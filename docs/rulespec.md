@@ -52,6 +52,9 @@ Supported rule kinds in the current Rust loader:
   every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
 - `relation`: explicit relation declarations with `arity`.
+- `reiteration`: a non-executable coverage marker for a provision that restates
+  another authority. It must declare `reiterates.target` and is ignored during
+  lowering into `ProgramSpec`.
 
 Example structured scale:
 
@@ -81,6 +84,30 @@ rules:
 Source-stated tables should use this shape instead of derived `match` formulas
 with embedded numeric cells. That keeps reforms path-addressable at the cell or
 selector level.
+
+Example reiterative provision:
+
+```yaml
+rules:
+  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
+    kind: reiteration
+    source: 10 CCR 2506-1 section 4.207.3(D)
+    source_url: https://www.sos.state.co.us/...
+    reiterates:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+      authority: federal
+      relationship: restates
+    verification:
+      values:
+        snap_maximum_allotment_table:
+          1: 298
+          2: 546
+```
+
+Use `reiteration` when the local text should be represented for coverage and
+auditability, but computation and reformable values belong to the target rule.
+If the local provision changes the target rule's legal effect, encode it as a
+real rule or amendment instead.
 
 Known hard gaps:
 

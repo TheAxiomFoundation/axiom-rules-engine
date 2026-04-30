@@ -247,6 +247,54 @@ rules:
 }
 
 #[test]
+fn rulespec_accepts_reiteration_rules_without_emitting_program_items() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  summary: Colorado restates a federal SNAP maximum allotment table.
+rules:
+  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
+    kind: reiteration
+    source: 10 CCR 2506-1 section 4.207.3(D)
+    source_url: https://example.test/co-snap
+    reiterates:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+      authority: federal
+      relationship: restates
+    verification:
+      values:
+        snap_maximum_allotment_table:
+          1: 298
+          2: 546
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("reiteration compiles");
+    assert!(program.parameters.is_empty());
+    assert!(program.derived.is_empty());
+    assert!(program.relations.is_empty());
+}
+
+#[test]
+fn rulespec_rejects_reiteration_without_target() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
+    kind: reiteration
+    source: 10 CCR 2506-1 section 4.207.3(D)
+    reiterates:
+      authority: federal
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("missing target should fail");
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingReiterationTarget { name }
+            if name == "co_snap_maximum_allotment_reiterates_usda_fy_2026"
+    ));
+}
+
+#[test]
 fn rulespec_lowers_date_and_relation_judgment_formulas() {
     let rulespec = r#"
 format: rulespec/v1

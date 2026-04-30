@@ -29,6 +29,8 @@ pub enum RuleSpecError {
     MissingEffectiveFrom { name: String },
     #[error("RuleSpec parameter table `{name}` has values but no indexed_by")]
     MissingIndexedBy { name: String },
+    #[error("RuleSpec reiteration `{name}` must declare reiterates.target")]
+    MissingReiterationTarget { name: String },
     #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
@@ -78,6 +80,8 @@ pub enum RuleKind {
     Derived,
     #[serde(alias = "Relation")]
     Relation,
+    #[serde(alias = "Reiteration")]
+    Reiteration,
     #[serde(alias = "DerivedRelation", alias = "derivedRelation")]
     DerivedRelation,
 }
@@ -92,6 +96,16 @@ pub struct SourceRef {
     pub citation: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ReiterationRef {
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub target: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub authority: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub relationship: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -123,6 +137,10 @@ pub struct RuleDefinition {
     pub source_url: Option<String>,
     #[serde(default)]
     pub sources: Vec<SourceRef>,
+    #[serde(default)]
+    pub reiterates: Option<ReiterationRef>,
+    #[serde(default)]
+    pub verification: Option<serde_yaml::Value>,
     #[serde(default)]
     pub arity: Option<usize>,
     #[serde(default, alias = "from")]
@@ -238,6 +256,9 @@ impl RulesDocument {
                         name: rule.name.clone(),
                         arity: rule.arity.unwrap_or(2),
                     });
+                }
+                RuleKind::Reiteration => {
+                    rule.validate_reiteration()?;
                 }
                 RuleKind::DerivedRelation => {
                     return Err(RuleSpecError::UnsupportedRuleKind {
@@ -366,6 +387,21 @@ impl RuleDefinition {
             indexed_by: Some(indexed_by),
             versions,
         })
+    }
+
+    fn validate_reiteration(&self) -> Result<(), RuleSpecError> {
+        let target = self
+            .reiterates
+            .as_ref()
+            .and_then(|reiterates| reiterates.target.as_deref())
+            .map(str::trim)
+            .unwrap_or_default();
+        if target.is_empty() {
+            return Err(RuleSpecError::MissingReiterationTarget {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
