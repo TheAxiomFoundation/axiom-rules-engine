@@ -285,6 +285,7 @@ pub struct ParameterVersion {
 pub struct IndexedParameter {
     pub name: String,
     pub unit: Option<String>,
+    pub indexed_by: Option<String>,
     pub versions: Vec<ParameterVersion>,
 }
 

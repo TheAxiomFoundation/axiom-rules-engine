@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -6,7 +6,10 @@ use chrono::NaiveDate;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::spec::{ProgramSpec, RelationSpec, UnitSpec, merge_programs};
+use crate::spec::{
+    IndexedParameterSpec, ParameterVersionSpec, ProgramSpec, RelationSpec, ScalarValueSpec,
+    UnitSpec, merge_programs,
+};
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
@@ -24,6 +27,8 @@ pub enum RuleSpecError {
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
     MissingEffectiveFrom { name: String },
+    #[error("RuleSpec parameter table `{name}` has values but no indexed_by")]
+    MissingIndexedBy { name: String },
     #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
@@ -138,6 +143,8 @@ pub struct RuleVersion {
     pub effective_to: Option<NaiveDate>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub formula: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_parameter_value_map")]
+    pub values: BTreeMap<i64, ScalarValueSpec>,
 }
 
 pub fn looks_like_rulespec_yaml(source: &str) -> bool {
@@ -213,10 +220,18 @@ impl RulesDocument {
         self.write_header(&mut formula_source);
 
         let mut explicit_relations = self.relations.clone();
+        let mut table_parameters = Vec::new();
+        let mut table_parameter_names = HashSet::new();
         for rule in &self.rules {
             match rule.effective_kind() {
                 RuleKind::Parameter | RuleKind::Derived => {
-                    rule.write_formula_definition(&mut formula_source)?;
+                    if rule.is_parameter_table() {
+                        rule.write_formula_stub_definition(&mut formula_source)?;
+                        table_parameter_names.insert(rule.name.clone());
+                        table_parameters.push(rule.to_indexed_parameter_spec()?);
+                    } else {
+                        rule.write_formula_definition(&mut formula_source)?;
+                    }
                 }
                 RuleKind::Relation => {
                     explicit_relations.push(RelationSpec {
@@ -238,6 +253,12 @@ impl RulesDocument {
         } else {
             crate::formula::lower_source(&formula_source)?
         };
+        if !table_parameters.is_empty() {
+            program
+                .parameters
+                .retain(|parameter| !table_parameter_names.contains(&parameter.name));
+            program.parameters.extend(table_parameters);
+        }
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
         Ok(program)
@@ -297,9 +318,54 @@ impl RuleDefinition {
                 effective_from: self.effective_from,
                 effective_to: self.effective_to,
                 formula: self.formula.clone(),
+                values: BTreeMap::new(),
             }];
         }
         Vec::new()
+    }
+
+    fn is_parameter_table(&self) -> bool {
+        self.effective_kind() == RuleKind::Parameter
+            && self
+                .versions
+                .iter()
+                .any(|version| !version.values.is_empty())
+    }
+
+    fn to_indexed_parameter_spec(&self) -> Result<IndexedParameterSpec, RuleSpecError> {
+        let indexed_by =
+            self.indexed_by
+                .clone()
+                .ok_or_else(|| RuleSpecError::MissingIndexedBy {
+                    name: self.name.clone(),
+                })?;
+        let mut versions = Vec::new();
+        for version in &self.versions {
+            if version.values.is_empty() {
+                continue;
+            }
+            let effective_from =
+                version
+                    .effective_from
+                    .ok_or_else(|| RuleSpecError::MissingEffectiveFrom {
+                        name: self.name.clone(),
+                    })?;
+            versions.push(ParameterVersionSpec {
+                effective_from,
+                values: version.values.clone(),
+            });
+        }
+        if versions.is_empty() {
+            return Err(RuleSpecError::MissingFormula {
+                name: self.name.clone(),
+            });
+        }
+        Ok(IndexedParameterSpec {
+            name: self.name.clone(),
+            unit: self.unit.clone(),
+            indexed_by: Some(indexed_by),
+            versions,
+        })
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
@@ -354,6 +420,30 @@ impl RuleDefinition {
             }
         }
         out.push('\n');
+        Ok(())
+    }
+
+    fn write_formula_stub_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        let effective_from = self
+            .versions
+            .iter()
+            .find(|version| !version.values.is_empty())
+            .and_then(|version| version.effective_from)
+            .ok_or_else(|| RuleSpecError::MissingEffectiveFrom {
+                name: self.name.clone(),
+            })?;
+
+        out.push_str(&self.name);
+        out.push_str(":\n");
+        write_metadata(out, "dtype", self.dtype.as_deref());
+        write_metadata(out, "unit", self.unit.as_deref());
+        write_metadata(out, "indexed_by", self.indexed_by.as_deref());
+        let (source, source_url) = self.effective_source();
+        write_metadata(out, "source", source.as_deref());
+        write_metadata(out, "source_url", source_url.as_deref());
+        out.push_str("    from ");
+        out.push_str(&effective_from.to_string());
+        out.push_str(":\n        0\n\n");
         Ok(())
     }
 
@@ -458,6 +548,49 @@ where
         serde_yaml::Value::Number(value) => Ok(Some(value.to_string())),
         other => Err(serde::de::Error::custom(format!(
             "expected scalar string-like value, got {other:?}"
+        ))),
+    }
+}
+
+fn deserialize_parameter_value_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<i64, ScalarValueSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<i64, serde_yaml::Value>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(key, value)| Ok((key, scalar_value_from_yaml(value)?)))
+        .collect()
+}
+
+fn scalar_value_from_yaml<E: serde::de::Error>(
+    value: serde_yaml::Value,
+) -> Result<ScalarValueSpec, E> {
+    match value {
+        serde_yaml::Value::Bool(value) => Ok(ScalarValueSpec::Bool { value }),
+        serde_yaml::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(ScalarValueSpec::Integer { value })
+            } else {
+                Ok(ScalarValueSpec::Decimal {
+                    value: value.to_string(),
+                })
+            }
+        }
+        serde_yaml::Value::String(value) => {
+            if let Ok(parsed) = value.parse::<i64>() {
+                Ok(ScalarValueSpec::Integer { value: parsed })
+            } else if value.parse::<rust_decimal::Decimal>().is_ok() {
+                Ok(ScalarValueSpec::Decimal { value })
+            } else if let Ok(parsed) = NaiveDate::parse_from_str(&value, "%Y-%m-%d") {
+                Ok(ScalarValueSpec::Date { value: parsed })
+            } else {
+                Ok(ScalarValueSpec::Text { value })
+            }
+        }
+        other => Err(serde::de::Error::custom(format!(
+            "expected scalar parameter value, got {other:?}"
         ))),
     }
 }

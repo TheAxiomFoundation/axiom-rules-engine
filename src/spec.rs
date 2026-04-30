@@ -163,6 +163,8 @@ pub struct IndexedParameterSpec {
     pub name: String,
     pub unit: Option<String>,
     #[serde(default)]
+    pub indexed_by: Option<String>,
+    #[serde(default)]
     pub versions: Vec<ParameterVersionSpec>,
 }
 
@@ -171,6 +173,7 @@ impl IndexedParameterSpec {
         Ok(IndexedParameter {
             name: self.name.clone(),
             unit: self.unit.clone(),
+            indexed_by: self.indexed_by.clone(),
             versions: self
                 .versions
                 .iter()

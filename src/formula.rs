@@ -413,6 +413,10 @@ pub enum Expr {
         obj: Box<Expr>,
         field: String,
     },
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+    },
     Cond {
         condition: Box<Expr>,
         then_expr: Box<Expr>,
@@ -963,6 +967,14 @@ impl Parser {
                     obj: Box::new(expr),
                     field,
                 };
+            } else if self.at(&[TokType::LBracket]) {
+                self.consume(TokType::LBracket)?;
+                let index = self.parse_expr()?;
+                self.consume(TokType::RBracket)?;
+                expr = Expr::Index {
+                    target: Box::new(expr),
+                    index: Box::new(index),
+                };
             } else {
                 break;
             }
@@ -1111,6 +1123,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         program.parameters.push(IndexedParameterSpec {
             name: v.path.clone(),
             unit: v.unit.clone(),
+            indexed_by: v.indexed_by.clone(),
             versions,
         });
     }
@@ -1265,6 +1278,22 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 }
             }
         },
+        Expr::Index { target, index } => {
+            let Expr::Var(parameter) = target.as_ref() else {
+                return Err(FormulaError::lower(
+                    "parameter lookup target must be a named parameter".to_string(),
+                ));
+            };
+            if !ctx.scalars.contains(parameter) {
+                return Err(FormulaError::lower(format!(
+                    "`{parameter}` is not a parameter table"
+                )));
+            }
+            ScalarExprSpec::ParameterLookup {
+                parameter: parameter.clone(),
+                index: Box::new(lower_to_scalar(index, ctx)?),
+            }
+        }
         Expr::BinOp { op, left, right } => {
             let l = lower_to_scalar(left, ctx)?;
             let r = lower_to_scalar(right, ctx)?;

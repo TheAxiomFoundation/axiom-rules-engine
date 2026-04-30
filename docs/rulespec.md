@@ -47,8 +47,40 @@ Supported rule kinds in the current Rust loader:
 
 - `parameter`: no entity-scoped output; literal versions lower to indexed scalar
   parameters through the existing bridge.
+- `parameter` rules with `indexed_by` and versioned `values` encode source
+  tables/scales as addressable parameter cells. `indexed_by` is required for
+  every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
 - `relation`: explicit relation declarations with `arity`.
+
+Example structured scale:
+
+```yaml
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+  - name: max_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment_table[household_size]
+```
+
+Source-stated tables should use this shape instead of derived `match` formulas
+with embedded numeric cells. That keeps reforms path-addressable at the cell or
+selector level.
 
 Known hard gaps:
 

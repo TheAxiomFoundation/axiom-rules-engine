@@ -1,5 +1,11 @@
+use axiom_rules::api::{
+    ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
+};
 use axiom_rules::compile::{CompileError, CompiledProgramArtifact, compile_program_file_to_json};
 use axiom_rules::rulespec::{RuleSpecError, lower_rulespec_str};
+use axiom_rules::spec::{
+    DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
+};
 
 #[test]
 fn rulespec_lowers_snap_like_formulas() {
@@ -121,6 +127,123 @@ rules:
             .evaluation_order
             .contains(&"snap_allotment".to_string())
     );
+}
+
+#[test]
+fn rulespec_lowers_indexed_parameter_tables_and_lookup_syntax() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  summary: |-
+    The maximum monthly allotments are 298 and 546 for household sizes 1 and 2,
+    plus 218 for each additional person.
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    source: USDA SNAP FY 2026 COLA maximum monthly allotment table
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+  - name: snap_maximum_allotment_additional_member
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: "218"
+  - name: max_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: |-
+          if household_size > 2:
+              snap_maximum_allotment_table[2] + ((household_size - 2) * snap_maximum_allotment_additional_member)
+          else: snap_maximum_allotment_table[household_size]
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+    let table = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "snap_maximum_allotment_table")
+        .expect("indexed parameter is present");
+    assert_eq!(table.versions.len(), 1);
+    assert_eq!(table.versions[0].values.len(), 2);
+    assert_eq!(table.indexed_by.as_deref(), Some("household_size"));
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "household_size".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Integer { value: 3 },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["max_allotment".to_string()],
+        }],
+    })
+    .expect("indexed parameter lookup executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get("max_allotment")
+        .expect("max_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "764");
+}
+
+#[test]
+fn rulespec_rejects_parameter_values_without_indexed_by() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("missing indexed_by should fail");
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingIndexedBy { name } if name == "snap_maximum_allotment_table"
+    ));
 }
 
 #[test]
