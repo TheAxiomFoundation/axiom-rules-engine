@@ -493,6 +493,108 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
 }
 
 #[test]
+fn fast_mode_falls_back_for_filtered_relation_counts() {
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+        }],
+        derived: vec![DerivedSpec {
+            name: "has_elderly_or_disabled_member".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Judgment,
+            unit: None,
+            source: None,
+            period: None,
+            source_url: None,
+            semantics: DerivedSemanticsSpec::Judgment {
+                expr: axiom_rules::spec::JudgmentExprSpec::Comparison {
+                    left: Box::new(ScalarExprSpec::CountRelated {
+                        relation: "member_of_household".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                        where_clause: Some(Box::new(
+                            axiom_rules::spec::JudgmentExprSpec::Comparison {
+                                left: Box::new(ScalarExprSpec::Input {
+                                    name: "is_elderly_or_disabled".to_string(),
+                                }),
+                                op: ComparisonOpSpec::Eq,
+                                right: Box::new(ScalarExprSpec::Literal {
+                                    value: ScalarValueSpec::Bool { value: true },
+                                }),
+                            },
+                        )),
+                    }),
+                    op: ComparisonOpSpec::Gt,
+                    right: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                },
+            },
+        }],
+        ..ProgramSpec::default()
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![InputRecordSpec {
+            name: "is_elderly_or_disabled".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "person-1".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: true },
+        }],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["person-1".to_string(), "household-1".to_string()],
+            interval,
+        }],
+    };
+    let queries = vec![ExecutionQuery {
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["has_elderly_or_disabled_member".to_string()],
+    }];
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("fast request falls back");
+
+    assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
+    assert!(
+        response
+            .metadata
+            .fallback_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("count_related where-clauses"),
+        "unexpected fallback reason: {:?}",
+        response.metadata.fallback_reason
+    );
+    assert_eq!(
+        judgment_output(
+            response.results[0]
+                .outputs
+                .get("has_elderly_or_disabled_member")
+                .expect("elderly/disabled output")
+        ),
+        JudgmentOutcomeSpec::Holds
+    );
+}
+
+#[test]
 fn compiled_program_artifact_round_trips_and_executes() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SNAP_PROGRAM_RULESPEC)
         .expect("programme compiles from YAML");

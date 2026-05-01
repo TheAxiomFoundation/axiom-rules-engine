@@ -183,7 +183,9 @@ fn fast_mode_metadata() -> ExecutionMetadata {
 fn unsupported_reason(error: &EvalError) -> Option<String> {
     match error {
         EvalError::TypeMismatch(message)
-            if message.starts_with("bulk execution does not yet support") =>
+            if message.starts_with("bulk execution does not yet support")
+                || message.starts_with("bulk fast mode does not yet support")
+                || message.starts_with("fast mode does not yet support") =>
         {
             Some(message.clone())
         }
