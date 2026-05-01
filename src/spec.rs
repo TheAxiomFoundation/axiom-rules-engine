@@ -758,10 +758,7 @@ pub fn merge_programs(
 ) -> Result<ProgramSpec, SpecError> {
     for unit in extension.units {
         if base.units.iter().any(|u| u.name == unit.name) {
-            return Err(SpecError::DuplicateOnMerge {
-                kind: "unit".to_string(),
-                name: unit.name,
-            });
+            continue;
         }
         base.units.push(unit);
     }

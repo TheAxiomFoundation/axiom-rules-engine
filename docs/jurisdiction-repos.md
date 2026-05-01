@@ -27,6 +27,23 @@ State repositories use `statutes/` for state statutes. Federal authorities stay
 in `us/statutes/...` or `us/regulation/...` and are referenced by absolute
 cross-repo paths.
 
+Executable RuleSpec modules can compose those authorities with top-level
+`imports`. Use canonical imports for cross-repo dependencies and relative
+imports for files in the same repository:
+
+```yaml
+format: rulespec/v1
+imports:
+  - us:policies/usda/snap/fy-2026-cola/maximum-allotments
+  - us-co:regulations/10-ccr-2506-1/4.207.3
+rules: []
+```
+
+Import targets follow the same path identity scheme as rule IDs, without the
+optional `#rule_name` suffix. The runtime resolves `us:` to `rules-us`,
+`us-tn:` to `rules-us-tn`, etc., using sibling checkouts and
+`AXIOM_RULE_REPO_ROOTS`.
+
 Rule files are named by the legal or policy unit they encode. Companion tests use
 the same stem:
 

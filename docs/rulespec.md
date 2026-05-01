@@ -14,6 +14,8 @@ Every RuleSpec YAML file must declare an explicit discriminator:
 format: rulespec/v1
 module:
   title: Texas SNAP overlay
+imports:
+  - us:policies/usda/snap/fy-2026-cola/maximum-allotments
 relations:
   - name: member_of_household
     arity: 2
@@ -55,6 +57,21 @@ Supported rule kinds in the current Rust loader:
 - `reiteration`: a non-executable coverage marker for a provision that restates
   another authority. It must declare `reiterates.target` and is ignored during
   lowering into `ProgramSpec`.
+
+Top-level `imports` merge other RuleSpec files into the compiled programme
+before the current file is lowered. Relative imports resolve from the current
+file. Canonical imports use jurisdiction repo paths:
+
+```yaml
+imports:
+  - us:policies/usda/snap/fy-2026-cola/maximum-allotments
+  - us-co:regulations/10-ccr-2506-1/4.207.3
+```
+
+The canonical form is `<jurisdiction>:<relative path without extension>`.
+`us:` resolves to the `rules-us` repository, `us-co:` resolves to
+`rules-us-co`, and so on. The loader searches sibling checkouts and any roots
+listed in `AXIOM_RULE_REPO_ROOTS`.
 
 Example structured scale:
 

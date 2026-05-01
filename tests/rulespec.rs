@@ -426,3 +426,147 @@ rules:
     assert_eq!(artifact.program.parameters.len(), 1);
     std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
 }
+
+#[test]
+fn compile_program_file_to_json_merges_rulespec_imports() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "axiom-rules-rulespec-import-test-{}",
+        std::process::id()
+    ));
+    let us_path = temp_root
+        .join("rules-us")
+        .join("policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
+    let co_path = temp_root
+        .join("rules-us-co")
+        .join("policies/cdhs/snap/fy-2026-benefit.yaml");
+    let artifact_path = temp_root.join("benefit.compiled.json");
+
+    std::fs::create_dir_all(us_path.parent().expect("us parent")).expect("us dir");
+    std::fs::create_dir_all(co_path.parent().expect("co parent")).expect("co dir");
+    std::fs::write(
+        &us_path,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+  - name: snap_maximum_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment_table[household_size]
+"#,
+    )
+    .expect("import fixture is written");
+    std::fs::write(
+        &co_path,
+        r#"
+format: rulespec/v1
+imports:
+  - us:policies/usda/snap/fy-2026-cola/maximum-allotments
+rules:
+  - name: snap_household_food_contribution_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: 2025-10-01
+        formula: "0.30"
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: floor(snap_maximum_allotment - (net_income * snap_household_food_contribution_rate))
+"#,
+    )
+    .expect("program fixture is written");
+
+    let artifact = compile_program_file_to_json(&co_path, &artifact_path)
+        .expect("RuleSpec file with canonical import compiles");
+    assert!(
+        artifact
+            .program
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == "snap_maximum_allotment_table")
+    );
+    assert!(
+        artifact
+            .program
+            .derived
+            .iter()
+            .any(|derived| derived.name == "snap_regular_month_allotment")
+    );
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "household_size".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Integer { value: 1 },
+                },
+                InputRecordSpec {
+                    name: "net_income".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "100".to_string(),
+                    },
+                },
+            ],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["snap_regular_month_allotment".to_string()],
+        }],
+    })
+    .expect("imported formula executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get("snap_regular_month_allotment")
+        .expect("snap_regular_month_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "268");
+
+    std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}

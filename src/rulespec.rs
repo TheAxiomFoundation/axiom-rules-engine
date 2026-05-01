@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use serde::Deserialize;
@@ -8,7 +9,7 @@ use thiserror::Error;
 
 use crate::spec::{
     IndexedParameterSpec, ParameterVersionSpec, ProgramSpec, RelationSpec, ScalarValueSpec,
-    UnitSpec, merge_programs,
+    UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -19,6 +20,10 @@ pub enum RuleSpecError {
     MissingDiscriminator,
     #[error("failed to read RuleSpec file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
+    #[error("RuleSpec import `{target}` in `{path}` could not be resolved")]
+    UnresolvedImport { path: String, target: String },
+    #[error("RuleSpec import cycle detected at `{path}`")]
+    ImportCycle { path: String },
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
@@ -49,6 +54,8 @@ pub struct RulesDocument {
     pub schema: Option<String>,
     #[serde(default)]
     pub extends: Option<String>,
+    #[serde(default)]
+    pub imports: Vec<String>,
     #[serde(default)]
     pub module: Option<ModuleMetadata>,
     #[serde(default)]
@@ -211,28 +218,205 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
 
 pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpecError> {
     let path = path.as_ref();
+    let mut context = RuleSpecLoadContext::default();
+    let document = load_rulespec_document_inner(path, &mut context)?;
+    document.to_program_spec()
+}
+
+#[derive(Default)]
+struct RuleSpecLoadContext {
+    stack: Vec<PathBuf>,
+    loaded: HashSet<PathBuf>,
+}
+
+fn load_rulespec_document_inner(
+    path: &Path,
+    context: &mut RuleSpecLoadContext,
+) -> Result<RulesDocument, RuleSpecError> {
     let source = fs::read_to_string(path).map_err(|error| RuleSpecError::ReadFile {
         path: path.display().to_string(),
         error,
     })?;
+    let resolved_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if context.stack.contains(&resolved_path) {
+        return Err(RuleSpecError::ImportCycle {
+            path: resolved_path.display().to_string(),
+        });
+    }
+    if context.loaded.contains(&resolved_path) {
+        return Ok(RulesDocument::default());
+    }
+
     if !looks_like_rulespec_yaml(&source) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
+    context.stack.push(resolved_path.clone());
     let document: RulesDocument = serde_yaml::from_str(&source)?;
-    let program = document.to_program_spec()?;
-    if let Some(extends) = document.extends {
+    let mut combined = RulesDocument::default();
+
+    if let Some(extends) = document.extends.as_deref() {
         let base_path = path.parent().unwrap_or_else(|| Path::new("")).join(extends);
-        let base = load_extended_program(&base_path)?;
-        return Ok(merge_programs(base, program)?);
+        let base = load_extended_document(&base_path, context)?;
+        combined = merge_rules_documents(combined, base);
     }
-    Ok(program)
+
+    for import in &document.imports {
+        let import_path = resolve_rulespec_import(path, import)?;
+        let imported = load_rulespec_document_inner(&import_path, context)?;
+        combined = merge_rules_documents(combined, imported);
+    }
+
+    combined = merge_rules_documents(combined, document.without_dependency_directives());
+    context.loaded.insert(resolved_path);
+    context.stack.pop();
+    Ok(combined)
 }
 
-fn load_extended_program(path: &Path) -> Result<ProgramSpec, RuleSpecError> {
-    load_rulespec_file(path)
+fn load_extended_document(
+    path: &Path,
+    context: &mut RuleSpecLoadContext,
+) -> Result<RulesDocument, RuleSpecError> {
+    load_rulespec_document_inner(path, context)
+}
+
+fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> RulesDocument {
+    if extension.format.is_some() {
+        base.format = extension.format;
+    }
+    if extension.schema.is_some() {
+        base.schema = extension.schema;
+    }
+    if extension.module.is_some() {
+        base.module = extension.module;
+    }
+    base.units.extend(extension.units);
+    base.relations.extend(extension.relations);
+    base.rules.extend(extension.rules);
+    base
+}
+
+fn resolve_rulespec_import(importer_path: &Path, import: &str) -> Result<PathBuf, RuleSpecError> {
+    let target = import.trim().trim_matches(['"', '\'']);
+    let target_without_fragment = target
+        .split_once('#')
+        .map(|(base, _)| base)
+        .unwrap_or(target)
+        .trim();
+    if let Some((prefix, relative)) = target_without_fragment.split_once(':') {
+        if is_canonical_repo_prefix(prefix) {
+            return resolve_canonical_rulespec_import(importer_path, prefix, relative, import);
+        }
+    }
+
+    let relative = import_target_to_rulespec_path(target_without_fragment);
+    let target_path = if relative.is_absolute() {
+        relative
+    } else {
+        importer_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(relative)
+    };
+    if target_path.exists() {
+        return Ok(target_path);
+    }
+    Err(RuleSpecError::UnresolvedImport {
+        path: importer_path.display().to_string(),
+        target: import.to_string(),
+    })
+}
+
+fn resolve_canonical_rulespec_import(
+    importer_path: &Path,
+    prefix: &str,
+    relative: &str,
+    import: &str,
+) -> Result<PathBuf, RuleSpecError> {
+    let relative_path = import_target_to_rulespec_path(relative.trim().trim_matches('/'));
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(RuleSpecError::UnresolvedImport {
+            path: importer_path.display().to_string(),
+            target: import.to_string(),
+        });
+    }
+
+    let repo_name = format!("rules-{prefix}");
+    for root in candidate_rule_repo_roots(importer_path, &repo_name) {
+        let target_path = root.join(&relative_path);
+        if target_path.exists() {
+            return Ok(target_path);
+        }
+    }
+    Err(RuleSpecError::UnresolvedImport {
+        path: importer_path.display().to_string(),
+        target: import.to_string(),
+    })
+}
+
+fn import_target_to_rulespec_path(target: &str) -> PathBuf {
+    let normalized = target.trim().trim_matches(['"', '\'']);
+    let path = PathBuf::from(normalized);
+    if normalized.ends_with(".yaml") || normalized.ends_with(".yml") {
+        path
+    } else {
+        PathBuf::from(format!("{normalized}.yaml"))
+    }
+}
+
+fn is_canonical_repo_prefix(prefix: &str) -> bool {
+    !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
+}
+
+fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let mut add = |candidate: PathBuf| {
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate);
+        }
+    };
+
+    if let Some(env_roots) = env::var_os("AXIOM_RULE_REPO_ROOTS") {
+        for raw_root in env::split_paths(&env_roots) {
+            if raw_root.file_name().is_some_and(|name| name == repo_name) {
+                add(raw_root);
+            } else {
+                add(raw_root.join(repo_name));
+            }
+        }
+    }
+
+    for ancestor in importer_path.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == repo_name) {
+            add(ancestor.to_path_buf());
+        }
+        if let Some(parent) = ancestor.parent() {
+            add(parent.join(repo_name));
+        }
+        add(ancestor.join("_axiom").join(repo_name));
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        add(cwd.join(repo_name));
+        add(cwd.join("_axiom").join(repo_name));
+    }
+    candidates
 }
 
 impl RulesDocument {
+    fn without_dependency_directives(mut self) -> Self {
+        self.extends = None;
+        self.imports.clear();
+        self
+    }
+
     pub fn to_program_spec(&self) -> Result<ProgramSpec, RuleSpecError> {
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
