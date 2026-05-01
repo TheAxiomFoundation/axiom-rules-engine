@@ -790,6 +790,38 @@ fn select_scalar_column(
                     .collect(),
             ))
         }
+        (ScalarColumn::Decimal(then_values), ScalarColumn::Integer(else_values)) => {
+            Ok(ScalarColumn::Decimal(
+                condition
+                    .into_iter()
+                    .zip(then_values)
+                    .zip(else_values)
+                    .map(|((condition, then_value), else_value)| {
+                        if condition.is_holds() {
+                            then_value
+                        } else {
+                            Decimal::from(else_value)
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+        (ScalarColumn::Integer(then_values), ScalarColumn::Decimal(else_values)) => {
+            Ok(ScalarColumn::Decimal(
+                condition
+                    .into_iter()
+                    .zip(then_values)
+                    .zip(else_values)
+                    .map(|((condition, then_value), else_value)| {
+                        if condition.is_holds() {
+                            Decimal::from(then_value)
+                        } else {
+                            else_value
+                        }
+                    })
+                    .collect(),
+            ))
+        }
         (ScalarColumn::Bool(then_values), ScalarColumn::Bool(else_values)) => {
             Ok(ScalarColumn::Bool(
                 condition

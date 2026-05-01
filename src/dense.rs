@@ -1497,6 +1497,38 @@ fn select_dense_scalar_column(
                     .collect(),
             ))
         }
+        (DenseColumn::Decimal(then_values), DenseColumn::Integer(else_values)) => {
+            Ok(DenseColumn::Decimal(
+                condition
+                    .into_iter()
+                    .zip(then_values)
+                    .zip(else_values)
+                    .map(|((condition, then_value), else_value)| {
+                        if condition.is_holds() {
+                            then_value
+                        } else {
+                            Decimal::from(else_value)
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+        (DenseColumn::Integer(then_values), DenseColumn::Decimal(else_values)) => {
+            Ok(DenseColumn::Decimal(
+                condition
+                    .into_iter()
+                    .zip(then_values)
+                    .zip(else_values)
+                    .map(|((condition, then_value), else_value)| {
+                        if condition.is_holds() {
+                            Decimal::from(then_value)
+                        } else {
+                            else_value
+                        }
+                    })
+                    .collect(),
+            ))
+        }
         (DenseColumn::Bool(then_values), DenseColumn::Bool(else_values)) => Ok(DenseColumn::Bool(
             condition
                 .into_iter()

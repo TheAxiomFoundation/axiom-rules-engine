@@ -8,9 +8,9 @@ use axiom_rules::api::{
 };
 use axiom_rules::compile::CompiledProgramArtifact;
 use axiom_rules::spec::{
-    DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, InputRecordSpec, IntervalSpec,
-    JudgmentOutcomeSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationRecordSpec, ScalarExprSpec, ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, InputRecordSpec,
+    IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec, PeriodSpec, ProgramSpec,
+    RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec, ScalarValueSpec,
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -268,6 +268,105 @@ fn fast_mode_matches_explain_mode_on_snap_batch() {
     assert_eq!(
         serde_json::to_value(&explain_outputs).expect("explain outputs serialise"),
         serde_json::to_value(&fast_outputs).expect("fast outputs serialise")
+    );
+}
+
+#[test]
+fn fast_mode_coerces_integer_and_decimal_if_branches() {
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        derived: vec![DerivedSpec {
+            name: "benefit".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Decimal,
+            unit: None,
+            source: None,
+            period: None,
+            source_url: None,
+            semantics: DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::If {
+                    condition: Box::new(axiom_rules::spec::JudgmentExprSpec::Comparison {
+                        left: Box::new(ScalarExprSpec::Input {
+                            name: "amount".to_string(),
+                        }),
+                        op: ComparisonOpSpec::Gt,
+                        right: Box::new(ScalarExprSpec::Literal {
+                            value: ScalarValueSpec::Integer { value: 0 },
+                        }),
+                    }),
+                    then_expr: Box::new(ScalarExprSpec::Input {
+                        name: "amount".to_string(),
+                    }),
+                    else_expr: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                },
+            },
+        }],
+        ..ProgramSpec::default()
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "amount".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: decimal_value("12.5"),
+            },
+            InputRecordSpec {
+                name: "amount".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-2".to_string(),
+                interval,
+                value: decimal_value("0"),
+            },
+        ],
+        relations: vec![],
+    };
+    let queries = ["household-1", "household-2"]
+        .into_iter()
+        .map(|entity_id| ExecutionQuery {
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+            outputs: vec!["benefit".to_string()],
+        })
+        .collect();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("fast request succeeds");
+
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        decimal_output(
+            response.results[0]
+                .outputs
+                .get("benefit")
+                .expect("benefit output")
+        ),
+        decimal("12.5")
+    );
+    assert_eq!(
+        decimal_output(
+            response.results[1]
+                .outputs
+                .get("benefit")
+                .expect("benefit output")
+        ),
+        decimal("0")
     );
 }
 
