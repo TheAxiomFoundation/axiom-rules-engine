@@ -1063,8 +1063,8 @@ pub fn parse_source(src: &str) -> Result<Module, FormulaError> {
 pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     let mut program = ProgramSpec::default();
 
-    // Helpful unit defaults so programmes don't have to re-declare common
-    // units inline. Programmes may override / add their own units by
+    // Helpful unit defaults so RuleSpec modules don't have to re-declare common
+    // units inline. RuleSpec modules may override / add their own units by
     // declaring them, but RuleSpec formula declarations only carry unit names on
     // a variable declaration — we seed the spec with the commonly used ones.
     for (name, kind) in [
@@ -1187,10 +1187,10 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
 /// enclosing entity at slot 0 and the related item at slot 1.
 fn infer_slots(_relation: &str) -> (usize, usize) {
     // Default slot convention: current entity is slot 1, related item is
-    // slot 0. Matches how every existing YAML programme declares its
+    // slot 0. Matches how every existing YAML RuleSpec module declares its
     // relations (adult_of_benefit_unit, child_of_claim, cb_receipt,
     // liable_person, associate_of, council_notice_of_tenancy, …). A
-    // programme that needs the opposite orientation should rename the
+    // RuleSpec module that needs the opposite orientation should rename the
     // relation to put the enclosing entity last (e.g.
     // `disposal_of_applicant` rather than `applicant_disposal`).
     (1, 0)

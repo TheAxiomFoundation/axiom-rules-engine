@@ -142,7 +142,7 @@ pub enum DenseCompileError {
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
     #[error(
-        "dense compilation requires an explicit entity because the programme defines multiple derived entities"
+        "dense compilation requires an explicit entity because the RuleSpec module defines multiple derived entities"
     )]
     AmbiguousRootEntity,
     #[error("dense compilation could not find derived outputs for entity `{0}`")]

@@ -188,7 +188,7 @@ pub enum ScalarExpr {
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
-    /// query period. Lets programmes evolve their input surface without
+    /// query period. Lets RuleSpec modules evolve their input surface without
     /// forcing every caller to supply every flag or amount — common when a
     /// calculation has many optional reliefs (blind person's allowance,
     /// marriage allowance transfer, country of residence, Gift Aid, etc.).

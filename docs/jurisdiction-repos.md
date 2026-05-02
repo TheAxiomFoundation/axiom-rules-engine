@@ -1,8 +1,8 @@
 # Jurisdiction Repositories
 
 Canonical rule content belongs in jurisdiction repositories. The engine repo is
-runtime and schema infrastructure; its `programmes/` tree is a prototype fixture
-set.
+runtime and schema infrastructure only; checked-in policy content belongs in
+`rules-*` repositories.
 
 ## Repository Layout
 

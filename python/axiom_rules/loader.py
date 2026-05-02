@@ -1,4 +1,4 @@
-"""Programme loader for RuleSpec YAML."""
+"""RuleSpec module loader."""
 from __future__ import annotations
 
 import json
@@ -48,7 +48,7 @@ def _compile_program(path: Path, binary_path: str | Path | None = None) -> Progr
 
 
 def load_program(path: str | Path, *, binary_path: str | Path | None = None) -> Program:
-    """Load a programme from RuleSpec YAML."""
+    """Load a RuleSpec module from RuleSpec YAML."""
     path = Path(path)
     spec: dict = yaml.safe_load(path.read_text()) or {}
     if not _looks_like_rulespec(spec):

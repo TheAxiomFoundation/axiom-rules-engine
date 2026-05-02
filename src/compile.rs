@@ -30,13 +30,13 @@ pub enum CompileError {
         path: String,
         error: serde_json::Error,
     },
-    #[error("failed to load RuleSpec programme `{path}`: {error}")]
+    #[error("failed to load RuleSpec module `{path}`: {error}")]
     RuleSpec {
         path: String,
         error: crate::rulespec::RuleSpecError,
     },
     #[error(
-        "ambiguous programme YAML `{path}` has a top-level `rules:` key but no RuleSpec discriminator (`format: rulespec/v1` or `schema: axiom.rules.*`)"
+        "ambiguous RuleSpec module YAML `{path}` has a top-level `rules:` key but no RuleSpec discriminator (`format: rulespec/v1` or `schema: axiom.rules.*`)"
     )]
     AmbiguousRuleSpecYaml { path: String },
 }

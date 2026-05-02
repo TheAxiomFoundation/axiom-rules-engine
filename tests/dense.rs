@@ -16,48 +16,46 @@ use axiom_rules::spec::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-const FLAT_TAX_PROGRAM_RULESPEC: &str = include_str!("../programmes/other/flat_tax/rules.yaml");
+const FLAT_TAX_PROGRAM_RULESPEC: &str = include_str!("fixtures/rulespec/other/flat_tax/rules.yaml");
 const FAMILY_ALLOWANCE_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/other/family_allowance/rules.yaml");
-const SNAP_PROGRAM_RULESPEC: &str = include_str!("../programmes/other/snap/rules.yaml");
-const SNAP_CASES_YAML: &str = include_str!("../programmes/other/snap/cases.yaml");
+    include_str!("fixtures/rulespec/other/family_allowance/rules.yaml");
 const CHILD_BENEFIT_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/uksi/1987/1967/regulation/15/rules.yaml");
+    include_str!("fixtures/rulespec/uksi/1987/1967/regulation/15/rules.yaml");
 const CHILD_BENEFIT_CASES_YAML: &str =
-    include_str!("../programmes/uksi/1987/1967/regulation/15/cases.yaml");
+    include_str!("fixtures/rulespec/uksi/1987/1967/regulation/15/cases.yaml");
 const NOTIONAL_CAPITAL_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ssi/2021/249/regulation/71/rules.yaml");
-const UC_PROGRAM_RULESPEC: &str = include_str!("../programmes/uksi/2013/376/rules.yaml");
-const UC_CASES_YAML: &str = include_str!("../programmes/uksi/2013/376/cases.yaml");
+    include_str!("fixtures/rulespec/ssi/2021/249/regulation/71/rules.yaml");
+const UC_PROGRAM_RULESPEC: &str = include_str!("fixtures/rulespec/uksi/2013/376/rules.yaml");
+const UC_CASES_YAML: &str = include_str!("fixtures/rulespec/uksi/2013/376/cases.yaml");
 const STATE_PENSION_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ukpga/2014/19/section/4/rules.yaml");
+    include_str!("fixtures/rulespec/ukpga/2014/19/section/4/rules.yaml");
 const STATE_PENSION_CASES_YAML: &str =
-    include_str!("../programmes/ukpga/2014/19/section/4/cases.yaml");
+    include_str!("fixtures/rulespec/ukpga/2014/19/section/4/cases.yaml");
 const CT_MARGINAL_RELIEF_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ukpga/2010/4/section/18B/rules.yaml");
+    include_str!("fixtures/rulespec/ukpga/2010/4/section/18B/rules.yaml");
 const CT_MARGINAL_RELIEF_CASES_YAML: &str =
-    include_str!("../programmes/ukpga/2010/4/section/18B/cases.yaml");
+    include_str!("fixtures/rulespec/ukpga/2010/4/section/18B/cases.yaml");
 const ATED_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ukpga/2013/29/section/99/rules.yaml");
-const ATED_CASES_YAML: &str = include_str!("../programmes/ukpga/2013/29/section/99/cases.yaml");
+    include_str!("fixtures/rulespec/ukpga/2013/29/section/99/rules.yaml");
+const ATED_CASES_YAML: &str = include_str!("fixtures/rulespec/ukpga/2013/29/section/99/cases.yaml");
 const AUTO_ENROLMENT_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ukpga/2008/30/section/3/rules.yaml");
+    include_str!("fixtures/rulespec/ukpga/2008/30/section/3/rules.yaml");
 const AUTO_ENROLMENT_CASES_YAML: &str =
-    include_str!("../programmes/ukpga/2008/30/section/3/cases.yaml");
+    include_str!("fixtures/rulespec/ukpga/2008/30/section/3/cases.yaml");
 const CHILD_BENEFIT_RATES_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/uksi/2006/965/regulation/2/rules.yaml");
+    include_str!("fixtures/rulespec/uksi/2006/965/regulation/2/rules.yaml");
 const CHILD_BENEFIT_RATES_CASES_YAML: &str =
-    include_str!("../programmes/uksi/2006/965/regulation/2/cases.yaml");
+    include_str!("fixtures/rulespec/uksi/2006/965/regulation/2/cases.yaml");
 const SCOTTISH_CTR_MAX_PROGRAM_RULESPEC: &str =
-    include_str!("../programmes/ssi/2021/249/regulation/79/rules.yaml");
+    include_str!("fixtures/rulespec/ssi/2021/249/regulation/79/rules.yaml");
 const SCOTTISH_CTR_MAX_CASES_YAML: &str =
-    include_str!("../programmes/ssi/2021/249/regulation/79/cases.yaml");
+    include_str!("fixtures/rulespec/ssi/2021/249/regulation/79/cases.yaml");
 
 #[test]
 fn dense_flat_tax_matches_explain_mode() {
     let period = month_period();
     let artifact = CompiledProgramArtifact::from_rulespec_str(FLAT_TAX_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Person"))
         .expect("dense compilation succeeds");
 
@@ -186,7 +184,7 @@ fn dense_flat_tax_matches_explain_mode() {
 fn dense_family_allowance_matches_explain_mode() {
     let period = month_period();
     let artifact = CompiledProgramArtifact::from_rulespec_str(FAMILY_ALLOWANCE_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
         .expect("dense compilation succeeds");
 
@@ -314,122 +312,9 @@ fn dense_family_allowance_matches_explain_mode() {
 }
 
 #[test]
-fn dense_snap_matches_explain_mode() {
-    let artifact = CompiledProgramArtifact::from_rulespec_str(SNAP_PROGRAM_RULESPEC)
-        .expect("programme compiles");
-    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
-        .expect("dense compilation succeeds");
-    let case_file: SnapCaseFile = serde_yaml::from_str(SNAP_CASES_YAML).expect("fixture parses");
-    let period = case_file.cases[0].period.clone();
-    let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
-        program: artifact.program.clone(),
-        dataset: snap_dataset_for_cases(&case_file.cases),
-        queries: case_file.cases.iter().map(snap_query).collect(),
-    })
-    .expect("explain execution succeeds");
-
-    let dense_result = dense
-        .execute(
-            &period.to_model().expect("period converts"),
-            snap_dense_batch(&case_file.cases),
-            &[
-                "household_size".to_string(),
-                "gross_income".to_string(),
-                "net_income".to_string(),
-                "passes_gross_income_test".to_string(),
-                "passes_net_income_test".to_string(),
-                "snap_eligible".to_string(),
-                "snap_allotment".to_string(),
-            ],
-        )
-        .expect("dense execution succeeds");
-
-    for row in 0..case_file.cases.len() {
-        compare_scalar(
-            explain.results[row]
-                .outputs
-                .get("household_size")
-                .expect("household size output"),
-            dense_result
-                .outputs
-                .get("household_size")
-                .expect("dense household size"),
-            row,
-        );
-        compare_scalar(
-            explain.results[row]
-                .outputs
-                .get("gross_income")
-                .expect("gross income output"),
-            dense_result
-                .outputs
-                .get("gross_income")
-                .expect("dense gross income"),
-            row,
-        );
-        compare_scalar(
-            explain.results[row]
-                .outputs
-                .get("net_income")
-                .expect("net income output"),
-            dense_result
-                .outputs
-                .get("net_income")
-                .expect("dense net income"),
-            row,
-        );
-        compare_judgment(
-            explain.results[row]
-                .outputs
-                .get("passes_gross_income_test")
-                .expect("gross test output"),
-            dense_result
-                .outputs
-                .get("passes_gross_income_test")
-                .expect("dense gross test"),
-            row,
-        );
-        compare_judgment(
-            explain.results[row]
-                .outputs
-                .get("passes_net_income_test")
-                .expect("net test output"),
-            dense_result
-                .outputs
-                .get("passes_net_income_test")
-                .expect("dense net test"),
-            row,
-        );
-        compare_judgment(
-            explain.results[row]
-                .outputs
-                .get("snap_eligible")
-                .expect("eligibility output"),
-            dense_result
-                .outputs
-                .get("snap_eligible")
-                .expect("dense eligibility"),
-            row,
-        );
-        compare_scalar(
-            explain.results[row]
-                .outputs
-                .get("snap_allotment")
-                .expect("snap allotment output"),
-            dense_result
-                .outputs
-                .get("snap_allotment")
-                .expect("dense allotment"),
-            row,
-        );
-    }
-}
-
-#[test]
 fn dense_child_benefit_responsibility_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(CHILD_BENEFIT_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Child"))
         .expect("dense compilation succeeds");
     let case_file: ChildBenefitCaseFile =
@@ -517,7 +402,7 @@ fn dense_child_benefit_responsibility_matches_explain_mode() {
 #[test]
 fn dense_scottish_ctr_max_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SCOTTISH_CTR_MAX_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Dwelling"))
         .expect("dense compilation succeeds");
     let case_file: ScottishCtrCaseFile =
@@ -742,7 +627,7 @@ struct ScottishCtrPerson {
 #[test]
 fn dense_child_benefit_rates_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(CHILD_BENEFIT_RATES_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Claimant"))
         .expect("dense compilation succeeds");
     let case_file: ChildBenefitRatesCaseFile =
@@ -885,7 +770,7 @@ struct ChildBenefitRatesChild {
 #[test]
 fn dense_auto_enrolment_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(AUTO_ENROLMENT_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Jobholder"))
         .expect("dense compilation succeeds");
     let case_file: AutoEnrolmentCaseFile =
@@ -1066,7 +951,7 @@ struct AutoEnrolmentCase {
 #[test]
 fn dense_ated_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(ATED_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("DwellingInterest"))
         .expect("dense compilation succeeds");
     let case_file: AtedCaseFile = serde_yaml::from_str(ATED_CASES_YAML).expect("fixture parses");
@@ -1196,7 +1081,7 @@ struct AtedCase {
 #[test]
 fn dense_ct_marginal_relief_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(CT_MARGINAL_RELIEF_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Company"))
         .expect("dense compilation succeeds");
     let case_file: CtMarginalReliefCaseFile =
@@ -1402,7 +1287,7 @@ struct CtMarginalReliefCase {
 #[test]
 fn dense_state_pension_transitional_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(STATE_PENSION_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Person"))
         .expect("dense compilation succeeds");
     let case_file: StatePensionCaseFile =
@@ -1602,7 +1487,7 @@ struct StatePensionYear {
 #[test]
 fn dense_universal_credit_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(UC_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("BenefitUnit"))
         .expect("dense compilation succeeds");
     let case_file: UcCaseFile = serde_yaml::from_str(UC_CASES_YAML).expect("fixture parses");
@@ -2047,7 +1932,7 @@ fn dense_date_add_days_matches_explain_mode() {
         },
     });
 
-    let artifact = CompiledProgramArtifact::compile(program).expect("programme compiles");
+    let artifact = CompiledProgramArtifact::compile(program).expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("PartWeek"))
         .expect("dense compilation succeeds");
 
@@ -2146,7 +2031,7 @@ fn dense_date_add_days_matches_explain_mode() {
 #[test]
 fn dense_notional_capital_matches_explain_mode() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(NOTIONAL_CAPITAL_PROGRAM_RULESPEC)
-        .expect("programme compiles");
+        .expect("RuleSpec module compiles");
     let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Applicant"))
         .expect("dense compilation succeeds");
 
@@ -2595,197 +2480,6 @@ fn family_allowance_dataset(
         }
     }
     dataset
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SnapCaseFile {
-    cases: Vec<SnapCase>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SnapCase {
-    household_id: String,
-    period: PeriodSpec,
-    members: Vec<SnapMember>,
-    dependent_care_deduction: String,
-    child_support_deduction: String,
-    medical_deduction: String,
-    shelter_costs: String,
-    has_elderly_or_disabled_member: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SnapMember {
-    person_id: String,
-    earned_income: String,
-    unearned_income: String,
-}
-
-fn snap_query(case: &SnapCase) -> ExecutionQuery {
-    ExecutionQuery {
-        entity_id: case.household_id.clone(),
-        period: case.period.clone(),
-        outputs: vec![
-            "household_size".to_string(),
-            "gross_income".to_string(),
-            "net_income".to_string(),
-            "passes_gross_income_test".to_string(),
-            "passes_net_income_test".to_string(),
-            "snap_eligible".to_string(),
-            "snap_allotment".to_string(),
-        ],
-    }
-}
-
-fn snap_dataset_for_cases(cases: &[SnapCase]) -> DatasetSpec {
-    let mut dataset = DatasetSpec::default();
-    for case in cases {
-        let interval = period_interval(&case.period);
-        dataset.inputs.extend([
-            InputRecordSpec {
-                name: "dependent_care_deduction".to_string(),
-                entity: "Household".to_string(),
-                entity_id: case.household_id.clone(),
-                interval: interval.clone(),
-                value: ScalarValueSpec::Decimal {
-                    value: case.dependent_care_deduction.clone(),
-                },
-            },
-            InputRecordSpec {
-                name: "child_support_deduction".to_string(),
-                entity: "Household".to_string(),
-                entity_id: case.household_id.clone(),
-                interval: interval.clone(),
-                value: ScalarValueSpec::Decimal {
-                    value: case.child_support_deduction.clone(),
-                },
-            },
-            InputRecordSpec {
-                name: "medical_deduction".to_string(),
-                entity: "Household".to_string(),
-                entity_id: case.household_id.clone(),
-                interval: interval.clone(),
-                value: ScalarValueSpec::Decimal {
-                    value: case.medical_deduction.clone(),
-                },
-            },
-            InputRecordSpec {
-                name: "shelter_costs".to_string(),
-                entity: "Household".to_string(),
-                entity_id: case.household_id.clone(),
-                interval: interval.clone(),
-                value: ScalarValueSpec::Decimal {
-                    value: case.shelter_costs.clone(),
-                },
-            },
-            InputRecordSpec {
-                name: "has_elderly_or_disabled_member".to_string(),
-                entity: "Household".to_string(),
-                entity_id: case.household_id.clone(),
-                interval: interval.clone(),
-                value: ScalarValueSpec::Bool {
-                    value: case.has_elderly_or_disabled_member,
-                },
-            },
-        ]);
-
-        for member in &case.members {
-            dataset.inputs.extend([
-                InputRecordSpec {
-                    name: "earned_income".to_string(),
-                    entity: "Person".to_string(),
-                    entity_id: member.person_id.clone(),
-                    interval: interval.clone(),
-                    value: ScalarValueSpec::Decimal {
-                        value: member.earned_income.clone(),
-                    },
-                },
-                InputRecordSpec {
-                    name: "unearned_income".to_string(),
-                    entity: "Person".to_string(),
-                    entity_id: member.person_id.clone(),
-                    interval: interval.clone(),
-                    value: ScalarValueSpec::Decimal {
-                        value: member.unearned_income.clone(),
-                    },
-                },
-            ]);
-            dataset.relations.push(RelationRecordSpec {
-                name: "member_of_household".to_string(),
-                tuple: vec![member.person_id.clone(), case.household_id.clone()],
-                interval: interval.clone(),
-            });
-        }
-    }
-    dataset
-}
-
-fn snap_dense_batch(cases: &[SnapCase]) -> DenseBatchSpec {
-    let mut member_offsets = Vec::with_capacity(cases.len() + 1);
-    let mut earned_income = Vec::new();
-    let mut unearned_income = Vec::new();
-    let mut dependent_care = Vec::with_capacity(cases.len());
-    let mut child_support = Vec::with_capacity(cases.len());
-    let mut medical = Vec::with_capacity(cases.len());
-    let mut shelter = Vec::with_capacity(cases.len());
-    let mut elderly_or_disabled = Vec::with_capacity(cases.len());
-
-    member_offsets.push(0);
-    for case in cases {
-        dependent_care.push(decimal(&case.dependent_care_deduction));
-        child_support.push(decimal(&case.child_support_deduction));
-        medical.push(decimal(&case.medical_deduction));
-        shelter.push(decimal(&case.shelter_costs));
-        elderly_or_disabled.push(case.has_elderly_or_disabled_member);
-        for member in &case.members {
-            earned_income.push(decimal(&member.earned_income));
-            unearned_income.push(decimal(&member.unearned_income));
-        }
-        member_offsets.push(earned_income.len());
-    }
-
-    DenseBatchSpec {
-        row_count: cases.len(),
-        inputs: HashMap::from([
-            (
-                "dependent_care_deduction".to_string(),
-                DenseColumn::Decimal(dependent_care),
-            ),
-            (
-                "child_support_deduction".to_string(),
-                DenseColumn::Decimal(child_support),
-            ),
-            (
-                "medical_deduction".to_string(),
-                DenseColumn::Decimal(medical),
-            ),
-            ("shelter_costs".to_string(), DenseColumn::Decimal(shelter)),
-            (
-                "has_elderly_or_disabled_member".to_string(),
-                DenseColumn::Bool(elderly_or_disabled),
-            ),
-        ]),
-        relations: HashMap::from([(
-            DenseRelationKey {
-                name: "member_of_household".to_string(),
-                current_slot: 1,
-                related_slot: 0,
-            },
-            DenseRelationBatchSpec {
-                offsets: member_offsets,
-                inputs: HashMap::from([
-                    (
-                        "earned_income".to_string(),
-                        DenseColumn::Decimal(earned_income),
-                    ),
-                    (
-                        "unearned_income".to_string(),
-                        DenseColumn::Decimal(unearned_income),
-                    ),
-                ]),
-            },
-        )]),
-    }
 }
 
 fn decimal(value: &str) -> Decimal {

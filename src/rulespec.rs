@@ -42,7 +42,7 @@ pub enum RuleSpecError {
         existing: usize,
         new: usize,
     },
-    #[error("failed to load extended RuleSpec programme: {0}")]
+    #[error("failed to load extended RuleSpec module: {0}")]
     Extended(#[from] crate::spec::SpecError),
 }
 

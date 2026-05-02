@@ -18,9 +18,9 @@ pub enum SpecError {
     InvalidDecimal { literal: String },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
-    #[error("failed to read programme `{path}`: {error}")]
+    #[error("failed to read program file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
-    #[error("duplicate {kind} `{name}` when merging extended programme")]
+    #[error("duplicate {kind} `{name}` when merging extended program")]
     DuplicateOnMerge { kind: String, name: String },
 }
 
@@ -43,7 +43,7 @@ impl ProgramSpec {
         Ok(serde_yaml::from_str(source)?)
     }
 
-    /// Load a programme from `path`, resolving any `extends: <other.yaml>`
+    /// Load a program from `path`, resolving any `extends: <other.yaml>`
     /// relative to the current file's directory. Conflicting parameter names
     /// have their versions concatenated, preserving effective_from order; the
     /// engine picks whichever version is live for the query period. Units,
@@ -753,7 +753,7 @@ impl RelationRecordSpec {
     }
 }
 
-/// Merge an extending programme into its base. Parameter versions are
+/// Merge an extending program into its base. Parameter versions are
 /// concatenated by parameter name (the engine's effective_from ordering picks
 /// the right version at evaluation). Units, relations, and derived outputs
 /// are additive — duplicate names across base and extension raise

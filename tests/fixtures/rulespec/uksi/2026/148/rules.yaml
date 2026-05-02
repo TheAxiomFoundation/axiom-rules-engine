@@ -1,0 +1,102 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Social Security Benefits Up-rating Order 2026 (SI 2026/148) — April 2026
+    uprating of Universal Credit rates.
+
+    In the deployed DSL this would be an `amend` block against the base UC
+    Regulations 2013 RuleSpec module (`tests/fixtures/rulespec/uksi/2013/376`). The Rust loader
+    does not yet compose amendments, so the new rates are declared as
+    standalone parameters with `from 2026-04-06:` values; callers picking the
+    April 2026 version will get these figures.
+
+    Notable change: LCWRA element halved to £217.26 for new claimants (a
+    protected rate of £429.80 applies to pre-2026 / terminally-ill / severe
+    cases; this file uses the new-claimant figure and flags the protected
+    path as out of scope).
+rules:
+  - name: uc_standard_allowance_single_under_25
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '338.58'
+  - name: uc_standard_allowance_single_25_or_over
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '424.90'
+  - name: uc_standard_allowance_couple_under_25
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '528.34'
+  - name: uc_standard_allowance_couple_25_or_over
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '666.97'
+  - name: uc_child_element_higher
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '351.88'
+  - name: uc_child_element_standard
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '303.94'
+  - name: uc_disabled_child_lower
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '164.79'
+  - name: uc_disabled_child_higher
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '514.71'
+  - name: uc_lcwra_element
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    source: SI 2026/148; halved for new claimants
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '217.26'
+  - name: uc_carer_element
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '209.34'
+  - name: uc_work_allowance_with_housing
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '427.00'
+  - name: uc_work_allowance_without_housing
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2026-04-06'
+        formula: '711.00'

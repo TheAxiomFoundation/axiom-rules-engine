@@ -8,14 +8,14 @@ The current direction is:
 3. Formula strings are fields inside RuleSpec, parsed by an internal engine
    module and normalised into `ProgramSpec`.
 
-No external programme adapter layer is part of the design. The repository
+No external RuleSpec module adapter layer is part of the design. The repository
 is still pre-adoption, so Git history is the migration path for old experiments.
 The active code and docs should describe the architecture we would choose from a
 clean start.
 
 ## Alignment Points
 
-RuleSpec should retain the semantic gains from the prototype:
+RuleSpec should retain the core engine semantics:
 
 - Temporal versions on each rule.
 - Typed scalar and judgment outputs.

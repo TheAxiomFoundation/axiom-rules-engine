@@ -16,7 +16,6 @@ from .models import (
     Program,
     QueryResult,
 )
-from .registry import ProgrammeEntry, ProgrammeRegistry
 from .source_registry import (
     R2ObjectRef,
     SourceArtifact,
@@ -50,8 +49,6 @@ __all__ = [
     "FastPathMetadata",
     "Interval",
     "Program",
-    "ProgrammeEntry",
-    "ProgrammeRegistry",
     "QueryResult",
     "R2ObjectRef",
     "SourceArtifact",

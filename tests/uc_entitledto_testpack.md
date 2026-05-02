@@ -1,6 +1,6 @@
 # Universal Credit — entitledto.co.uk comparison test pack
 
-Axiom Rules Engine programme: `universal_credit` (rates effective 2025-04-07).
+Axiom Rules Engine RuleSpec module: `universal_credit` (rates effective 2025-04-07).
 Assessment period: 2025-05-01 to 2025-05-31 (one calendar month).
 
 For each scenario below: the Axiom Rules Engine inputs, the Axiom Rules Engine outputs, and a block of

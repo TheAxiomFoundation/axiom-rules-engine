@@ -4,7 +4,7 @@ RuleSpec is the canonical authoring and interchange schema for Axiom Rules
 Engine rules.
 Authoring tools should emit RuleSpec YAML/JSON from Axiom source documents; the
 Rust engine normalises it into `ProgramSpec` before compilation. `ProgramSpec` is
-the runtime IR, not a programme file format.
+the runtime IR, not a RuleSpec module file format.
 
 ## Shape
 
@@ -40,7 +40,7 @@ rules:
 ```
 
 `schema: axiom.rules.*` is also accepted as a discriminator. YAML with a
-top-level `rules:` key and no discriminator is rejected, because programme files
+top-level `rules:` key and no discriminator is rejected, because RuleSpec module files
 must identify their schema explicitly.
 
 ## Semantics
@@ -58,7 +58,7 @@ Supported rule kinds in the current Rust loader:
   another authority. It must declare `reiterates.target` and is ignored during
   lowering into `ProgramSpec`.
 
-Top-level `imports` merge other RuleSpec files into the compiled programme
+Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Relative imports resolve from the current
 file. Canonical imports use jurisdiction repo paths:
 
@@ -76,7 +76,7 @@ listed in `AXIOM_RULE_REPO_ROOTS`.
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example
 `us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still
-reference rules by local symbol inside the compiled programme, but public access
+reference rules by local symbol inside the compiled RuleSpec module, but public access
 must use the durable id whenever one exists. Execution requests for repo-backed
 RuleSpec outputs are rejected if they use only the bare rule name. Responses are
 keyed by the durable id and include the local `name` inside each output value
