@@ -441,7 +441,7 @@ rules:
 #[test]
 fn compile_program_file_to_json_accepts_rulespec_yaml() {
     let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-rulespec-compile-test-{}",
+        "axiom-rules-rulespec-yaml-test-{}",
         std::process::id()
     ));
     let program_path = temp_root.join("rules.yaml");
