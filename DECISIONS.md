@@ -4,7 +4,7 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules`. One
 entry per decision, most recent first.
 
-## 2026-04-25 — RuleSpec is the only external programme format
+## 2026-04-25 — RuleSpec is the only external rule format
 
 **Decision.** The canonical authoring and interchange surface is RuleSpec
 YAML/JSON: structured rule metadata with concise formula strings. Authoring
@@ -12,7 +12,7 @@ tools write RuleSpec, the Axiom app visualises RuleSpec and compiled traces, and
 the Rust engine normalises RuleSpec into `ProgramSpec` before compilation.
 
 `ProgramSpec` is the engine IR, not the author schema. It remains useful inside
-compiled artifacts and tests, but programme files accepted by the compile path
+compiled artifacts and tests, but rule files accepted by the compile path
 must be explicit RuleSpec (`format: rulespec/v1` or `schema: axiom.rules.*`).
 
 **Why.**
@@ -32,7 +32,7 @@ must be explicit RuleSpec (`format: rulespec/v1` or `schema: axiom.rules.*`).
 - `axiom-rules compile` accepts RuleSpec YAML only.
 - Ambiguous YAML with a top-level `rules:` key and no discriminator is rejected.
 - The formula parser is an internal implementation module for RuleSpec formula
-  fields, not a separate programme format.
+  fields, not a separate rule format.
 - Old experiments should be recovered from Git history, not preserved in active
   code.
 
@@ -82,14 +82,15 @@ They do include expected hashes in Git.
   `policy/dhs/snap/manual/23/L.yaml`.
 - See `docs/jurisdiction-repos.md` for the concrete layout.
 
-## 2026-04-19 — `programmes/` migrates to jurisdiction repos
+## 2026-04-19 — Rule content lives in jurisdiction repos
 
-**Decision.** The `programmes/` directory in this engine repo is a proof of
-concept. In production, encodings live in the jurisdiction repo they belong to.
-Canonical jurisdiction repositories use `statutes/`, `regulation/`, `policy/`,
-and `sources/` paths.
+**Decision.** Production encodings live in the jurisdiction repo they belong to.
+The engine repo keeps RuleSpec YAML only as parser/execution fixtures under
+`tests/fixtures/rulespec/`. Canonical jurisdiction repositories use `statutes/`,
+`regulation/`, `policy/`, and `sources/` paths.
 
-The engine resolves `extends:` by filesystem path; any mounted layout works.
+The engine resolves `extends:` and RuleSpec imports by filesystem path; any
+mounted layout works.
 
 **Why.**
 
@@ -99,9 +100,9 @@ The engine resolves `extends:` by filesystem path; any mounted layout works.
 
 **Consequences.**
 
-- The programmes currently under `programmes/` in this repo move out
-  post-prototype.
-- The engine can keep a small set of canonical examples for tests and docs.
+- `axiom-rules` has no checked-in production policy content.
+- Engine tests can keep a small set of RuleSpec fixtures for parser, compiler,
+  and execution coverage.
 
 ## 2026-04-19 — `sets` and `amends` are graph-level metadata
 

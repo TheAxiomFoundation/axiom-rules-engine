@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 
 use axiom_rules::compile::CompiledProgramArtifact;
 use axiom_rules::dense::{
@@ -51,10 +50,7 @@ impl CompiledDenseProgramHandle {
     #[staticmethod]
     #[pyo3(signature = (path, entity=None))]
     fn from_file(path: &str, entity: Option<&str>) -> PyResult<Self> {
-        let yaml = fs::read_to_string(path).map_err(|error| {
-            PyRuntimeError::new_err(format!("failed to read dense programme `{path}`: {error}"))
-        })?;
-        let artifact = CompiledProgramArtifact::from_yaml_str(&yaml)
+        let artifact = CompiledProgramArtifact::from_rulespec_file(path)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let compiled = DenseCompiledProgram::from_artifact(&artifact, entity)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
