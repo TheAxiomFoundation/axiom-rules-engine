@@ -2006,6 +2006,7 @@ fn dense_date_add_days_matches_explain_mode() {
 
     let mut program = ProgramSpec::default();
     program.derived.push(DerivedSpec {
+        id: None,
         name: "relevant_week_start".to_string(),
         entity: "PartWeek".to_string(),
         dtype: DTypeSpec::Date,
@@ -2025,6 +2026,7 @@ fn dense_date_add_days_matches_explain_mode() {
         },
     });
     program.derived.push(DerivedSpec {
+        id: None,
         name: "relevant_week_ends_on_end".to_string(),
         entity: "PartWeek".to_string(),
         dtype: DTypeSpec::Judgment,

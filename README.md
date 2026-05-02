@@ -119,6 +119,7 @@ The compiled artefact is currently an analysed execution package:
 
 - resolved `ProgramSpec`
 - dependency-ordered derived outputs
+- durable RuleSpec output ids in the form `<canonical file target>#<rule name>`
 - fast-path eligibility metadata
 
 That means the generic compile pipeline is now real and reusable. The repo no
@@ -230,8 +231,9 @@ There is now also a generic dense compiled path in Rust for a substantial subset
 - `count_related` with optional `where` predicate
 - `sum_related` over related inputs, with optional `where` predicate
 - `ceil`, `floor`, `date_add_days`
-- source citations on derived outputs, surfaced as a tree-shaped trace in
-  explain mode with every intermediate value and regulation reference
+- source citations and durable ids on derived outputs, surfaced as a
+  tree-shaped trace in explain mode with every intermediate value and
+  regulation reference
 
 It is exercised on multiple programmes:
 

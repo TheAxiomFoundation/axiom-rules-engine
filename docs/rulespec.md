@@ -73,6 +73,15 @@ The canonical form is `<jurisdiction>:<relative path without extension>`.
 `rules-us-co`, and so on. The loader searches sibling checkouts and any roots
 listed in `AXIOM_RULE_REPO_ROOTS`.
 
+Executable rules loaded from jurisdiction repos receive a durable id of
+`<canonical file target>#<rule name>`, for example
+`us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still
+reference rules by bare name when unambiguous, but compiled artifacts, execution
+outputs, and trace nodes expose the durable id. Execution requests may ask for a
+derived output by either bare name or durable id; responses are keyed by the
+durable id when one exists and include the friendly `name` inside each output
+value.
+
 Example structured scale:
 
 ```yaml

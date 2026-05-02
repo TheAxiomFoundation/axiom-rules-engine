@@ -260,6 +260,7 @@ pub enum DerivedSemantics {
 
 #[derive(Clone, Debug)]
 pub struct Derived {
+    pub id: Option<String>,
     pub name: String,
     pub entity: String,
     pub dtype: DType,
@@ -283,6 +284,7 @@ pub struct ParameterVersion {
 
 #[derive(Clone, Debug)]
 pub struct IndexedParameter {
+    pub id: Option<String>,
     pub name: String,
     pub unit: Option<String>,
     pub indexed_by: Option<String>,
@@ -314,6 +316,23 @@ impl Program {
 
     pub fn add_derived(&mut self, derived: Derived) {
         self.derived.insert(derived.name.clone(), derived);
+    }
+
+    pub fn resolve_derived_name(&self, reference: &str) -> Option<String> {
+        if self.derived.contains_key(reference) {
+            return Some(reference.to_string());
+        }
+        self.derived
+            .values()
+            .find(|derived| derived.id.as_deref() == Some(reference))
+            .map(|derived| derived.name.clone())
+    }
+
+    pub fn public_derived_key(&self, name: &str) -> String {
+        self.derived
+            .get(name)
+            .and_then(|derived| derived.id.clone())
+            .unwrap_or_else(|| name.to_string())
     }
 }
 

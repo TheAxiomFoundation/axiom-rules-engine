@@ -93,8 +93,11 @@ pub fn try_execute(
     let mut results = Vec::with_capacity(queries.len());
     let mut requested = HashSet::new();
     for query in queries {
-        for output in &query.outputs {
-            requested.insert(output.clone());
+        for output_reference in &query.outputs {
+            let output_name = program
+                .resolve_derived_name(output_reference)
+                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+            requested.insert(output_name.to_string());
         }
     }
 
@@ -114,14 +117,23 @@ pub fn try_execute(
 
     for (row_index, query) in queries.iter().enumerate() {
         let mut outputs = BTreeMap::new();
-        for output_name in &query.outputs {
-            let derived = evaluator.get_derived(output_name)?.clone();
+        for output_reference in &query.outputs {
+            let output_name = program
+                .resolve_derived_name(output_reference)
+                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+            let derived = evaluator.get_derived(&output_name)?.clone();
+            let output_key = derived
+                .id
+                .clone()
+                .unwrap_or_else(|| output_name.to_string());
             match &derived.semantics {
                 DerivedSemantics::Scalar(_) => {
-                    let column = evaluator.evaluate_scalar(output_name)?;
+                    let column = evaluator.evaluate_scalar(&output_name)?;
                     outputs.insert(
-                        output_name.clone(),
+                        output_key,
                         OutputValue::Scalar {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             dtype: DTypeSpec::from_model(&derived.dtype),
                             unit: derived.unit.clone(),
                             value: ScalarValueSpec::from_model(
@@ -131,10 +143,12 @@ pub fn try_execute(
                     );
                 }
                 DerivedSemantics::Judgment(_) => {
-                    let column = evaluator.evaluate_judgment(output_name)?;
+                    let column = evaluator.evaluate_judgment(&output_name)?;
                     outputs.insert(
-                        output_name.clone(),
+                        output_key,
                         OutputValue::Judgment {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             unit: derived.unit.clone(),
                             outcome: JudgmentOutcomeSpec::from(column[row_index]),
                         },

@@ -508,9 +508,28 @@ rules:
     assert!(
         artifact
             .program
+            .parameters
+            .iter()
+            .any(|parameter| parameter.id.as_deref()
+                == Some(
+                    "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_table"
+                ))
+    );
+    assert!(
+        artifact
+            .program
             .derived
             .iter()
             .any(|derived| derived.name == "snap_regular_month_allotment")
+    );
+    let output_id =
+        "us-co:policies/cdhs/snap/fy-2026-benefit#snap_regular_month_allotment".to_string();
+    assert!(
+        artifact
+            .program
+            .derived
+            .iter()
+            .any(|derived| derived.id.as_deref() == Some(output_id.as_str()))
     );
 
     let period = PeriodSpec {
@@ -551,18 +570,22 @@ rules:
         queries: vec![ExecutionQuery {
             entity_id: "household-1".to_string(),
             period,
-            outputs: vec!["snap_regular_month_allotment".to_string()],
+            outputs: vec![output_id.clone()],
         }],
     })
     .expect("imported formula executes");
 
-    let OutputValue::Scalar { value, .. } = response.results[0]
+    let OutputValue::Scalar {
+        name, id, value, ..
+    } = response.results[0]
         .outputs
-        .get("snap_regular_month_allotment")
+        .get(&output_id)
         .expect("snap_regular_month_allotment output")
     else {
         panic!("expected scalar output");
     };
+    assert_eq!(name, "snap_regular_month_allotment");
+    assert_eq!(id.as_deref(), Some(output_id.as_str()));
     let ScalarValueSpec::Decimal { value } = value else {
         panic!("expected decimal scalar");
     };

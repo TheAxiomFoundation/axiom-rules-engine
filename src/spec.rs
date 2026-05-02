@@ -160,6 +160,8 @@ pub struct RelationSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexedParameterSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub unit: Option<String>,
     #[serde(default)]
@@ -171,6 +173,7 @@ pub struct IndexedParameterSpec {
 impl IndexedParameterSpec {
     fn to_model(&self) -> Result<IndexedParameter, SpecError> {
         Ok(IndexedParameter {
+            id: self.id.clone(),
             name: self.name.clone(),
             unit: self.unit.clone(),
             indexed_by: self.indexed_by.clone(),
@@ -204,6 +207,8 @@ impl ParameterVersionSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DerivedSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub entity: String,
     pub dtype: DTypeSpec,
@@ -224,6 +229,7 @@ pub struct DerivedSpec {
 impl DerivedSpec {
     fn to_model(&self) -> Result<Derived, SpecError> {
         Ok(Derived {
+            id: self.id.clone(),
             name: self.name.clone(),
             entity: self.entity.clone(),
             dtype: self.dtype.to_model(),

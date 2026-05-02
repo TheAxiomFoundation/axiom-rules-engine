@@ -65,11 +65,17 @@ pub struct QueryResult {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputValue {
     Scalar {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         dtype: DTypeSpec,
         unit: Option<String>,
         value: ScalarValueSpec,
     },
     Judgment {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         unit: Option<String>,
         outcome: JudgmentOutcomeSpec,
     },
@@ -79,6 +85,9 @@ pub enum OutputValue {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DerivedTraceNode {
     Scalar {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         dtype: DTypeSpec,
         unit: Option<String>,
         value: ScalarValueSpec,
@@ -89,6 +98,9 @@ pub enum DerivedTraceNode {
         dependencies: Vec<String>,
     },
     Judgment {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         unit: Option<String>,
         outcome: JudgmentOutcomeSpec,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,18 +184,27 @@ fn execute_explain(
         let period = query.period.to_model()?;
         let mut outputs = BTreeMap::new();
 
-        for output_name in &query.outputs {
+        for output_reference in &query.outputs {
+            let output_name = program
+                .resolve_derived_name(output_reference)
+                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
             let derived = program
                 .derived
-                .get(output_name)
-                .ok_or_else(|| EvalError::UnknownDerived(output_name.clone()))?;
+                .get(&output_name)
+                .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
+            let output_key = derived
+                .id
+                .clone()
+                .unwrap_or_else(|| output_name.to_string());
 
             match &derived.semantics {
                 DerivedSemantics::Scalar(_) => {
-                    let value = engine.evaluate_scalar(output_name, &query.entity_id, &period)?;
+                    let value = engine.evaluate_scalar(&output_name, &query.entity_id, &period)?;
                     outputs.insert(
-                        output_name.clone(),
+                        output_key,
                         OutputValue::Scalar {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             dtype: DTypeSpec::from_model(&derived.dtype),
                             unit: derived.unit.clone(),
                             value: ScalarValueSpec::from_model(value),
@@ -192,10 +213,12 @@ fn execute_explain(
                 }
                 DerivedSemantics::Judgment(_) => {
                     let outcome =
-                        engine.evaluate_judgment(output_name, &query.entity_id, &period)?;
+                        engine.evaluate_judgment(&output_name, &query.entity_id, &period)?;
                     outputs.insert(
-                        output_name.clone(),
+                        output_key,
                         OutputValue::Judgment {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             unit: derived.unit.clone(),
                             outcome: match outcome {
                                 JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
@@ -233,14 +256,16 @@ fn collect_trace(
             DerivedSemantics::Scalar(expr) => {
                 if let Some(value) = engine.cached_scalar(&derived.name, entity_id, period) {
                     trace.insert(
-                        derived.name.clone(),
+                        program.public_derived_key(&derived.name),
                         DerivedTraceNode::Scalar {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             dtype: DTypeSpec::from_model(&derived.dtype),
                             unit: derived.unit.clone(),
                             value: ScalarValueSpec::from_model(value),
                             source: derived.source.clone(),
                             source_url: derived.source_url.clone(),
-                            dependencies: scalar_dependencies(expr),
+                            dependencies: public_dependencies(program, scalar_dependencies(expr)),
                         },
                     );
                 }
@@ -248,8 +273,10 @@ fn collect_trace(
             DerivedSemantics::Judgment(expr) => {
                 if let Some(outcome) = engine.cached_judgment(&derived.name, entity_id, period) {
                     trace.insert(
-                        derived.name.clone(),
+                        program.public_derived_key(&derived.name),
                         DerivedTraceNode::Judgment {
+                            name: derived.name.clone(),
+                            id: derived.id.clone(),
                             unit: derived.unit.clone(),
                             outcome: match outcome {
                                 JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
@@ -258,7 +285,7 @@ fn collect_trace(
                             },
                             source: derived.source.clone(),
                             source_url: derived.source_url.clone(),
-                            dependencies: judgment_dependencies(expr),
+                            dependencies: public_dependencies(program, judgment_dependencies(expr)),
                         },
                     );
                 }
@@ -266,6 +293,13 @@ fn collect_trace(
         }
     }
     trace
+}
+
+fn public_dependencies(program: &crate::model::Program, dependencies: Vec<String>) -> Vec<String> {
+    dependencies
+        .into_iter()
+        .map(|dependency| program.public_derived_key(&dependency))
+        .collect()
 }
 
 fn scalar_dependencies(expr: &crate::model::ScalarExpr) -> Vec<String> {

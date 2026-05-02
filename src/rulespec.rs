@@ -118,6 +118,8 @@ pub struct ReiterationRef {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RuleDefinition {
     pub name: String,
+    #[serde(skip)]
+    pub origin_target: Option<String>,
     #[serde(default)]
     pub kind: Option<RuleKind>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
@@ -212,7 +214,12 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
     if !looks_like_rulespec_yaml(source) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
-    let document: RulesDocument = serde_yaml::from_str(source)?;
+    let mut document: RulesDocument = serde_yaml::from_str(source)?;
+    let origin_target = document
+        .module
+        .as_ref()
+        .and_then(|module| module.id.clone());
+    document.assign_origin_target(origin_target);
     document.to_program_spec()
 }
 
@@ -251,7 +258,8 @@ fn load_rulespec_document_inner(
         return Err(RuleSpecError::MissingDiscriminator);
     }
     context.stack.push(resolved_path.clone());
-    let document: RulesDocument = serde_yaml::from_str(&source)?;
+    let mut document: RulesDocument = serde_yaml::from_str(&source)?;
+    document.assign_origin_target(canonical_rulespec_target(path));
     let mut combined = RulesDocument::default();
 
     if let Some(extends) = document.extends.as_deref() {
@@ -357,6 +365,36 @@ fn resolve_canonical_rulespec_import(
     })
 }
 
+fn canonical_rulespec_target(path: &Path) -> Option<String> {
+    let resolved_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let components = resolved_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<String>>();
+    let repo_index = components
+        .iter()
+        .rposition(|component| component.starts_with("rules-"))?;
+    let prefix = components[repo_index].strip_prefix("rules-")?;
+    if prefix.is_empty() || repo_index + 1 >= components.len() {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in &components[repo_index + 1..] {
+        relative.push(component);
+    }
+    let mut relative = relative.to_string_lossy().replace('\\', "/");
+    if relative.ends_with(".yaml") || relative.ends_with(".yml") {
+        if let Some(stem) = Path::new(&relative).with_extension("").to_str() {
+            relative = stem.replace('\\', "/");
+        }
+    }
+    if relative.is_empty() {
+        None
+    } else {
+        Some(format!("{prefix}:{relative}"))
+    }
+}
+
 fn import_target_to_rulespec_path(target: &str) -> PathBuf {
     let normalized = target.trim().trim_matches(['"', '\'']);
     let path = PathBuf::from(normalized);
@@ -411,6 +449,12 @@ fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathB
 }
 
 impl RulesDocument {
+    fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        for rule in &mut self.rules {
+            rule.origin_target = origin_target.clone();
+        }
+    }
+
     fn without_dependency_directives(mut self) -> Self {
         self.extends = None;
         self.imports.clear();
@@ -464,9 +508,28 @@ impl RulesDocument {
                 .retain(|parameter| !table_parameter_names.contains(&parameter.name));
             program.parameters.extend(table_parameters);
         }
+        self.apply_rule_ids(&mut program);
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
         Ok(program)
+    }
+
+    fn apply_rule_ids(&self, program: &mut ProgramSpec) {
+        for rule in &self.rules {
+            let Some(rule_id) = rule.canonical_rule_id() else {
+                continue;
+            };
+            for parameter in &mut program.parameters {
+                if parameter.name == rule.name {
+                    parameter.id = Some(rule_id.clone());
+                }
+            }
+            for derived in &mut program.derived {
+                if derived.name == rule.name {
+                    derived.id = Some(rule_id.clone());
+                }
+            }
+        }
     }
 
     fn write_header(&self, out: &mut String) {
@@ -502,6 +565,12 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    fn canonical_rule_id(&self) -> Option<String> {
+        self.origin_target
+            .as_ref()
+            .map(|target| format!("{target}#{}", self.name))
+    }
+
     fn effective_kind(&self) -> RuleKind {
         self.kind.clone().unwrap_or_else(|| {
             if self.arity.is_some() && self.formula.is_none() && self.versions.is_empty() {
@@ -566,6 +635,7 @@ impl RuleDefinition {
             });
         }
         Ok(IndexedParameterSpec {
+            id: self.canonical_rule_id(),
             name: self.name.clone(),
             unit: self.unit.clone(),
             indexed_by: Some(indexed_by),

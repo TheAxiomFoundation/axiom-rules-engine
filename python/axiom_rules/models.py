@@ -91,6 +91,8 @@ class CompiledExecutionRequest(BaseModel):
 
 class ScalarOutput(BaseModel):
     kind: Literal["scalar"]
+    name: str
+    id: str | None = None
     dtype: str
     unit: str | None = None
     value: ScalarValue
@@ -98,6 +100,8 @@ class ScalarOutput(BaseModel):
 
 class JudgmentOutput(BaseModel):
     kind: Literal["judgment"]
+    name: str
+    id: str | None = None
     unit: str | None = None
     outcome: Literal["holds", "not_holds", "undetermined"]
 
@@ -107,6 +111,8 @@ OutputValue = Annotated[ScalarOutput | JudgmentOutput, Field(discriminator="kind
 
 class ScalarTraceNode(BaseModel):
     kind: Literal["scalar"]
+    name: str
+    id: str | None = None
     dtype: str
     unit: str | None = None
     value: ScalarValue
@@ -117,6 +123,8 @@ class ScalarTraceNode(BaseModel):
 
 class JudgmentTraceNode(BaseModel):
     kind: Literal["judgment"]
+    name: str
+    id: str | None = None
     unit: str | None = None
     outcome: Literal["holds", "not_holds", "undetermined"]
     source: str | None = None

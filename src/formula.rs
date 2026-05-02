@@ -1121,6 +1121,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             });
         }
         program.parameters.push(IndexedParameterSpec {
+            id: None,
             name: v.path.clone(),
             unit: v.unit.clone(),
             indexed_by: v.indexed_by.clone(),
@@ -1157,6 +1158,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             },
         };
         program.derived.push(DerivedSpec {
+            id: None,
             name: v.path.clone(),
             entity,
             dtype,

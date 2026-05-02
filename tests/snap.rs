@@ -284,6 +284,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
     };
     let program = ProgramSpec {
         derived: vec![DerivedSpec {
+            id: None,
             name: "benefit".to_string(),
             entity: "Household".to_string(),
             dtype: DTypeSpec::Decimal,
@@ -388,6 +389,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         }],
         derived: vec![
             DerivedSpec {
+                id: None,
                 name: "person_income".to_string(),
                 entity: "Person".to_string(),
                 dtype: DTypeSpec::Decimal,
@@ -402,6 +404,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
                 },
             },
             DerivedSpec {
+                id: None,
                 name: "household_income".to_string(),
                 entity: "Household".to_string(),
                 dtype: DTypeSpec::Decimal,
@@ -509,6 +512,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
             arity: 2,
         }],
         derived: vec![DerivedSpec {
+            id: None,
             name: "has_elderly_or_disabled_member".to_string(),
             entity: "Household".to_string(),
             dtype: DTypeSpec::Judgment,
