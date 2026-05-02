@@ -76,11 +76,11 @@ listed in `AXIOM_RULE_REPO_ROOTS`.
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example
 `us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still
-reference rules by bare name when unambiguous, but compiled artifacts, execution
-outputs, and trace nodes expose the durable id. Execution requests may ask for a
-derived output by either bare name or durable id; responses are keyed by the
-durable id when one exists and include the friendly `name` inside each output
-value.
+reference rules by local symbol inside the compiled programme, but public access
+must use the durable id whenever one exists. Execution requests for repo-backed
+RuleSpec outputs are rejected if they use only the bare rule name. Responses are
+keyed by the durable id and include the local `name` inside each output value
+only as display metadata alongside the id.
 
 Example structured scale:
 

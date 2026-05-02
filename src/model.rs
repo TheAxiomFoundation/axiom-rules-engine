@@ -319,13 +319,19 @@ impl Program {
     }
 
     pub fn resolve_derived_name(&self, reference: &str) -> Option<String> {
-        if self.derived.contains_key(reference) {
-            return Some(reference.to_string());
-        }
-        self.derived
+        if let Some(derived) = self
+            .derived
             .values()
             .find(|derived| derived.id.as_deref() == Some(reference))
-            .map(|derived| derived.name.clone())
+        {
+            return Some(derived.name.clone());
+        }
+        let derived = self.derived.get(reference)?;
+        if derived.id.is_none() {
+            Some(reference.to_string())
+        } else {
+            None
+        }
     }
 
     pub fn public_derived_key(&self, name: &str) -> String {

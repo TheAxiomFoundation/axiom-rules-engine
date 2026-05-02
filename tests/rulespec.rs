@@ -6,6 +6,8 @@ use axiom_rules::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules::spec::{
     DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
 };
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn rulespec_lowers_snap_like_formulas() {
@@ -186,6 +188,7 @@ rules:
         start: "2026-01-01".parse().expect("valid date"),
         end: "2026-01-31".parse().expect("valid date"),
     };
+
     let response = execute_request(ExecutionRequest {
         mode: ExecutionMode::Explain,
         program: artifact.program,
@@ -221,6 +224,50 @@ rules:
         panic!("expected decimal scalar");
     };
     assert_eq!(value, "764");
+}
+
+#[test]
+fn repo_backed_rulespec_outputs_reject_bare_friendly_names() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: "1"
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let program = artifact.program.to_program().expect("program lowers");
+
+    assert_eq!(
+        program.resolve_derived_name("us:statutes/7/2017/a#snap_regular_month_allotment"),
+        Some("snap_regular_month_allotment".to_string())
+    );
+    assert_eq!(
+        program.resolve_derived_name("snap_regular_month_allotment"),
+        None
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
