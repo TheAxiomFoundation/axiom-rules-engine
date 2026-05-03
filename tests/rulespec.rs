@@ -14,7 +14,7 @@ fn rulespec_lowers_snap_like_formulas() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: us.snap.tx.overlay
+  id: us-tx:policies/hhsc/snap/overlay-subset
   title: Texas SNAP overlay subset
 relations:
   - name: member_of_household
@@ -346,7 +346,7 @@ fn rulespec_lowers_date_and_relation_judgment_formulas() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: uk.housing.section21.example
+  id: uk:statutes/ukpga/1988/50/section/21
 rules:
   - name: minimum_notice_days
     kind: parameter
