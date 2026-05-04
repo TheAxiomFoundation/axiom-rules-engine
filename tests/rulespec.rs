@@ -595,6 +595,96 @@ rules:
 }
 
 #[test]
+fn count_where_can_use_related_derived_judgment_predicates() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/regulation/7-cfr/273/5.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+relations:
+  - name: member_of_household
+    arity: 2
+rules:
+  - name: snap_member_student_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: not snap_member_student_ineligible
+  - name: snap_student_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_student_eligible) > 0
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:regulation/7-cfr/273/5#snap_student_eligible".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulation/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
+                entity: "Member".to_string(),
+                entity_id: "member-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: false },
+            }],
+            relations: vec![axiom_rules::spec::RelationRecordSpec {
+                name: "us:regulation/7-cfr/273/5#relation.member_of_household".to_string(),
+                tuple: vec!["member-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("related derived predicate executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_student_eligible output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(*outcome, axiom_rules::spec::JudgmentOutcomeSpec::Holds);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn rulespec_rejects_parameter_values_without_indexed_by() {
     let rulespec = r#"
 format: rulespec/v1

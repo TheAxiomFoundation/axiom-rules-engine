@@ -1440,15 +1440,20 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 let pred = expect_var(&args[1], "count_where arg 2")?;
                 ctx.relations.borrow_mut().insert(relation.clone());
                 let (current_slot, related_slot) = infer_slots(&relation);
+                let where_clause = if ctx.derived.contains(&pred) {
+                    JudgmentExprSpec::Derived { name: pred }
+                } else {
+                    JudgmentExprSpec::Comparison {
+                        left: Box::new(ScalarExprSpec::Input { name: pred }),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(lit_bool_spec(true)),
+                    }
+                };
                 ScalarExprSpec::CountRelated {
                     relation,
                     current_slot,
                     related_slot,
-                    where_clause: Some(Box::new(JudgmentExprSpec::Comparison {
-                        left: Box::new(ScalarExprSpec::Input { name: pred }),
-                        op: ComparisonOpSpec::Eq,
-                        right: Box::new(lit_bool_spec(true)),
-                    })),
+                    where_clause: Some(Box::new(where_clause)),
                 }
             }
             "sum_where" => {
@@ -1460,16 +1465,21 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 let pred = expect_var(&args[2], "sum_where arg 3")?;
                 ctx.relations.borrow_mut().insert(relation.clone());
                 let (current_slot, related_slot) = infer_slots(&relation);
+                let where_clause = if ctx.derived.contains(&pred) {
+                    JudgmentExprSpec::Derived { name: pred }
+                } else {
+                    JudgmentExprSpec::Comparison {
+                        left: Box::new(ScalarExprSpec::Input { name: pred }),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(lit_bool_spec(true)),
+                    }
+                };
                 ScalarExprSpec::SumRelated {
                     relation,
                     current_slot,
                     related_slot,
                     value: RelatedValueRefSpec::Input { name: field },
-                    where_clause: Some(Box::new(JudgmentExprSpec::Comparison {
-                        left: Box::new(ScalarExprSpec::Input { name: pred }),
-                        op: ComparisonOpSpec::Eq,
-                        right: Box::new(lit_bool_spec(true)),
-                    })),
+                    where_clause: Some(Box::new(where_clause)),
                 }
             }
             _ => {
