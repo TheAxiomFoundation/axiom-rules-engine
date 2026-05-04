@@ -853,6 +853,39 @@ rules:
 }
 
 #[test]
+fn duplicate_derived_rule_names_return_compile_error() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: duplicate_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: duplicate_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "2"
+"#;
+
+    let err = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect_err("duplicate derived names should fail compilation");
+    assert!(matches!(
+        err,
+        CompileError::DuplicateDerivedRule { name } if name == "duplicate_amount"
+    ));
+}
+
+#[test]
 fn compile_program_file_to_json_accepts_rulespec_yaml() {
     let temp_root = std::env::temp_dir().join(format!(
         "axiom-rules-rulespec-yaml-test-{}",

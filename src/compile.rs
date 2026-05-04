@@ -17,6 +17,8 @@ pub enum CompileError {
     ReadArtifactFile { path: String, error: std::io::Error },
     #[error("unknown derived dependency `{dependency}` referenced from `{derived}`")]
     UnknownDerivedDependency { derived: String, dependency: String },
+    #[error("duplicate derived rule `{name}`")]
+    DuplicateDerivedRule { name: String },
     #[error("cyclic derived dependency detected involving: {cycle}")]
     CyclicDependency { cycle: String },
     #[error("failed to read program file `{path}`: {error}")]
@@ -149,11 +151,14 @@ impl CompiledProgramArtifact {
 }
 
 fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> {
-    let derived_names = program
-        .derived
-        .iter()
-        .map(|derived| derived.name.clone())
-        .collect::<HashSet<String>>();
+    let mut derived_names = HashSet::new();
+    for derived in &program.derived {
+        if !derived_names.insert(derived.name.clone()) {
+            return Err(CompileError::DuplicateDerivedRule {
+                name: derived.name.clone(),
+            });
+        }
+    }
 
     let mut incoming_counts = HashMap::new();
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
