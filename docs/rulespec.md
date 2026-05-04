@@ -76,11 +76,26 @@ listed in `AXIOM_RULE_REPO_ROOTS`.
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example
 `us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still
-reference rules by local symbol inside the compiled RuleSpec module, but public access
-must use the durable id whenever one exists. Execution requests for repo-backed
-RuleSpec outputs are rejected if they use only the bare rule name. Responses are
-keyed by the durable id and include the local `name` inside each output value
-only as display metadata alongside the id.
+reference rules by local symbol inside the compiled RuleSpec module, but public
+access must use durable legal ids whenever one exists.
+
+Execution requests for repo-backed RuleSpec reject bare output, input, and
+relation names. Dataset inputs use `#input.<local symbol>` when supplying an
+input slot from the current rule, or the upstream rule id when supplying an
+imported derived/parameter value:
+
+```yaml
+input:
+  us:statutes/7/2017/a#input.household_size: 1
+  us:statutes/7/2014/e/6/A#snap_net_income: 100
+  us:statutes/7/2012/j#relation.member_of_household:
+    - us:statutes/7/2012/j#input.snap_member_is_elderly_or_disabled: false
+output:
+  us:statutes/7/2017/a#snap_regular_month_allotment: 268
+```
+
+Responses are keyed by durable ids and include the local `name` inside each
+output value only as display metadata alongside the id.
 
 Example structured scale:
 

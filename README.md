@@ -40,7 +40,8 @@ rules: []
 ```
 
 For repo-backed RuleSpec files, public execution requests must use durable
-output IDs. Bare local names remain local formula symbols only.
+legal IDs for queried outputs and dataset input/relation names. Bare local names
+remain local formula symbols only.
 
 ## Commands
 
@@ -56,6 +57,50 @@ Run a compiled artifact:
 
 ```bash
 cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
+```
+
+`request.json` must key every public reference by the legal RuleSpec ID:
+
+```json
+{
+  "mode": "explain",
+  "dataset": {
+    "inputs": [
+      {
+        "name": "us:statutes/7/2017/a#input.household_size",
+        "entity": "Household",
+        "entity_id": "household:1",
+        "interval": { "start": "2026-01-01", "end": "2026-02-01" },
+        "value": { "kind": "integer", "value": 1 }
+      },
+      {
+        "name": "us:statutes/7/2014/e/6/A#snap_net_income",
+        "entity": "Household",
+        "entity_id": "household:1",
+        "interval": { "start": "2026-01-01", "end": "2026-02-01" },
+        "value": { "kind": "decimal", "value": "100" }
+      }
+    ],
+    "relations": [
+      {
+        "name": "us:statutes/7/2012/j#relation.member_of_household",
+        "tuple": ["household:1", "person:1"],
+        "interval": { "start": "2026-01-01", "end": "2026-02-01" }
+      }
+    ]
+  },
+  "queries": [
+    {
+      "entity_id": "household:1",
+      "period": {
+        "period_kind": "month",
+        "start": "2026-01-01",
+        "end": "2026-02-01"
+      },
+      "outputs": ["us:statutes/7/2017/a#snap_regular_month_allotment"]
+    }
+  ]
+}
 ```
 
 Validate jurisdiction-repo source registry files:
