@@ -271,6 +271,330 @@ rules:
 }
 
 #[test]
+fn repo_backed_rulespec_execution_rejects_bare_friendly_input_names() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "snap_maximum_allotment".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "298".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["us:statutes/7/2017/a#snap_regular_month_allotment".to_string()],
+        }],
+    })
+    .expect_err("repo-backed execution must reject bare input names");
+
+    assert!(error.to_string().contains(
+        "dataset input `snap_maximum_allotment` must use an absolute legal RuleSpec reference"
+    ));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_absolute_input_names() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:statutes/7/2017/a#snap_regular_month_allotment".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:statutes/7/2017/a#input.snap_maximum_allotment".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "298".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute input reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_regular_month_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "298");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_absolute_upstream_output_inputs() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/statutes/7/2014/e/6/A.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_net_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: max(0, snap_monthly_household_income - snap_standard_deduction)
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:statutes/7/2014/e/6/A#snap_net_income".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "us:statutes/7/2014/e/6/A#input.snap_monthly_household_income"
+                        .to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "1000".to_string(),
+                    },
+                },
+                InputRecordSpec {
+                    name: "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction"
+                        .to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "209".to_string(),
+                    },
+                },
+            ],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute upstream output input reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_net_income output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "791");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_absolute_relation_names() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
+    let rules_file = root.join("rules-us/statutes/7/2012/j.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+relations:
+  - name: member_of_household
+    arity: 2
+rules:
+  - name: snap_household_has_elderly_or_disabled_member
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_is_elderly_or_disabled) > 0
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id =
+        "us:statutes/7/2012/j#snap_household_has_elderly_or_disabled_member".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:statutes/7/2012/j#input.snap_member_is_elderly_or_disabled".to_string(),
+                entity: "Member".to_string(),
+                entity_id: "member-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: true },
+            }],
+            relations: vec![axiom_rules::spec::RelationRecordSpec {
+                name: "us:statutes/7/2012/j#relation.member_of_household".to_string(),
+                tuple: vec!["member-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute relation reference executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_household_has_elderly_or_disabled_member output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(*outcome, axiom_rules::spec::JudgmentOutcomeSpec::Holds);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn rulespec_rejects_parameter_values_without_indexed_by() {
     let rulespec = r#"
 format: rulespec/v1
@@ -590,7 +914,9 @@ rules:
         dataset: DatasetSpec {
             inputs: vec![
                 InputRecordSpec {
-                    name: "household_size".to_string(),
+                    name:
+                        "us:policies/usda/snap/fy-2026-cola/maximum-allotments#input.household_size"
+                            .to_string(),
                     entity: "Household".to_string(),
                     entity_id: "household-1".to_string(),
                     interval: IntervalSpec {
@@ -600,7 +926,7 @@ rules:
                     value: ScalarValueSpec::Integer { value: 1 },
                 },
                 InputRecordSpec {
-                    name: "net_income".to_string(),
+                    name: "us-co:policies/cdhs/snap/fy-2026-benefit#input.net_income".to_string(),
                     entity: "Household".to_string(),
                     entity_id: "household-1".to_string(),
                     interval: IntervalSpec {

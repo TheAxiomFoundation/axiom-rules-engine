@@ -122,7 +122,7 @@ pub enum ApiError {
 pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, ApiError> {
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
-    let dataset = request.dataset.to_dataset()?;
+    let dataset = request.dataset.to_dataset_for_program(&program)?;
 
     match requested_mode {
         ExecutionMode::Explain => execute_explain(

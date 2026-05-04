@@ -22,6 +22,14 @@ pub enum SpecError {
     ReadFile { path: String, error: std::io::Error },
     #[error("duplicate {kind} `{name}` when merging extended program")]
     DuplicateOnMerge { kind: String, name: String },
+    #[error(
+        "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot, derived rule, or parameter in the compiled program"
+    )]
+    InvalidDatasetInputReference { reference: String },
+    #[error(
+        "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
+    )]
+    InvalidDatasetRelationReference { reference: String },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -109,6 +117,20 @@ impl DatasetSpec {
                 .map(RelationRecordSpec::to_model)
                 .collect::<Result<Vec<RelationRecord>, SpecError>>()?,
         })
+    }
+
+    pub fn to_dataset_for_program(&self, program: &Program) -> Result<DataSet, SpecError> {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|input| input.to_model_for_program(program))
+            .collect::<Result<Vec<InputRecord>, SpecError>>()?;
+        let relations = self
+            .relations
+            .iter()
+            .map(|relation| relation.to_model_for_program(program))
+            .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
+        Ok(DataSet { inputs, relations })
     }
 }
 
@@ -734,6 +756,21 @@ impl InputRecordSpec {
             value: self.value.to_model()?,
         })
     }
+
+    fn to_model_for_program(&self, program: &Program) -> Result<InputRecord, SpecError> {
+        let name = program.resolve_input_name(&self.name).ok_or_else(|| {
+            SpecError::InvalidDatasetInputReference {
+                reference: self.name.clone(),
+            }
+        })?;
+        Ok(InputRecord {
+            name,
+            entity: self.entity.clone(),
+            entity_id: self.entity_id.clone(),
+            interval: self.interval.to_model(),
+            value: self.value.to_model()?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -747,6 +784,19 @@ impl RelationRecordSpec {
     fn to_model(&self) -> Result<RelationRecord, SpecError> {
         Ok(RelationRecord {
             name: self.name.clone(),
+            tuple: self.tuple.clone(),
+            interval: self.interval.to_model(),
+        })
+    }
+
+    fn to_model_for_program(&self, program: &Program) -> Result<RelationRecord, SpecError> {
+        let name = program.resolve_relation_name(&self.name).ok_or_else(|| {
+            SpecError::InvalidDatasetRelationReference {
+                reference: self.name.clone(),
+            }
+        })?;
+        Ok(RelationRecord {
+            name,
             tuple: self.tuple.clone(),
             interval: self.interval.to_model(),
         })

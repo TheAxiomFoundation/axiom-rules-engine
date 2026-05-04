@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -334,11 +334,190 @@ impl Program {
         }
     }
 
+    pub fn resolve_input_name(&self, reference: &str) -> Option<String> {
+        if !self.has_public_ids() {
+            return Some(reference.to_string());
+        }
+
+        let public_reference = PublicReference::parse(reference)?;
+        let input_slots = self.input_slots();
+        if let Some(input_name) = public_reference.fragment.strip_prefix("input.") {
+            if input_slots.contains(input_name) {
+                return Some(input_name.to_string());
+            }
+            return None;
+        }
+
+        if let Some(derived) = self
+            .derived
+            .values()
+            .find(|derived| derived.id.as_deref() == Some(reference))
+        {
+            return Some(derived.name.clone());
+        }
+
+        if let Some(parameter) = self
+            .parameters
+            .values()
+            .find(|parameter| parameter.id.as_deref() == Some(reference))
+        {
+            return Some(parameter.name.clone());
+        }
+
+        if input_slots.contains(public_reference.fragment) {
+            return Some(public_reference.fragment.to_string());
+        }
+
+        None
+    }
+
+    pub fn resolve_relation_name(&self, reference: &str) -> Option<String> {
+        if !self.has_public_ids() {
+            return self
+                .relations
+                .contains_key(reference)
+                .then(|| reference.to_string());
+        }
+
+        let public_reference = PublicReference::parse(reference)?;
+        let relation_name = public_reference.fragment.strip_prefix("relation.")?;
+        self.relations
+            .contains_key(relation_name)
+            .then(|| relation_name.to_string())
+    }
+
     pub fn public_derived_key(&self, name: &str) -> String {
         self.derived
             .get(name)
             .and_then(|derived| derived.id.clone())
             .unwrap_or_else(|| name.to_string())
+    }
+
+    fn has_public_ids(&self) -> bool {
+        self.derived.values().any(|derived| derived.id.is_some())
+            || self
+                .parameters
+                .values()
+                .any(|parameter| parameter.id.is_some())
+    }
+
+    fn input_slots(&self) -> HashSet<&str> {
+        let mut slots = HashSet::new();
+        for derived in self.derived.values() {
+            collect_input_slots_from_semantics(&derived.semantics, &mut slots);
+        }
+        slots
+    }
+}
+
+struct PublicReference<'a> {
+    fragment: &'a str,
+}
+
+impl<'a> PublicReference<'a> {
+    fn parse(reference: &'a str) -> Option<Self> {
+        let (target, fragment) = reference.split_once('#')?;
+        if !target.contains(':') || target.trim().is_empty() || fragment.trim().is_empty() {
+            return None;
+        }
+        Some(Self { fragment })
+    }
+}
+
+fn collect_input_slots_from_semantics<'a>(
+    semantics: &'a DerivedSemantics,
+    slots: &mut HashSet<&'a str>,
+) {
+    match semantics {
+        DerivedSemantics::Scalar(expr) => collect_input_slots_from_scalar_expr(expr, slots),
+        DerivedSemantics::Judgment(expr) => collect_input_slots_from_judgment_expr(expr, slots),
+    }
+}
+
+fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut HashSet<&'a str>) {
+    match expr {
+        ScalarExpr::Literal(_)
+        | ScalarExpr::Derived(_)
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::Input(name) => {
+            slots.insert(name.as_str());
+        }
+        ScalarExpr::InputOrElse { name, .. } => {
+            slots.insert(name.as_str());
+        }
+        ScalarExpr::ParameterLookup { index, .. } => {
+            collect_input_slots_from_scalar_expr(index, slots);
+        }
+        ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+            for item in items {
+                collect_input_slots_from_scalar_expr(item, slots);
+            }
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right) => {
+            collect_input_slots_from_scalar_expr(left, slots);
+            collect_input_slots_from_scalar_expr(right, slots);
+        }
+        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+            collect_input_slots_from_scalar_expr(value, slots);
+        }
+        ScalarExpr::DateAddDays { date, days } => {
+            collect_input_slots_from_scalar_expr(date, slots);
+            collect_input_slots_from_scalar_expr(days, slots);
+        }
+        ScalarExpr::DaysBetween { from, to } => {
+            collect_input_slots_from_scalar_expr(from, slots);
+            collect_input_slots_from_scalar_expr(to, slots);
+        }
+        ScalarExpr::CountRelated { where_clause, .. } => {
+            if let Some(where_clause) = where_clause {
+                collect_input_slots_from_judgment_expr(where_clause, slots);
+            }
+        }
+        ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
+            if let Some(where_clause) = where_clause {
+                collect_input_slots_from_judgment_expr(where_clause, slots);
+            }
+        }
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_input_slots_from_judgment_expr(condition, slots);
+            collect_input_slots_from_scalar_expr(then_expr, slots);
+            collect_input_slots_from_scalar_expr(else_expr, slots);
+        }
+    }
+}
+
+fn collect_input_slots_from_judgment_expr<'a>(
+    expr: &'a JudgmentExpr,
+    slots: &mut HashSet<&'a str>,
+) {
+    match expr {
+        JudgmentExpr::Comparison { left, right, .. } => {
+            collect_input_slots_from_scalar_expr(left, slots);
+            collect_input_slots_from_scalar_expr(right, slots);
+        }
+        JudgmentExpr::Derived(_) => {}
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+            for item in items {
+                collect_input_slots_from_judgment_expr(item, slots);
+            }
+        }
+        JudgmentExpr::Not(item) => {
+            collect_input_slots_from_judgment_expr(item, slots);
+        }
     }
 }
 
