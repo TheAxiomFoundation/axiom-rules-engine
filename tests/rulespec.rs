@@ -601,7 +601,7 @@ fn count_where_can_use_related_derived_judgment_predicates() {
         .expect("system time after unix epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/regulation/7-cfr/273/5.yaml");
+    let rules_file = root.join("rules-us/regulations/7-cfr/273/5.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -639,14 +639,14 @@ rules:
         start: "2026-01-01".parse().expect("valid date"),
         end: "2026-01-31".parse().expect("valid date"),
     };
-    let output_id = "us:regulation/7-cfr/273/5#snap_student_eligible".to_string();
+    let output_id = "us:regulations/7-cfr/273/5#snap_student_eligible".to_string();
 
     let response = execute_request(ExecutionRequest {
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
             inputs: vec![InputRecordSpec {
-                name: "us:regulation/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
+                name: "us:regulations/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
                 entity: "Member".to_string(),
                 entity_id: "member-1".to_string(),
                 interval: IntervalSpec {
@@ -656,7 +656,7 @@ rules:
                 value: ScalarValueSpec::Bool { value: false },
             }],
             relations: vec![axiom_rules::spec::RelationRecordSpec {
-                name: "us:regulation/7-cfr/273/5#relation.member_of_household".to_string(),
+                name: "us:regulations/7-cfr/273/5#relation.member_of_household".to_string(),
                 tuple: vec!["member-1".to_string(), "household-1".to_string()],
                 interval: IntervalSpec {
                     start: period.start,

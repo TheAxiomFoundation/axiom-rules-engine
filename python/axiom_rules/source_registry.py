@@ -20,7 +20,7 @@ DEFAULT_BUCKET = "axiom-sources"
 DEFAULT_ARTIFACTS = ("raw", "text")
 HASH_KEYS = tuple(f"{artifact}_sha256" for artifact in DEFAULT_ARTIFACTS)
 EDGE_KEYS = ("sets", "implements", "extends", "authority")
-TAXONOMY_ROOTS = ("statutes", "regulation", "policy")
+TAXONOMY_ROOTS = ("statutes", "regulations", "policies")
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")

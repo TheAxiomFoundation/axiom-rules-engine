@@ -101,7 +101,7 @@ def test_derives_source_identity_and_default_r2_paths(tmp_path: Path) -> None:
     root = tmp_path / "us-tn"
     source = write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         valid_default_body(),
     )
 
@@ -109,34 +109,34 @@ def test_derives_source_identity_and_default_r2_paths(tmp_path: Path) -> None:
 
     assert report.ok
     assert discover_source_files(root) == [source]
-    assert source_path_for(root, source) == "policy/dhs/snap/manual/23/L"
-    assert source_id_for(root, source) == "us-tn:policy/dhs/snap/manual/23/L"
+    assert source_path_for(root, source) == "policies/dhs/snap/manual/23/L"
+    assert source_id_for(root, source) == "us-tn:policies/dhs/snap/manual/23/L"
     entry = report.entries[0]
-    assert entry.source_id == "us-tn:policy/dhs/snap/manual/23/L"
+    assert entry.source_id == "us-tn:policies/dhs/snap/manual/23/L"
     assert [artifact.name for artifact in entry.artifacts] == ["raw", "text"]
     assert [artifact.r2_path for artifact in entry.artifacts] == [
-        "r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/raw",
-        "r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/text",
+        "r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/raw",
+        "r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/text",
     ]
 
 
 def test_repo_and_bucket_can_be_overridden(tmp_path: Path) -> None:
     root = tmp_path / "checkout"
-    source = write_source(root, "regulation/7-cfr/273/9.yaml", valid_default_body())
+    source = write_source(root, "regulations/7-cfr/273/9.yaml", valid_default_body())
 
     report = validate_source_registries(root, repo="us", bucket="test-bucket")
 
     assert report.ok
-    assert source_id_for(root, source, repo="us") == "us:regulation/7-cfr/273/9"
+    assert source_id_for(root, source, repo="us") == "us:regulations/7-cfr/273/9"
     assert report.entries[0].artifacts[0].r2_path == (
-        "r2://test-bucket/us/regulation/7-cfr/273/9/raw"
+        "r2://test-bucket/us/regulations/7-cfr/273/9/raw"
     )
     assert default_r2_path(
         repo="us",
-        source_path="regulation/7-cfr/273/9",
+        source_path="regulations/7-cfr/273/9",
         artifact="raw",
         bucket="test-bucket",
-    ) == "r2://test-bucket/us/regulation/7-cfr/273/9/raw"
+    ) == "r2://test-bucket/us/regulations/7-cfr/273/9/raw"
 
 
 def test_parse_r2_path() -> None:
@@ -152,7 +152,7 @@ def test_explicit_artifacts_replace_default_hashes(tmp_path: Path) -> None:
     root = tmp_path / "us-tn"
     write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         f"""
 publisher: Tennessee DHS
 canonical_url: https://example.test/manual
@@ -173,8 +173,8 @@ artifacts:
 
     assert report.ok
     assert [artifact.r2_path for artifact in report.entries[0].artifacts] == [
-        "r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/manual.pdf",
-        "r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/manual.txt",
+        "r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/manual.pdf",
+        "r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/manual.txt",
     ]
 
 
@@ -182,7 +182,7 @@ def test_rejects_explicit_akn_artifact(tmp_path: Path) -> None:
     root = tmp_path / "us-tn"
     write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         f"""
 publisher: Tennessee DHS
 canonical_url: https://example.test/manual
@@ -207,13 +207,13 @@ def test_rejects_redundant_identity_storage_bad_hash_and_relative_edges(
     root = tmp_path / "us-tn"
     write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         """
-id: us-tn:policy/dhs/snap/manual/23/L
+id: us-tn:policies/dhs/snap/manual/23/L
 publisher: Tennessee DHS
 canonical_url: https://example.test/manual
 retrieved_at: 2026-04-25T00:00:00Z
-storage: r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L
+storage: r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L
 sets:
   - statutes/7/2014/e/6/A
 hashes:
@@ -269,13 +269,13 @@ def test_verify_r2_accepts_matching_objects(tmp_path: Path) -> None:
     text = b"manual text"
     write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         body_with_hashes(raw=raw, text=text),
     )
     client = FakeR2Client(
         {
-            ("axiom-sources", "us-tn/policy/dhs/snap/manual/23/L/raw"): raw,
-            ("axiom-sources", "us-tn/policy/dhs/snap/manual/23/L/text"): text,
+            ("axiom-sources", "us-tn/policies/dhs/snap/manual/23/L/raw"): raw,
+            ("axiom-sources", "us-tn/policies/dhs/snap/manual/23/L/text"): text,
         }
     )
 
@@ -290,12 +290,12 @@ def test_verify_r2_reports_missing_and_hash_mismatch(tmp_path: Path) -> None:
     text = b"expected text"
     write_source(
         root,
-        "policy/dhs/snap/manual/23/L.yaml",
+        "policies/dhs/snap/manual/23/L.yaml",
         body_with_hashes(raw=raw, text=text),
     )
     client = FakeR2Client(
         {
-            ("axiom-sources", "us-tn/policy/dhs/snap/manual/23/L/raw"): b"wrong raw",
+            ("axiom-sources", "us-tn/policies/dhs/snap/manual/23/L/raw"): b"wrong raw",
         }
     )
 

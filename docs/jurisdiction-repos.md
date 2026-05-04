@@ -12,19 +12,19 @@ same top-level taxonomy:
 ```text
 us/
   statutes/
-  regulation/
-  policy/
+  regulations/
+  policies/
   sources/
 
 us-tn/
   statutes/
-  regulation/
-  policy/
+  regulations/
+  policies/
   sources/
 ```
 
 State repositories use `statutes/` for state statutes. Federal authorities stay
-in `us/statutes/...` or `us/regulation/...` and are referenced by absolute
+in `us/statutes/...` or `us/regulations/...` and are referenced by absolute
 cross-repo paths.
 
 Executable RuleSpec modules can compose those authorities with top-level
@@ -51,10 +51,10 @@ the same stem:
 us/
   statutes/7/2014/e/6/A.yaml
   statutes/7/2014/e/6/A.test.yaml
-  regulation/7-cfr/273/9/d/6.yaml
-  regulation/7-cfr/273/9/d/6.test.yaml
-  policy/irs/pub/501.yaml
-  policy/irs/pub/501.test.yaml
+  regulations/7-cfr/273/9/d/6.yaml
+  regulations/7-cfr/273/9/d/6.test.yaml
+  policies/irs/pub/501.yaml
+  policies/irs/pub/501.test.yaml
 ```
 
 ## Path Identity
@@ -64,7 +64,7 @@ default.
 
 ```text
 us:statutes/7/2014/e/6/A
-us-tn:policy/dhs/snap/manual/23/L
+us-tn:policies/dhs/snap/manual/23/L
 ```
 
 These IDs derive from:
@@ -76,17 +76,17 @@ These IDs derive from:
 For source registry files under `sources/`, the `sources/` prefix is removed:
 
 ```text
-us-tn/sources/policy/dhs/snap/manual/23/L.yaml
+us-tn/sources/policies/dhs/snap/manual/23/L.yaml
 ```
 
 has source identity:
 
 ```text
-us-tn:policy/dhs/snap/manual/23/L
+us-tn:policies/dhs/snap/manual/23/L
 ```
 
-Use `aliases:` only for external citations, old paths, or other non-canonical
-identifiers that must remain resolvable.
+Use `aliases:` only for external citations or other non-canonical identifiers
+that must remain resolvable.
 
 ## Source Registry
 
@@ -95,9 +95,9 @@ Git stores source metadata and expected hashes. R2 stores the actual artifacts.
 
 ```text
 us-tn/
-  policy/dhs/snap/manual/23/L.yaml
-  policy/dhs/snap/manual/23/L.test.yaml
-  sources/policy/dhs/snap/manual/23/L.yaml
+  policies/dhs/snap/manual/23/L.yaml
+  policies/dhs/snap/manual/23/L.test.yaml
+  sources/policies/dhs/snap/manual/23/L.yaml
 ```
 
 Default source registry shape:
@@ -126,11 +126,11 @@ Example:
 
 ```text
 Git:
-us-tn/sources/policy/dhs/snap/manual/23/L.yaml
+us-tn/sources/policies/dhs/snap/manual/23/L.yaml
 
 R2:
-r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/raw
-r2://axiom-sources/us-tn/policy/dhs/snap/manual/23/L/text
+r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/raw
+r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/text
 ```
 
 R2 may store actual hashes in object metadata for fast validation. Git still
@@ -192,7 +192,7 @@ metadata such as `sets`, `implements`, `extends`, or `authority`. Those edges
 should point to absolute canonical paths, for example:
 
 ```text
-us-tn:policy/dhs/snap/manual/23/L
+us-tn:policies/dhs/snap/manual/23/L
 sets
 us:statutes/7/2014/e/6/A
 ```
