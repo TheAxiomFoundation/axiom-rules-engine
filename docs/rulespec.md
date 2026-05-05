@@ -16,10 +16,11 @@ module:
   title: Texas SNAP overlay
 imports:
   - us:policies/usda/snap/fy-2026-cola/maximum-allotments
-relations:
-  - name: member_of_household
-    arity: 2
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
   - name: medical_deduction
     kind: derived
     entity: Household
@@ -53,10 +54,31 @@ Supported rule kinds in the current Rust loader:
   tables/scales as addressable parameter cells. `indexed_by` is required for
   every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
-- `relation`: explicit relation declarations with `arity`.
-- `reiteration`: a non-executable coverage marker for a provision that restates
-  another authority. It must declare `reiterates.target` and is ignored during
+- `data_relation`: executable runtime predicate declarations with
+  `data_relation.arity`. Dataset relation records use durable ids such as
+  `us:statutes/7/2012/j#relation.member_of_household`.
+- `source_relation`: non-executable legal/provenance edges. It must declare
+  `source_relation.type` and `source_relation.target` and is ignored during
   lowering into `ProgramSpec`.
+
+`kind` describes the record's schema and lowering behavior. Source/legal
+semantics live in `source_relation.type`, not in `kind`. The supported
+source-relation types are `defines`, `delegates`, `implements`, `sets`,
+`amends`, `restates`, and `cites`. Executable `parameter` and `derived` rules
+implicitly define their own durable outputs, so explicit `defines` records are
+only needed for span-level provenance that is not otherwise represented by an
+executable rule.
+
+RuleSpec files must not use top-level `relations:`. Runtime predicates are
+normal rule records:
+
+```yaml
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+```
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Relative imports resolve from the current
@@ -78,6 +100,9 @@ Executable rules loaded from jurisdiction repos receive a durable id of
 `us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still
 reference rules by local symbol inside the compiled RuleSpec module, but public
 access must use durable legal ids whenever one exists.
+
+Rule names are public concept fragments, not just display labels. See
+[`concept-naming.md`](concept-naming.md) for the naming contract.
 
 Execution requests for repo-backed RuleSpec reject bare output, input, and
 relation names. Dataset inputs use `#input.<local symbol>` when supplying an
@@ -126,18 +151,18 @@ Source-stated tables should use this shape instead of derived `match` formulas
 with embedded numeric cells. That keeps reforms path-addressable at the cell or
 selector level.
 
-Example reiterative provision:
+Example restating provision:
 
 ```yaml
 rules:
-  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
-    kind: reiteration
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
     source: 10 CCR 2506-1 section 4.207.3(D)
     source_url: https://www.sos.state.co.us/...
-    reiterates:
+    source_relation:
+      type: restates
       target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
       authority: federal
-      relationship: restates
     verification:
       values:
         snap_maximum_allotment_table:
@@ -145,10 +170,41 @@ rules:
           2: 546
 ```
 
-Use `reiteration` when the local text should be represented for coverage and
-auditability, but computation and reformable values belong to the target rule.
-If the local provision changes the target rule's legal effect, encode it as a
-real rule or amendment instead.
+Use `source_relation.type: restates` when the local text should be represented
+for coverage and auditability, but computation and reformable values belong to
+the target rule. Restatement records cannot contain executable formulas,
+versions, or table values that lower into runtime. If the local provision
+changes the target rule's legal effect, encode the executable local rule and add
+a `source_relation.type: sets`, `implements`, or `amends` edge to the upstream
+delegation or target.
+
+Example delegated parameter setting:
+
+```yaml
+rules:
+  - name: co_snap_heating_cooling_sua_fy_2026
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    source: Colorado SNAP manual FY 2026 SUA table
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 475
+          2: 475
+
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source: Colorado SNAP manual FY 2026 SUA table
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      authority: state
+      value: us-co:policy/cdhs/snap/fy-2026#co_snap_heating_cooling_sua_fy_2026
+      basis:
+        delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+```
 
 Known hard gaps:
 

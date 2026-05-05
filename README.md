@@ -29,6 +29,10 @@ RuleSpec files must declare `format: rulespec/v1` or a schema starting with
 `axiom.rules`. YAML with a top-level `rules:` key but no discriminator is
 rejected.
 
+Rule names are public concept fragments. Use
+[`docs/concept-naming.md`](docs/concept-naming.md) when adding or reviewing
+RuleSpec names.
+
 Canonical imports use jurisdiction repo paths:
 
 ```yaml
@@ -113,11 +117,27 @@ Add `--verify-r2` with `AXIOM_R2_ACCOUNT_ID`,
 `AXIOM_R2_ACCESS_KEY_ID`, and `AXIOM_R2_SECRET_ACCESS_KEY` set to verify object
 existence and SHA-256 hashes against R2.
 
+Search and validate public concept IDs discovered from jurisdiction RuleSpec
+repos:
+
+```bash
+axiom concepts search "adjusted gross income" --root /path/to/rules-us --json
+axiom concepts show us:statutes/26/1401#self_employment_tax --root /path/to/rules-us --json
+axiom concepts validate us:statutes/26/62#adjusted_gross_income --root /path/to/rules-us --json
+axiom concepts list --namespace us:statutes/26 --root /path/to/rules-us --json
+```
+
+The concept index is static and repo-backed. It includes module IDs, rule output
+IDs, data-relation IDs, source-relation IDs, and inferred `#input.*` leaves from
+RuleSpec formulas. This lets the Axiom app, validators, and encoding tools
+validate source-to-legal-concept alignment without importing the runtime.
+
 ## Python Package
 
 The Python wrapper lives under `python/axiom_rules/`. It exposes `Program`,
-`Dataset`, `AxiomRulesEngine`, and dense execution bindings, and shells out to
-the compiled `axiom-rules` binary for reference and compiled-artifact flows.
+`Dataset`, `AxiomRulesEngine`, dense execution bindings, source registry checks,
+and concept discovery helpers. It shells out to the compiled `axiom-rules`
+binary for reference and compiled-artifact flows.
 
 ## Tests
 

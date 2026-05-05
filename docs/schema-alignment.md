@@ -27,12 +27,13 @@ RuleSpec should retain the core engine semantics:
 
 RuleSpec should make machine-authored structure explicit:
 
-- Explicit rule kind: `parameter`, `derived`, `relation`, and eventually
-  `derived_relation`.
-- Explicit relation arity and, in a follow-up, slot names/orientation.
+- Explicit rule kind: `parameter`, `derived`, `data_relation`,
+  `source_relation`, and eventually `derived_relation`.
+- Explicit data-relation arity and, in a follow-up, slot names/orientation.
 - Multi-source provenance and source-document anchors.
-- Graph-level metadata such as `sets` and `amends` in sidecar documents rather
-  than overloaded expressions.
+- Legal/provenance graph edges such as `restates`, `sets`, `implements`, and
+  `amends` as `source_relation` records that do not lower directly into the
+  executable runtime.
 
 ## Current Gaps
 
@@ -41,6 +42,9 @@ schema/runtime gaps are explicit:
 
 - `derived_relation` is rejected until relation outputs are modelled in
   `ProgramSpec`.
+- `source_relation` records are validated as provenance metadata and ignored
+  during runtime lowering; the harness/compiler should consume them when
+  resolving imports, amendments, and upstream-first checks.
 - Formula strings currently support the implemented scalar/judgment expression
   subset, not arbitrary legal operators.
 - Relation slot orientation is still inferred in some expression forms and
@@ -56,5 +60,7 @@ The Rust tests cover:
   nested `if`, relation aggregation, and provenance.
 - RuleSpec compilation for a housing-style judgment with date arithmetic,
   relation counts, derived judgment references, and `not`.
+- Acceptance of non-executable `source_relation` records and rejection of legacy
+  `reiteration` and top-level RuleSpec `relations:`.
 - Rejection of `derived_relation` until relation outputs are modelled.
 - Rejection of ambiguous YAML with `rules:` but no RuleSpec discriminator.

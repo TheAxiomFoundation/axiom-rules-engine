@@ -16,10 +16,11 @@ format: rulespec/v1
 module:
   id: us-tx:policies/hhsc/snap/overlay-subset
   title: Texas SNAP overlay subset
-relations:
-  - name: member_of_household
-    arity: 2
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
   - name: snap_state_sme_flat_amount
     kind: parameter
     dtype: Money
@@ -525,10 +526,11 @@ fn repo_backed_rulespec_execution_resolves_absolute_relation_names() {
         &rules_file,
         r#"
 format: rulespec/v1
-relations:
-  - name: member_of_household
-    arity: 2
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
   - name: snap_household_has_elderly_or_disabled_member
     kind: derived
     entity: Household
@@ -608,10 +610,11 @@ fn count_where_can_use_related_derived_judgment_predicates() {
         &rules_file,
         r#"
 format: rulespec/v1
-relations:
-  - name: member_of_household
-    arity: 2
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
   - name: snap_member_student_eligible
     kind: derived
     entity: Person
@@ -708,20 +711,19 @@ rules:
 }
 
 #[test]
-fn rulespec_accepts_reiteration_rules_without_emitting_program_items() {
+fn rulespec_accepts_source_relations_without_emitting_program_items() {
     let rulespec = r#"
 format: rulespec/v1
 module:
   summary: Colorado restates a federal SNAP maximum allotment table.
 rules:
-  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
-    kind: reiteration
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
     source: 10 CCR 2506-1 section 4.207.3(D)
-    source_url: https://example.test/co-snap
-    reiterates:
+    source_relation:
+      type: restates
       target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
       authority: federal
-      relationship: restates
     verification:
       values:
         snap_maximum_allotment_table:
@@ -729,29 +731,342 @@ rules:
           2: 546
 "#;
 
-    let program = lower_rulespec_str(rulespec).expect("reiteration compiles");
+    let program = lower_rulespec_str(rulespec).expect("source relation compiles");
     assert!(program.parameters.is_empty());
     assert!(program.derived.is_empty());
     assert!(program.relations.is_empty());
 }
 
 #[test]
-fn rulespec_rejects_reiteration_without_target() {
+fn rulespec_rejects_source_relation_without_target() {
     let rulespec = r#"
 format: rulespec/v1
 rules:
-  - name: co_snap_maximum_allotment_reiterates_usda_fy_2026
-    kind: reiteration
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
     source: 10 CCR 2506-1 section 4.207.3(D)
-    reiterates:
+    source_relation:
+      type: restates
       authority: federal
 "#;
 
     let err = lower_rulespec_str(rulespec).expect_err("missing target should fail");
     assert!(matches!(
         err,
-        RuleSpecError::MissingReiterationTarget { name }
-            if name == "co_snap_maximum_allotment_reiterates_usda_fy_2026"
+        RuleSpecError::MissingSourceRelationTarget { name }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_source_relation_without_type() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source_relation:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+"#,
+    )
+    .expect_err("missing source relation type should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingSourceRelationType { name }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_source_relation_bare_target() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source_relation:
+      type: restates
+      target: snap_maximum_allotment
+"#,
+    )
+    .expect_err("bare source relation target should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::InvalidSourceRelationReference { name, field, value }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+                && field == "target"
+                && value == "snap_maximum_allotment"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_executable_body_on_source_relation() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_standard_deduction_restates_usda_fy_2026
+    kind: source_relation
+    entity: Household
+    dtype: Money
+    period: Month
+    source_relation:
+      type: restates
+      target: us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction
+    versions:
+      - effective_from: 2025-10-01
+        formula: "209"
+"#,
+    )
+    .expect_err("source relation executable body should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::SourceRelationHasExecutableBody { name }
+            if name == "co_snap_standard_deduction_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_sets_relation_without_delegation_basis() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026#co_snap_heating_cooling_sua
+"#,
+    )
+    .expect_err("sets source relation without delegation should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingSourceRelationDelegation {
+            name,
+            relation_type
+        } if name == "co_snap_heating_cooling_sua_sets_federal_slot"
+            && relation_type == "sets"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_sets_relation_value_without_fragment() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026
+      basis:
+        delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+"#,
+    )
+    .expect_err("source relation value without fragment should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::InvalidSourceRelationReference { name, field, value }
+            if name == "co_snap_heating_cooling_sua_sets_federal_slot"
+                && field == "value"
+                && value == "us-co:policies/cdhs/snap/fy-2026"
+    ));
+}
+
+#[test]
+fn rulespec_accepts_sets_relation_with_absolute_value_and_delegation() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026#co_snap_heating_cooling_sua
+      basis:
+        delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("valid sets source relation compiles");
+    assert!(program.parameters.is_empty());
+    assert!(program.derived.is_empty());
+    assert!(program.relations.is_empty());
+}
+
+#[test]
+fn rulespec_rejects_amendment_without_operation() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: emergency_act_amends_snap_resource_limit_2026
+    kind: source_relation
+    source_relation:
+      type: amends
+      target: us:regulations/7-cfr/273/8#snap_resource_limit
+      amendment:
+        effective:
+          start: 2026-04-01
+"#,
+    )
+    .expect_err("amendment without operation should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingAmendmentOperation { name }
+            if name == "emergency_act_amends_snap_resource_limit_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_amendment_without_effective_interval() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: emergency_act_amends_snap_resource_limit_2026
+    kind: source_relation
+    source_relation:
+      type: amends
+      target: us:regulations/7-cfr/273/8#snap_resource_limit
+      amendment:
+        operation: replace
+"#,
+    )
+    .expect_err("amendment without effective interval should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingAmendmentEffective { name }
+            if name == "emergency_act_amends_snap_resource_limit_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_legacy_reiteration_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: legacy_restates
+    kind: reiteration
+    reiterates:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+"#,
+    )
+    .expect_err("legacy reiteration kind should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::UnsupportedRuleKind { name, kind }
+            if name == "legacy_restates" && kind == "reiteration"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_top_level_relations_in_rulespec() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+relations:
+  - name: member_of_household
+    arity: 2
+"#,
+    )
+    .expect_err("RuleSpec relation declarations must be rule records");
+
+    assert!(matches!(err, RuleSpecError::TopLevelRelationsUnsupported));
+}
+
+#[test]
+fn rulespec_rejects_bare_relation_rule_without_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    arity: 2
+"#,
+    )
+    .expect_err("bare relation-shaped rule should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::TopLevelArityUnsupported { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_data_relation_with_top_level_arity() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    arity: 2
+"#,
+    )
+    .expect_err("data relation arity must be nested under data_relation");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::TopLevelArityUnsupported { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_data_relation_without_nested_arity() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation: {}
+"#,
+    )
+    .expect_err("data relation must declare data_relation.arity");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingDataRelationArity { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_missing_rule_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: inferred_parameter
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect_err("RuleSpec rules must declare kind explicitly");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingRuleKind { name }
+            if name == "inferred_parameter"
     ));
 }
 

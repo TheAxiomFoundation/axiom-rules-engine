@@ -28,14 +28,52 @@ pub enum RuleSpecError {
     Formula(#[from] crate::formula::FormulaError),
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
     UnsupportedRuleKind { name: String, kind: String },
+    #[error("RuleSpec rule `{name}` must declare `kind`")]
+    MissingRuleKind { name: String },
     #[error("RuleSpec rule `{name}` has no formula version")]
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
     MissingEffectiveFrom { name: String },
     #[error("RuleSpec parameter table `{name}` has values but no indexed_by")]
     MissingIndexedBy { name: String },
-    #[error("RuleSpec reiteration `{name}` must declare reiterates.target")]
-    MissingReiterationTarget { name: String },
+    #[error(
+        "RuleSpec files must declare runtime predicates as `rules[].kind: data_relation`, not top-level `relations`"
+    )]
+    TopLevelRelationsUnsupported,
+    #[error(
+        "RuleSpec rule `{name}` must declare runtime predicate arity under `data_relation.arity`, not top-level `arity`"
+    )]
+    TopLevelArityUnsupported { name: String },
+    #[error("RuleSpec data relation `{name}` must declare data_relation.arity")]
+    MissingDataRelationArity { name: String },
+    #[error("RuleSpec source relation `{name}` must declare source_relation")]
+    MissingSourceRelation { name: String },
+    #[error("RuleSpec source relation `{name}` must declare source_relation.type")]
+    MissingSourceRelationType { name: String },
+    #[error("RuleSpec source relation `{name}` must declare source_relation.target")]
+    MissingSourceRelationTarget { name: String },
+    #[error("RuleSpec source relation `{name}` has non-absolute `{field}` reference `{value}`")]
+    InvalidSourceRelationReference {
+        name: String,
+        field: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec source relation `{name}` with type `{relation_type}` must declare source_relation.basis.delegation"
+    )]
+    MissingSourceRelationDelegation { name: String, relation_type: String },
+    #[error(
+        "RuleSpec amendment source relation `{name}` must declare source_relation.amendment.operation"
+    )]
+    MissingAmendmentOperation { name: String },
+    #[error(
+        "RuleSpec amendment source relation `{name}` must declare source_relation.amendment.effective"
+    )]
+    MissingAmendmentEffective { name: String },
+    #[error(
+        "RuleSpec source relation `{name}` cannot include executable formula, version, table, or runtime relation fields"
+    )]
+    SourceRelationHasExecutableBody { name: String },
     #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
@@ -85,6 +123,10 @@ pub enum RuleKind {
     Parameter,
     #[serde(alias = "Derived")]
     Derived,
+    #[serde(alias = "DataRelation", alias = "dataRelation")]
+    DataRelation,
+    #[serde(alias = "SourceRelation", alias = "sourceRelation")]
+    SourceRelation,
     #[serde(alias = "Relation")]
     Relation,
     #[serde(alias = "Reiteration")]
@@ -106,13 +148,67 @@ pub struct SourceRef {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct ReiterationRef {
+pub struct DataRelationRef {
+    #[serde(default)]
+    pub arity: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRelationType {
+    Defines,
+    Delegates,
+    Implements,
+    Sets,
+    Amends,
+    Restates,
+    Cites,
+}
+
+impl SourceRelationType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Defines => "defines",
+            Self::Delegates => "delegates",
+            Self::Implements => "implements",
+            Self::Sets => "sets",
+            Self::Amends => "amends",
+            Self::Restates => "restates",
+            Self::Cites => "cites",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SourceRelationBasis {
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub delegation: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SourceRelationAmendment {
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub effective: Option<serde_yaml::Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub superseding_rule: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SourceRelationRef {
+    #[serde(default, rename = "type")]
+    pub relation_type: Option<SourceRelationType>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub target: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub authority: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
-    pub relationship: Option<String>,
+    pub value: Option<String>,
+    #[serde(default)]
+    pub basis: Option<SourceRelationBasis>,
+    #[serde(default)]
+    pub amendment: Option<SourceRelationAmendment>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -147,7 +243,9 @@ pub struct RuleDefinition {
     #[serde(default)]
     pub sources: Vec<SourceRef>,
     #[serde(default)]
-    pub reiterates: Option<ReiterationRef>,
+    pub data_relation: Option<DataRelationRef>,
+    #[serde(default)]
+    pub source_relation: Option<SourceRelationRef>,
     #[serde(default)]
     pub verification: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -412,6 +510,16 @@ fn is_canonical_repo_prefix(prefix: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
+fn is_absolute_rulespec_ref(value: &str) -> bool {
+    let value = value.trim();
+    let Some((prefix, relative)) = value.split_once(':') else {
+        return false;
+    };
+    is_canonical_repo_prefix(prefix)
+        && !relative.trim_matches('/').is_empty()
+        && !value.chars().any(char::is_whitespace)
+}
+
 fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
@@ -462,14 +570,28 @@ impl RulesDocument {
     }
 
     pub fn to_program_spec(&self) -> Result<ProgramSpec, RuleSpecError> {
+        if !self.relations.is_empty() {
+            return Err(RuleSpecError::TopLevelRelationsUnsupported);
+        }
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
 
-        let mut explicit_relations = self.relations.clone();
+        let mut explicit_relations = Vec::new();
         let mut table_parameters = Vec::new();
         let mut table_parameter_names = HashSet::new();
         for rule in &self.rules {
-            match rule.effective_kind() {
+            if let Some(kind) = &rule.kind {
+                if let Some(error) = rule.unsupported_kind_error(kind) {
+                    return Err(error);
+                }
+            }
+            if rule.arity.is_some() {
+                return Err(RuleSpecError::TopLevelArityUnsupported {
+                    name: rule.name.clone(),
+                });
+            }
+            let kind = rule.declared_kind()?;
+            match kind {
                 RuleKind::Parameter | RuleKind::Derived => {
                     if rule.is_parameter_table() {
                         rule.write_formula_stub_definition(&mut formula_source)?;
@@ -479,21 +601,13 @@ impl RulesDocument {
                         rule.write_formula_definition(&mut formula_source)?;
                     }
                 }
-                RuleKind::Relation => {
-                    explicit_relations.push(RelationSpec {
-                        name: rule.name.clone(),
-                        arity: rule.arity.unwrap_or(2),
-                    });
+                RuleKind::DataRelation => {
+                    explicit_relations.push(rule.to_data_relation_spec()?);
                 }
-                RuleKind::Reiteration => {
-                    rule.validate_reiteration()?;
+                RuleKind::SourceRelation => {
+                    rule.validate_source_relation()?;
                 }
-                RuleKind::DerivedRelation => {
-                    return Err(RuleSpecError::UnsupportedRuleKind {
-                        name: rule.name.clone(),
-                        kind: "derived_relation".to_string(),
-                    });
-                }
+                RuleKind::Relation | RuleKind::Reiteration | RuleKind::DerivedRelation => {}
             }
         }
 
@@ -571,15 +685,22 @@ impl RuleDefinition {
             .map(|target| format!("{target}#{}", self.name))
     }
 
-    fn effective_kind(&self) -> RuleKind {
-        self.kind.clone().unwrap_or_else(|| {
-            if self.arity.is_some() && self.formula.is_none() && self.versions.is_empty() {
-                RuleKind::Relation
-            } else if self.entity.is_some() {
-                RuleKind::Derived
-            } else {
-                RuleKind::Parameter
-            }
+    fn declared_kind(&self) -> Result<RuleKind, RuleSpecError> {
+        self.kind.clone().ok_or_else(|| RuleSpecError::MissingRuleKind {
+            name: self.name.clone(),
+        })
+    }
+
+    fn unsupported_kind_error(&self, kind: &RuleKind) -> Option<RuleSpecError> {
+        let kind = match kind {
+            RuleKind::Relation => "relation",
+            RuleKind::Reiteration => "reiteration",
+            RuleKind::DerivedRelation => "derived_relation",
+            _ => return None,
+        };
+        Some(RuleSpecError::UnsupportedRuleKind {
+            name: self.name.clone(),
+            kind: kind.to_string(),
         })
     }
 
@@ -599,11 +720,9 @@ impl RuleDefinition {
     }
 
     fn is_parameter_table(&self) -> bool {
-        self.effective_kind() == RuleKind::Parameter
-            && self
-                .versions
-                .iter()
-                .any(|version| !version.values.is_empty())
+        self.versions
+            .iter()
+            .any(|version| !version.values.is_empty())
     }
 
     fn to_indexed_parameter_spec(&self) -> Result<IndexedParameterSpec, RuleSpecError> {
@@ -643,19 +762,159 @@ impl RuleDefinition {
         })
     }
 
-    fn validate_reiteration(&self) -> Result<(), RuleSpecError> {
-        let target = self
-            .reiterates
+    fn to_data_relation_spec(&self) -> Result<RelationSpec, RuleSpecError> {
+        let arity = self
+            .data_relation
             .as_ref()
-            .and_then(|reiterates| reiterates.target.as_deref())
-            .map(str::trim)
-            .unwrap_or_default();
-        if target.is_empty() {
-            return Err(RuleSpecError::MissingReiterationTarget {
+            .and_then(|data_relation| data_relation.arity)
+            .ok_or_else(|| RuleSpecError::MissingDataRelationArity {
+                name: self.name.clone(),
+            })?;
+        Ok(RelationSpec {
+            name: self.name.clone(),
+            arity,
+        })
+    }
+
+    fn validate_source_relation(&self) -> Result<(), RuleSpecError> {
+        if self.has_executable_body() {
+            return Err(RuleSpecError::SourceRelationHasExecutableBody {
                 name: self.name.clone(),
             });
         }
+
+        let source_relation =
+            self.source_relation
+                .as_ref()
+                .ok_or_else(|| RuleSpecError::MissingSourceRelation {
+                    name: self.name.clone(),
+                })?;
+        let relation_type = source_relation.relation_type.as_ref().ok_or_else(|| {
+            RuleSpecError::MissingSourceRelationType {
+                name: self.name.clone(),
+            }
+        })?;
+        let target = source_relation
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .ok_or_else(|| RuleSpecError::MissingSourceRelationTarget {
+                name: self.name.clone(),
+            })?;
+        self.validate_absolute_source_relation_ref("target", target)?;
+
+        if let Some(value) = source_relation.value.as_deref() {
+            self.validate_absolute_source_relation_ref("value", value)?;
+            self.validate_source_relation_fragment_ref("value", value)?;
+        }
+        if let Some(delegation) = source_relation
+            .basis
+            .as_ref()
+            .and_then(|basis| basis.delegation.as_deref())
+        {
+            self.validate_absolute_source_relation_ref("basis.delegation", delegation)?;
+            self.validate_source_relation_fragment_ref("basis.delegation", delegation)?;
+        }
+        if let Some(superseding_rule) = source_relation
+            .amendment
+            .as_ref()
+            .and_then(|amendment| amendment.superseding_rule.as_deref())
+        {
+            self.validate_absolute_source_relation_ref(
+                "amendment.superseding_rule",
+                superseding_rule,
+            )?;
+            self.validate_source_relation_fragment_ref(
+                "amendment.superseding_rule",
+                superseding_rule,
+            )?;
+        }
+
+        if matches!(
+            relation_type,
+            SourceRelationType::Implements | SourceRelationType::Sets
+        ) && source_relation
+            .basis
+            .as_ref()
+            .and_then(|basis| basis.delegation.as_deref())
+            .map(str::trim)
+            .filter(|delegation| !delegation.is_empty())
+            .is_none()
+        {
+            return Err(RuleSpecError::MissingSourceRelationDelegation {
+                name: self.name.clone(),
+                relation_type: relation_type.as_str().to_string(),
+            });
+        }
+
+        if *relation_type == SourceRelationType::Amends {
+            let amendment = source_relation.amendment.as_ref();
+            if amendment
+                .and_then(|amendment| amendment.operation.as_deref())
+                .map(str::trim)
+                .filter(|operation| !operation.is_empty())
+                .is_none()
+            {
+                return Err(RuleSpecError::MissingAmendmentOperation {
+                    name: self.name.clone(),
+                });
+            }
+            if amendment
+                .and_then(|amendment| amendment.effective.as_ref())
+                .is_none()
+            {
+                return Err(RuleSpecError::MissingAmendmentEffective {
+                    name: self.name.clone(),
+                });
+            }
+        }
         Ok(())
+    }
+
+    fn has_executable_body(&self) -> bool {
+        self.formula
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|formula| !formula.is_empty())
+            || !self.versions.is_empty()
+            || self.arity.is_some()
+            || self.indexed_by.is_some()
+            || self.entity.is_some()
+            || self.dtype.is_some()
+            || self.period.is_some()
+            || self.unit.is_some()
+            || self.default.is_some()
+    }
+
+    fn validate_absolute_source_relation_ref(
+        &self,
+        field: &str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        if is_absolute_rulespec_ref(value) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidSourceRelationReference {
+            name: self.name.clone(),
+            field: field.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    fn validate_source_relation_fragment_ref(
+        &self,
+        field: &str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        if value.trim().split_once('#').is_some() {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidSourceRelationReference {
+            name: self.name.clone(),
+            field: field.to_string(),
+            value: value.to_string(),
+        })
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {

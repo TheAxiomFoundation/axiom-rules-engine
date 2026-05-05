@@ -4,6 +4,36 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules`. One
 entry per decision, most recent first.
 
+## 2026-05-04 — Runtime predicates and source relations are separate RuleSpec kinds
+
+**Decision.** RuleSpec has separate record kinds for executable data predicates
+and legal/provenance graph edges:
+
+- `data_relation` declares runtime predicates such as `member_of_household`.
+- `source_relation` declares non-executable source edges such as `restates`,
+  `implements`, `sets`, `amends`, and `cites`.
+
+`kind: reiteration`, `kind: relation`, and top-level RuleSpec `relations:` are
+not accepted. Restatements are represented as `kind: source_relation` with
+`source_relation.type: restates`.
+
+**Why.**
+
+- A runtime predicate and a legal authority edge have different schemas and
+  lowering behavior.
+- Keeping provenance out of `ProgramSpec` gives the runtime a clean executable
+  program while still letting the harness verify upstream-first encoding,
+  delegated settings, amendments, and restatements.
+- `restates` is one member of a broader source-relation taxonomy; it should not
+  be hard-coded as its own rule kind.
+
+**Consequences.**
+
+- `parameter`, `derived`, and `data_relation` lower into runtime.
+- `source_relation` is validated but ignored during runtime lowering.
+- Public relation dataset references remain durable ids of the form
+  `<file>#relation.<local predicate>`.
+
 ## 2026-04-25 — RuleSpec is the only external rule format
 
 **Decision.** The canonical authoring and interchange surface is RuleSpec
