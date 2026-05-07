@@ -116,23 +116,29 @@ pub struct ModuleMetadata {
     pub status: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuleKind {
-    #[serde(alias = "Parameter")]
     Parameter,
-    #[serde(alias = "Derived")]
     Derived,
-    #[serde(alias = "DataRelation", alias = "dataRelation")]
     DataRelation,
-    #[serde(alias = "SourceRelation", alias = "sourceRelation")]
     SourceRelation,
-    #[serde(alias = "Relation")]
-    Relation,
-    #[serde(alias = "Reiteration")]
-    Reiteration,
-    #[serde(alias = "DerivedRelation", alias = "derivedRelation")]
-    DerivedRelation,
+    Unsupported(String),
+}
+
+impl<'de> Deserialize<'de> for RuleKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "parameter" => Self::Parameter,
+            "derived" => Self::Derived,
+            "data_relation" => Self::DataRelation,
+            "source_relation" => Self::SourceRelation,
+            _ => Self::Unsupported(value),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -580,19 +586,24 @@ impl RulesDocument {
         let mut table_parameters = Vec::new();
         let mut table_parameter_names = HashSet::new();
         for rule in &self.rules {
-            if let Some(kind) = &rule.kind {
-                if let Some(error) = rule.unsupported_kind_error(kind) {
-                    return Err(error);
+            let kind = match rule.declared_kind() {
+                Ok(kind) => kind,
+                Err(RuleSpecError::MissingRuleKind { .. }) if rule.arity.is_some() => {
+                    return Err(RuleSpecError::TopLevelArityUnsupported {
+                        name: rule.name.clone(),
+                    });
                 }
-            }
-            if rule.arity.is_some() {
-                return Err(RuleSpecError::TopLevelArityUnsupported {
-                    name: rule.name.clone(),
-                });
-            }
-            let kind = rule.declared_kind()?;
+                Err(error) => return Err(error),
+            };
             match kind {
+                RuleKind::Unsupported(kind) => {
+                    return Err(RuleSpecError::UnsupportedRuleKind {
+                        name: rule.name.clone(),
+                        kind,
+                    });
+                }
                 RuleKind::Parameter | RuleKind::Derived => {
+                    rule.reject_top_level_arity()?;
                     if rule.is_parameter_table() {
                         rule.write_formula_stub_definition(&mut formula_source)?;
                         table_parameter_names.insert(rule.name.clone());
@@ -602,12 +613,13 @@ impl RulesDocument {
                     }
                 }
                 RuleKind::DataRelation => {
+                    rule.reject_top_level_arity()?;
                     explicit_relations.push(rule.to_data_relation_spec()?);
                 }
                 RuleKind::SourceRelation => {
+                    rule.reject_top_level_arity()?;
                     rule.validate_source_relation()?;
                 }
-                RuleKind::Relation | RuleKind::Reiteration | RuleKind::DerivedRelation => {}
             }
         }
 
@@ -686,22 +698,20 @@ impl RuleDefinition {
     }
 
     fn declared_kind(&self) -> Result<RuleKind, RuleSpecError> {
-        self.kind.clone().ok_or_else(|| RuleSpecError::MissingRuleKind {
-            name: self.name.clone(),
-        })
+        self.kind
+            .clone()
+            .ok_or_else(|| RuleSpecError::MissingRuleKind {
+                name: self.name.clone(),
+            })
     }
 
-    fn unsupported_kind_error(&self, kind: &RuleKind) -> Option<RuleSpecError> {
-        let kind = match kind {
-            RuleKind::Relation => "relation",
-            RuleKind::Reiteration => "reiteration",
-            RuleKind::DerivedRelation => "derived_relation",
-            _ => return None,
-        };
-        Some(RuleSpecError::UnsupportedRuleKind {
-            name: self.name.clone(),
-            kind: kind.to_string(),
-        })
+    fn reject_top_level_arity(&self) -> Result<(), RuleSpecError> {
+        if self.arity.is_some() {
+            return Err(RuleSpecError::TopLevelArityUnsupported {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn effective_versions(&self) -> Vec<RuleVersion> {
