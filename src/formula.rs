@@ -1431,7 +1431,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             // pre-computes on the related entity.
             //
             //   count_where(relation, predicate_field)
-            //   sum_where(relation, amount_field, predicate_field)
+            //   sum_where(relation, amount_field_or_derived, predicate_field)
             "count_where" => {
                 if args.len() != 2 {
                     return Err(FormulaError::lower("count_where takes 2 args".to_string()));
@@ -1474,11 +1474,16 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                         right: Box::new(lit_bool_spec(true)),
                     }
                 };
+                let value = if ctx.derived.contains(&field) {
+                    RelatedValueRefSpec::Derived { name: field }
+                } else {
+                    RelatedValueRefSpec::Input { name: field }
+                };
                 ScalarExprSpec::SumRelated {
                     relation,
                     current_slot,
                     related_slot,
-                    value: RelatedValueRefSpec::Input { name: field },
+                    value,
                     where_clause: Some(Box::new(where_clause)),
                 }
             }

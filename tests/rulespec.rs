@@ -771,6 +771,149 @@ rules:
 }
 
 #[test]
+fn sum_where_can_sum_related_derived_scalar_values() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/26/25A.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: education_credit_member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: aotc_first_expense_threshold
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "2000"
+  - name: aotc_student_potential
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: min(qualified_tuition_and_related_expenses, aotc_first_expense_threshold)
+  - name: aotc_eligible_student_claim
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: aotc_election_in_effect and not has_felony_drug_conviction
+  - name: american_opportunity_credit_before_phaseout
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          sum_where(
+              education_credit_member_of_tax_unit,
+              aotc_student_potential,
+              aotc_eligible_student_claim
+          )
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let output_id =
+        "us:statutes/26/25A#american_opportunity_credit_before_phaseout".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.qualified_tuition_and_related_expenses"
+                        .to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "3000".to_string(),
+                    },
+                },
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.aotc_election_in_effect".to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Bool { value: true },
+                },
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.has_felony_drug_conviction".to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Bool { value: false },
+                },
+            ],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:statutes/26/25A#relation.education_credit_member_of_tax_unit"
+                    .to_string(),
+                tuple: vec!["student-1".to_string(), "tax-unit-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("related derived scalar sum executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("american_opportunity_credit_before_phaseout output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "2000");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn rulespec_rejects_parameter_values_without_indexed_by() {
     let rulespec = r#"
 format: rulespec/v1
