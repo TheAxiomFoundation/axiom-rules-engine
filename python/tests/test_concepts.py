@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from axiom_rules.cli import main
-from axiom_rules.concepts import (
+from axiom_rules_engine.cli import main
+from axiom_rules_engine.concepts import (
     discover_concepts,
     search_concepts,
     show_concept,
@@ -60,7 +60,7 @@ rules:
 
 
 def test_discover_concepts_from_rulespec_file(tmp_path: Path) -> None:
-    root = tmp_path / "rules-us"
+    root = tmp_path / "rulespec-us"
     write_rulespec(root, "statutes/26/62.yaml", rulespec_body())
 
     concepts = discover_concepts([root])
@@ -79,7 +79,7 @@ def test_discover_concepts_from_rulespec_file(tmp_path: Path) -> None:
 
 
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:
-    root = tmp_path / "rules-us"
+    root = tmp_path / "rulespec-us"
     write_rulespec(root, "statutes/26/62.yaml", rulespec_body())
 
     matches = search_concepts([root], "adjusted gross", limit=5)
@@ -94,7 +94,7 @@ def test_search_show_and_validate_concept(tmp_path: Path) -> None:
 
 
 def test_validate_reports_missing_fragment_and_suggestions(tmp_path: Path) -> None:
-    root = tmp_path / "rules-us"
+    root = tmp_path / "rulespec-us"
     write_rulespec(root, "statutes/26/62.yaml", rulespec_body())
 
     result = validate_concept_id([root], "us:statutes/26/62#taxable_income")
@@ -107,7 +107,7 @@ def test_validate_reports_missing_fragment_and_suggestions(tmp_path: Path) -> No
 
 
 def test_cli_concepts_search_json(tmp_path: Path, capsys) -> None:
-    root = tmp_path / "rules-us"
+    root = tmp_path / "rulespec-us"
     write_rulespec(root, "statutes/26/62.yaml", rulespec_body())
 
     rc = main(
@@ -128,7 +128,7 @@ def test_cli_concepts_search_json(tmp_path: Path, capsys) -> None:
 
 
 def test_cli_concepts_validate_json_failure(tmp_path: Path, capsys) -> None:
-    root = tmp_path / "rules-us"
+    root = tmp_path / "rulespec-us"
     write_rulespec(root, "statutes/26/62.yaml", rulespec_body())
 
     rc = main(

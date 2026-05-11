@@ -1,4 +1,4 @@
-use axiom_rules::rulespec::load_rulespec_file;
+use axiom_rules_engine::rulespec::load_rulespec_file;
 
 #[test]
 fn all_rulespec_files_parse_and_lower() {

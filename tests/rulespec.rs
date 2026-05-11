@@ -1,9 +1,9 @@
-use axiom_rules::api::{
+use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
-use axiom_rules::compile::{CompileError, CompiledProgramArtifact, compile_program_file_to_json};
-use axiom_rules::rulespec::{RuleSpecError, lower_rulespec_str};
-use axiom_rules::spec::{
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact, compile_program_file_to_json};
+use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
+use axiom_rules_engine::spec::{
     DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
 };
 use std::fs;
@@ -233,8 +233,8 @@ fn repo_backed_rulespec_outputs_reject_bare_friendly_names() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -277,8 +277,8 @@ fn repo_backed_rulespec_execution_rejects_bare_friendly_input_names() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -346,8 +346,8 @@ fn repo_backed_rulespec_execution_resolves_absolute_input_names() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/statutes/7/2017/a.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -424,8 +424,8 @@ fn repo_backed_rulespec_execution_resolves_absolute_upstream_output_inputs() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/statutes/7/2014/e/6/A.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/7/2014/e/6/A.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -518,8 +518,8 @@ fn repo_backed_rulespec_execution_resolves_absolute_relation_names() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/statutes/7/2012/j.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/7/2012/j.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -567,7 +567,7 @@ rules:
                 },
                 value: ScalarValueSpec::Bool { value: true },
             }],
-            relations: vec![axiom_rules::spec::RelationRecordSpec {
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
                 name: "us:statutes/7/2012/j#relation.member_of_household".to_string(),
                 tuple: vec!["member-1".to_string(), "household-1".to_string()],
                 interval: IntervalSpec {
@@ -591,7 +591,7 @@ rules:
     else {
         panic!("expected judgment output");
     };
-    assert_eq!(*outcome, axiom_rules::spec::JudgmentOutcomeSpec::Holds);
+    assert_eq!(*outcome, axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -602,8 +602,8 @@ fn count_where_can_use_related_derived_judgment_predicates() {
         .duration_since(UNIX_EPOCH)
         .expect("system time after unix epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-test-{nonce}"));
-    let rules_file = root.join("rules-us/regulations/7-cfr/273/5.yaml");
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/regulations/7-cfr/273/5.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -658,7 +658,7 @@ rules:
                 },
                 value: ScalarValueSpec::Bool { value: false },
             }],
-            relations: vec![axiom_rules::spec::RelationRecordSpec {
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
                 name: "us:regulations/7-cfr/273/5#relation.member_of_household".to_string(),
                 tuple: vec!["member-1".to_string(), "household-1".to_string()],
                 interval: IntervalSpec {
@@ -682,7 +682,7 @@ rules:
     else {
         panic!("expected judgment output");
     };
-    assert_eq!(*outcome, axiom_rules::spec::JudgmentOutcomeSpec::Holds);
+    assert_eq!(*outcome, axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1203,7 +1203,7 @@ rules:
 #[test]
 fn compile_program_file_to_json_accepts_rulespec_yaml() {
     let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-rulespec-yaml-test-{}",
+        "axiom-rules-engine-rulespec-yaml-test-{}",
         std::process::id()
     ));
     let program_path = temp_root.join("rules.yaml");
@@ -1239,14 +1239,14 @@ rules:
 #[test]
 fn compile_program_file_to_json_merges_rulespec_imports() {
     let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-rulespec-import-test-{}",
+        "axiom-rules-engine-rulespec-import-test-{}",
         std::process::id()
     ));
     let us_path = temp_root
-        .join("rules-us")
+        .join("rulespec-us")
         .join("policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
     let co_path = temp_root
-        .join("rules-us-co")
+        .join("rulespec-us-co")
         .join("policies/cdhs/snap/fy-2026-benefit.yaml");
     let artifact_path = temp_root.join("benefit.compiled.json");
 

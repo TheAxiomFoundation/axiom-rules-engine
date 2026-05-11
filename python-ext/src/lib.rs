@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use axiom_rules::compile::CompiledProgramArtifact;
-use axiom_rules::dense::{
+use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec, DenseRelationKey,
     DenseRelationSchema,
 };
-use axiom_rules::model::{JudgmentOutcome, Period, PeriodKind};
+use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
 use chrono::NaiveDate;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rust_decimal::prelude::ToPrimitive;
 
-#[pyclass(module = "axiom_rules_dense")]
+#[pyclass(module = "axiom_rules_engine_dense")]
 #[derive(Clone)]
 struct RelationSchemaHandle {
     #[pyo3(get)]
@@ -40,7 +40,7 @@ impl From<&DenseRelationSchema> for RelationSchemaHandle {
     }
 }
 
-#[pyclass(module = "axiom_rules_dense", name = "CompiledDenseProgram")]
+#[pyclass(module = "axiom_rules_engine_dense", name = "CompiledDenseProgram")]
 struct CompiledDenseProgramHandle {
     compiled: DenseCompiledProgram,
 }
@@ -104,7 +104,7 @@ impl CompiledDenseProgramHandle {
         let output_dict = PyDict::new(py);
         for (name, value) in execution.outputs {
             match value {
-                axiom_rules::dense::DenseOutputValue::Scalar(column) => match column {
+                axiom_rules_engine::dense::DenseOutputValue::Scalar(column) => match column {
                     DenseColumn::Bool(values) => {
                         output_dict.set_item(name, PyArray1::from_vec(py, values))?;
                     }
@@ -135,7 +135,7 @@ impl CompiledDenseProgramHandle {
                         output_dict.set_item(name, PyList::new(py, materialised)?)?;
                     }
                 },
-                axiom_rules::dense::DenseOutputValue::Judgment(values) => {
+                axiom_rules_engine::dense::DenseOutputValue::Judgment(values) => {
                     let materialised = values
                         .into_iter()
                         .map(|value| judgment_code(&value))
@@ -153,7 +153,7 @@ impl CompiledDenseProgramHandle {
 }
 
 #[pymodule]
-fn axiom_rules_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn axiom_rules_engine_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CompiledDenseProgramHandle>()?;
     module.add_class::<RelationSchemaHandle>()?;
     Ok(())

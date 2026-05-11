@@ -1,15 +1,15 @@
 [package]
-name = "axiom-rules-dense"
+name = "axiom-rules-engine-dense"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "axiom_rules_dense"
+name = "axiom_rules_engine_dense"
 crate-type = ["cdylib"]
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
 numpy = "0.27.0"
 pyo3 = { version = "0.27.0", features = ["chrono", "extension-module"] }
-axiom-rules = { path = ".." }
+axiom-rules-engine = { path = ".." }
 rust_decimal = "1.38.0"

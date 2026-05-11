@@ -456,7 +456,7 @@ fn resolve_canonical_rulespec_import(
         });
     }
 
-    let repo_name = format!("rules-{prefix}");
+    let repo_name = format!("rulespec-{prefix}");
     for root in candidate_rule_repo_roots(importer_path, &repo_name) {
         let target_path = root.join(&relative_path);
         if target_path.exists() {
@@ -477,8 +477,8 @@ fn canonical_rulespec_target(path: &Path) -> Option<String> {
         .collect::<Vec<String>>();
     let repo_index = components
         .iter()
-        .rposition(|component| component.starts_with("rules-"))?;
-    let prefix = components[repo_index].strip_prefix("rules-")?;
+        .rposition(|component| component.starts_with("rulespec-"))?;
+    let prefix = components[repo_index].strip_prefix("rulespec-")?;
     if prefix.is_empty() || repo_index + 1 >= components.len() {
         return None;
     }
@@ -535,7 +535,7 @@ fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathB
         }
     };
 
-    if let Some(env_roots) = env::var_os("AXIOM_RULE_REPO_ROOTS") {
+    if let Some(env_roots) = env::var_os("AXIOM_RULESPEC_REPO_ROOTS") {
         for raw_root in env::split_paths(&env_roots) {
             if raw_root.file_name().is_some_and(|name| name == repo_name) {
                 add(raw_root);

@@ -2,7 +2,7 @@
 
 Canonical rule content belongs in jurisdiction repositories. The engine repo is
 runtime and schema infrastructure only; checked-in policy content belongs in
-`rules-*` repositories.
+`rulespec-*` repositories.
 
 ## Repository Layout
 
@@ -40,9 +40,9 @@ rules: []
 ```
 
 Import targets follow the same path identity scheme as rule IDs, without the
-optional `#rule_name` suffix. The runtime resolves `us:` to `rules-us`,
-`us-tn:` to `rules-us-tn`, etc., using sibling checkouts and
-`AXIOM_RULE_REPO_ROOTS`.
+optional `#rule_name` suffix. The runtime resolves `us:` to `rulespec-us`,
+`us-tn:` to `rulespec-us-tn`, etc., using sibling checkouts and
+`AXIOM_RULESPEC_REPO_ROOTS`.
 
 Rule files are named by the legal or policy unit they encode. Companion tests use
 the same stem:
@@ -141,7 +141,7 @@ or bytes, and compares actual hashes to the Git-declared expected hashes.
 Validate registry files with:
 
 ```bash
-PYTHONPATH=python python3 -m axiom_rules.cli check-sources /path/to/us-tn --verbose
+PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/us-tn --verbose
 ```
 
 The validator rejects duplicated `id:` fields, top-level `storage:` fields,
@@ -155,7 +155,7 @@ To verify live R2 objects as well:
 AXIOM_R2_ACCOUNT_ID=...
 AXIOM_R2_ACCESS_KEY_ID=...
 AXIOM_R2_SECRET_ACCESS_KEY=...
-PYTHONPATH=python python3 -m axiom_rules.cli check-sources /path/to/us-tn --verify-r2
+PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/us-tn --verify-r2
 ```
 
 `AXIOM_R2_ENDPOINT_URL` can be used instead of `AXIOM_R2_ACCOUNT_ID`. Live

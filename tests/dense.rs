@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use axiom_rules::api::{
+use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
-use axiom_rules::compile::CompiledProgramArtifact;
-use axiom_rules::dense::{
+use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue, DenseRelationBatchSpec,
     DenseRelationKey,
 };
-use axiom_rules::spec::{
+use axiom_rules_engine::spec::{
     DTypeSpec, DatasetSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec,
     PeriodSpec, RelationRecordSpec, ScalarValueSpec,
 };
@@ -1885,7 +1885,7 @@ fn uc_dense_batch(cases: &[UcCase]) -> DenseBatchSpec {
 
 #[test]
 fn dense_date_add_days_matches_explain_mode() {
-    use axiom_rules::spec::{
+    use axiom_rules_engine::spec::{
         DerivedSemanticsSpec, DerivedSpec, JudgmentExprSpec, ProgramSpec, ScalarExprSpec,
     };
 
@@ -1924,7 +1924,7 @@ fn dense_date_add_days_matches_explain_mode() {
                 left: Box::new(ScalarExprSpec::Derived {
                     name: "relevant_week_start".to_string(),
                 }),
-                op: axiom_rules::spec::ComparisonOpSpec::Lt,
+                op: axiom_rules_engine::spec::ComparisonOpSpec::Lt,
                 right: Box::new(ScalarExprSpec::Input {
                     name: "part_week_end".to_string(),
                 }),
@@ -2398,27 +2398,27 @@ fn compare_scalar(explain: &OutputValue, dense: &DenseOutputValue, row: usize) {
     let dense_value = dense_column.scalar_value_at(
         row,
         &match value {
-            ScalarValueSpec::Bool { .. } => axiom_rules::model::DType::Bool,
-            ScalarValueSpec::Integer { .. } => axiom_rules::model::DType::Integer,
-            ScalarValueSpec::Decimal { .. } => axiom_rules::model::DType::Decimal,
-            ScalarValueSpec::Text { .. } => axiom_rules::model::DType::Text,
-            ScalarValueSpec::Date { .. } => axiom_rules::model::DType::Date,
+            ScalarValueSpec::Bool { .. } => axiom_rules_engine::model::DType::Bool,
+            ScalarValueSpec::Integer { .. } => axiom_rules_engine::model::DType::Integer,
+            ScalarValueSpec::Decimal { .. } => axiom_rules_engine::model::DType::Decimal,
+            ScalarValueSpec::Text { .. } => axiom_rules_engine::model::DType::Text,
+            ScalarValueSpec::Date { .. } => axiom_rules_engine::model::DType::Date,
         },
     );
     match (value, dense_value) {
-        (ScalarValueSpec::Bool { value }, axiom_rules::model::ScalarValue::Bool(dense)) => {
+        (ScalarValueSpec::Bool { value }, axiom_rules_engine::model::ScalarValue::Bool(dense)) => {
             assert_eq!(*value, dense)
         }
-        (ScalarValueSpec::Integer { value }, axiom_rules::model::ScalarValue::Integer(dense)) => {
+        (ScalarValueSpec::Integer { value }, axiom_rules_engine::model::ScalarValue::Integer(dense)) => {
             assert_eq!(*value, dense)
         }
-        (ScalarValueSpec::Decimal { value }, axiom_rules::model::ScalarValue::Decimal(dense)) => {
+        (ScalarValueSpec::Decimal { value }, axiom_rules_engine::model::ScalarValue::Decimal(dense)) => {
             assert_eq!(decimal(value), dense)
         }
-        (ScalarValueSpec::Text { value }, axiom_rules::model::ScalarValue::Text(dense)) => {
+        (ScalarValueSpec::Text { value }, axiom_rules_engine::model::ScalarValue::Text(dense)) => {
             assert_eq!(value, &dense)
         }
-        (ScalarValueSpec::Date { value }, axiom_rules::model::ScalarValue::Date(dense)) => {
+        (ScalarValueSpec::Date { value }, axiom_rules_engine::model::ScalarValue::Date(dense)) => {
             assert_eq!(*value, dense)
         }
         other => panic!("mismatched scalar values: {other:?}"),
@@ -2433,9 +2433,9 @@ fn compare_judgment(explain: &OutputValue, dense: &DenseOutputValue, row: usize)
         panic!("expected dense judgment output");
     };
     let dense = match values[row] {
-        axiom_rules::model::JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
-        axiom_rules::model::JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
-        axiom_rules::model::JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
+        axiom_rules_engine::model::JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
+        axiom_rules_engine::model::JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
+        axiom_rules_engine::model::JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
     };
     assert_eq!(*outcome, dense);
 }

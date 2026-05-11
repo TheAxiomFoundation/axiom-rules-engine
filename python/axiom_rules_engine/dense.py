@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 try:
-    from axiom_rules_dense import CompiledDenseProgram as NativeCompiledDenseProgram
+    from axiom_rules_engine_dense import CompiledDenseProgram as NativeCompiledDenseProgram
 except ImportError:  # pragma: no cover - exercised only when the extension is missing
     NativeCompiledDenseProgram = None
 
@@ -37,7 +37,7 @@ class CompiledDenseProgram:
     ) -> "CompiledDenseProgram":
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(
-                "axiom_rules_dense is not installed. Build it with "
+                "axiom_rules_engine_dense is not installed. Build it with "
                 "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
             )
         return cls(NativeCompiledDenseProgram.from_file(str(Path(path)), entity))

@@ -2,12 +2,12 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 
-use axiom_rules::api::{
+use axiom_rules_engine::api::{
     CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest, ExecutionResponse,
     OutputValue, execute_compiled_request, execute_request,
 };
-use axiom_rules::compile::CompiledProgramArtifact;
-use axiom_rules::spec::{
+use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, InputRecordSpec,
     IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec, PeriodSpec, ProgramSpec,
     RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec, ScalarValueSpec,
@@ -38,14 +38,14 @@ rules:
 #[test]
 fn cli_round_trip_returns_json() {
     let program =
-        axiom_rules::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
     let request = simple_execution_request(ExecutionMode::Fast, program);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("spawn axiom-rules binary");
+        .expect("spawn axiom-rules-engine binary");
 
     child
         .stdin
@@ -84,7 +84,7 @@ fn cli_round_trip_returns_json() {
 #[test]
 fn fast_mode_matches_explain_mode_on_batch() {
     let program =
-        axiom_rules::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
+        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
     let period = simple_period();
     let queries = simple_queries(&period);
     let dataset = simple_dataset(&period);
@@ -160,7 +160,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
             source_url: None,
             semantics: DerivedSemanticsSpec::Scalar {
                 expr: ScalarExprSpec::If {
-                    condition: Box::new(axiom_rules::spec::JudgmentExprSpec::Comparison {
+                    condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
                         left: Box::new(ScalarExprSpec::Input {
                             name: "amount".to_string(),
                         }),
@@ -249,7 +249,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         end: period.end,
     };
     let program = ProgramSpec {
-        relations: vec![axiom_rules::spec::RelationSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
         }],
@@ -373,7 +373,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
         end: period.end,
     };
     let program = ProgramSpec {
-        relations: vec![axiom_rules::spec::RelationSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
         }],
@@ -387,13 +387,13 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
             period: None,
             source_url: None,
             semantics: DerivedSemanticsSpec::Judgment {
-                expr: axiom_rules::spec::JudgmentExprSpec::Comparison {
+                expr: axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
                     left: Box::new(ScalarExprSpec::CountRelated {
                         relation: "member_of_household".to_string(),
                         current_slot: 1,
                         related_slot: 0,
                         where_clause: Some(Box::new(
-                            axiom_rules::spec::JudgmentExprSpec::Comparison {
+                            axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
                                 left: Box::new(ScalarExprSpec::Input {
                                     name: "is_elderly_or_disabled".to_string(),
                                 }),
@@ -496,13 +496,13 @@ fn compiled_program_artifact_round_trips_and_executes() {
 #[test]
 fn cli_compile_and_run_compiled_round_trip() {
     let temp_root =
-        std::env::temp_dir().join(format!("axiom-rules-compile-test-{}", std::process::id()));
+        std::env::temp_dir().join(format!("axiom-rules-engine-compile-test-{}", std::process::id()));
     std::fs::create_dir_all(&temp_root).expect("temp dir created");
     let program_path = temp_root.join("rules.yaml");
     let artifact_path = temp_root.join("rules.compiled.json");
     std::fs::write(&program_path, SIMPLE_RULESPEC).expect("RuleSpec module written");
 
-    let compile_output = Command::new(env!("CARGO_BIN_EXE_axiom-rules"))
+    let compile_output = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
         .args([
             "compile",
             "--program",
@@ -530,7 +530,7 @@ fn cli_compile_and_run_compiled_round_trip() {
         queries: simple_queries(&period),
     };
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
         .args([
             "run-compiled",
             "--artifact",
@@ -539,7 +539,7 @@ fn cli_compile_and_run_compiled_round_trip() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("spawn axiom-rules binary");
+        .expect("spawn axiom-rules-engine binary");
 
     child
         .stdin

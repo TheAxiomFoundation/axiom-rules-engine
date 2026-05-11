@@ -1,7 +1,7 @@
 # Decisions
 
 Short decision log for architecture choices. Publicly and internally, this is
-the Axiom Rules Engine; the Rust crate and executable are `axiom-rules`. One
+the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
 ## 2026-05-04 — Runtime predicates and source relations are separate RuleSpec kinds
@@ -59,7 +59,7 @@ must be explicit RuleSpec (`format: rulespec/v1` or `schema: axiom.rules.*`).
 
 **Consequences.**
 
-- `axiom-rules compile` accepts RuleSpec YAML only.
+- `axiom-rules-engine compile` accepts RuleSpec YAML only.
 - Ambiguous YAML with a top-level `rules:` key and no discriminator is rejected.
 - The formula parser is an internal implementation module for RuleSpec formula
   fields, not a separate rule format.
@@ -130,7 +130,7 @@ mounted layout works.
 
 **Consequences.**
 
-- `axiom-rules` has no checked-in production policy content.
+- `axiom-rules-engine` has no checked-in production policy content.
 - Engine tests can keep a small set of RuleSpec fixtures for parser, compiler,
   and execution coverage.
 

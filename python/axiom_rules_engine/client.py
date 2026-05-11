@@ -16,7 +16,7 @@ from .models import (
 
 
 class AxiomRulesEngine:
-    def __init__(self, binary_path: str | Path = "target/debug/axiom-rules") -> None:
+    def __init__(self, binary_path: str | Path = "target/debug/axiom-rules-engine") -> None:
         self.binary_path = Path(binary_path)
 
     def execute(self, request: ExecutionRequest) -> ExecutionResponse:

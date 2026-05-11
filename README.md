@@ -2,8 +2,8 @@
 
 Rust runtime and Python bindings for executing Axiom RuleSpec.
 
-`axiom-rules` is engine infrastructure only. Production policy content belongs
-in jurisdiction repositories such as `rules-us` and `rules-us-co`, where the file
+`axiom-rules-engine` is engine infrastructure only. Production policy content belongs
+in jurisdiction repositories such as `rulespec-us` and `rulespec-us-co`, where the file
 path supplies the legal ID. This repo keeps RuleSpec YAML only as test fixtures
 under `tests/fixtures/rulespec/`.
 
@@ -53,7 +53,7 @@ Compile a RuleSpec file:
 
 ```bash
 cargo run -- compile \
-  --program /path/to/rules-us-co/policies/cdhs/snap/fy-2026-benefit-calculation.yaml \
+  --program /path/to/rulespec-us-co/policies/cdhs/snap/fy-2026-benefit-calculation.yaml \
   --output /tmp/snap.compiled.json
 ```
 
@@ -110,7 +110,7 @@ cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
 Validate jurisdiction-repo source registry files:
 
 ```bash
-PYTHONPATH=python python3 -m axiom_rules.cli check-sources /path/to/rules-us-co
+PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/rulespec-us-co
 ```
 
 Add `--verify-r2` with `AXIOM_R2_ACCOUNT_ID`,
@@ -121,10 +121,10 @@ Search and validate public concept IDs discovered from jurisdiction RuleSpec
 repos:
 
 ```bash
-axiom concepts search "adjusted gross income" --root /path/to/rules-us --json
-axiom concepts show us:statutes/26/1401#self_employment_tax --root /path/to/rules-us --json
-axiom concepts validate us:statutes/26/62#adjusted_gross_income --root /path/to/rules-us --json
-axiom concepts list --namespace us:statutes/26 --root /path/to/rules-us --json
+axiom concepts search "adjusted gross income" --root /path/to/rulespec-us --json
+axiom concepts show us:statutes/26/1401#self_employment_tax --root /path/to/rulespec-us --json
+axiom concepts validate us:statutes/26/62#adjusted_gross_income --root /path/to/rulespec-us --json
+axiom concepts list --namespace us:statutes/26 --root /path/to/rulespec-us --json
 ```
 
 The concept index is static and repo-backed. It includes module IDs, rule output
@@ -134,9 +134,9 @@ validate source-to-legal-concept alignment without importing the runtime.
 
 ## Python Package
 
-The Python wrapper lives under `python/axiom_rules/`. It exposes `Program`,
+The Python wrapper lives under `python/axiom_rules_engine/`. It exposes `Program`,
 `Dataset`, `AxiomRulesEngine`, dense execution bindings, source registry checks,
-and concept discovery helpers. It shells out to the compiled `axiom-rules`
+and concept discovery helpers. It shells out to the compiled `axiom-rules-engine`
 binary for reference and compiled-artifact flows.
 
 ## Tests

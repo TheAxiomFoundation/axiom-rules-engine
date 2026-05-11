@@ -23,9 +23,9 @@ def _compile_program(path: Path, binary_path: str | Path | None = None) -> Progr
     binary = (
         Path(binary_path)
         if binary_path is not None
-        else ROOT / "target" / "debug" / "axiom-rules"
+        else ROOT / "target" / "debug" / "axiom-rules-engine"
     )
-    with tempfile.TemporaryDirectory(prefix="axiom-rules-program-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="axiom-rules-engine-program-") as temp_dir:
         artifact_path = Path(temp_dir) / "program.compiled.json"
         process = subprocess.run(
             [

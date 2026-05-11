@@ -91,9 +91,9 @@ imports:
 ```
 
 The canonical form is `<jurisdiction>:<relative path without extension>`.
-`us:` resolves to the `rules-us` repository, `us-co:` resolves to
-`rules-us-co`, and so on. The loader searches sibling checkouts and any roots
-listed in `AXIOM_RULE_REPO_ROOTS`.
+`us:` resolves to the `rulespec-us` repository, `us-co:` resolves to
+`rulespec-us-co`, and so on. The loader searches sibling checkouts and any roots
+listed in `AXIOM_RULESPEC_REPO_ROOTS`.
 
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example

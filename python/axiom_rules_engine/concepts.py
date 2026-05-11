@@ -380,7 +380,7 @@ def _base_concept_id(root: Path, path: Path) -> str:
 
 def _repo_prefix(root: Path) -> str:
     name = root.name
-    return name.removeprefix("rules-") if name.startswith("rules-") else name
+    return name.removeprefix("rulespec-") if name.startswith("rulespec-") else name
 
 
 def _corpus_citation_path(module: dict[str, Any]) -> str | None:

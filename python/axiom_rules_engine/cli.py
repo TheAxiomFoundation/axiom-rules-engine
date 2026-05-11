@@ -122,7 +122,7 @@ def concepts_list(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m axiom_rules.cli")
+    parser = argparse.ArgumentParser(prog="python -m axiom_rules_engine.cli")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     sources = subcommands.add_parser(

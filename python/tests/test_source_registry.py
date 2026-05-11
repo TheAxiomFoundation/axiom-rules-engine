@@ -10,8 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "python"))
 
-from axiom_rules.cli import main
-from axiom_rules.source_registry import (
+from axiom_rules_engine.cli import main
+from axiom_rules_engine.source_registry import (
     R2ObjectRef,
     build_r2_client_from_env,
     default_r2_path,

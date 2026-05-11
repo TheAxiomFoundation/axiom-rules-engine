@@ -2,10 +2,10 @@ use std::env;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use axiom_rules::api::{
+use axiom_rules_engine::api::{
     CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
 };
-use axiom_rules::compile::{
+use axiom_rules_engine::compile::{
     CompiledProgramArtifact, compile_program_file_to_json, compile_summary_lines,
 };
 
