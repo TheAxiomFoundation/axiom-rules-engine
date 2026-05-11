@@ -1053,10 +1053,9 @@ pub fn parse_source(src: &str) -> Result<Module, FormulaError> {
 ///   literal lowers to a scalar `Parameter` keyed at index 0 (or at integer
 ///   keys if the literal is an integer-keyed table once indexed_by support
 ///   lands).
-/// - A `VariableDecl` with an `entity` lowers to a `Derived` output. Its
-///   expression is the expression from the currently-effective temporal
-///   value (picked by the caller's query period at execution time — for
-///   now we take the latest one).
+/// - A `VariableDecl` with an `entity` lowers to a `Derived` output. Derived
+///   formulas must currently have a single temporal value; versioned derived
+///   lowering is not supported until execution can select formulas by period.
 /// - Non-literal scalar variables (with no entity but a computed expression)
 ///   lower to derived outputs attached to a synthetic `Scalar` entity so
 ///   they can be referenced from entity-scoped derived values.
@@ -1138,6 +1137,12 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     for v in &module.variables {
         if v.entity.is_none() && v.values.iter().all(|t| is_literal_expr(&t.expr)) {
             continue;
+        }
+        if v.values.len() > 1 {
+            return Err(FormulaError::lower(format!(
+                "derived variable `{}` has multiple formula versions; versioned derived formulas are not supported yet",
+                v.path
+            )));
         }
         let dtype = parse_dtype(v.dtype.as_deref());
         let entity = v.entity.clone().unwrap_or_else(|| "Scalar".to_string());

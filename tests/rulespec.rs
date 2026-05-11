@@ -1427,6 +1427,33 @@ rules:
 }
 
 #[test]
+fn rulespec_rejects_multi_version_derived_formula() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: savers_credit_gross_contributions
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: qualified_retirement_contributions
+      - effective_from: 2027-01-01
+        formula: able_account_contributions
+"#;
+
+    let err = lower_rulespec_str(rulespec)
+        .expect_err("multi-version derived formulas should fail before compilation");
+    assert!(
+        err.to_string()
+            .contains("versioned derived formulas are not supported yet"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn compile_program_file_to_json_accepts_rulespec_yaml() {
     let temp_root = std::env::temp_dir().join(format!(
         "axiom-rules-engine-rulespec-yaml-test-{}",
