@@ -406,6 +406,11 @@ impl Program {
         for derived in self.derived.values() {
             collect_input_slots_from_semantics(&derived.semantics, &mut slots);
         }
+        for parameter in self.parameters.values() {
+            if let Some(indexed_by) = parameter.indexed_by.as_deref() {
+                slots.insert(indexed_by);
+            }
+        }
         slots
     }
 }

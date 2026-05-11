@@ -419,6 +419,89 @@ rules:
 }
 
 #[test]
+fn repo_backed_rulespec_execution_resolves_indexed_parameter_input_names() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/policies/irs/brackets.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: income_tax_bracket_rates
+    kind: parameter
+    dtype: Rate
+    indexed_by: bracket
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          1: 0.10
+  - name: first_bracket_rate
+    kind: derived
+    entity: TaxUnit
+    dtype: Rate
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: income_tax_bracket_rates[1]
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let output_id = "us:policies/irs/brackets#first_bracket_rate".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:policies/irs/brackets#input.bracket".to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Integer { value: 1 },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute indexed parameter input reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("first_bracket_rate output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "0.1");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn repo_backed_rulespec_execution_resolves_absolute_upstream_output_inputs() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
