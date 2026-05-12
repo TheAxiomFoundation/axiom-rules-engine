@@ -2409,10 +2409,16 @@ fn compare_scalar(explain: &OutputValue, dense: &DenseOutputValue, row: usize) {
         (ScalarValueSpec::Bool { value }, axiom_rules_engine::model::ScalarValue::Bool(dense)) => {
             assert_eq!(*value, dense)
         }
-        (ScalarValueSpec::Integer { value }, axiom_rules_engine::model::ScalarValue::Integer(dense)) => {
+        (
+            ScalarValueSpec::Integer { value },
+            axiom_rules_engine::model::ScalarValue::Integer(dense),
+        ) => {
             assert_eq!(*value, dense)
         }
-        (ScalarValueSpec::Decimal { value }, axiom_rules_engine::model::ScalarValue::Decimal(dense)) => {
+        (
+            ScalarValueSpec::Decimal { value },
+            axiom_rules_engine::model::ScalarValue::Decimal(dense),
+        ) => {
             assert_eq!(decimal(value), dense)
         }
         (ScalarValueSpec::Text { value }, axiom_rules_engine::model::ScalarValue::Text(dense)) => {
@@ -2435,7 +2441,9 @@ fn compare_judgment(explain: &OutputValue, dense: &DenseOutputValue, row: usize)
     let dense = match values[row] {
         axiom_rules_engine::model::JudgmentOutcome::Holds => JudgmentOutcomeSpec::Holds,
         axiom_rules_engine::model::JudgmentOutcome::NotHolds => JudgmentOutcomeSpec::NotHolds,
-        axiom_rules_engine::model::JudgmentOutcome::Undetermined => JudgmentOutcomeSpec::Undetermined,
+        axiom_rules_engine::model::JudgmentOutcome::Undetermined => {
+            JudgmentOutcomeSpec::Undetermined
+        }
     };
     assert_eq!(*outcome, dense);
 }
