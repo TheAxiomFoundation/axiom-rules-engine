@@ -1058,6 +1058,115 @@ rules: []
 }
 
 #[test]
+fn rulespec_rejects_namespaced_relation_arity_mismatch() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let rules_file = root.join("rulespec-us/statutes/26/63/c.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create rules dir");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 1
+  - name: standard_deduction_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write RuleSpec");
+
+    let error = CompiledProgramArtifact::from_rulespec_file(&rules_file)
+        .expect_err("relation arity mismatch should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("us:statutes/26/63/c#relation.member_of_tax_unit"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("conflicting arities 2 and 1"),
+        "{error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_keeps_unscoped_inferred_relation_when_import_uses_same_short_name() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let imported_file = root.join("rulespec-us/statutes/26/63/c.yaml");
+    let program_file = root.join("program.yaml");
+    fs::create_dir_all(imported_file.parent().expect("rules file has parent"))
+        .expect("create rules dir");
+    fs::write(
+        &imported_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+"#,
+    )
+    .expect("write imported RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/26/63/c
+rules:
+  - name: local_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write program RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
+    );
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .any(|relation| relation.name == "member_of_tax_unit")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn rulespec_rejects_parameter_values_without_indexed_by() {
     let rulespec = r#"
 format: rulespec/v1

@@ -645,7 +645,7 @@ impl RulesDocument {
             program.parameters.extend(table_parameters);
         }
         self.apply_rule_ids(&mut program);
-        rewrite_relation_references(&mut program, &relation_rewrites);
+        rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
         Ok(program)
@@ -1078,9 +1078,34 @@ fn append_missing_relations(
 fn rewrite_relation_references(
     program: &mut ProgramSpec,
     rewrites: &HashMap<(String, String), String>,
-) {
+    explicit_relations: &[RelationSpec],
+) -> Result<(), RuleSpecError> {
     if rewrites.is_empty() {
-        return;
+        return Ok(());
+    }
+    let inferred_arities: HashMap<String, usize> = program
+        .relations
+        .iter()
+        .map(|relation| (relation.name.clone(), relation.arity))
+        .collect();
+    let explicit_arities: HashMap<String, usize> = explicit_relations
+        .iter()
+        .map(|relation| (relation.name.clone(), relation.arity))
+        .collect();
+    for ((_, short_name), canonical_name) in rewrites {
+        let Some(inferred_arity) = inferred_arities.get(short_name) else {
+            continue;
+        };
+        let Some(explicit_arity) = explicit_arities.get(canonical_name) else {
+            continue;
+        };
+        if inferred_arity != explicit_arity {
+            return Err(RuleSpecError::RelationArityConflict {
+                name: canonical_name.clone(),
+                existing: *inferred_arity,
+                new: *explicit_arity,
+            });
+        }
     }
     let namespaced_short_names: HashSet<String> = rewrites
         .keys()
@@ -1103,9 +1128,110 @@ fn rewrite_relation_references(
             }
         }
     }
-    program
-        .relations
-        .retain(|relation| !namespaced_short_names.contains(&relation.name));
+    let used_relations = used_relation_names(program);
+    program.relations.retain(|relation| {
+        !namespaced_short_names.contains(&relation.name) || used_relations.contains(&relation.name)
+    });
+    Ok(())
+}
+
+fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for derived in &program.derived {
+        match &derived.semantics {
+            DerivedSemanticsSpec::Scalar { expr } => {
+                collect_scalar_relation_names(expr, &mut names);
+            }
+            DerivedSemanticsSpec::Judgment { expr } => {
+                collect_judgment_relation_names(expr, &mut names);
+            }
+        }
+    }
+    names
+}
+
+fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<String>) {
+    match expr {
+        ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::Input { .. }
+        | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::PeriodStart
+        | ScalarExprSpec::PeriodEnd => {}
+        ScalarExprSpec::InputOrElse { default: _, .. } => {}
+        ScalarExprSpec::ParameterLookup { index, .. }
+        | ScalarExprSpec::Ceil { value: index }
+        | ScalarExprSpec::Floor { value: index } => {
+            collect_scalar_relation_names(index, names);
+        }
+        ScalarExprSpec::Add { items }
+        | ScalarExprSpec::Max { items }
+        | ScalarExprSpec::Min { items } => {
+            for item in items {
+                collect_scalar_relation_names(item, names);
+            }
+        }
+        ScalarExprSpec::Sub { left, right }
+        | ScalarExprSpec::Mul { left, right }
+        | ScalarExprSpec::Div { left, right } => {
+            collect_scalar_relation_names(left, names);
+            collect_scalar_relation_names(right, names);
+        }
+        ScalarExprSpec::DateAddDays { date, days } => {
+            collect_scalar_relation_names(date, names);
+            collect_scalar_relation_names(days, names);
+        }
+        ScalarExprSpec::DaysBetween { from, to } => {
+            collect_scalar_relation_names(from, names);
+            collect_scalar_relation_names(to, names);
+        }
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            names.insert(relation.clone());
+            if let Some(where_clause) = where_clause {
+                collect_judgment_relation_names(where_clause, names);
+            }
+        }
+        ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            names.insert(relation.clone());
+            if let Some(where_clause) = where_clause {
+                collect_judgment_relation_names(where_clause, names);
+            }
+        }
+        ScalarExprSpec::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_judgment_relation_names(condition, names);
+            collect_scalar_relation_names(then_expr, names);
+            collect_scalar_relation_names(else_expr, names);
+        }
+    }
+}
+
+fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<String>) {
+    match expr {
+        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Comparison { left, right, .. } => {
+            collect_scalar_relation_names(left, names);
+            collect_scalar_relation_names(right, names);
+        }
+        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+            for item in items {
+                collect_judgment_relation_names(item, names);
+            }
+        }
+        JudgmentExprSpec::Not { item } => {
+            collect_judgment_relation_names(item, names);
+        }
+    }
 }
 
 fn rewrite_scalar_relation_references(
