@@ -136,6 +136,25 @@ rules:
 }
 
 #[test]
+fn rulespec_source_metadata_allows_quoted_phrases() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: snap_household_food_contribution_rate
+    kind: parameter
+    dtype: Rate
+    source: 7 USC 2017(a), "30 per centum"
+    versions:
+      - effective_from: 2008-10-01
+        formula: "0.30"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+
+    assert_eq!(artifact.program.parameters.len(), 1);
+}
+
+#[test]
 fn rulespec_lowers_indexed_parameter_tables_and_lookup_syntax() {
     let rulespec = r#"
 format: rulespec/v1

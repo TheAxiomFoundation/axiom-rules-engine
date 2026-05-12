@@ -263,21 +263,52 @@ impl<'a> Lexer<'a> {
             // String literal
             if c == b'"' || c == b'\'' {
                 let quote = c;
-                let start = self.pos + 1;
-                let mut end = start;
-                while end < self.src.len() && self.src[end] != quote {
-                    end += 1;
+                self.advance(1);
+                let mut value = String::new();
+                let mut segment_start = self.pos;
+                while self.pos < self.src.len() {
+                    let current = self.src[self.pos];
+                    if current == quote {
+                        if segment_start < self.pos {
+                            value.push_str(
+                                std::str::from_utf8(&self.src[segment_start..self.pos]).unwrap(),
+                            );
+                        }
+                        self.advance(1);
+                        self.push(TokType::String, value, line, col);
+                        break;
+                    }
+                    if current == b'\\' {
+                        if segment_start < self.pos {
+                            value.push_str(
+                                std::str::from_utf8(&self.src[segment_start..self.pos]).unwrap(),
+                            );
+                        }
+                        if self.pos + 1 >= self.src.len() {
+                            return Err(FormulaError::parse(line, col, "unterminated string"));
+                        }
+                        let escaped = self.src[self.pos + 1];
+                        value.push(match escaped {
+                            b'\\' => '\\',
+                            b'"' => '"',
+                            b'\'' => '\'',
+                            b'n' => '\n',
+                            b'r' => '\r',
+                            b't' => '\t',
+                            other => other as char,
+                        });
+                        self.advance(2);
+                        segment_start = self.pos;
+                        continue;
+                    }
+                    self.advance(1);
                 }
-                if end >= self.src.len() {
-                    return Err(FormulaError::parse(line, col, "unterminated string"));
+                if self.tokens.last().is_some_and(|token| {
+                    token.ty == TokType::String && token.line == line && token.col == col
+                }) {
+                    continue;
                 }
-                let s = std::str::from_utf8(&self.src[start..end])
-                    .unwrap()
-                    .to_string();
-                let n = end + 1 - self.pos;
-                self.advance(n);
-                self.push(TokType::String, s, line, col);
-                continue;
+                return Err(FormulaError::parse(line, col, "unterminated string"));
             }
 
             // Identifier / path / keyword
