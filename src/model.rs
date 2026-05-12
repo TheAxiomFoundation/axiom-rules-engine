@@ -372,6 +372,9 @@ impl Program {
     }
 
     pub fn resolve_relation_name(&self, reference: &str) -> Option<String> {
+        if self.relations.contains_key(reference) {
+            return Some(reference.to_string());
+        }
         if !self.has_public_ids() {
             return self
                 .relations

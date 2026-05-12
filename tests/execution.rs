@@ -37,8 +37,8 @@ rules:
 
 #[test]
 fn cli_round_trip_returns_json() {
-    let program =
-        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
     let request = simple_execution_request(ExecutionMode::Fast, program);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -83,8 +83,8 @@ fn cli_round_trip_returns_json() {
 
 #[test]
 fn fast_mode_matches_explain_mode_on_batch() {
-    let program =
-        axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("program fixture parses");
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
     let period = simple_period();
     let queries = simple_queries(&period);
     let dataset = simple_dataset(&period);
@@ -495,8 +495,10 @@ fn compiled_program_artifact_round_trips_and_executes() {
 
 #[test]
 fn cli_compile_and_run_compiled_round_trip() {
-    let temp_root =
-        std::env::temp_dir().join(format!("axiom-rules-engine-compile-test-{}", std::process::id()));
+    let temp_root = std::env::temp_dir().join(format!(
+        "axiom-rules-engine-compile-test-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&temp_root).expect("temp dir created");
     let program_path = temp_root.join("rules.yaml");
     let artifact_path = temp_root.join("rules.compiled.json");

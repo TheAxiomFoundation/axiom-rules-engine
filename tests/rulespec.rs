@@ -1,7 +1,9 @@
 use axiom_rules_engine::api::{
     ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
-use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact, compile_program_file_to_json};
+use axiom_rules_engine::compile::{
+    CompileError, CompiledProgramArtifact, compile_program_file_to_json,
+};
 use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules_engine::spec::{
     DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
@@ -122,7 +124,8 @@ rules:
         program
             .relations
             .iter()
-            .any(|r| r.name == "member_of_household")
+            .any(|r| r.name
+                == "us-tx:policies/hhsc/snap/overlay-subset#relation.member_of_household")
     );
     assert!(
         artifact
@@ -674,7 +677,10 @@ rules:
     else {
         panic!("expected judgment output");
     };
-    assert_eq!(*outcome, axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds);
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -765,7 +771,10 @@ rules:
     else {
         panic!("expected judgment output");
     };
-    assert_eq!(*outcome, axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds);
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -838,8 +847,7 @@ rules:
         start: "2026-01-01".parse().expect("valid date"),
         end: "2026-12-31".parse().expect("valid date"),
     };
-    let output_id =
-        "us:statutes/26/25A#american_opportunity_credit_before_phaseout".to_string();
+    let output_id = "us:statutes/26/25A#american_opportunity_credit_before_phaseout".to_string();
 
     let response = execute_request(ExecutionRequest {
         mode: ExecutionMode::Explain,
@@ -881,8 +889,7 @@ rules:
                 },
             ],
             relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
-                name: "us:statutes/26/25A#relation.education_credit_member_of_tax_unit"
-                    .to_string(),
+                name: "us:statutes/26/25A#relation.education_credit_member_of_tax_unit".to_string(),
                 tuple: vec!["student-1".to_string(), "tax-unit-1".to_string()],
                 interval: IntervalSpec {
                     start: period.start,
@@ -909,6 +916,143 @@ rules:
         panic!("expected decimal scalar");
     };
     assert_eq!(value, "2000");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_namespaces_same_named_relations_by_origin_target() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let first_file = root.join("rulespec-us/statutes/26/24/h.yaml");
+    let second_file = root.join("rulespec-us/statutes/26/63/c.yaml");
+    let program_file = root.join("program.yaml");
+    fs::create_dir_all(first_file.parent().expect("rules file has parent"))
+        .expect("create first rules dir");
+    fs::create_dir_all(second_file.parent().expect("rules file has parent"))
+        .expect("create second rules dir");
+    fs::write(
+        &first_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: ctc_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write first RuleSpec");
+    fs::write(
+        &second_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: standard_deduction_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write second RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/26/24/h
+  - us:statutes/26/63/c
+rules: []
+"#,
+    )
+    .expect("write program RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let ctc_output = "us:statutes/26/24/h#ctc_member_count".to_string();
+    let standard_deduction_output =
+        "us:statutes/26/63/c#standard_deduction_member_count".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![
+                axiom_rules_engine::spec::RelationRecordSpec {
+                    name: "us:statutes/26/24/h#relation.member_of_tax_unit".to_string(),
+                    tuple: vec!["child-1".to_string(), "tax-unit-1".to_string()],
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                },
+                axiom_rules_engine::spec::RelationRecordSpec {
+                    name: "us:statutes/26/63/c#relation.member_of_tax_unit".to_string(),
+                    tuple: vec!["head-1".to_string(), "tax-unit-1".to_string()],
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                },
+            ],
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![ctc_output.clone(), standard_deduction_output.clone()],
+        }],
+    })
+    .expect("same-named relation references execute");
+
+    let OutputValue::Scalar {
+        value: ScalarValueSpec::Integer { value: ctc_count },
+        ..
+    } = response.results[0]
+        .outputs
+        .get(&ctc_output)
+        .expect("ctc member count output")
+    else {
+        panic!("expected integer scalar");
+    };
+    let OutputValue::Scalar {
+        value: ScalarValueSpec::Integer {
+            value: standard_deduction_count,
+        },
+        ..
+    } = response.results[0]
+        .outputs
+        .get(&standard_deduction_output)
+        .expect("standard deduction member count output")
+    else {
+        panic!("expected integer scalar");
+    };
+    assert_eq!(*ctc_count, 1);
+    assert_eq!(*standard_deduction_count, 1);
 
     let _ = fs::remove_dir_all(root);
 }
