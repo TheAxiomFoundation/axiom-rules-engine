@@ -30,6 +30,8 @@ pub enum RuleSpecError {
     UnsupportedRuleKind { name: String, kind: String },
     #[error("RuleSpec rule `{name}` must declare `kind`")]
     MissingRuleKind { name: String },
+    #[error("RuleSpec reiteration rule `{name}` must declare `reiterates.target`")]
+    MissingReiterationTarget { name: String },
     #[error("RuleSpec rule `{name}` has no formula version")]
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
@@ -122,6 +124,7 @@ pub enum RuleKind {
     Derived,
     DataRelation,
     SourceRelation,
+    Reiteration,
     Unsupported(String),
 }
 
@@ -136,6 +139,7 @@ impl<'de> Deserialize<'de> for RuleKind {
             "derived" => Self::Derived,
             "data_relation" => Self::DataRelation,
             "source_relation" => Self::SourceRelation,
+            "reiteration" => Self::Reiteration,
             _ => Self::Unsupported(value),
         })
     }
@@ -157,6 +161,21 @@ pub struct SourceRef {
 pub struct DataRelationRef {
     #[serde(default)]
     pub arity: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ReiterationRef {
+    /// Fully-qualified target rule that this reiteration restates.
+    /// Example: `us:statutes/7/2017/a#snap_regular_month_allotment`.
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub target: Option<String>,
+    /// Authority of the reiterated rule. Typical values: `federal`, `state`.
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub authority: Option<String>,
+    /// Relationship to the target. Typical values: `restates`, `amends`,
+    /// `implements`. Used today only for source tracing.
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub relationship: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -252,6 +271,8 @@ pub struct RuleDefinition {
     pub data_relation: Option<DataRelationRef>,
     #[serde(default)]
     pub source_relation: Option<SourceRelationRef>,
+    #[serde(default)]
+    pub reiterates: Option<ReiterationRef>,
     #[serde(default)]
     pub verification: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -630,6 +651,11 @@ impl RulesDocument {
                     rule.reject_top_level_arity()?;
                     rule.validate_source_relation()?;
                 }
+                RuleKind::Reiteration => {
+                    rule.reject_top_level_arity()?;
+                    let synthesized = rule.as_reiteration_derived()?;
+                    synthesized.write_formula_definition(&mut formula_source)?;
+                }
             }
         }
 
@@ -730,6 +756,52 @@ impl RuleDefinition {
             });
         }
         Ok(())
+    }
+
+    /// Lower a `kind: reiteration` rule into an equivalent Derived rule
+    /// whose formula evaluates to the reiterated target. The reiteration's
+    /// `reiterates.target` is a fully-qualified reference like
+    /// `us:statutes/7/2017/a#snap_regular_month_allotment`; the synthesized
+    /// formula uses the unqualified rule name (`snap_regular_month_allotment`),
+    /// which resolves against the importer module's symbol table the same
+    /// way any other rule reference does.
+    fn as_reiteration_derived(&self) -> Result<RuleDefinition, RuleSpecError> {
+        let target = self
+            .reiterates
+            .as_ref()
+            .and_then(|r| r.target.as_deref())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| RuleSpecError::MissingReiterationTarget {
+                name: self.name.clone(),
+            })?;
+        let unqualified = target
+            .rsplit_once('#')
+            .map(|(_, name)| name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(target)
+            .to_string();
+        // Pick effective_from from the rule if declared, otherwise use a
+        // sentinel that places the synthesized formula at the start of
+        // recorded time. The reiterated target's own effective range governs
+        // when concrete values appear.
+        let effective_from = self
+            .effective_from
+            .or_else(|| self.versions.first().and_then(|v| v.effective_from))
+            .or_else(|| chrono::NaiveDate::from_ymd_opt(1900, 1, 1));
+        let synthesized_version = RuleVersion {
+            effective_from,
+            effective_to: self.effective_to,
+            formula: Some(unqualified),
+            values: BTreeMap::new(),
+        };
+        let mut synthesized = self.clone();
+        synthesized.kind = Some(RuleKind::Derived);
+        synthesized.versions = vec![synthesized_version];
+        synthesized.formula = None;
+        synthesized.effective_from = None;
+        synthesized.effective_to = None;
+        Ok(synthesized)
     }
 
     fn effective_versions(&self) -> Vec<RuleVersion> {

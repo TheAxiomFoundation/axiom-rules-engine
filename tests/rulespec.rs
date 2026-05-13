@@ -1453,23 +1453,53 @@ rules:
 }
 
 #[test]
-fn rulespec_rejects_legacy_reiteration_kind() {
+fn rulespec_lowers_reiteration_to_derived_alias_for_target() {
+    // A `kind: reiteration` rule restates another rule's value. The engine
+    // lowers it to a Derived rule whose formula evaluates to the
+    // reiterated target referenced by its unqualified name; resolution
+    // against the importer's symbol table happens like any other rule
+    // reference.
+    let program = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_max_allotment_reiterates_usda
+    kind: reiteration
+    reiterates:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+      authority: federal
+      relationship: restates
+"#,
+    )
+    .expect("reiteration rule should lower to a derived alias");
+
+    let derived = program
+        .derived
+        .iter()
+        .find(|d| d.name == "co_snap_max_allotment_reiterates_usda")
+        .expect("expected lowered derived alias");
+    let semantics = format!("{:?}", derived.semantics);
+    assert!(
+        semantics.contains("snap_maximum_allotment"),
+        "lowered formula must reference the reiterated rule by unqualified name; got {semantics}"
+    );
+}
+
+#[test]
+fn rulespec_rejects_reiteration_without_target() {
     let err = lower_rulespec_str(
         r#"
 format: rulespec/v1
 rules:
-  - name: legacy_restates
+  - name: missing_target
     kind: reiteration
-    reiterates:
-      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
 "#,
     )
-    .expect_err("legacy reiteration kind should fail");
+    .expect_err("reiteration without reiterates.target must fail");
 
     assert!(matches!(
         err,
-        RuleSpecError::UnsupportedRuleKind { name, kind }
-            if name == "legacy_restates" && kind == "reiteration"
+        RuleSpecError::MissingReiterationTarget { name } if name == "missing_target"
     ));
 }
 
