@@ -202,6 +202,12 @@ pub struct RelationDerivationSpec {
     pub source_relation: String,
     pub current_slot: usize,
     pub related_slot: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_entities: Vec<String>,
     pub predicate: JudgmentExprSpec,
 }
 
@@ -211,6 +217,9 @@ impl RelationDerivationSpec {
             source_relation: self.source_relation.clone(),
             current_slot: self.current_slot,
             related_slot: self.related_slot,
+            entity: self.entity.clone(),
+            member_relation: self.member_relation.clone(),
+            slot_entities: self.slot_entities.clone(),
             predicate: self.predicate.to_model()?,
         })
     }

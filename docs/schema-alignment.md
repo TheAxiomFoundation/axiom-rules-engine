@@ -28,7 +28,7 @@ RuleSpec should retain the core engine semantics:
 RuleSpec should make machine-authored structure explicit:
 
 - Explicit rule kind: `parameter`, `derived`, `data_relation`,
-  `source_relation`, and eventually `derived_relation`.
+  `derived_relation`, and `source_relation`.
 - Explicit data-relation arity and, in a follow-up, slot names/orientation.
 - Multi-source provenance and source-document anchors.
 - Legal/provenance graph edges such as `restates`, `sets`, `implements`, and
@@ -40,8 +40,8 @@ RuleSpec should make machine-authored structure explicit:
 The Rust loader now compiles RuleSpec directly as the external format. Remaining
 schema/runtime gaps are explicit:
 
-- `derived_relation` is rejected until relation outputs are modelled in
-  `ProgramSpec`.
+- `derived_relation` lowers into `ProgramSpec` and executes in explain mode.
+  Bulk fast and dense execution still need derived-relation support.
 - `source_relation` records are validated as provenance metadata and ignored
   during runtime lowering; the harness/compiler should consume them when
   resolving imports, amendments, and upstream-first checks.
@@ -62,5 +62,5 @@ The Rust tests cover:
   relation counts, derived judgment references, and `not`.
 - Acceptance of non-executable `source_relation` records and rejection of legacy
   `reiteration` and top-level RuleSpec `relations:`.
-- Rejection of `derived_relation` until relation outputs are modelled.
+- Lowering and explain-mode execution of `derived_relation`.
 - Rejection of ambiguous YAML with `rules:` but no RuleSpec discriminator.

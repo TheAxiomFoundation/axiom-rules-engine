@@ -287,6 +287,9 @@ pub struct RelationDerivation {
     pub source_relation: String,
     pub current_slot: usize,
     pub related_slot: usize,
+    pub entity: Option<String>,
+    pub member_relation: Option<String>,
+    pub slot_entities: Vec<String>,
     pub predicate: JudgmentExpr,
 }
 

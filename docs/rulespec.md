@@ -57,6 +57,9 @@ Supported rule kinds in the current Rust loader:
 - `data_relation`: executable runtime predicate declarations with
   `data_relation.arity`. Dataset relation records use durable ids such as
   `us:statutes/7/2012/j#relation.member_of_household`.
+- `derived_relation`: executable runtime predicates computed by filtering a
+  source relation with a judgment formula. This supports filtered membership
+  sets such as SNAP units, MAGI households, and qualifying-child sets.
 - `source_relation`: non-executable legal/provenance edges. It must declare
   `source_relation.type` and `source_relation.target` and is ignored during
   lowering into `ProgramSpec`.
@@ -79,6 +82,59 @@ rules:
     data_relation:
       arity: 2
 ```
+
+Derived relations are rule-defined views over data relations or other derived
+relations. The source relation supplies candidate tuples; the formula decides
+which candidate tuples remain in the filtered relation.
+
+```yaml
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn and not student_ineligible
+
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and snap_member_eligible
+
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+```
+
+In this example, `member_of_household` is supplied by the dataset. `snap_unit`
+is computed at runtime by keeping only household members whose
+`snap_member_eligible` judgment holds. Rules scoped to `entity: SnapUnit` use
+the `member_relation` alias (`members` above) to aggregate over the filtered
+members. The runtime id for the filtered entity is the source relation's current
+entity id, so a SNAP unit backed by `household-1` is queried with
+`entity_id: household-1`.
+
+Derived relations currently execute in explain mode. Bulk fast mode and the
+generic dense compiler explicitly fall back or reject derived relations until
+those execution paths can compute filtered membership without changing
+semantics.
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Relative imports resolve from the current
@@ -208,13 +264,12 @@ rules:
 
 Known hard gaps:
 
-- `derived_relation` is represented in the schema direction but intentionally
-  rejected until relation outputs are modelled in `ProgramSpec`.
 - Formula strings are parsed by the internal `crate::formula` parser and
   normalised into `ProgramSpec`.
 - Current formula-string gaps include latest-only derived temporal formulas,
-  inferred relation slot orientation, and no relation-output rules. These should
-  be closed in RuleSpec and `ProgramSpec`, not by adding another source format.
+  inferred relation slot orientation, and no fast/dense support for derived
+  relations. These should be closed in RuleSpec and `ProgramSpec`, not by adding
+  another source format.
 
 ## Why This Instead Of Direct `ProgramSpec` YAML
 
