@@ -41,10 +41,13 @@ The Rust loader now compiles RuleSpec directly as the external format. Remaining
 schema/runtime gaps are explicit:
 
 - `derived_relation` lowers into `ProgramSpec` and executes in explain mode,
-  bulk fast mode, and the generic dense compiler for related-input predicates.
+  bulk fast mode, and the generic dense compiler for related-input predicates,
+  current/root predicates, and composed derived-relation source chains.
 - `source_relation` records are validated as provenance metadata and ignored
   during runtime lowering; the harness/compiler should consume them when
   resolving imports, amendments, and upstream-first checks.
+- Downstream jurisdiction repos still need their own migrations to replace
+  SNAP approximations with filtered-entity RuleSpec.
 - Formula strings currently support the implemented scalar/judgment expression
   subset, not arbitrary legal operators.
 - Relation slot orientation is still inferred in some expression forms and

@@ -565,7 +565,13 @@ impl<'a> BulkEvaluator<'a> {
                         };
                         if let Some(predicate) = where_clause {
                             if !self
-                                .eval_related_judgment_expr(predicate, &current_id, related_id)?
+                                .eval_related_judgment_expr(
+                                    predicate,
+                                    &current_id,
+                                    related_id,
+                                    None,
+                                    None,
+                                )?
                                 .is_holds()
                             {
                                 continue;
@@ -602,6 +608,8 @@ impl<'a> BulkEvaluator<'a> {
                                             predicate,
                                             &current_id,
                                             &related_id,
+                                            None,
+                                            None,
                                         )?
                                         .is_holds()
                                     {
@@ -733,8 +741,22 @@ impl<'a> BulkEvaluator<'a> {
                 let Some(related_id) = tuple.get(derivation.related_slot) else {
                     continue;
                 };
+                let current_entity = derivation
+                    .slot_entities
+                    .get(derivation.current_slot)
+                    .map(String::as_str);
+                let related_entity = derivation
+                    .slot_entities
+                    .get(derivation.related_slot)
+                    .map(String::as_str);
                 if self
-                    .eval_related_judgment_expr(&derivation.predicate, &current_id, related_id)?
+                    .eval_related_judgment_expr(
+                        &derivation.predicate,
+                        &current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
                     .is_holds()
                 {
                     rows.push(tuple);
@@ -752,11 +774,25 @@ impl<'a> BulkEvaluator<'a> {
         expr: &JudgmentExpr,
         current_id: &str,
         related_id: &str,
+        current_entity: Option<&str>,
+        related_entity: Option<&str>,
     ) -> Result<JudgmentOutcome, EvalError> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
-                let left = self.eval_related_scalar_expr(left, current_id, related_id)?;
-                let right = self.eval_related_scalar_expr(right, current_id, related_id)?;
+                let left = self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?;
+                let right = self.eval_related_scalar_expr(
+                    right,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?;
                 Ok(if compare_scalar_values_for_bulk(&left, *op, &right)? {
                     JudgmentOutcome::Holds
                 } else {
@@ -765,9 +801,20 @@ impl<'a> BulkEvaluator<'a> {
             }
             JudgmentExpr::Derived(name) => {
                 let derived = self.get_derived(name)?.clone();
+                let target_id = if Some(derived.entity.as_str()) == current_entity {
+                    current_id
+                } else {
+                    related_id
+                };
                 match &derived.semantics {
                     DerivedSemantics::Judgment(expr) => {
-                        self.eval_related_judgment_expr(expr, current_id, related_id)
+                        self.eval_related_judgment_expr(
+                            expr,
+                            current_id,
+                            target_id,
+                            current_entity,
+                            related_entity,
+                        )
                     }
                     DerivedSemantics::Scalar(_) => Err(EvalError::ExpectedJudgment(name.clone())),
                 }
@@ -790,7 +837,13 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_related_judgment_expr(item, current_id, related_id)? {
+                    match self.eval_related_judgment_expr(
+                        item,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )? {
                         JudgmentOutcome::Holds => {}
                         JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -805,7 +858,13 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::Or(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_related_judgment_expr(item, current_id, related_id)? {
+                    match self.eval_related_judgment_expr(
+                        item,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )? {
                         JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
                         JudgmentOutcome::NotHolds => {}
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -818,13 +877,17 @@ impl<'a> BulkEvaluator<'a> {
                 })
             }
             JudgmentExpr::Not(item) => {
-                Ok(
-                    match self.eval_related_judgment_expr(item, current_id, related_id)? {
+                Ok(match self.eval_related_judgment_expr(
+                    item,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )? {
                         JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
                         JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
                         JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                    },
-                )
+                    })
             }
         }
     }
@@ -834,6 +897,8 @@ impl<'a> BulkEvaluator<'a> {
         expr: &ScalarExpr,
         current_id: &str,
         related_id: &str,
+        current_entity: Option<&str>,
+        related_entity: Option<&str>,
     ) -> Result<ScalarValue, EvalError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(value.clone()),
@@ -847,10 +912,21 @@ impl<'a> BulkEvaluator<'a> {
             }
             ScalarExpr::Derived(name) => {
                 let derived = self.get_derived(name)?.clone();
+                let target_id = if Some(derived.entity.as_str()) == current_entity {
+                    current_id
+                } else if Some(derived.entity.as_str()) == related_entity {
+                    related_id
+                } else {
+                    related_id
+                };
                 match &derived.semantics {
-                    DerivedSemantics::Scalar(expr) => {
-                        self.eval_related_scalar_expr(expr, current_id, related_id)
-                    }
+                    DerivedSemantics::Scalar(expr) => self.eval_related_scalar_expr(
+                        expr,
+                        current_id,
+                        target_id,
+                        current_entity,
+                        related_entity,
+                    ),
                     DerivedSemantics::Judgment(_) => Err(EvalError::ExpectedScalar(name.clone())),
                 }
             }
@@ -858,40 +934,82 @@ impl<'a> BulkEvaluator<'a> {
                 let mut total = Decimal::ZERO;
                 for item in items {
                     total += self
-                        .eval_related_scalar_expr(item, current_id, related_id)?
+                        .eval_related_scalar_expr(
+                            item,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
                         .as_decimal()
                         .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
             ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(left, current_id, related_id)?
+                self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
                     .as_decimal()
                     .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     - self
-                        .eval_related_scalar_expr(right, current_id, related_id)?
+                        .eval_related_scalar_expr(
+                            right,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
                         .as_decimal()
                         .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
             )),
             ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(left, current_id, related_id)?
+                self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
                     .as_decimal()
                     .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     * self
-                        .eval_related_scalar_expr(right, current_id, related_id)?
+                        .eval_related_scalar_expr(
+                            right,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
                         .as_decimal()
                         .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
             )),
             ScalarExpr::Div(left, right) => {
                 let divisor = self
-                    .eval_related_scalar_expr(right, current_id, related_id)?
+                    .eval_related_scalar_expr(
+                        right,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
                     .as_decimal()
                     .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
                 Ok(ScalarValue::Decimal(
-                    self.eval_related_scalar_expr(left, current_id, related_id)?
+                    self.eval_related_scalar_expr(
+                        left,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
                         .as_decimal()
                         .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                         / divisor,
@@ -904,13 +1022,25 @@ impl<'a> BulkEvaluator<'a> {
                 ),
             ),
             ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(value, current_id, related_id)?
+                self.eval_related_scalar_expr(
+                    value,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
                     .as_decimal()
                     .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     .ceil(),
             )),
             ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(value, current_id, related_id)?
+                self.eval_related_scalar_expr(
+                    value,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
                     .as_decimal()
                     .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     .floor(),

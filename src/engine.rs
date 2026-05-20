@@ -52,6 +52,20 @@ struct CacheKey {
 struct RelationEvalContext<'a> {
     current_id: &'a str,
     related_id: &'a str,
+    current_entity: Option<&'a str>,
+    related_entity: Option<&'a str>,
+}
+
+impl<'a> RelationEvalContext<'a> {
+    fn entity_id_for(self, entity: &str) -> Option<&'a str> {
+        if self.current_entity == Some(entity) {
+            return Some(self.current_id);
+        }
+        if self.related_entity == Some(entity) {
+            return Some(self.related_id);
+        }
+        None
+    }
 }
 
 pub struct Engine<'a> {
@@ -425,7 +439,13 @@ impl<'a> Engine<'a> {
                     },
                 )
             }
-            JudgmentExpr::Derived(name) => self.evaluate_judgment(name, entity_id, period),
+            JudgmentExpr::Derived(name) => {
+                let derived = self.get_derived(name)?.clone();
+                let target_entity_id = relation_context
+                    .and_then(|context| context.entity_id_for(&derived.entity))
+                    .unwrap_or(entity_id);
+                self.evaluate_judgment(name, target_entity_id, period)
+            }
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
@@ -610,6 +630,8 @@ impl<'a> Engine<'a> {
                 let context = RelationEvalContext {
                     current_id: entity_id,
                     related_id: &related_id,
+                    current_entity: derivation.slot_entities.get(derivation.current_slot).map(String::as_str),
+                    related_entity: derivation.slot_entities.get(derivation.related_slot).map(String::as_str),
                 };
                 if self
                     .eval_judgment_expr_inner(

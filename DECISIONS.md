@@ -25,12 +25,17 @@ relation alias so rules can be scoped to the filtered view, for example
 **Consequences.**
 
 - `len`, `sum`, `count_where`, and `sum_where` operate over filtered
-  membership in explain mode.
+  membership in explain mode, bulk fast mode, and dense mode for supported
+  predicate shapes.
 - The compiler rejects derived-relation cycles.
-- Bulk fast mode and dense compilation support derived relations when the
-  membership predicate can be evaluated from related inputs and related judgment
-  rules. More complex cross-scope predicates remain explicit fallback/rejection
-  cases until their dependency shapes are supported.
+- Membership predicates can combine related entity rules with current/root
+  entity rules, and a derived relation can use another derived relation as its
+  source.
+- Filtered entity ids are not separately materialized; a filtered entity such as
+  `SnapUnit` is keyed by the source/current entity id, for example
+  `household-1`.
+- Jurisdiction repos must migrate their own SNAP approximations separately; this
+  engine change only provides the runtime feature.
 
 ## 2026-05-04 — Runtime predicates and source relations are separate RuleSpec kinds
 

@@ -132,9 +132,12 @@ entity id, so a SNAP unit backed by `household-1` is queried with
 `entity_id: household-1`.
 
 Derived relations execute in explain mode, bulk fast mode, and the generic dense
-compiler for predicates that can be evaluated from related inputs and related
-judgment rules. More complex cross-scope predicates may still fall back or be
-rejected by optimized execution paths until their dependency shape is supported.
+compiler for predicates that can be evaluated from related inputs, related
+judgment rules, and current/root entity judgment or scalar rules. A
+`source_relation` may also point at another `derived_relation`; the runtime
+applies the parent filter before the child filter. Optimized execution paths may
+still reject membership predicates that aggregate another relation from inside a
+current/root predicate.
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Relative imports resolve from the current
