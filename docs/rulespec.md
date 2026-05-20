@@ -112,7 +112,7 @@ rules:
       slot_entities: [Person, Household]
     versions:
       - effective_from: 2026-01-01
-        formula: member_of_household and snap_member_eligible
+        formula: snap_member_eligible
 
   - name: snap_unit_size
     kind: derived
