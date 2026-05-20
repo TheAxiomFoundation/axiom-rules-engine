@@ -48,6 +48,12 @@ struct CacheKey {
     period: Period,
 }
 
+#[derive(Clone, Copy)]
+struct RelationEvalContext<'a> {
+    current_id: &'a str,
+    related_id: &'a str,
+}
+
 pub struct Engine<'a> {
     program: &'a Program,
     input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>>,
@@ -397,6 +403,16 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Result<JudgmentOutcome, EvalError> {
+        self.eval_judgment_expr_inner(expr, entity_id, period, None)
+    }
+
+    fn eval_judgment_expr_inner(
+        &mut self,
+        expr: &JudgmentExpr,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Result<JudgmentOutcome, EvalError> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
                 let left_value = self.eval_scalar_expr(left, entity_id, period)?;
@@ -410,10 +426,35 @@ impl<'a> Engine<'a> {
                 )
             }
             JudgmentExpr::Derived(name) => self.evaluate_judgment(name, entity_id, period),
+            JudgmentExpr::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } => {
+                let context = relation_context.ok_or_else(|| {
+                    EvalError::TypeMismatch(format!(
+                        "relation predicate `{relation}` can only be evaluated inside a derived relation"
+                    ))
+                })?;
+                Ok(
+                    if self.relation_contains(
+                        relation,
+                        *current_slot,
+                        *related_slot,
+                        context.current_id,
+                        context.related_id,
+                        period,
+                    )? {
+                        JudgmentOutcome::Holds
+                    } else {
+                        JudgmentOutcome::NotHolds
+                    },
+                )
+            }
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr(item, entity_id, period)? {
+                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
                         JudgmentOutcome::Holds => {}
                         JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -428,7 +469,7 @@ impl<'a> Engine<'a> {
             JudgmentExpr::Or(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr(item, entity_id, period)? {
+                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
                         JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
                         JudgmentOutcome::NotHolds => {}
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -441,7 +482,7 @@ impl<'a> Engine<'a> {
                 })
             }
             JudgmentExpr::Not(item) => {
-                Ok(match self.eval_judgment_expr(item, entity_id, period)? {
+                Ok(match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
                     JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
                     JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
                     JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
@@ -529,7 +570,7 @@ impl<'a> Engine<'a> {
     }
 
     fn related_entity_ids(
-        &self,
+        &mut self,
         relation: &str,
         current_slot: usize,
         related_slot: usize,
@@ -548,14 +589,61 @@ impl<'a> Engine<'a> {
             )));
         }
 
-        Ok(self
+        let mut related_ids = self
             .relation_index
             .get(&(relation.to_string(), current_slot, entity_id.to_string()))
             .into_iter()
             .flat_map(|records| records.iter().copied())
             .filter(|record| record.interval.contains_period(period))
             .filter_map(|record| record.tuple.get(related_slot).cloned())
-            .collect())
+            .collect::<Vec<String>>();
+
+        if let Some(derivation) = schema.derivation.clone() {
+            let mut derived_ids = Vec::new();
+            for related_id in self.related_entity_ids(
+                &derivation.source_relation,
+                derivation.current_slot,
+                derivation.related_slot,
+                entity_id,
+                period,
+            )? {
+                let context = RelationEvalContext {
+                    current_id: entity_id,
+                    related_id: &related_id,
+                };
+                if self
+                    .eval_judgment_expr_inner(
+                        &derivation.predicate,
+                        &related_id,
+                        period,
+                        Some(context),
+                    )?
+                    .is_holds()
+                {
+                    derived_ids.push(related_id);
+                }
+            }
+            related_ids.extend(derived_ids);
+        }
+
+        related_ids.sort();
+        related_ids.dedup();
+        Ok(related_ids)
+    }
+
+    fn relation_contains(
+        &mut self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        current_id: &str,
+        related_id: &str,
+        period: &Period,
+    ) -> Result<bool, EvalError> {
+        Ok(self
+            .related_entity_ids(relation, current_slot, related_slot, current_id, period)?
+            .iter()
+            .any(|candidate| candidate == related_id))
     }
 
     fn compare_scalar_values(

@@ -284,6 +284,16 @@ impl DenseCompiledProgram {
         program: &Program,
         entity: Option<&str>,
     ) -> Result<Self, DenseCompileError> {
+        if let Some(relation) = program
+            .relations
+            .values()
+            .find(|relation| relation.derivation.is_some())
+        {
+            return Err(DenseCompileError::Unsupported(format!(
+                "derived relation `{}`",
+                relation.name
+            )));
+        }
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
             None => {
@@ -733,6 +743,11 @@ impl<'a> DenseCompiler<'a> {
                 }
                 Ok(CompiledJudgmentExpr::Derived(self.compile_derived(name)?))
             }
+            JudgmentExpr::RelationMember { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "relation predicate `{relation}`"
+                )))
+            }
             JudgmentExpr::And(items) => Ok(CompiledJudgmentExpr::And(
                 items
                     .iter()
@@ -767,6 +782,11 @@ impl<'a> DenseCompiler<'a> {
             JudgmentExpr::Derived(name) => Err(DenseCompileError::Unsupported(format!(
                 "where-clause predicates cannot yet reference derived values (`{name}`)"
             ))),
+            JudgmentExpr::RelationMember { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "where-clause predicates cannot yet reference relation membership (`{relation}`)"
+                )))
+            }
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
                     .iter()

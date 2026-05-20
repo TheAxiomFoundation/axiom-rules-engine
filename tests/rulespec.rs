@@ -1633,22 +1633,61 @@ rules:
 }
 
 #[test]
-fn rulespec_rejects_derived_relations_until_relation_outputs_are_modelled() {
-    let err = lower_rulespec_str(
+fn rulespec_lowers_derived_relations_as_filtered_runtime_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
         r#"
 format: rulespec/v1
 rules:
-  - name: eligible_member_of_household
-    kind: derived_relation
-    arity: 2
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
     versions:
       - effective_from: 2025-01-01
-        formula: member_of_household
+        formula: has_ssn and not student_ineligible
+  - name: eligible_member_of_household
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: 2025-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(eligible_member_of_household)
 "#,
     )
-    .expect_err("derived_relation is intentionally not supported yet");
+    .expect("derived relation RuleSpec compiles");
 
-    assert!(matches!(err, RuleSpecError::UnsupportedRuleKind { .. }));
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "eligible_member_of_household")
+        .expect("derived relation emitted");
+    assert!(relation.derivation.is_some());
+    let member_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_member_eligible")
+        .expect("member predicate is ordered");
+    let unit_size_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_unit_size")
+        .expect("filtered relation consumer is ordered");
+    assert!(member_order < unit_size_order);
 }
 
 #[test]

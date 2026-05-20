@@ -67,6 +67,15 @@ pub fn try_execute(
     data: &DataSet,
     queries: &[ExecutionQuery],
 ) -> Result<FastPathResult, EvalError> {
+    if program
+        .relations
+        .values()
+        .any(|relation| relation.derivation.is_some())
+    {
+        return Ok(FastPathResult::Unsupported {
+            reason: "fast mode currently does not support derived relations".to_string(),
+        });
+    }
     if queries.is_empty() {
         return Ok(FastPathResult::Executed(empty_response()));
     }
@@ -642,6 +651,9 @@ impl<'a> BulkEvaluator<'a> {
                 compare_columns(left, *op, right)
             }
             JudgmentExpr::Derived(name) => Ok(self.evaluate_judgment(name)?.clone()),
+            JudgmentExpr::RelationMember { relation, .. } => Err(EvalError::TypeMismatch(
+                format!("fast mode cannot evaluate relation predicate `{relation}`"),
+            )),
             JudgmentExpr::And(items) => {
                 let mut results = vec![JudgmentOutcome::Holds; self.entity_ids.len()];
                 for item in items {

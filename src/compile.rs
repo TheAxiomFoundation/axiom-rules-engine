@@ -159,12 +159,13 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
             });
         }
     }
+    let relation_dependencies = relation_derivation_dependencies(program, &derived_names)?;
 
     let mut incoming_counts = HashMap::new();
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
 
     for derived in &program.derived {
-        let dependencies = derived_dependencies(derived);
+        let dependencies = derived_dependencies(derived, &relation_dependencies);
         incoming_counts.insert(derived.name.clone(), dependencies.len());
 
         for dependency in dependencies {
@@ -219,6 +220,14 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
 
 fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
     let mut blockers = Vec::new();
+    for relation in &program.relations {
+        if relation.derivation.is_some() {
+            blockers.push(format!(
+                "{}: bulk fast mode does not yet support derived relations; explain mode does",
+                relation.name
+            ));
+        }
+    }
     for derived in &program.derived {
         collect_fast_blockers_from_semantics(&derived.name, &derived.semantics, &mut blockers);
     }
@@ -338,7 +347,7 @@ fn collect_fast_blockers_from_judgment_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, left, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, right, blockers);
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
             for item in items {
                 collect_fast_blockers_from_judgment_expr(derived_name, item, blockers);
@@ -350,70 +359,112 @@ fn collect_fast_blockers_from_judgment_expr(
     }
 }
 
-fn derived_dependencies(derived: &crate::spec::DerivedSpec) -> HashSet<String> {
+fn relation_derivation_dependencies(
+    program: &ProgramSpec,
+    derived_names: &HashSet<String>,
+) -> Result<HashMap<String, HashSet<String>>, CompileError> {
+    let mut dependencies_by_relation = HashMap::new();
+    for relation in &program.relations {
+        let Some(derivation) = &relation.derivation else {
+            continue;
+        };
+        let mut dependencies = HashSet::new();
+        collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
+        for dependency in &dependencies {
+            if !derived_names.contains(dependency) {
+                return Err(CompileError::UnknownDerivedDependency {
+                    derived: relation.name.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        dependencies_by_relation.insert(relation.name.clone(), dependencies);
+    }
+    Ok(dependencies_by_relation)
+}
+
+fn derived_dependencies(
+    derived: &crate::spec::DerivedSpec,
+    relation_dependencies: &HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
     let mut dependencies = HashSet::new();
     match &derived.semantics {
         DerivedSemanticsSpec::Scalar { expr } => {
-            collect_scalar_dependencies(expr, &mut dependencies);
+            collect_scalar_dependencies(expr, &mut dependencies, relation_dependencies);
         }
         DerivedSemanticsSpec::Judgment { expr } => {
-            collect_judgment_dependencies(expr, &mut dependencies);
+            collect_judgment_dependencies(expr, &mut dependencies, relation_dependencies);
         }
     }
     dependencies
 }
 
-fn collect_scalar_dependencies(expr: &ScalarExprSpec, dependencies: &mut HashSet<String>) {
+fn collect_scalar_dependencies(
+    expr: &ScalarExprSpec,
+    dependencies: &mut HashSet<String>,
+    relation_dependencies: &HashMap<String, HashSet<String>>,
+) {
     match expr {
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
-        ScalarExprSpec::CountRelated { where_clause, .. } => {
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
             if let Some(predicate) = where_clause {
-                collect_judgment_dependencies(predicate, dependencies);
+                collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
             }
         }
         ScalarExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
         }
         ScalarExprSpec::ParameterLookup { index, .. } => {
-            collect_scalar_dependencies(index, dependencies);
+            collect_scalar_dependencies(index, dependencies, relation_dependencies);
         }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Max { items }
         | ScalarExprSpec::Min { items } => {
             for item in items {
-                collect_scalar_dependencies(item, dependencies);
+                collect_scalar_dependencies(item, dependencies, relation_dependencies);
             }
         }
         ScalarExprSpec::Sub { left, right }
         | ScalarExprSpec::Mul { left, right }
         | ScalarExprSpec::Div { left, right } => {
-            collect_scalar_dependencies(left, dependencies);
-            collect_scalar_dependencies(right, dependencies);
+            collect_scalar_dependencies(left, dependencies, relation_dependencies);
+            collect_scalar_dependencies(right, dependencies, relation_dependencies);
         }
         ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
-            collect_scalar_dependencies(value, dependencies);
+            collect_scalar_dependencies(value, dependencies, relation_dependencies);
         }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::DateAddDays { date, days } => {
-            collect_scalar_dependencies(date, dependencies);
-            collect_scalar_dependencies(days, dependencies);
+            collect_scalar_dependencies(date, dependencies, relation_dependencies);
+            collect_scalar_dependencies(days, dependencies, relation_dependencies);
         }
         ScalarExprSpec::DaysBetween { from, to } => {
-            collect_scalar_dependencies(from, dependencies);
-            collect_scalar_dependencies(to, dependencies);
+            collect_scalar_dependencies(from, dependencies, relation_dependencies);
+            collect_scalar_dependencies(to, dependencies, relation_dependencies);
         }
         ScalarExprSpec::SumRelated {
             value,
+            relation,
             where_clause,
             ..
         } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
             if let RelatedValueRefSpec::Derived { name } = value {
                 dependencies.insert(name.clone());
             }
             if let Some(predicate) = where_clause {
-                collect_judgment_dependencies(predicate, dependencies);
+                collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
             }
         }
         ScalarExprSpec::If {
@@ -421,29 +472,34 @@ fn collect_scalar_dependencies(expr: &ScalarExprSpec, dependencies: &mut HashSet
             then_expr,
             else_expr,
         } => {
-            collect_judgment_dependencies(condition, dependencies);
-            collect_scalar_dependencies(then_expr, dependencies);
-            collect_scalar_dependencies(else_expr, dependencies);
+            collect_judgment_dependencies(condition, dependencies, relation_dependencies);
+            collect_scalar_dependencies(then_expr, dependencies, relation_dependencies);
+            collect_scalar_dependencies(else_expr, dependencies, relation_dependencies);
         }
     }
 }
 
-fn collect_judgment_dependencies(expr: &JudgmentExprSpec, dependencies: &mut HashSet<String>) {
+fn collect_judgment_dependencies(
+    expr: &JudgmentExprSpec,
+    dependencies: &mut HashSet<String>,
+    relation_dependencies: &HashMap<String, HashSet<String>>,
+) {
     match expr {
         JudgmentExprSpec::Comparison { left, right, .. } => {
-            collect_scalar_dependencies(left, dependencies);
-            collect_scalar_dependencies(right, dependencies);
+            collect_scalar_dependencies(left, dependencies, relation_dependencies);
+            collect_scalar_dependencies(right, dependencies, relation_dependencies);
         }
         JudgmentExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
         }
+        JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
             for item in items {
-                collect_judgment_dependencies(item, dependencies);
+                collect_judgment_dependencies(item, dependencies, relation_dependencies);
             }
         }
         JudgmentExprSpec::Not { item } => {
-            collect_judgment_dependencies(item, dependencies);
+            collect_judgment_dependencies(item, dependencies, relation_dependencies);
         }
     }
 }

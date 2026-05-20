@@ -247,6 +247,11 @@ pub enum JudgmentExpr {
         right: ScalarExpr,
     },
     Derived(String),
+    RelationMember {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+    },
     And(Vec<JudgmentExpr>),
     Or(Vec<JudgmentExpr>),
     Not(Box<JudgmentExpr>),
@@ -274,6 +279,15 @@ pub struct Derived {
 pub struct RelationSchema {
     pub name: String,
     pub arity: usize,
+    pub derivation: Option<RelationDerivation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RelationDerivation {
+    pub source_relation: String,
+    pub current_slot: usize,
+    pub related_slot: usize,
+    pub predicate: JudgmentExpr,
 }
 
 #[derive(Clone, Debug)]
@@ -305,9 +319,16 @@ impl Program {
     }
 
     pub fn add_relation(&mut self, name: impl Into<String>, arity: usize) {
-        let name = name.into();
-        self.relations
-            .insert(name.clone(), RelationSchema { name, arity });
+        self.add_relation_schema(RelationSchema {
+            name: name.into(),
+            arity,
+            derivation: None,
+        });
+    }
+
+    pub fn add_relation_schema(&mut self, schema: RelationSchema) {
+        let name = schema.name.clone();
+        self.relations.insert(name, schema);
     }
 
     pub fn add_parameter(&mut self, parameter: IndexedParameter) {
@@ -517,7 +538,7 @@ fn collect_input_slots_from_judgment_expr<'a>(
             collect_input_slots_from_scalar_expr(left, slots);
             collect_input_slots_from_scalar_expr(right, slots);
         }
-        JudgmentExpr::Derived(_) => {}
+        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_input_slots_from_judgment_expr(item, slots);
