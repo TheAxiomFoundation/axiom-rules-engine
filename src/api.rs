@@ -386,6 +386,7 @@ fn collect_judgment_deps(
         JudgmentExpr::Derived(name) => {
             deps.insert(name.clone());
         }
+        JudgmentExpr::RelationMember { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_deps(item, deps);

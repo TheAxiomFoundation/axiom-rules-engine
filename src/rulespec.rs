@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::spec::{
     DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
+    ProgramSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -46,6 +46,14 @@ pub enum RuleSpecError {
     TopLevelArityUnsupported { name: String },
     #[error("RuleSpec data relation `{name}` must declare data_relation.arity")]
     MissingDataRelationArity { name: String },
+    #[error("RuleSpec derived relation `{name}` must declare derived_relation")]
+    MissingDerivedRelation { name: String },
+    #[error("RuleSpec derived relation `{name}` must declare derived_relation.arity")]
+    MissingDerivedRelationArity { name: String },
+    #[error("RuleSpec derived relation `{name}` must declare derived_relation.source_relation")]
+    MissingDerivedRelationSource { name: String },
+    #[error("RuleSpec derived relation `{name}` must declare exactly one membership formula version")]
+    InvalidDerivedRelationFormulaVersions { name: String },
     #[error("RuleSpec source relation `{name}` must declare source_relation")]
     MissingSourceRelation { name: String },
     #[error("RuleSpec source relation `{name}` must declare source_relation.type")]
@@ -121,6 +129,7 @@ pub enum RuleKind {
     Parameter,
     Derived,
     DataRelation,
+    DerivedRelation,
     SourceRelation,
     Unsupported(String),
 }
@@ -135,6 +144,7 @@ impl<'de> Deserialize<'de> for RuleKind {
             "parameter" => Self::Parameter,
             "derived" => Self::Derived,
             "data_relation" => Self::DataRelation,
+            "derived_relation" => Self::DerivedRelation,
             "source_relation" => Self::SourceRelation,
             _ => Self::Unsupported(value),
         })
@@ -157,6 +167,24 @@ pub struct SourceRef {
 pub struct DataRelationRef {
     #[serde(default)]
     pub arity: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct DerivedRelationRef {
+    #[serde(default)]
+    pub arity: Option<usize>,
+    #[serde(default, alias = "source")]
+    pub source_relation: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub entity: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_like")]
+    pub member_relation: Option<String>,
+    #[serde(default)]
+    pub slot_entities: Vec<String>,
+    #[serde(default)]
+    pub current_slot: Option<usize>,
+    #[serde(default)]
+    pub related_slot: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -250,6 +278,8 @@ pub struct RuleDefinition {
     pub sources: Vec<SourceRef>,
     #[serde(default)]
     pub data_relation: Option<DataRelationRef>,
+    #[serde(default)]
+    pub derived_relation: Option<DerivedRelationRef>,
     #[serde(default)]
     pub source_relation: Option<SourceRelationRef>,
     #[serde(default)]
@@ -586,6 +616,24 @@ impl RulesDocument {
         let mut relation_rewrites = HashMap::new();
         let mut table_parameters = Vec::new();
         let mut table_parameter_names = HashSet::new();
+        let derived_rule_names = self
+            .rules
+            .iter()
+            .filter_map(|rule| match rule.kind.as_ref() {
+                Some(RuleKind::Derived) => Some(rule.name.clone()),
+                _ => None,
+            })
+            .collect::<HashSet<String>>();
+        let relation_predicate_names = self
+            .rules
+            .iter()
+            .filter_map(|rule| match rule.kind.as_ref() {
+                Some(RuleKind::DataRelation | RuleKind::DerivedRelation) => {
+                    Some(rule.name.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<String>>();
         for rule in &self.rules {
             let kind = match rule.declared_kind() {
                 Ok(kind) => kind,
@@ -626,6 +674,20 @@ impl RulesDocument {
                     }
                     explicit_relations.push(relation);
                 }
+                RuleKind::DerivedRelation => {
+                    rule.reject_top_level_arity()?;
+                    let relation = rule
+                        .to_derived_relation_spec(&derived_rule_names, &relation_predicate_names)?;
+                    if relation.name != rule.name {
+                        if let Some(origin_target) = rule.origin_target.as_deref() {
+                            relation_rewrites.insert(
+                                (origin_target.to_string(), rule.name.clone()),
+                                relation.name.clone(),
+                            );
+                        }
+                    }
+                    explicit_relations.push(relation);
+                }
                 RuleKind::SourceRelation => {
                     rule.reject_top_level_arity()?;
                     rule.validate_source_relation()?;
@@ -648,6 +710,7 @@ impl RulesDocument {
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
+        rewrite_filtered_entity_member_aliases(&mut program);
         Ok(program)
     }
 
@@ -801,6 +864,69 @@ impl RuleDefinition {
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
+            derivation: None,
+        })
+    }
+
+    fn to_derived_relation_spec(
+        &self,
+        derived_names: &HashSet<String>,
+        relation_predicate_names: &HashSet<String>,
+    ) -> Result<RelationSpec, RuleSpecError> {
+        let derived_relation =
+            self.derived_relation
+                .as_ref()
+                .ok_or_else(|| RuleSpecError::MissingDerivedRelation {
+                    name: self.name.clone(),
+                })?;
+        let arity =
+            derived_relation
+                .arity
+                .ok_or_else(|| RuleSpecError::MissingDerivedRelationArity {
+                    name: self.name.clone(),
+                })?;
+        let source_relation = derived_relation
+            .source_relation
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .ok_or_else(|| RuleSpecError::MissingDerivedRelationSource {
+                name: self.name.clone(),
+            })?
+            .to_string();
+        let versions = self.effective_versions();
+        if versions.len() != 1 {
+            return Err(RuleSpecError::InvalidDerivedRelationFormulaVersions {
+                name: self.name.clone(),
+            });
+        }
+        let formula = versions[0]
+            .formula
+            .as_deref()
+            .map(str::trim)
+            .filter(|formula| !formula.is_empty())
+            .ok_or_else(|| RuleSpecError::MissingFormula {
+                name: self.name.clone(),
+            })?;
+        let predicate = crate::formula::lower_judgment_formula(
+            formula,
+            derived_names.clone(),
+            relation_predicate_names.clone(),
+        )?;
+        let (inferred_current_slot, inferred_related_slot) =
+            crate::formula::infer_relation_slots_for_rulespec(source_relation.as_str());
+        Ok(RelationSpec {
+            name: self.canonical_relation_id(),
+            arity,
+            derivation: Some(RelationDerivationSpec {
+                source_relation,
+                current_slot: derived_relation.current_slot.unwrap_or(inferred_current_slot),
+                related_slot: derived_relation.related_slot.unwrap_or(inferred_related_slot),
+                entity: derived_relation.entity.clone(),
+                member_relation: derived_relation.member_relation.clone(),
+                slot_entities: derived_relation.slot_entities.clone(),
+                predicate,
+            }),
         })
     }
 
@@ -1058,7 +1184,7 @@ fn append_missing_relations(
     for relation in relations {
         if let Some(existing) = program
             .relations
-            .iter()
+            .iter_mut()
             .find(|existing| existing.name == relation.name)
         {
             if existing.arity != relation.arity {
@@ -1068,11 +1194,154 @@ fn append_missing_relations(
                     new: relation.arity,
                 });
             }
+            if existing.derivation.is_none() && relation.derivation.is_some() {
+                existing.derivation = relation.derivation.clone();
+            }
             continue;
         }
         program.relations.push(relation.clone());
     }
     Ok(())
+}
+
+fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
+    let aliases = program
+        .relations
+        .iter()
+        .filter_map(|relation| {
+            let derivation = relation.derivation.as_ref()?;
+            Some((
+                derivation.entity.as_ref()?.clone(),
+                derivation.member_relation.as_ref()?.clone(),
+                relation.name.clone(),
+            ))
+        })
+        .collect::<Vec<(String, String, String)>>();
+    if aliases.is_empty() {
+        return;
+    }
+
+    for derived in &mut program.derived {
+        for (entity, alias, relation_name) in &aliases {
+            if &derived.entity != entity {
+                continue;
+            }
+            match &mut derived.semantics {
+                DerivedSemanticsSpec::Scalar { expr } => {
+                    rewrite_relation_alias_in_scalar(expr, alias, relation_name);
+                }
+                DerivedSemanticsSpec::Judgment { expr } => {
+                    rewrite_relation_alias_in_judgment(expr, alias, relation_name);
+                }
+            }
+        }
+    }
+
+    let alias_names = aliases
+        .into_iter()
+        .map(|(_, alias, _)| alias)
+        .collect::<HashSet<String>>();
+    let used_relations = used_relation_names(program);
+    program
+        .relations
+        .retain(|relation| !alias_names.contains(&relation.name) || used_relations.contains(&relation.name));
+}
+
+fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, relation_name: &str) {
+    match expr {
+        ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::Input { .. }
+        | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::PeriodStart
+        | ScalarExprSpec::PeriodEnd => {}
+        ScalarExprSpec::InputOrElse { default: _, .. } => {}
+        ScalarExprSpec::ParameterLookup { index, .. }
+        | ScalarExprSpec::Ceil { value: index }
+        | ScalarExprSpec::Floor { value: index } => {
+            rewrite_relation_alias_in_scalar(index, alias, relation_name);
+        }
+        ScalarExprSpec::Add { items }
+        | ScalarExprSpec::Max { items }
+        | ScalarExprSpec::Min { items } => {
+            for item in items {
+                rewrite_relation_alias_in_scalar(item, alias, relation_name);
+            }
+        }
+        ScalarExprSpec::Sub { left, right }
+        | ScalarExprSpec::Mul { left, right }
+        | ScalarExprSpec::Div { left, right } => {
+            rewrite_relation_alias_in_scalar(left, alias, relation_name);
+            rewrite_relation_alias_in_scalar(right, alias, relation_name);
+        }
+        ScalarExprSpec::DateAddDays { date, days } => {
+            rewrite_relation_alias_in_scalar(date, alias, relation_name);
+            rewrite_relation_alias_in_scalar(days, alias, relation_name);
+        }
+        ScalarExprSpec::DaysBetween { from, to } => {
+            rewrite_relation_alias_in_scalar(from, alias, relation_name);
+            rewrite_relation_alias_in_scalar(to, alias, relation_name);
+        }
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+            if let Some(where_clause) = where_clause {
+                rewrite_relation_alias_in_judgment(where_clause, alias, relation_name);
+            }
+        }
+        ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+            if let Some(where_clause) = where_clause {
+                rewrite_relation_alias_in_judgment(where_clause, alias, relation_name);
+            }
+        }
+        ScalarExprSpec::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_relation_alias_in_judgment(condition, alias, relation_name);
+            rewrite_relation_alias_in_scalar(then_expr, alias, relation_name);
+            rewrite_relation_alias_in_scalar(else_expr, alias, relation_name);
+        }
+    }
+}
+
+fn rewrite_relation_alias_in_judgment(
+    expr: &mut JudgmentExprSpec,
+    alias: &str,
+    relation_name: &str,
+) {
+    match expr {
+        JudgmentExprSpec::Comparison { left, right, .. } => {
+            rewrite_relation_alias_in_scalar(left, alias, relation_name);
+            rewrite_relation_alias_in_scalar(right, alias, relation_name);
+        }
+        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+        }
+        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+            for item in items {
+                rewrite_relation_alias_in_judgment(item, alias, relation_name);
+            }
+        }
+        JudgmentExprSpec::Not { item } => {
+            rewrite_relation_alias_in_judgment(item, alias, relation_name);
+        }
+    }
 }
 
 fn rewrite_relation_references(
@@ -1128,6 +1397,19 @@ fn rewrite_relation_references(
             }
         }
     }
+    for relation in &mut program.relations {
+        let Some(origin_target) = relation
+            .name
+            .split_once("#relation.")
+            .map(|(target, _)| target)
+        else {
+            continue;
+        };
+        if let Some(derivation) = &mut relation.derivation {
+            rewrite_relation_name(&mut derivation.source_relation, origin_target, rewrites);
+            rewrite_judgment_relation_references(&mut derivation.predicate, origin_target, rewrites);
+        }
+    }
     let used_relations = used_relation_names(program);
     program.relations.retain(|relation| {
         !namespaced_short_names.contains(&relation.name) || used_relations.contains(&relation.name)
@@ -1145,6 +1427,12 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
             DerivedSemanticsSpec::Judgment { expr } => {
                 collect_judgment_relation_names(expr, &mut names);
             }
+        }
+    }
+    for relation in &program.relations {
+        if let Some(derivation) = &relation.derivation {
+            names.insert(derivation.source_relation.clone());
+            collect_judgment_relation_names(&derivation.predicate, &mut names);
         }
     }
     names
@@ -1219,6 +1507,9 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
 fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<String>) {
     match expr {
         JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            names.insert(relation.clone());
+        }
         JudgmentExprSpec::Comparison { left, right, .. } => {
             collect_scalar_relation_names(left, names);
             collect_scalar_relation_names(right, names);
@@ -1315,6 +1606,9 @@ fn rewrite_judgment_relation_references(
             rewrite_scalar_relation_references(right, origin_target, rewrites);
         }
         JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            rewrite_relation_name(relation, origin_target, rewrites);
+        }
         JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
             for item in items {
                 rewrite_judgment_relation_references(item, origin_target, rewrites);

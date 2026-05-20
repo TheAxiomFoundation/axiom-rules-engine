@@ -211,6 +211,7 @@ struct BulkEvaluator<'a> {
     program: &'a Program,
     period: Period,
     entity_ids: Vec<String>,
+    query_index: HashMap<String, usize>,
     query_input_cells: HashMap<String, Vec<Option<ScalarValue>>>,
     related_input_index: HashMap<(String, String), ScalarValue>,
     relation_adjacency: HashMap<(String, usize), Vec<Vec<Vec<String>>>>,
@@ -267,6 +268,7 @@ impl<'a> BulkEvaluator<'a> {
             program,
             period,
             entity_ids,
+            query_index,
             query_input_cells,
             related_input_index,
             relation_adjacency,
@@ -552,19 +554,31 @@ impl<'a> BulkEvaluator<'a> {
                 related_slot,
                 where_clause,
             } => {
-                if where_clause.is_some() {
-                    return Err(EvalError::TypeMismatch(
-                        "bulk fast mode does not yet support count_related where-clauses"
-                            .to_string(),
-                    ));
-                }
                 let mut values = Vec::with_capacity(self.entity_ids.len());
                 for row_index in 0..self.entity_ids.len() {
                     let related = self.related_rows(relation, *current_slot, row_index)?;
-                    let count = related
-                        .iter()
-                        .filter(|tuple| tuple.get(*related_slot).is_some())
-                        .count() as i64;
+                    let current_id = self.entity_ids[row_index].clone();
+                    let mut count = 0_i64;
+                    for tuple in related {
+                        let Some(related_id) = tuple.get(*related_slot) else {
+                            continue;
+                        };
+                        if let Some(predicate) = where_clause {
+                            if !self
+                                .eval_related_judgment_expr(
+                                    predicate,
+                                    &current_id,
+                                    related_id,
+                                    None,
+                                    None,
+                                )?
+                                .is_holds()
+                            {
+                                continue;
+                            }
+                        }
+                        count += 1;
+                    }
                     values.push(count);
                 }
                 Ok(ScalarColumn::Integer(values))
@@ -576,13 +590,9 @@ impl<'a> BulkEvaluator<'a> {
                 value,
                 where_clause,
             } => {
-                if where_clause.is_some() {
-                    return Err(EvalError::TypeMismatch(
-                        "bulk fast mode does not yet support sum_related where-clauses".to_string(),
-                    ));
-                }
                 let mut totals = Vec::with_capacity(self.entity_ids.len());
                 for row_index in 0..self.entity_ids.len() {
+                    let current_id = self.entity_ids[row_index].clone();
                     let related_ids = self
                         .related_rows(relation, *current_slot, row_index)?
                         .iter()
@@ -592,6 +602,20 @@ impl<'a> BulkEvaluator<'a> {
                     match value {
                         RelatedValueRef::Input(name) => {
                             for related_id in related_ids {
+                                if let Some(predicate) = where_clause {
+                                    if !self
+                                        .eval_related_judgment_expr(
+                                            predicate,
+                                            &current_id,
+                                            &related_id,
+                                            None,
+                                            None,
+                                        )?
+                                        .is_holds()
+                                    {
+                                        continue;
+                                    }
+                                }
                                 let scalar = self
                                     .related_input_index
                                     .get(&(name.clone(), related_id.clone()))
@@ -642,6 +666,9 @@ impl<'a> BulkEvaluator<'a> {
                 compare_columns(left, *op, right)
             }
             JudgmentExpr::Derived(name) => Ok(self.evaluate_judgment(name)?.clone()),
+            JudgmentExpr::RelationMember { relation, .. } => Err(EvalError::TypeMismatch(
+                format!("fast mode cannot evaluate relation predicate `{relation}`"),
+            )),
             JudgmentExpr::And(items) => {
                 let mut results = vec![JudgmentOutcome::Holds; self.entity_ids.len()];
                 for item in items {
@@ -689,20 +716,383 @@ impl<'a> BulkEvaluator<'a> {
     }
 
     fn related_rows(
-        &self,
+        &mut self,
         relation: &str,
         slot: usize,
         row_index: usize,
-    ) -> Result<&Vec<Vec<String>>, EvalError> {
-        self.relation_adjacency
+    ) -> Result<Vec<Vec<String>>, EvalError> {
+        let schema = self
+            .program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        let mut rows = self
+            .relation_adjacency
             .get(&(relation.to_string(), slot))
             .and_then(|rows| rows.get(row_index))
-            .ok_or_else(|| {
-                EvalError::UnknownRelation(format!(
-                    "{relation}::{}",
-                    self.entity_ids.get(row_index).cloned().unwrap_or_default()
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(derivation) = schema.derivation.clone() {
+            let current_id = self.entity_ids[row_index].clone();
+            let source_rows =
+                self.related_rows(&derivation.source_relation, derivation.current_slot, row_index)?;
+            for tuple in source_rows {
+                let Some(related_id) = tuple.get(derivation.related_slot) else {
+                    continue;
+                };
+                let current_entity = derivation
+                    .slot_entities
+                    .get(derivation.current_slot)
+                    .map(String::as_str);
+                let related_entity = derivation
+                    .slot_entities
+                    .get(derivation.related_slot)
+                    .map(String::as_str);
+                if self
+                    .eval_related_judgment_expr(
+                        &derivation.predicate,
+                        &current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
+                    .is_holds()
+                {
+                    rows.push(tuple);
+                }
+            }
+        }
+
+        rows.sort();
+        rows.dedup();
+        Ok(rows)
+    }
+
+    fn eval_related_judgment_expr(
+        &mut self,
+        expr: &JudgmentExpr,
+        current_id: &str,
+        related_id: &str,
+        current_entity: Option<&str>,
+        related_entity: Option<&str>,
+    ) -> Result<JudgmentOutcome, EvalError> {
+        match expr {
+            JudgmentExpr::Comparison { left, op, right } => {
+                let left = self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?;
+                let right = self.eval_related_scalar_expr(
+                    right,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?;
+                Ok(if compare_scalar_values_for_bulk(&left, *op, &right)? {
+                    JudgmentOutcome::Holds
+                } else {
+                    JudgmentOutcome::NotHolds
+                })
+            }
+            JudgmentExpr::Derived(name) => {
+                let derived = self.get_derived(name)?.clone();
+                let target_id = if Some(derived.entity.as_str()) == current_entity {
+                    current_id
+                } else {
+                    related_id
+                };
+                match &derived.semantics {
+                    DerivedSemantics::Judgment(expr) => {
+                        self.eval_related_judgment_expr(
+                            expr,
+                            current_id,
+                            target_id,
+                            current_entity,
+                            related_entity,
+                        )
+                    }
+                    DerivedSemantics::Scalar(_) => Err(EvalError::ExpectedJudgment(name.clone())),
+                }
+            }
+            JudgmentExpr::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } => Ok(if self.relation_contains(
+                relation,
+                *current_slot,
+                *related_slot,
+                current_id,
+                related_id,
+            )? {
+                JudgmentOutcome::Holds
+            } else {
+                JudgmentOutcome::NotHolds
+            }),
+            JudgmentExpr::And(items) => {
+                let mut saw_undetermined = false;
+                for item in items {
+                    match self.eval_related_judgment_expr(
+                        item,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )? {
+                        JudgmentOutcome::Holds => {}
+                        JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
+                        JudgmentOutcome::Undetermined => saw_undetermined = true,
+                    }
+                }
+                Ok(if saw_undetermined {
+                    JudgmentOutcome::Undetermined
+                } else {
+                    JudgmentOutcome::Holds
+                })
+            }
+            JudgmentExpr::Or(items) => {
+                let mut saw_undetermined = false;
+                for item in items {
+                    match self.eval_related_judgment_expr(
+                        item,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )? {
+                        JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
+                        JudgmentOutcome::NotHolds => {}
+                        JudgmentOutcome::Undetermined => saw_undetermined = true,
+                    }
+                }
+                Ok(if saw_undetermined {
+                    JudgmentOutcome::Undetermined
+                } else {
+                    JudgmentOutcome::NotHolds
+                })
+            }
+            JudgmentExpr::Not(item) => {
+                Ok(match self.eval_related_judgment_expr(
+                    item,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )? {
+                        JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
+                        JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
+                        JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
+                    })
+            }
+        }
+    }
+
+    fn eval_related_scalar_expr(
+        &mut self,
+        expr: &ScalarExpr,
+        current_id: &str,
+        related_id: &str,
+        current_entity: Option<&str>,
+        related_entity: Option<&str>,
+    ) -> Result<ScalarValue, EvalError> {
+        match expr {
+            ScalarExpr::Literal(value) => Ok(value.clone()),
+            ScalarExpr::Input(name) => self.lookup_entity_input(name, related_id),
+            ScalarExpr::InputOrElse { name, default } => {
+                match self.lookup_entity_input(name, related_id) {
+                    Ok(value) => Ok(value),
+                    Err(EvalError::MissingInput { .. }) => Ok(default.clone()),
+                    Err(error) => Err(error),
+                }
+            }
+            ScalarExpr::Derived(name) => {
+                let derived = self.get_derived(name)?.clone();
+                let target_id = if Some(derived.entity.as_str()) == current_entity {
+                    current_id
+                } else if Some(derived.entity.as_str()) == related_entity {
+                    related_id
+                } else {
+                    related_id
+                };
+                match &derived.semantics {
+                    DerivedSemantics::Scalar(expr) => self.eval_related_scalar_expr(
+                        expr,
+                        current_id,
+                        target_id,
+                        current_entity,
+                        related_entity,
+                    ),
+                    DerivedSemantics::Judgment(_) => Err(EvalError::ExpectedScalar(name.clone())),
+                }
+            }
+            ScalarExpr::Add(items) => {
+                let mut total = Decimal::ZERO;
+                for item in items {
+                    total += self
+                        .eval_related_scalar_expr(
+                            item,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
+                        .as_decimal()
+                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
+                }
+                Ok(ScalarValue::Decimal(total))
+            }
+            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
+                self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                    - self
+                        .eval_related_scalar_expr(
+                            right,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
+                        .as_decimal()
+                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
+            )),
+            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
+                self.eval_related_scalar_expr(
+                    left,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                    * self
+                        .eval_related_scalar_expr(
+                            right,
+                            current_id,
+                            related_id,
+                            current_entity,
+                            related_entity,
+                        )?
+                        .as_decimal()
+                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
+            )),
+            ScalarExpr::Div(left, right) => {
+                let divisor = self
+                    .eval_related_scalar_expr(
+                        right,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
+                if divisor.is_zero() {
+                    return Err(EvalError::DivisionByZero);
+                }
+                Ok(ScalarValue::Decimal(
+                    self.eval_related_scalar_expr(
+                        left,
+                        current_id,
+                        related_id,
+                        current_entity,
+                        related_entity,
+                    )?
+                        .as_decimal()
+                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                        / divisor,
                 ))
+            }
+            ScalarExpr::Max(_) | ScalarExpr::Min(_) | ScalarExpr::ParameterLookup { .. } => Err(
+                EvalError::TypeMismatch(
+                    "bulk fast mode does not yet support this related scalar expression"
+                        .to_string(),
+                ),
+            ),
+            ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
+                self.eval_related_scalar_expr(
+                    value,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                    .ceil(),
+            )),
+            ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
+                self.eval_related_scalar_expr(
+                    value,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                    .floor(),
+            )),
+            ScalarExpr::PeriodStart => Ok(ScalarValue::Date(self.period.start)),
+            ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(self.period.end)),
+            ScalarExpr::DateAddDays { .. }
+            | ScalarExpr::DaysBetween { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::If { .. } => Err(EvalError::TypeMismatch(
+                "bulk fast mode does not yet support this related scalar expression".to_string(),
+            )),
+        }
+    }
+
+    fn lookup_entity_input(&self, name: &str, entity_id: &str) -> Result<ScalarValue, EvalError> {
+        if let Some(&row_index) = self.query_index.get(entity_id) {
+            if let Some(Some(value)) = self
+                .query_input_cells
+                .get(name)
+                .and_then(|cells| cells.get(row_index))
+            {
+                return Ok(value.clone());
+            }
+        }
+        self.related_input_index
+            .get(&(name.to_string(), entity_id.to_string()))
+            .cloned()
+            .ok_or_else(|| EvalError::MissingInput {
+                name: name.to_string(),
+                entity_id: entity_id.to_string(),
+                period_start: self.period.start,
+                period_end: self.period.end,
             })
+    }
+
+    fn relation_contains(
+        &mut self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        current_id: &str,
+        related_id: &str,
+    ) -> Result<bool, EvalError> {
+        let Some(&row_index) = self.query_index.get(current_id) else {
+            return Ok(false);
+        };
+        Ok(self
+            .related_rows(relation, current_slot, row_index)?
+            .iter()
+            .any(|tuple| tuple.get(related_slot).is_some_and(|candidate| candidate == related_id)))
     }
 }
 
@@ -936,6 +1326,45 @@ fn compare_columns(
                     }
                 })
                 .collect())
+        }
+    }
+}
+
+fn compare_scalar_values_for_bulk(
+    left: &ScalarValue,
+    op: ComparisonOp,
+    right: &ScalarValue,
+) -> Result<bool, EvalError> {
+    match (left, right) {
+        (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "boolean comparisons only support == and !=".to_string(),
+            )),
+        },
+        (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "text comparisons only support == and !=".to_string(),
+            )),
+        },
+        (left, right) => {
+            let left = left.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
+            })?;
+            let right = right.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
+            })?;
+            Ok(match op {
+                ComparisonOp::Lt => left < right,
+                ComparisonOp::Lte => left <= right,
+                ComparisonOp::Gt => left > right,
+                ComparisonOp::Gte => left >= right,
+                ComparisonOp::Eq => left == right,
+                ComparisonOp::Ne => left != right,
+            })
         }
     }
 }

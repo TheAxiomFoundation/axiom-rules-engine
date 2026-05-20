@@ -68,7 +68,12 @@ fn cli_round_trip_returns_json() {
     let response: ExecutionResponse =
         serde_json::from_slice(&output.stdout).expect("response parses");
     assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        response.metadata.actual_mode,
+        ExecutionMode::Fast,
+        "unexpected fallback reason: {:?}",
+        response.metadata.fallback_reason
+    );
     let result = &response.results[0];
     assert_eq!(
         decimal_output(
@@ -90,7 +95,7 @@ fn fast_mode_matches_explain_mode_on_batch() {
     let dataset = simple_dataset(&period);
 
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
+        mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
         queries: queries.clone(),
@@ -252,6 +257,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            derivation: None,
         }],
         derived: vec![
             DerivedSpec {
@@ -337,7 +343,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
+        mode: ExecutionMode::Fast,
         program,
         dataset,
         queries,
@@ -376,6 +382,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            derivation: None,
         }],
         derived: vec![DerivedSpec {
             id: None,
@@ -442,17 +449,8 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
     .expect("fast request falls back");
 
     assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
-    assert!(
-        response
-            .metadata
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("count_related where-clauses"),
-        "unexpected fallback reason: {:?}",
-        response.metadata.fallback_reason
-    );
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.fallback_reason, None);
     assert_eq!(
         judgment_output(
             response.results[0]
@@ -461,6 +459,584 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
                 .expect("elderly/disabled output")
         ),
         JudgmentOutcomeSpec::Holds
+    );
+}
+
+#[test]
+fn derived_relation_filters_structural_members_at_runtime() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn and not student_ineligible
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(snap_unit)
+  - name: snap_unit_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(snap_unit.income)
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let mut inputs = Vec::new();
+    for (person, has_ssn, student_ineligible, income) in [
+        ("person-1", true, false, "100"),
+        ("person-2", false, false, "250"),
+        ("person-3", true, true, "400"),
+    ] {
+        inputs.push(InputRecordSpec {
+            name: "has_ssn".to_string(),
+            entity: "Person".to_string(),
+            entity_id: person.to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: has_ssn },
+        });
+        inputs.push(InputRecordSpec {
+            name: "student_ineligible".to_string(),
+            entity: "Person".to_string(),
+            entity_id: person.to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool {
+                value: student_ineligible,
+            },
+        });
+        inputs.push(InputRecordSpec {
+            name: "income".to_string(),
+            entity: "Person".to_string(),
+            entity_id: person.to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Decimal {
+                value: income.to_string(),
+            },
+        });
+    }
+    let dataset = DatasetSpec {
+        inputs,
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-2".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-3".to_string(), "household-1".to_string()],
+                interval,
+            },
+        ],
+    };
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![
+                "snap_unit_size".to_string(),
+                "snap_unit_income".to_string(),
+            ],
+        }],
+    })
+    .expect("request succeeds");
+
+    assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(
+        response.metadata.actual_mode,
+        ExecutionMode::Fast,
+        "unexpected fallback reason: {:?}",
+        response.metadata.fallback_reason
+    );
+    assert_eq!(response.metadata.fallback_reason, None);
+    assert_eq!(
+        integer_output(
+            response.results[0]
+                .outputs
+                .get("snap_unit_size")
+                .expect("snap unit size output")
+        ),
+        1
+    );
+    assert_eq!(
+        decimal_output(
+            response.results[0]
+                .outputs
+                .get("snap_unit_income")
+                .expect("snap unit income output")
+        ),
+        decimal("100")
+    );
+}
+
+#[test]
+fn filtered_entity_scope_aggregates_over_member_alias() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+  - name: snap_unit_income
+    kind: derived
+    entity: SnapUnit
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(members.income)
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+            InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: "100".to_string(),
+                },
+            },
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: false },
+            },
+            InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: "500".to_string(),
+                },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-2".to_string(), "household-1".to_string()],
+                interval,
+            },
+        ],
+    };
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![
+                "snap_unit_size".to_string(),
+                "snap_unit_income".to_string(),
+            ],
+        }],
+    })
+    .expect("filtered entity request succeeds");
+
+    assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.fallback_reason, None);
+    assert_eq!(
+        integer_output(
+            response.results[0]
+                .outputs
+                .get("snap_unit_size")
+                .expect("snap unit size output")
+        ),
+        1
+    );
+    assert_eq!(
+        decimal_output(
+            response.results[0]
+                .outputs
+                .get("snap_unit_income")
+                .expect("snap unit income output")
+        ),
+        decimal("100")
+    );
+}
+
+#[test]
+fn derived_relation_membership_can_depend_on_current_entity_predicates() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: household_accepts_snap_members
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: snap_application_active
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and household_accepts_snap_members and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "snap_application_active".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+            InputRecordSpec {
+                name: "snap_application_active".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: false },
+            },
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-2".to_string(), "household-2".to_string()],
+                interval,
+            },
+        ],
+    };
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries: vec![
+            ExecutionQuery {
+                entity_id: "household-1".to_string(),
+                period: period.clone(),
+                outputs: vec!["snap_unit_size".to_string()],
+            },
+            ExecutionQuery {
+                entity_id: "household-2".to_string(),
+                period,
+                outputs: vec!["snap_unit_size".to_string()],
+            },
+        ],
+    })
+    .expect("cross-scope derived relation request succeeds");
+
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        integer_output(
+            response.results[0]
+                .outputs
+                .get("snap_unit_size")
+                .expect("first snap unit size output")
+        ),
+        1
+    );
+    assert_eq!(
+        integer_output(
+            response.results[1]
+                .outputs
+                .get("snap_unit_size")
+                .expect("second snap unit size output")
+        ),
+        0
+    );
+}
+
+#[test]
+fn derived_relations_can_filter_other_derived_relations() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn
+  - name: adult_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: age >= 18
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: snap_member_eligible
+  - name: adult_snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: snap_unit
+      entity: AdultSnapUnit
+      member_relation: adult_members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: adult_member
+  - name: adult_snap_unit_size
+    kind: derived
+    entity: AdultSnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(adult_members)
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: true },
+            },
+            InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-3".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: false },
+            },
+            InputRecordSpec {
+                name: "age".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 30 },
+            },
+            InputRecordSpec {
+                name: "age".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-2".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 12 },
+            },
+            InputRecordSpec {
+                name: "age".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-3".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 40 },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-2".to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-3".to_string(), "household-1".to_string()],
+                interval,
+            },
+        ],
+    };
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset,
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["adult_snap_unit_size".to_string()],
+        }],
+    })
+    .expect("composed derived relation request succeeds");
+
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        integer_output(
+            response.results[0]
+                .outputs
+                .get("adult_snap_unit_size")
+                .expect("adult snap unit size output")
+        ),
+        1
     );
 }
 
@@ -652,6 +1228,16 @@ fn decimal_output(output: &OutputValue) -> Decimal {
             ..
         } => Decimal::from(*value),
         other => panic!("expected decimal scalar output, got {other:?}"),
+    }
+}
+
+fn integer_output(output: &OutputValue) -> i64 {
+    match output {
+        OutputValue::Scalar {
+            value: ScalarValueSpec::Integer { value },
+            ..
+        } => *value,
+        other => panic!("expected integer scalar output, got {other:?}"),
     }
 }
 

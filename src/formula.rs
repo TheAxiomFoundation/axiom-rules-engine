@@ -1163,6 +1163,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     let ctx = LowerCtx {
         scalars: scalar_names,
         derived: derived_names,
+        relation_predicates: HashSet::new(),
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     for v in &module.variables {
@@ -1210,7 +1211,11 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     let mut relation_names: Vec<String> = ctx.relations.borrow().iter().cloned().collect();
     relation_names.sort();
     for name in relation_names {
-        program.relations.push(RelationSpec { name, arity: 2 });
+        program.relations.push(RelationSpec {
+            name,
+            arity: 2,
+            derivation: None,
+        });
     }
 
     Ok(program)
@@ -1230,6 +1235,10 @@ fn infer_slots(_relation: &str) -> (usize, usize) {
     // relation to put the enclosing entity last (e.g.
     // `disposal_of_applicant` rather than `applicant_disposal`).
     (1, 0)
+}
+
+pub(crate) fn infer_relation_slots_for_rulespec(relation: &str) -> (usize, usize) {
+    infer_slots(relation)
 }
 
 fn is_literal_expr(e: &Expr) -> bool {
@@ -1269,6 +1278,7 @@ fn parse_dtype(s: Option<&str>) -> DTypeSpec {
 struct LowerCtx {
     scalars: HashSet<String>,
     derived: HashSet<String>,
+    relation_predicates: HashSet<String>,
     // Relations discovered while lowering expressions (len / sum /
     // count_where / sum_where) so we can emit matching RelationSpec
     // declarations without requiring an explicit entity-declaration
@@ -1639,6 +1649,13 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         Expr::Var(name) => {
             if ctx.derived.contains(name) {
                 JudgmentExprSpec::Derived { name: name.clone() }
+            } else if ctx.relation_predicates.contains(name) {
+                let (current_slot, related_slot) = infer_slots(name);
+                JudgmentExprSpec::RelationMember {
+                    relation: name.clone(),
+                    current_slot,
+                    related_slot,
+                }
             } else {
                 JudgmentExprSpec::Comparison {
                     left: Box::new(ScalarExprSpec::Input { name: name.clone() }),
@@ -1714,4 +1731,29 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
 pub(crate) fn lower_source(source: &str) -> Result<ProgramSpec, FormulaError> {
     let module = parse_source(source)?;
     lower_module(&module)
+}
+
+pub(crate) fn lower_judgment_formula(
+    formula: &str,
+    derived_names: HashSet<String>,
+    relation_predicates: HashSet<String>,
+) -> Result<JudgmentExprSpec, FormulaError> {
+    let tokens = Lexer::new(formula).tokenise()?;
+    let mut parser = Parser::new(tokens);
+    let expr = parser.parse_expr()?;
+    if parser.peek(0).ty != TokType::Eof {
+        let tok = parser.peek(0);
+        return Err(FormulaError::parse(
+            tok.line,
+            tok.col,
+            "unexpected trailing token in relation predicate",
+        ));
+    }
+    let ctx = LowerCtx {
+        scalars: HashSet::new(),
+        derived: derived_names,
+        relation_predicates,
+        relations: std::cell::RefCell::new(HashSet::new()),
+    };
+    lower_to_judgment(&expr, &ctx)
 }

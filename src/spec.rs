@@ -9,7 +9,8 @@ use thiserror::Error;
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, InputRecord,
     Interval, JudgmentExpr, JudgmentOutcome, ParameterVersion, Period, PeriodKind, Program,
-    RelatedValueRef, RelationRecord, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, ScalarExpr, ScalarValue,
+    UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -80,7 +81,7 @@ impl ProgramSpec {
         }
 
         for relation in &self.relations {
-            program.add_relation(&relation.name, relation.arity);
+            program.add_relation_schema(relation.to_model()?);
         }
 
         for parameter in &self.parameters {
@@ -178,6 +179,50 @@ impl UnitKindSpec {
 pub struct RelationSpec {
     pub name: String,
     pub arity: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<RelationDerivationSpec>,
+}
+
+impl RelationSpec {
+    fn to_model(&self) -> Result<RelationSchema, SpecError> {
+        Ok(RelationSchema {
+            name: self.name.clone(),
+            arity: self.arity,
+            derivation: self
+                .derivation
+                .as_ref()
+                .map(RelationDerivationSpec::to_model)
+                .transpose()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelationDerivationSpec {
+    pub source_relation: String,
+    pub current_slot: usize,
+    pub related_slot: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot_entities: Vec<String>,
+    pub predicate: JudgmentExprSpec,
+}
+
+impl RelationDerivationSpec {
+    fn to_model(&self) -> Result<RelationDerivation, SpecError> {
+        Ok(RelationDerivation {
+            source_relation: self.source_relation.clone(),
+            current_slot: self.current_slot,
+            related_slot: self.related_slot,
+            entity: self.entity.clone(),
+            member_relation: self.member_relation.clone(),
+            slot_entities: self.slot_entities.clone(),
+            predicate: self.predicate.to_model()?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -605,6 +650,11 @@ pub enum JudgmentExprSpec {
     Derived {
         name: String,
     },
+    RelationMember {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+    },
     And {
         items: Vec<JudgmentExprSpec>,
     },
@@ -625,6 +675,15 @@ impl JudgmentExprSpec {
                 right: right.to_model()?,
             }),
             Self::Derived { name } => Ok(JudgmentExpr::Derived(name.clone())),
+            Self::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } => Ok(JudgmentExpr::RelationMember {
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+            }),
             Self::And { items } => Ok(JudgmentExpr::And(
                 items
                     .iter()

@@ -92,6 +92,10 @@ pub struct DenseRelationKey {
 pub struct DenseRelationSchema {
     pub key: DenseRelationKey,
     pub related_inputs: Vec<String>,
+    current_entity: Option<String>,
+    related_entity: Option<String>,
+    parent_relation: Option<usize>,
+    filter: Option<CompiledRelatedJudgmentExpr>,
 }
 
 #[derive(Clone, Debug)]
@@ -211,15 +215,18 @@ enum CompiledRelatedScalarExpr {
     Literal(ScalarValue),
     Input(usize),
     InputOrElse { input: usize, default: ScalarValue },
+    RootScalar(Box<CompiledScalarExpr>),
 }
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
+    Literal(bool),
     Comparison {
         left: CompiledRelatedScalarExpr,
         op: ComparisonOp,
         right: CompiledRelatedScalarExpr,
     },
+    RootJudgment(Box<CompiledJudgmentExpr>),
     And(Vec<CompiledRelatedJudgmentExpr>),
     Or(Vec<CompiledRelatedJudgmentExpr>),
     Not(Box<CompiledRelatedJudgmentExpr>),
@@ -661,7 +668,7 @@ impl<'a> DenseCompiler<'a> {
                 related_slot,
                 where_clause,
             } => {
-                let relation_index = self.relation(relation, *current_slot, *related_slot);
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
@@ -679,7 +686,7 @@ impl<'a> DenseCompiler<'a> {
                 where_clause,
             } => match value {
                 RelatedValueRef::Input(name) => {
-                    let relation_index = self.relation(relation, *current_slot, *related_slot);
+                    let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                     let input_index = self.related_input(relation_index, name, false);
                     let predicate = where_clause
                         .as_deref()
@@ -733,6 +740,11 @@ impl<'a> DenseCompiler<'a> {
                 }
                 Ok(CompiledJudgmentExpr::Derived(self.compile_derived(name)?))
             }
+            JudgmentExpr::RelationMember { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "relation predicate `{relation}`"
+                )))
+            }
             JudgmentExpr::And(items) => Ok(CompiledJudgmentExpr::And(
                 items
                     .iter()
@@ -764,9 +776,47 @@ impl<'a> DenseCompiler<'a> {
                     right: self.compile_related_scalar(relation_index, right)?,
                 })
             }
-            JudgmentExpr::Derived(name) => Err(DenseCompileError::Unsupported(format!(
-                "where-clause predicates cannot yet reference derived values (`{name}`)"
-            ))),
+            JudgmentExpr::Derived(name) => {
+                let derived = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown related judgment dependency `{name}`"
+                    ))
+                })?;
+                let relation = &self.relations[relation_index];
+                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
+                    || derived.entity == self.root_entity
+                {
+                    return match &derived.semantics {
+                        DerivedSemantics::Judgment(expr) => Ok(
+                            CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
+                                self.compile_current_judgment_expr(name, &derived.entity, expr)?,
+                            )),
+                        ),
+                        DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(
+                            format!(
+                                "where-clause predicates cannot reference scalar derived values (`{name}`)"
+                            ),
+                        )),
+                    };
+                }
+                if relation.related_entity.is_some()
+                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
+                {
+                    return Err(DenseCompileError::Unsupported(format!(
+                        "related predicate `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
+                        derived.entity, relation.key.name
+                    )));
+                }
+                match &derived.semantics {
+                    DerivedSemantics::Judgment(expr) => {
+                        self.compile_related_predicate(relation_index, expr)
+                    }
+                    DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
+                        "where-clause predicates cannot reference scalar derived values (`{name}`)"
+                    ))),
+                }
+            }
+            JudgmentExpr::RelationMember { .. } => Ok(CompiledRelatedJudgmentExpr::Literal(true)),
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
                     .iter()
@@ -803,8 +853,220 @@ impl<'a> DenseCompiler<'a> {
                     default: default.clone(),
                 })
             }
+            ScalarExpr::Derived(name) => {
+                let derived = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown related scalar dependency `{name}`"
+                    ))
+                })?;
+                let relation = &self.relations[relation_index];
+                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
+                    || derived.entity == self.root_entity
+                {
+                    return match &derived.semantics {
+                        DerivedSemantics::Scalar(expr) => Ok(CompiledRelatedScalarExpr::RootScalar(
+                            Box::new(self.compile_current_scalar_expr(
+                                name,
+                                &derived.entity,
+                                expr,
+                            )?),
+                        )),
+                        DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(
+                            format!(
+                                "where-clause scalar expressions cannot reference judgment derived values (`{name}`)"
+                            ),
+                        )),
+                    };
+                }
+                if relation.related_entity.is_some()
+                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
+                {
+                    return Err(DenseCompileError::Unsupported(format!(
+                        "related scalar `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
+                        derived.entity, relation.key.name
+                    )));
+                }
+                match &derived.semantics {
+                    DerivedSemantics::Scalar(expr) => self.compile_related_scalar(relation_index, expr),
+                    DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
+                        "where-clause scalar expressions cannot reference judgment derived values (`{name}`)"
+                    ))),
+                }
+            }
             other => Err(DenseCompileError::Unsupported(format!(
                 "where-clause predicates currently only support comparisons between related inputs and literals; got {other:?}"
+            ))),
+        }
+    }
+
+    fn compile_current_scalar_expr(
+        &mut self,
+        derived_name: &str,
+        entity: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledScalarExpr, DenseCompileError> {
+        match expr {
+            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name, false))),
+            ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
+                input: self.root_input(name, true),
+                default: default.clone(),
+            }),
+            ScalarExpr::Derived(name) => {
+                let dependency = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown scalar dependency `{name}` referenced from `{derived_name}`"
+                    ))
+                })?;
+                if dependency.entity != entity && dependency.entity != self.root_entity {
+                    return Err(DenseCompileError::CrossEntityDependency {
+                        derived: derived_name.to_string(),
+                        dependency: name.clone(),
+                        entity: dependency.entity.clone(),
+                    });
+                }
+                match &dependency.semantics {
+                    DerivedSemantics::Scalar(expr) => {
+                        self.compile_current_scalar_expr(name, &dependency.entity, expr)
+                    }
+                    DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
+                        "scalar expression cannot reference judgment derived value (`{name}`)"
+                    ))),
+                }
+            }
+            ScalarExpr::ParameterLookup { parameter, index } => Ok(
+                CompiledScalarExpr::ParameterLookup {
+                    parameter: self.parameter(parameter)?,
+                    index: Box::new(self.compile_current_scalar_expr(derived_name, entity, index)?),
+                },
+            ),
+            ScalarExpr::Add(items) => Ok(CompiledScalarExpr::Add(
+                items
+                    .iter()
+                    .map(|item| self.compile_current_scalar_expr(derived_name, entity, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Sub(left, right) => Ok(CompiledScalarExpr::Sub(
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, left)?),
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, right)?),
+            )),
+            ScalarExpr::Mul(left, right) => Ok(CompiledScalarExpr::Mul(
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, left)?),
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, right)?),
+            )),
+            ScalarExpr::Div(left, right) => Ok(CompiledScalarExpr::Div(
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, left)?),
+                Box::new(self.compile_current_scalar_expr(derived_name, entity, right)?),
+            )),
+            ScalarExpr::Max(items) => Ok(CompiledScalarExpr::Max(
+                items
+                    .iter()
+                    .map(|item| self.compile_current_scalar_expr(derived_name, entity, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Min(items) => Ok(CompiledScalarExpr::Min(
+                items
+                    .iter()
+                    .map(|item| self.compile_current_scalar_expr(derived_name, entity, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Ceil(value) => Ok(CompiledScalarExpr::Ceil(Box::new(
+                self.compile_current_scalar_expr(derived_name, entity, value)?,
+            ))),
+            ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
+                self.compile_current_scalar_expr(derived_name, entity, value)?,
+            ))),
+            ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
+            ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
+            ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
+                date: Box::new(self.compile_current_scalar_expr(derived_name, entity, date)?),
+                days: Box::new(self.compile_current_scalar_expr(derived_name, entity, days)?),
+            }),
+            ScalarExpr::DaysBetween { from, to } => Ok(CompiledScalarExpr::DaysBetween {
+                from: Box::new(self.compile_current_scalar_expr(derived_name, entity, from)?),
+                to: Box::new(self.compile_current_scalar_expr(derived_name, entity, to)?),
+            }),
+            ScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => Ok(CompiledScalarExpr::If {
+                condition: Box::new(self.compile_current_judgment_expr(
+                    derived_name,
+                    entity,
+                    condition,
+                )?),
+                then_expr: Box::new(self.compile_current_scalar_expr(
+                    derived_name,
+                    entity,
+                    then_expr,
+                )?),
+                else_expr: Box::new(self.compile_current_scalar_expr(
+                    derived_name,
+                    entity,
+                    else_expr,
+                )?),
+            }),
+            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => Err(
+                DenseCompileError::Unsupported(
+                    "current-entity derived relation predicates cannot aggregate another relation"
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+
+    fn compile_current_judgment_expr(
+        &mut self,
+        derived_name: &str,
+        entity: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
+        match expr {
+            JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
+                left: self.compile_current_scalar_expr(derived_name, entity, left)?,
+                op: *op,
+                right: self.compile_current_scalar_expr(derived_name, entity, right)?,
+            }),
+            JudgmentExpr::Derived(name) => {
+                let dependency = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown judgment dependency `{name}` referenced from `{derived_name}`"
+                    ))
+                })?;
+                if dependency.entity != entity && dependency.entity != self.root_entity {
+                    return Err(DenseCompileError::CrossEntityDependency {
+                        derived: derived_name.to_string(),
+                        dependency: name.clone(),
+                        entity: dependency.entity.clone(),
+                    });
+                }
+                match &dependency.semantics {
+                    DerivedSemantics::Judgment(expr) => {
+                        self.compile_current_judgment_expr(name, &dependency.entity, expr)
+                    }
+                    DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
+                        "judgment expression cannot reference scalar derived value (`{name}`)"
+                    ))),
+                }
+            }
+            JudgmentExpr::RelationMember { relation, .. } => Err(DenseCompileError::Unsupported(
+                format!("current-entity relation predicate `{relation}`"),
+            )),
+            JudgmentExpr::And(items) => Ok(CompiledJudgmentExpr::And(
+                items
+                    .iter()
+                    .map(|item| self.compile_current_judgment_expr(derived_name, entity, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            JudgmentExpr::Or(items) => Ok(CompiledJudgmentExpr::Or(
+                items
+                    .iter()
+                    .map(|item| self.compile_current_judgment_expr(derived_name, entity, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            JudgmentExpr::Not(item) => Ok(CompiledJudgmentExpr::Not(Box::new(
+                self.compile_current_judgment_expr(derived_name, entity, item)?,
             ))),
         }
     }
@@ -825,23 +1087,78 @@ impl<'a> DenseCompiler<'a> {
         index
     }
 
-    fn relation(&mut self, name: &str, current_slot: usize, related_slot: usize) -> usize {
-        let key = DenseRelationKey {
+    fn relation(
+        &mut self,
+        name: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> Result<usize, DenseCompileError> {
+        let lookup_key = DenseRelationKey {
             name: name.to_string(),
             current_slot,
             related_slot,
         };
-        if let Some(&index) = self.relation_index.get(&key) {
-            index
+        if let Some(&index) = self.relation_index.get(&lookup_key) {
+            Ok(index)
         } else {
-            let index = self.relations.len();
-            self.relations.push(DenseRelationSchema {
-                key: key.clone(),
-                related_inputs: Vec::new(),
-            });
-            self.optional_related_inputs.push(HashSet::new());
-            self.relation_index.insert(key, index);
-            index
+            let relation = self.program.relations.get(name);
+            if let Some(derivation) = relation.and_then(|relation| relation.derivation.as_ref()) {
+                let source_key = DenseRelationKey {
+                    name: derivation.source_relation.clone(),
+                    current_slot: derivation.current_slot,
+                    related_slot: derivation.related_slot,
+                };
+                let parent_relation = self
+                    .program
+                    .relations
+                    .get(&derivation.source_relation)
+                    .and_then(|relation| relation.derivation.as_ref())
+                    .map(|_| {
+                        self.relation(
+                            &derivation.source_relation,
+                            derivation.current_slot,
+                            derivation.related_slot,
+                        )
+                    })
+                    .transpose()?;
+                let key = parent_relation
+                    .map(|parent| self.relations[parent].key.clone())
+                    .unwrap_or(source_key);
+                let index = self.relations.len();
+                self.relations.push(DenseRelationSchema {
+                    key,
+                    related_inputs: Vec::new(),
+                    current_entity: derivation
+                        .slot_entities
+                        .get(derivation.current_slot)
+                        .cloned(),
+                    related_entity: derivation
+                        .slot_entities
+                        .get(derivation.related_slot)
+                        .cloned(),
+                    parent_relation,
+                    filter: None,
+                });
+                self.optional_related_inputs.push(HashSet::new());
+                self.relation_index.insert(lookup_key, index);
+                let filter = self.compile_related_predicate(index, &derivation.predicate)?;
+                self.relations[index].filter = Some(filter);
+                return Ok(index);
+            } else {
+                let index = self.relations.len();
+                let key = lookup_key.clone();
+                self.relations.push(DenseRelationSchema {
+                    key,
+                    related_inputs: Vec::new(),
+                    current_entity: None,
+                    related_entity: None,
+                    parent_relation: None,
+                    filter: None,
+                });
+                self.optional_related_inputs.push(HashSet::new());
+                self.relation_index.insert(lookup_key, index);
+                Ok(index)
+            }
         }
     }
 
@@ -1091,25 +1408,20 @@ impl<'a> DenseExecutor<'a> {
                 relation,
                 predicate,
             } => {
-                let relation_batch = &self.batch.relations[*relation];
-                if let Some(predicate) = predicate {
-                    let mask = eval_related_predicate(
-                        predicate,
-                        &relation_batch.inputs,
-                        relation_batch.related_count,
-                    )?;
+                let offsets = self.batch.relations[*relation].offsets.clone();
+                let mask = self.relation_mask(*relation, predicate.as_ref())?;
+                if let Some(mask) = mask {
                     let mut counts = Vec::with_capacity(self.batch.row_count);
                     for row in 0..self.batch.row_count {
-                        let start = relation_batch.offsets[row];
-                        let end = relation_batch.offsets[row + 1];
+                        let start = offsets[row];
+                        let end = offsets[row + 1];
                         let matched = mask[start..end].iter().filter(|keep| **keep).count() as i64;
                         counts.push(matched);
                     }
                     Ok(DenseColumn::Integer(counts))
                 } else {
                     Ok(DenseColumn::Integer(
-                        relation_batch
-                            .offsets
+                        offsets
                             .windows(2)
                             .map(|pair| (pair[1] - pair[0]) as i64)
                             .collect(),
@@ -1121,8 +1433,8 @@ impl<'a> DenseExecutor<'a> {
                 input,
                 predicate,
             } => {
-                let relation_batch = &self.batch.relations[*relation];
-                let values = relation_batch.inputs[*input]
+                let offsets = self.batch.relations[*relation].offsets.clone();
+                let values = self.batch.relations[*relation].inputs[*input]
                     .as_ref()
                     .ok_or_else(|| EvalError::MissingInput {
                         name: format!("related_input[{input}]"),
@@ -1131,20 +1443,11 @@ impl<'a> DenseExecutor<'a> {
                         period_end: self.period.end,
                     })?
                     .as_decimal_vec()?;
-                let mask = predicate
-                    .as_ref()
-                    .map(|predicate| {
-                        eval_related_predicate(
-                            predicate,
-                            &relation_batch.inputs,
-                            relation_batch.related_count,
-                        )
-                    })
-                    .transpose()?;
+                let mask = self.relation_mask(*relation, predicate.as_ref())?;
                 let mut totals = Vec::with_capacity(self.batch.row_count);
                 for row in 0..self.batch.row_count {
-                    let start = relation_batch.offsets[row];
-                    let end = relation_batch.offsets[row + 1];
+                    let start = offsets[row];
+                    let end = offsets[row + 1];
                     let mut total = Decimal::ZERO;
                     match &mask {
                         Some(mask) => {
@@ -1173,6 +1476,126 @@ impl<'a> DenseExecutor<'a> {
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_dense_scalar_column(condition, then_values, else_values)
+            }
+        }
+    }
+
+    fn relation_mask(
+        &mut self,
+        relation: usize,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+    ) -> Result<Option<Vec<bool>>, EvalError> {
+        let parent_relation = self.program.relations[relation].parent_relation;
+        let parent_mask = parent_relation
+            .map(|parent| self.relation_mask(parent, None))
+            .transpose()?
+            .flatten();
+        let base_filter = self.program.relations[relation].filter.clone();
+        let base_mask = base_filter
+            .as_ref()
+            .map(|predicate| self.eval_related_predicate(relation, predicate))
+            .transpose()?;
+        let predicate_mask = predicate
+            .map(|predicate| self.eval_related_predicate(relation, predicate))
+            .transpose()?;
+
+        let local_mask = match (base_mask, predicate_mask) {
+            (Some(mut base), Some(predicate)) => {
+                for (base, predicate) in base.iter_mut().zip(predicate) {
+                    *base &= predicate;
+                }
+                Some(base)
+            }
+            (Some(base), None) => Some(base),
+            (None, Some(predicate)) => Some(predicate),
+            (None, None) => None,
+        };
+
+        Ok(match (parent_mask, local_mask) {
+            (Some(mut parent), Some(local)) => {
+                for (parent, local) in parent.iter_mut().zip(local) {
+                    *parent &= local;
+                }
+                Some(parent)
+            }
+            (Some(parent), None) => Some(parent),
+            (None, Some(local)) => Some(local),
+            (None, None) => None,
+        })
+    }
+
+    fn eval_related_predicate(
+        &mut self,
+        relation: usize,
+        expr: &CompiledRelatedJudgmentExpr,
+    ) -> Result<Vec<bool>, EvalError> {
+        let length = self.batch.relations[relation].related_count;
+        match expr {
+            CompiledRelatedJudgmentExpr::Literal(value) => Ok(vec![*value; length]),
+            CompiledRelatedJudgmentExpr::Comparison { left, op, right } => {
+                let left = self.resolve_related_scalar(relation, left)?;
+                let right = self.resolve_related_scalar(relation, right)?;
+                Ok(compare_related_columns(&left, *op, &right)?)
+            }
+            CompiledRelatedJudgmentExpr::RootJudgment(expr) => {
+                let offsets = self.batch.relations[relation].offsets.clone();
+                let values = self.eval_judgment_expr(expr)?;
+                project_root_judgment_to_related(&values, &offsets)
+            }
+            CompiledRelatedJudgmentExpr::And(items) => {
+                let mut result = vec![true; length];
+                for item in items {
+                    let sub = self.eval_related_predicate(relation, item)?;
+                    for (index, keep) in sub.into_iter().enumerate() {
+                        result[index] &= keep;
+                    }
+                }
+                Ok(result)
+            }
+            CompiledRelatedJudgmentExpr::Or(items) => {
+                let mut result = vec![false; length];
+                for item in items {
+                    let sub = self.eval_related_predicate(relation, item)?;
+                    for (index, keep) in sub.into_iter().enumerate() {
+                        result[index] |= keep;
+                    }
+                }
+                Ok(result)
+            }
+            CompiledRelatedJudgmentExpr::Not(item) => Ok(self
+                .eval_related_predicate(relation, item)?
+                .into_iter()
+                .map(|keep| !keep)
+                .collect()),
+        }
+    }
+
+    fn resolve_related_scalar(
+        &mut self,
+        relation: usize,
+        expr: &CompiledRelatedScalarExpr,
+    ) -> Result<DenseColumn, EvalError> {
+        let length = self.batch.relations[relation].related_count;
+        match expr {
+            CompiledRelatedScalarExpr::Literal(value) => Ok(broadcast_scalar_literal(value, length)),
+            CompiledRelatedScalarExpr::Input(index) => self.batch.relations[relation].inputs[*index]
+                .clone()
+                .ok_or_else(|| EvalError::MissingInput {
+                    name: format!("related_input[{index}]"),
+                    entity_id: String::new(),
+                    period_start: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
+                    period_end: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
+                }),
+            CompiledRelatedScalarExpr::InputOrElse { input, default } => {
+                match &self.batch.relations[relation].inputs[*input] {
+                    Some(column) => Ok(column.clone()),
+                    None => Ok(broadcast_scalar_literal(default, length)),
+                }
+            }
+            CompiledRelatedScalarExpr::RootScalar(expr) => {
+                let offsets = self.batch.relations[relation].offsets.clone();
+                let values = self.eval_scalar_expr(expr)?;
+                project_root_column_to_related(&values, &offsets)
             }
         }
     }
@@ -1235,71 +1658,88 @@ impl<'a> DenseExecutor<'a> {
     }
 }
 
-fn eval_related_predicate(
-    expr: &CompiledRelatedJudgmentExpr,
-    related_inputs: &[Option<DenseColumn>],
-    related_count: usize,
+fn project_root_judgment_to_related(
+    values: &[JudgmentOutcome],
+    offsets: &[usize],
 ) -> Result<Vec<bool>, EvalError> {
-    let length = related_count;
-    match expr {
-        CompiledRelatedJudgmentExpr::Comparison { left, op, right } => {
-            let left = resolve_related_scalar(left, related_inputs, length)?;
-            let right = resolve_related_scalar(right, related_inputs, length)?;
-            Ok(compare_related_columns(&left, *op, &right)?)
-        }
-        CompiledRelatedJudgmentExpr::And(items) => {
-            let mut result = vec![true; length];
-            for item in items {
-                let sub = eval_related_predicate(item, related_inputs, related_count)?;
-                for (index, keep) in sub.into_iter().enumerate() {
-                    result[index] &= keep;
-                }
-            }
-            Ok(result)
-        }
-        CompiledRelatedJudgmentExpr::Or(items) => {
-            let mut result = vec![false; length];
-            for item in items {
-                let sub = eval_related_predicate(item, related_inputs, related_count)?;
-                for (index, keep) in sub.into_iter().enumerate() {
-                    result[index] |= keep;
-                }
-            }
-            Ok(result)
-        }
-        CompiledRelatedJudgmentExpr::Not(item) => {
-            Ok(eval_related_predicate(item, related_inputs, related_count)?
-                .into_iter()
-                .map(|keep| !keep)
-                .collect())
+    let row_count = offsets.len().saturating_sub(1);
+    if values.len() != row_count {
+        return Err(EvalError::TypeMismatch(format!(
+            "dense root judgment has length {} but relation offsets describe {} rows",
+            values.len(),
+            row_count
+        )));
+    }
+
+    let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+    for row in 0..row_count {
+        for _ in offsets[row]..offsets[row + 1] {
+            projected.push(values[row].is_holds());
         }
     }
+    Ok(projected)
 }
 
-fn resolve_related_scalar(
-    expr: &CompiledRelatedScalarExpr,
-    related_inputs: &[Option<DenseColumn>],
-    length: usize,
+fn project_root_column_to_related(
+    column: &DenseColumn,
+    offsets: &[usize],
 ) -> Result<DenseColumn, EvalError> {
-    match expr {
-        CompiledRelatedScalarExpr::Literal(value) => Ok(broadcast_scalar_literal(value, length)),
-        CompiledRelatedScalarExpr::Input(index) => {
-            related_inputs[*index]
-                .clone()
-                .ok_or_else(|| EvalError::MissingInput {
-                    name: format!("related_input[{index}]"),
-                    entity_id: String::new(),
-                    period_start: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                    period_end: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                })
-        }
-        CompiledRelatedScalarExpr::InputOrElse { input, default } => {
-            match &related_inputs[*input] {
-                Some(column) => Ok(column.clone()),
-                None => Ok(broadcast_scalar_literal(default, length)),
-            }
-        }
+    let row_count = offsets.len().saturating_sub(1);
+    if column.len() != row_count {
+        return Err(EvalError::TypeMismatch(format!(
+            "dense root scalar has length {} but relation offsets describe {} rows",
+            column.len(),
+            row_count
+        )));
     }
+
+    Ok(match column {
+        DenseColumn::Bool(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row]);
+                }
+            }
+            DenseColumn::Bool(projected)
+        }
+        DenseColumn::Integer(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row]);
+                }
+            }
+            DenseColumn::Integer(projected)
+        }
+        DenseColumn::Decimal(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row]);
+                }
+            }
+            DenseColumn::Decimal(projected)
+        }
+        DenseColumn::Text(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row].clone());
+                }
+            }
+            DenseColumn::Text(projected)
+        }
+        DenseColumn::Date(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row]);
+                }
+            }
+            DenseColumn::Date(projected)
+        }
+    })
 }
 
 fn compare_related_columns(

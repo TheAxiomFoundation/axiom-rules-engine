@@ -4,6 +4,39 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-05-20 — Filtered entities lower as derived runtime relations
+
+**Decision.** RuleSpec models filtered entity membership with
+`kind: derived_relation`: a runtime relation derived from a source relation and
+a judgment predicate. A derived relation may declare an entity name and a member
+relation alias so rules can be scoped to the filtered view, for example
+`entity: SnapUnit` with `formula: len(members)`.
+
+**Why.**
+
+- Legal constructs such as SNAP units, MAGI households, and qualifying-child
+  sets are filtered membership sets, not household-level booleans.
+- The existing runtime already understands relation aggregation. Extending
+  relations preserves that model and avoids inventing a second collection
+  mechanism.
+- A filtered entity instance is keyed by the source relation's current entity
+  id, which keeps execution compatible with existing query shapes.
+
+**Consequences.**
+
+- `len`, `sum`, `count_where`, and `sum_where` operate over filtered
+  membership in explain mode, bulk fast mode, and dense mode for supported
+  predicate shapes.
+- The compiler rejects derived-relation cycles.
+- Membership predicates can combine related entity rules with current/root
+  entity rules, and a derived relation can use another derived relation as its
+  source.
+- Filtered entity ids are not separately materialized; a filtered entity such as
+  `SnapUnit` is keyed by the source/current entity id, for example
+  `household-1`.
+- Jurisdiction repos must migrate their own SNAP approximations separately; this
+  engine change only provides the runtime feature.
+
 ## 2026-05-04 — Runtime predicates and source relations are separate RuleSpec kinds
 
 **Decision.** RuleSpec has separate record kinds for executable data predicates

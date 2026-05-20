@@ -6,7 +6,8 @@ use axiom_rules_engine::compile::{
 };
 use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules_engine::spec::{
-    DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
+    DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
+    ScalarExprSpec, ScalarValueSpec,
 };
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1633,22 +1634,169 @@ rules:
 }
 
 #[test]
-fn rulespec_rejects_derived_relations_until_relation_outputs_are_modelled() {
-    let err = lower_rulespec_str(
+fn rulespec_lowers_derived_relations_as_filtered_runtime_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
         r#"
 format: rulespec/v1
 rules:
-  - name: eligible_member_of_household
-    kind: derived_relation
-    arity: 2
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
     versions:
       - effective_from: 2025-01-01
-        formula: member_of_household
+        formula: has_ssn and not student_ineligible
+  - name: eligible_member_of_household
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: 2025-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(eligible_member_of_household)
 "#,
     )
-    .expect_err("derived_relation is intentionally not supported yet");
+    .expect("derived relation RuleSpec compiles");
 
-    assert!(matches!(err, RuleSpecError::UnsupportedRuleKind { .. }));
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "eligible_member_of_household")
+        .expect("derived relation emitted");
+    assert!(relation.derivation.is_some());
+    let member_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_member_eligible")
+        .expect("member predicate is ordered");
+    let unit_size_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_unit_size")
+        .expect("filtered relation consumer is ordered");
+    assert!(member_order < unit_size_order);
+}
+
+#[test]
+fn rulespec_rewrites_filtered_entity_member_alias_to_derived_relation() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2025-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2025-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(members)
+"#,
+    )
+    .expect("filtered entity RuleSpec compiles");
+
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "snap_unit")
+        .expect("snap_unit relation emitted");
+    let derivation = relation.derivation.as_ref().expect("relation is derived");
+    assert_eq!(derivation.entity.as_deref(), Some("SnapUnit"));
+    assert_eq!(derivation.member_relation.as_deref(), Some("members"));
+    assert_eq!(derivation.slot_entities, vec!["Person", "Household"]);
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .all(|relation| relation.name != "members")
+    );
+
+    let snap_unit_size = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "snap_unit_size")
+        .expect("snap unit size emitted");
+    let DerivedSemanticsSpec::Scalar { expr } = &snap_unit_size.semantics else {
+        panic!("snap_unit_size should be scalar");
+    };
+    let ScalarExprSpec::CountRelated { relation, .. } = expr else {
+        panic!("snap_unit_size should count a relation");
+    };
+    assert_eq!(relation, "snap_unit");
+}
+
+#[test]
+fn compile_rejects_derived_relation_cycles() {
+    let err = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: relation_a
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relation_b
+    versions:
+      - effective_from: 2025-01-01
+        formula: relation_b
+  - name: relation_b
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relation_a
+    versions:
+      - effective_from: 2025-01-01
+        formula: relation_a
+  - name: count_a
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(relation_a)
+"#,
+    )
+    .expect_err("relation derivation cycle should be rejected");
+
+    assert!(matches!(err, CompileError::CyclicRelationDependency { .. }));
 }
 
 #[test]
