@@ -51,6 +51,48 @@ const SCOTTISH_CTR_MAX_PROGRAM_RULESPEC: &str =
 const SCOTTISH_CTR_MAX_CASES_YAML: &str =
     include_str!("fixtures/rulespec/ssi/2021/249/regulation/79/cases.yaml");
 
+const FILTERED_ENTITY_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn and not student_ineligible
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+  - name: snap_unit_income
+    kind: derived
+    entity: SnapUnit
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(members.income)
+"#;
+
 #[test]
 fn dense_flat_tax_matches_explain_mode() {
     let period = month_period();
@@ -306,6 +348,155 @@ fn dense_family_allowance_matches_explain_mode() {
                 .outputs
                 .get("monthly_allowance")
                 .expect("dense monthly allowance"),
+            row,
+        );
+    }
+}
+
+#[test]
+fn dense_filtered_entity_scope_matches_explain_mode() {
+    let period = month_period();
+    let artifact = CompiledProgramArtifact::from_rulespec_str(FILTERED_ENTITY_RULESPEC)
+        .expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("SnapUnit"))
+        .expect("dense compilation succeeds");
+
+    let households = [
+        (
+            "household-1",
+            vec![
+                ("person-1", true, false, decimal("100")),
+                ("person-2", false, false, decimal("250")),
+                ("person-3", true, true, decimal("400")),
+            ],
+        ),
+        (
+            "household-2",
+            vec![
+                ("person-4", true, false, decimal("50")),
+                ("person-5", true, false, decimal("75")),
+            ],
+        ),
+    ];
+
+    let mut inputs = Vec::new();
+    let mut relations = Vec::new();
+    let interval = period_interval(&period);
+    for (household_id, members) in households {
+        for (person_id, has_ssn, student_ineligible, income) in members {
+            inputs.push(InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: person_id.to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: has_ssn },
+            });
+            inputs.push(InputRecordSpec {
+                name: "student_ineligible".to_string(),
+                entity: "Person".to_string(),
+                entity_id: person_id.to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool {
+                    value: student_ineligible,
+                },
+            });
+            inputs.push(InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: person_id.to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: income.normalize().to_string(),
+                },
+            });
+            relations.push(RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec![person_id.to_string(), household_id.to_string()],
+                interval: interval.clone(),
+            });
+        }
+    }
+
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program.clone(),
+        dataset: DatasetSpec { inputs, relations },
+        queries: ["household-1", "household-2"]
+            .into_iter()
+            .map(|entity_id| ExecutionQuery {
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: vec![
+                    "snap_unit_size".to_string(),
+                    "snap_unit_income".to_string(),
+                ],
+            })
+            .collect(),
+    })
+    .expect("explain execution succeeds");
+
+    let dense_result = dense
+        .execute(
+            &period.to_model().expect("period converts"),
+            DenseBatchSpec {
+                row_count: 2,
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    DenseRelationKey {
+                        name: "member_of_household".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                    },
+                    DenseRelationBatchSpec {
+                        offsets: vec![0, 3, 5],
+                        inputs: HashMap::from([
+                            (
+                                "has_ssn".to_string(),
+                                DenseColumn::Bool(vec![true, false, true, true, true]),
+                            ),
+                            (
+                                "student_ineligible".to_string(),
+                                DenseColumn::Bool(vec![false, false, true, false, false]),
+                            ),
+                            (
+                                "income".to_string(),
+                                DenseColumn::Decimal(vec![
+                                    decimal("100"),
+                                    decimal("250"),
+                                    decimal("400"),
+                                    decimal("50"),
+                                    decimal("75"),
+                                ]),
+                            ),
+                        ]),
+                    },
+                )]),
+            },
+            &["snap_unit_size".to_string(), "snap_unit_income".to_string()],
+        )
+        .expect("dense execution succeeds");
+
+    for row in 0..2 {
+        compare_scalar(
+            explain.results[row]
+                .outputs
+                .get("snap_unit_size")
+                .expect("snap unit size output"),
+            dense_result
+                .outputs
+                .get("snap_unit_size")
+                .expect("dense snap unit size"),
+            row,
+        );
+        compare_scalar(
+            explain.results[row]
+                .outputs
+                .get("snap_unit_income")
+                .expect("snap unit income output"),
+            dense_result
+                .outputs
+                .get("snap_unit_income")
+                .expect("dense snap unit income"),
             row,
         );
     }

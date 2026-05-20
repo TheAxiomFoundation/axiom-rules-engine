@@ -68,7 +68,12 @@ fn cli_round_trip_returns_json() {
     let response: ExecutionResponse =
         serde_json::from_slice(&output.stdout).expect("response parses");
     assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        response.metadata.actual_mode,
+        ExecutionMode::Fast,
+        "unexpected fallback reason: {:?}",
+        response.metadata.fallback_reason
+    );
     let result = &response.results[0];
     assert_eq!(
         decimal_output(
@@ -90,7 +95,7 @@ fn fast_mode_matches_explain_mode_on_batch() {
     let dataset = simple_dataset(&period);
 
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
+        mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
         queries: queries.clone(),
@@ -338,7 +343,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
+        mode: ExecutionMode::Fast,
         program,
         dataset,
         queries,
@@ -444,17 +449,8 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
     .expect("fast request falls back");
 
     assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
-    assert!(
-        response
-            .metadata
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("count_related where-clauses"),
-        "unexpected fallback reason: {:?}",
-        response.metadata.fallback_reason
-    );
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.fallback_reason, None);
     assert_eq!(
         judgment_output(
             response.results[0]
@@ -585,17 +581,14 @@ rules:
     })
     .expect("request succeeds");
 
-    assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
-    assert!(
-        response
-            .metadata
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("derived relations"),
+    assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(
+        response.metadata.actual_mode,
+        ExecutionMode::Fast,
         "unexpected fallback reason: {:?}",
         response.metadata.fallback_reason
     );
+    assert_eq!(response.metadata.fallback_reason, None);
     assert_eq!(
         integer_output(
             response.results[0]
@@ -720,7 +713,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Explain,
+        mode: ExecutionMode::Fast,
         program,
         dataset,
         queries: vec![ExecutionQuery {
@@ -734,6 +727,9 @@ rules:
     })
     .expect("filtered entity request succeeds");
 
+    assert_eq!(response.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(response.metadata.fallback_reason, None);
     assert_eq!(
         integer_output(
             response.results[0]

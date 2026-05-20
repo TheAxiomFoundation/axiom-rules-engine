@@ -40,8 +40,8 @@ RuleSpec should make machine-authored structure explicit:
 The Rust loader now compiles RuleSpec directly as the external format. Remaining
 schema/runtime gaps are explicit:
 
-- `derived_relation` lowers into `ProgramSpec` and executes in explain mode.
-  Bulk fast and dense execution still need derived-relation support.
+- `derived_relation` lowers into `ProgramSpec` and executes in explain mode,
+  bulk fast mode, and the generic dense compiler for related-input predicates.
 - `source_relation` records are validated as provenance metadata and ignored
   during runtime lowering; the harness/compiler should consume them when
   resolving imports, amendments, and upstream-first checks.

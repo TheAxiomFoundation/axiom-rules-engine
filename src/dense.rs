@@ -92,6 +92,7 @@ pub struct DenseRelationKey {
 pub struct DenseRelationSchema {
     pub key: DenseRelationKey,
     pub related_inputs: Vec<String>,
+    filter: Option<CompiledRelatedJudgmentExpr>,
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +216,7 @@ enum CompiledRelatedScalarExpr {
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
+    Literal(bool),
     Comparison {
         left: CompiledRelatedScalarExpr,
         op: ComparisonOp,
@@ -284,16 +286,6 @@ impl DenseCompiledProgram {
         program: &Program,
         entity: Option<&str>,
     ) -> Result<Self, DenseCompileError> {
-        if let Some(relation) = program
-            .relations
-            .values()
-            .find(|relation| relation.derivation.is_some())
-        {
-            return Err(DenseCompileError::Unsupported(format!(
-                "derived relation `{}`",
-                relation.name
-            )));
-        }
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
             None => {
@@ -671,7 +663,7 @@ impl<'a> DenseCompiler<'a> {
                 related_slot,
                 where_clause,
             } => {
-                let relation_index = self.relation(relation, *current_slot, *related_slot);
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
@@ -689,7 +681,7 @@ impl<'a> DenseCompiler<'a> {
                 where_clause,
             } => match value {
                 RelatedValueRef::Input(name) => {
-                    let relation_index = self.relation(relation, *current_slot, *related_slot);
+                    let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                     let input_index = self.related_input(relation_index, name, false);
                     let predicate = where_clause
                         .as_deref()
@@ -779,14 +771,22 @@ impl<'a> DenseCompiler<'a> {
                     right: self.compile_related_scalar(relation_index, right)?,
                 })
             }
-            JudgmentExpr::Derived(name) => Err(DenseCompileError::Unsupported(format!(
-                "where-clause predicates cannot yet reference derived values (`{name}`)"
-            ))),
-            JudgmentExpr::RelationMember { relation, .. } => {
-                Err(DenseCompileError::Unsupported(format!(
-                    "where-clause predicates cannot yet reference relation membership (`{relation}`)"
-                )))
+            JudgmentExpr::Derived(name) => {
+                let derived = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown related judgment dependency `{name}`"
+                    ))
+                })?;
+                match &derived.semantics {
+                    DerivedSemantics::Judgment(expr) => {
+                        self.compile_related_predicate(relation_index, expr)
+                    }
+                    DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
+                        "where-clause predicates cannot reference scalar derived values (`{name}`)"
+                    ))),
+                }
             }
+            JudgmentExpr::RelationMember { .. } => Ok(CompiledRelatedJudgmentExpr::Literal(true)),
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
                     .iter()
@@ -845,23 +845,51 @@ impl<'a> DenseCompiler<'a> {
         index
     }
 
-    fn relation(&mut self, name: &str, current_slot: usize, related_slot: usize) -> usize {
-        let key = DenseRelationKey {
+    fn relation(
+        &mut self,
+        name: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> Result<usize, DenseCompileError> {
+        let lookup_key = DenseRelationKey {
             name: name.to_string(),
             current_slot,
             related_slot,
         };
-        if let Some(&index) = self.relation_index.get(&key) {
-            index
+        if let Some(&index) = self.relation_index.get(&lookup_key) {
+            Ok(index)
         } else {
             let index = self.relations.len();
+            let relation = self.program.relations.get(name);
+            let (key, filter) = if let Some(derivation) =
+                relation.and_then(|relation| relation.derivation.as_ref())
+            {
+                let source_key = DenseRelationKey {
+                    name: derivation.source_relation.clone(),
+                    current_slot: derivation.current_slot,
+                    related_slot: derivation.related_slot,
+                };
+                self.relations.push(DenseRelationSchema {
+                    key: source_key,
+                    related_inputs: Vec::new(),
+                    filter: None,
+                });
+                self.optional_related_inputs.push(HashSet::new());
+                self.relation_index.insert(lookup_key, index);
+                let filter = self.compile_related_predicate(index, &derivation.predicate)?;
+                self.relations[index].filter = Some(filter);
+                return Ok(index);
+            } else {
+                (lookup_key.clone(), None)
+            };
             self.relations.push(DenseRelationSchema {
-                key: key.clone(),
+                key,
                 related_inputs: Vec::new(),
+                filter,
             });
             self.optional_related_inputs.push(HashSet::new());
-            self.relation_index.insert(key, index);
-            index
+            self.relation_index.insert(lookup_key, index);
+            Ok(index)
         }
     }
 
@@ -1112,12 +1140,8 @@ impl<'a> DenseExecutor<'a> {
                 predicate,
             } => {
                 let relation_batch = &self.batch.relations[*relation];
-                if let Some(predicate) = predicate {
-                    let mask = eval_related_predicate(
-                        predicate,
-                        &relation_batch.inputs,
-                        relation_batch.related_count,
-                    )?;
+                let mask = self.relation_mask(*relation, predicate.as_ref())?;
+                if let Some(mask) = mask {
                     let mut counts = Vec::with_capacity(self.batch.row_count);
                     for row in 0..self.batch.row_count {
                         let start = relation_batch.offsets[row];
@@ -1151,16 +1175,7 @@ impl<'a> DenseExecutor<'a> {
                         period_end: self.period.end,
                     })?
                     .as_decimal_vec()?;
-                let mask = predicate
-                    .as_ref()
-                    .map(|predicate| {
-                        eval_related_predicate(
-                            predicate,
-                            &relation_batch.inputs,
-                            relation_batch.related_count,
-                        )
-                    })
-                    .transpose()?;
+                let mask = self.relation_mask(*relation, predicate.as_ref())?;
                 let mut totals = Vec::with_capacity(self.batch.row_count);
                 for row in 0..self.batch.row_count {
                     let start = relation_batch.offsets[row];
@@ -1195,6 +1210,46 @@ impl<'a> DenseExecutor<'a> {
                 select_dense_scalar_column(condition, then_values, else_values)
             }
         }
+    }
+
+    fn relation_mask(
+        &self,
+        relation: usize,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+    ) -> Result<Option<Vec<bool>>, EvalError> {
+        let relation_batch = &self.batch.relations[relation];
+        let base_mask = self.program.relations[relation]
+            .filter
+            .as_ref()
+            .map(|predicate| {
+                eval_related_predicate(
+                    predicate,
+                    &relation_batch.inputs,
+                    relation_batch.related_count,
+                )
+            })
+            .transpose()?;
+        let predicate_mask = predicate
+            .map(|predicate| {
+                eval_related_predicate(
+                    predicate,
+                    &relation_batch.inputs,
+                    relation_batch.related_count,
+                )
+            })
+            .transpose()?;
+
+        Ok(match (base_mask, predicate_mask) {
+            (Some(mut base), Some(predicate)) => {
+                for (base, predicate) in base.iter_mut().zip(predicate) {
+                    *base &= predicate;
+                }
+                Some(base)
+            }
+            (Some(base), None) => Some(base),
+            (None, Some(predicate)) => Some(predicate),
+            (None, None) => None,
+        })
     }
 
     fn eval_judgment_expr(
@@ -1262,6 +1317,7 @@ fn eval_related_predicate(
 ) -> Result<Vec<bool>, EvalError> {
     let length = related_count;
     match expr {
+        CompiledRelatedJudgmentExpr::Literal(value) => Ok(vec![*value; length]),
         CompiledRelatedJudgmentExpr::Comparison { left, op, right } => {
             let left = resolve_related_scalar(left, related_inputs, length)?;
             let right = resolve_related_scalar(right, related_inputs, length)?;

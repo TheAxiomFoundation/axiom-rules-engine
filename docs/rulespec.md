@@ -131,10 +131,10 @@ members. The runtime id for the filtered entity is the source relation's current
 entity id, so a SNAP unit backed by `household-1` is queried with
 `entity_id: household-1`.
 
-Derived relations currently execute in explain mode. Bulk fast mode and the
-generic dense compiler explicitly fall back or reject derived relations until
-those execution paths can compute filtered membership without changing
-semantics.
+Derived relations execute in explain mode, bulk fast mode, and the generic dense
+compiler for predicates that can be evaluated from related inputs and related
+judgment rules. More complex cross-scope predicates may still fall back or be
+rejected by optimized execution paths until their dependency shape is supported.
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Relative imports resolve from the current
@@ -267,9 +267,9 @@ Known hard gaps:
 - Formula strings are parsed by the internal `crate::formula` parser and
   normalised into `ProgramSpec`.
 - Current formula-string gaps include latest-only derived temporal formulas,
-  inferred relation slot orientation, and no fast/dense support for derived
-  relations. These should be closed in RuleSpec and `ProgramSpec`, not by adding
-  another source format.
+  inferred relation slot orientation, and incomplete optimized support for
+  complex cross-scope derived-relation predicates. These should be closed in
+  RuleSpec and `ProgramSpec`, not by adding another source format.
 
 ## Why This Instead Of Direct `ProgramSpec` YAML
 

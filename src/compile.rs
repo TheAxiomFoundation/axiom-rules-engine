@@ -228,14 +228,6 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
 
 fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
     let mut blockers = Vec::new();
-    for relation in &program.relations {
-        if relation.derivation.is_some() {
-            blockers.push(format!(
-                "{}: bulk fast mode does not yet support derived relations; explain mode does",
-                relation.name
-            ));
-        }
-    }
     for derived in &program.derived {
         collect_fast_blockers_from_semantics(&derived.name, &derived.semantics, &mut blockers);
     }
@@ -272,13 +264,7 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
-        ScalarExprSpec::CountRelated { where_clause, .. } => {
-            if where_clause.is_some() {
-                blockers.push(format!(
-                    "{derived_name}: bulk fast mode does not yet support count_related where-clauses; explain mode and the generic dense path do"
-                ));
-            }
-        }
+        ScalarExprSpec::CountRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, index, blockers);
         }
@@ -317,19 +303,10 @@ fn collect_fast_blockers_from_scalar_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, from, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, to, blockers);
         }
-        ScalarExprSpec::SumRelated {
-            value,
-            where_clause,
-            ..
-        } => {
+        ScalarExprSpec::SumRelated { value, .. } => {
             if matches!(value, RelatedValueRefSpec::Derived { .. }) {
                 blockers.push(format!(
                     "{derived_name}: fast mode does not yet support sum_related over related derived values"
-                ));
-            }
-            if where_clause.is_some() {
-                blockers.push(format!(
-                    "{derived_name}: bulk fast mode does not yet support sum_related where-clauses; explain mode and the generic dense path do"
                 ));
             }
         }

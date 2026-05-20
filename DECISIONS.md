@@ -27,9 +27,10 @@ relation alias so rules can be scoped to the filtered view, for example
 - `len`, `sum`, `count_where`, and `sum_where` operate over filtered
   membership in explain mode.
 - The compiler rejects derived-relation cycles.
-- Bulk fast mode and dense compilation deliberately fall back or reject derived
-  relations until those paths can compute filtered membership with identical
-  semantics.
+- Bulk fast mode and dense compilation support derived relations when the
+  membership predicate can be evaluated from related inputs and related judgment
+  rules. More complex cross-scope predicates remain explicit fallback/rejection
+  cases until their dependency shapes are supported.
 
 ## 2026-05-04 — Runtime predicates and source relations are separate RuleSpec kinds
 
