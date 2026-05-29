@@ -800,6 +800,129 @@ rules:
 }
 
 #[test]
+fn composition_count_where_uses_imported_relation_for_imported_predicate() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
+    let relation_file = root.join("rulespec-us/statutes/7/2012/j.yaml");
+    let member_rules_file = root.join("rulespec-us/regulations/7-cfr/273/5.yaml");
+    let program_file = root.join("rulespec-us-co/policies/snap.yaml");
+    fs::create_dir_all(relation_file.parent().expect("relation file has parent"))
+        .expect("create relation rules dir");
+    fs::create_dir_all(
+        member_rules_file
+            .parent()
+            .expect("member rules file has parent"),
+    )
+    .expect("create member rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
+    fs::write(
+        &relation_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+"#,
+    )
+    .expect("write relation RuleSpec");
+    fs::write(
+        &member_rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_member_student_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: not snap_member_student_ineligible
+"#,
+    )
+    .expect("write member RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/7/2012/j
+  - us:regulations/7-cfr/273/5
+rules:
+  - name: snap_student_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_student_eligible) > 0
+"#,
+    )
+    .expect("write composition RuleSpec");
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us-co:policies/snap#snap_student_eligible".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulations/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: false },
+            }],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:statutes/7/2012/j#relation.member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("composition imported relation reference executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_student_eligible output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn sum_where_can_sum_related_derived_scalar_values() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
