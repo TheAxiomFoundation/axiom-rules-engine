@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::spec::{
     DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
+    ProgramSpec, RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec,
+    ScalarValueSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -52,7 +53,9 @@ pub enum RuleSpecError {
     MissingDerivedRelationArity { name: String },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation.source_relation")]
     MissingDerivedRelationSource { name: String },
-    #[error("RuleSpec derived relation `{name}` must declare exactly one membership formula version")]
+    #[error(
+        "RuleSpec derived relation `{name}` must declare exactly one membership formula version"
+    )]
     InvalidDerivedRelationFormulaVersions { name: String },
     #[error("RuleSpec source relation `{name}` must declare source_relation")]
     MissingSourceRelation { name: String },
@@ -628,9 +631,7 @@ impl RulesDocument {
             .rules
             .iter()
             .filter_map(|rule| match rule.kind.as_ref() {
-                Some(RuleKind::DataRelation | RuleKind::DerivedRelation) => {
-                    Some(rule.name.clone())
-                }
+                Some(RuleKind::DataRelation | RuleKind::DerivedRelation) => Some(rule.name.clone()),
                 _ => None,
             })
             .collect::<HashSet<String>>();
@@ -873,12 +874,11 @@ impl RuleDefinition {
         derived_names: &HashSet<String>,
         relation_predicate_names: &HashSet<String>,
     ) -> Result<RelationSpec, RuleSpecError> {
-        let derived_relation =
-            self.derived_relation
-                .as_ref()
-                .ok_or_else(|| RuleSpecError::MissingDerivedRelation {
-                    name: self.name.clone(),
-                })?;
+        let derived_relation = self.derived_relation.as_ref().ok_or_else(|| {
+            RuleSpecError::MissingDerivedRelation {
+                name: self.name.clone(),
+            }
+        })?;
         let arity =
             derived_relation
                 .arity
@@ -920,8 +920,12 @@ impl RuleDefinition {
             arity,
             derivation: Some(RelationDerivationSpec {
                 source_relation,
-                current_slot: derived_relation.current_slot.unwrap_or(inferred_current_slot),
-                related_slot: derived_relation.related_slot.unwrap_or(inferred_related_slot),
+                current_slot: derived_relation
+                    .current_slot
+                    .unwrap_or(inferred_current_slot),
+                related_slot: derived_relation
+                    .related_slot
+                    .unwrap_or(inferred_related_slot),
                 entity: derived_relation.entity.clone(),
                 member_relation: derived_relation.member_relation.clone(),
                 slot_entities: derived_relation.slot_entities.clone(),
@@ -1242,9 +1246,9 @@ fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
         .map(|(_, alias, _)| alias)
         .collect::<HashSet<String>>();
     let used_relations = used_relation_names(program);
-    program
-        .relations
-        .retain(|relation| !alias_names.contains(&relation.name) || used_relations.contains(&relation.name));
+    program.relations.retain(|relation| {
+        !alias_names.contains(&relation.name) || used_relations.contains(&relation.name)
+    });
 }
 
 fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, relation_name: &str) {
@@ -1380,6 +1384,8 @@ fn rewrite_relation_references(
         .keys()
         .map(|(_, relation)| relation.clone())
         .collect();
+    let unambiguous_short_rewrites = unambiguous_relation_rewrites(rewrites);
+    let derived_origin_targets = derived_origin_targets(program);
     for derived in &mut program.derived {
         let Some(origin_target) = derived
             .id
@@ -1390,10 +1396,22 @@ fn rewrite_relation_references(
         };
         match &mut derived.semantics {
             DerivedSemanticsSpec::Scalar { expr } => {
-                rewrite_scalar_relation_references(expr, origin_target, rewrites);
+                rewrite_scalar_relation_references(
+                    expr,
+                    origin_target,
+                    rewrites,
+                    &unambiguous_short_rewrites,
+                    &derived_origin_targets,
+                );
             }
             DerivedSemanticsSpec::Judgment { expr } => {
-                rewrite_judgment_relation_references(expr, origin_target, rewrites);
+                rewrite_judgment_relation_references(
+                    expr,
+                    origin_target,
+                    rewrites,
+                    &unambiguous_short_rewrites,
+                    &derived_origin_targets,
+                );
             }
         }
     }
@@ -1407,7 +1425,13 @@ fn rewrite_relation_references(
         };
         if let Some(derivation) = &mut relation.derivation {
             rewrite_relation_name(&mut derivation.source_relation, origin_target, rewrites);
-            rewrite_judgment_relation_references(&mut derivation.predicate, origin_target, rewrites);
+            rewrite_judgment_relation_references(
+                &mut derivation.predicate,
+                origin_target,
+                rewrites,
+                &unambiguous_short_rewrites,
+                &derived_origin_targets,
+            );
         }
     }
     let used_relations = used_relation_names(program);
@@ -1415,6 +1439,55 @@ fn rewrite_relation_references(
         !namespaced_short_names.contains(&relation.name) || used_relations.contains(&relation.name)
     });
     Ok(())
+}
+
+fn unambiguous_relation_rewrites(
+    rewrites: &HashMap<(String, String), String>,
+) -> HashMap<String, String> {
+    let mut candidates: HashMap<String, Option<String>> = HashMap::new();
+    for ((_, short_name), canonical_name) in rewrites {
+        candidates
+            .entry(short_name.clone())
+            .and_modify(|candidate| {
+                if candidate.as_deref() != Some(canonical_name.as_str()) {
+                    *candidate = None;
+                }
+            })
+            .or_insert_with(|| Some(canonical_name.clone()));
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(short_name, canonical_name)| {
+            canonical_name.map(|canonical_name| (short_name, canonical_name))
+        })
+        .collect()
+}
+
+fn derived_origin_targets(program: &ProgramSpec) -> HashMap<String, String> {
+    let mut candidates: HashMap<String, Option<String>> = HashMap::new();
+    for derived in &program.derived {
+        let Some(origin_target) = derived
+            .id
+            .as_deref()
+            .and_then(|id| id.split_once('#').map(|(target, _)| target.to_string()))
+        else {
+            continue;
+        };
+        candidates
+            .entry(derived.name.clone())
+            .and_modify(|candidate| {
+                if candidate.as_ref() != Some(&origin_target) {
+                    *candidate = None;
+                }
+            })
+            .or_insert(Some(origin_target));
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(name, origin_target)| {
+            origin_target.map(|origin_target| (name, origin_target))
+        })
+        .collect()
 }
 
 fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
@@ -1529,6 +1602,8 @@ fn rewrite_scalar_relation_references(
     expr: &mut ScalarExprSpec,
     origin_target: &str,
     rewrites: &HashMap<(String, String), String>,
+    unambiguous_short_rewrites: &HashMap<String, String>,
+    derived_origin_targets: &HashMap<String, String>,
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
@@ -1540,47 +1615,126 @@ fn rewrite_scalar_relation_references(
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
         | ScalarExprSpec::Floor { value: index } => {
-            rewrite_scalar_relation_references(index, origin_target, rewrites);
+            rewrite_scalar_relation_references(
+                index,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Max { items }
         | ScalarExprSpec::Min { items } => {
             for item in items {
-                rewrite_scalar_relation_references(item, origin_target, rewrites);
+                rewrite_scalar_relation_references(
+                    item,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
             }
         }
         ScalarExprSpec::Sub { left, right }
         | ScalarExprSpec::Mul { left, right }
         | ScalarExprSpec::Div { left, right } => {
-            rewrite_scalar_relation_references(left, origin_target, rewrites);
-            rewrite_scalar_relation_references(right, origin_target, rewrites);
+            rewrite_scalar_relation_references(
+                left,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                right,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         ScalarExprSpec::DateAddDays { date, days } => {
-            rewrite_scalar_relation_references(date, origin_target, rewrites);
-            rewrite_scalar_relation_references(days, origin_target, rewrites);
+            rewrite_scalar_relation_references(
+                date,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                days,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         ScalarExprSpec::DaysBetween { from, to } => {
-            rewrite_scalar_relation_references(from, origin_target, rewrites);
-            rewrite_scalar_relation_references(to, origin_target, rewrites);
+            rewrite_scalar_relation_references(
+                from,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                to,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
             ..
         } => {
-            rewrite_relation_name(relation, origin_target, rewrites);
+            if !rewrite_relation_name(relation, origin_target, rewrites)
+                && related_aggregation_uses_imported_derived(
+                    None,
+                    where_clause.as_deref(),
+                    origin_target,
+                    derived_origin_targets,
+                )
+            {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
             if let Some(where_clause) = where_clause {
-                rewrite_judgment_relation_references(where_clause, origin_target, rewrites);
+                rewrite_judgment_relation_references(
+                    where_clause,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
             }
         }
         ScalarExprSpec::SumRelated {
             relation,
+            value,
             where_clause,
             ..
         } => {
-            rewrite_relation_name(relation, origin_target, rewrites);
+            if !rewrite_relation_name(relation, origin_target, rewrites)
+                && related_aggregation_uses_imported_derived(
+                    Some(value),
+                    where_clause.as_deref(),
+                    origin_target,
+                    derived_origin_targets,
+                )
+            {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
             if let Some(where_clause) = where_clause {
-                rewrite_judgment_relation_references(where_clause, origin_target, rewrites);
+                rewrite_judgment_relation_references(
+                    where_clause,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
             }
         }
         ScalarExprSpec::If {
@@ -1588,9 +1742,27 @@ fn rewrite_scalar_relation_references(
             then_expr,
             else_expr,
         } => {
-            rewrite_judgment_relation_references(condition, origin_target, rewrites);
-            rewrite_scalar_relation_references(then_expr, origin_target, rewrites);
-            rewrite_scalar_relation_references(else_expr, origin_target, rewrites);
+            rewrite_judgment_relation_references(
+                condition,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                then_expr,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                else_expr,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
     }
 }
@@ -1599,11 +1771,25 @@ fn rewrite_judgment_relation_references(
     expr: &mut JudgmentExprSpec,
     origin_target: &str,
     rewrites: &HashMap<(String, String), String>,
+    unambiguous_short_rewrites: &HashMap<String, String>,
+    derived_origin_targets: &HashMap<String, String>,
 ) {
     match expr {
         JudgmentExprSpec::Comparison { left, right, .. } => {
-            rewrite_scalar_relation_references(left, origin_target, rewrites);
-            rewrite_scalar_relation_references(right, origin_target, rewrites);
+            rewrite_scalar_relation_references(
+                left,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            rewrite_scalar_relation_references(
+                right,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         JudgmentExprSpec::Derived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
@@ -1611,11 +1797,23 @@ fn rewrite_judgment_relation_references(
         }
         JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
             for item in items {
-                rewrite_judgment_relation_references(item, origin_target, rewrites);
+                rewrite_judgment_relation_references(
+                    item,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
             }
         }
         JudgmentExprSpec::Not { item } => {
-            rewrite_judgment_relation_references(item, origin_target, rewrites);
+            rewrite_judgment_relation_references(
+                item,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
     }
 }
@@ -1624,10 +1822,144 @@ fn rewrite_relation_name(
     relation: &mut String,
     origin_target: &str,
     rewrites: &HashMap<(String, String), String>,
-) {
+) -> bool {
     if let Some(rewrite) = rewrites.get(&(origin_target.to_string(), relation.clone())) {
         *relation = rewrite.clone();
+        true
+    } else {
+        false
     }
+}
+
+fn rewrite_unambiguous_relation_name(
+    relation: &mut String,
+    unambiguous_short_rewrites: &HashMap<String, String>,
+) -> bool {
+    if relation.contains("#relation.") {
+        return false;
+    }
+    if let Some(rewrite) = unambiguous_short_rewrites.get(relation) {
+        *relation = rewrite.clone();
+        true
+    } else {
+        false
+    }
+}
+
+fn related_aggregation_uses_imported_derived(
+    value: Option<&RelatedValueRefSpec>,
+    where_clause: Option<&JudgmentExprSpec>,
+    origin_target: &str,
+    derived_origin_targets: &HashMap<String, String>,
+) -> bool {
+    if let Some(RelatedValueRefSpec::Derived { name }) = value {
+        if derived_reference_is_imported(name, origin_target, derived_origin_targets) {
+            return true;
+        }
+    }
+    where_clause
+        .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
+        .unwrap_or(false)
+}
+
+fn judgment_uses_imported_derived(
+    expr: &JudgmentExprSpec,
+    origin_target: &str,
+    derived_origin_targets: &HashMap<String, String>,
+) -> bool {
+    match expr {
+        JudgmentExprSpec::Comparison { left, right, .. } => {
+            scalar_uses_imported_derived(left, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(right, origin_target, derived_origin_targets)
+        }
+        JudgmentExprSpec::Derived { name } => {
+            derived_reference_is_imported(name, origin_target, derived_origin_targets)
+        }
+        JudgmentExprSpec::RelationMember { .. } => false,
+        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+            items.iter().any(|item| {
+                judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
+            })
+        }
+        JudgmentExprSpec::Not { item } => {
+            judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
+        }
+    }
+}
+
+fn scalar_uses_imported_derived(
+    expr: &ScalarExprSpec,
+    origin_target: &str,
+    derived_origin_targets: &HashMap<String, String>,
+) -> bool {
+    match expr {
+        ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::Input { .. }
+        | ScalarExprSpec::InputOrElse { .. }
+        | ScalarExprSpec::PeriodStart
+        | ScalarExprSpec::PeriodEnd => false,
+        ScalarExprSpec::Derived { name } => {
+            derived_reference_is_imported(name, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::ParameterLookup { index, .. }
+        | ScalarExprSpec::Ceil { value: index }
+        | ScalarExprSpec::Floor { value: index } => {
+            scalar_uses_imported_derived(index, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::Add { items }
+        | ScalarExprSpec::Max { items }
+        | ScalarExprSpec::Min { items } => items
+            .iter()
+            .any(|item| scalar_uses_imported_derived(item, origin_target, derived_origin_targets)),
+        ScalarExprSpec::Sub { left, right }
+        | ScalarExprSpec::Mul { left, right }
+        | ScalarExprSpec::Div { left, right } => {
+            scalar_uses_imported_derived(left, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(right, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::DateAddDays { date, days } => {
+            scalar_uses_imported_derived(date, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(days, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::DaysBetween { from, to } => {
+            scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(to, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::CountRelated { where_clause, .. } => where_clause
+            .as_deref()
+            .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
+            .unwrap_or(false),
+        ScalarExprSpec::SumRelated {
+            value,
+            where_clause,
+            ..
+        } => related_aggregation_uses_imported_derived(
+            Some(value),
+            where_clause.as_deref(),
+            origin_target,
+            derived_origin_targets,
+        ),
+        ScalarExprSpec::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            judgment_uses_imported_derived(condition, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(then_expr, origin_target, derived_origin_targets)
+                || scalar_uses_imported_derived(else_expr, origin_target, derived_origin_targets)
+        }
+    }
+}
+
+fn derived_reference_is_imported(
+    name: &str,
+    origin_target: &str,
+    derived_origin_targets: &HashMap<String, String>,
+) -> bool {
+    derived_origin_targets
+        .get(name)
+        .map(|derived_origin| derived_origin != origin_target)
+        .unwrap_or(false)
 }
 
 fn write_metadata(out: &mut String, key: &str, value: Option<&str>) {
