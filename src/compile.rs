@@ -48,10 +48,27 @@ pub enum CompileError {
         "ambiguous RuleSpec module YAML `{path}` has a top-level `rules:` key but no RuleSpec discriminator (`format: rulespec/v1` or `schema: axiom.rules.*`)"
     )]
     AmbiguousRuleSpecYaml { path: String },
+    #[error(
+        "compiled artefact `{path}` has artifact_format_version {found}, but this engine supports up to {supported}; recompile the program with this engine or upgrade the engine"
+    )]
+    UnsupportedArtifactFormatVersion {
+        path: String,
+        found: u32,
+        supported: u32,
+    },
 }
+
+/// Format version stamped into every artifact this engine compiles.
+/// Artifacts with a missing field (version 0) predate stamping and are
+/// accepted; artifacts newer than this are rejected at load.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompiledProgramArtifact {
+    #[serde(default)]
+    pub artifact_format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
     pub program: ProgramSpec,
     pub metadata: CompiledProgramMetadata,
 }
@@ -74,12 +91,25 @@ impl CompiledProgramArtifact {
         let evaluation_order = evaluation_order(&program)?;
         let fast_path = fast_path_metadata(&program);
         Ok(Self {
+            artifact_format_version: ARTIFACT_FORMAT_VERSION,
+            engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             program,
             metadata: CompiledProgramMetadata {
                 evaluation_order,
                 fast_path,
             },
         })
+    }
+
+    fn check_format_version(self, path: &str) -> Result<Self, CompileError> {
+        if self.artifact_format_version > ARTIFACT_FORMAT_VERSION {
+            return Err(CompileError::UnsupportedArtifactFormatVersion {
+                path: path.to_string(),
+                found: self.artifact_format_version,
+                supported: ARTIFACT_FORMAT_VERSION,
+            });
+        }
+        Ok(self)
     }
 
     pub fn from_rulespec_str(source: &str) -> Result<Self, CompileError> {
@@ -129,10 +159,12 @@ impl CompiledProgramArtifact {
     }
 
     pub fn from_json_str(source: &str) -> Result<Self, CompileError> {
-        serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
-            path: "<memory>".to_string(),
-            error,
-        })
+        let artifact: Self =
+            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+                path: "<memory>".to_string(),
+                error,
+            })?;
+        artifact.check_format_version("<memory>")
     }
 
     pub fn from_json_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
@@ -141,10 +173,12 @@ impl CompiledProgramArtifact {
             path: path.display().to_string(),
             error,
         })?;
-        serde_json::from_str(&source).map_err(|error| CompileError::DeserializeArtifact {
-            path: path.display().to_string(),
-            error,
-        })
+        let artifact: Self =
+            serde_json::from_str(&source).map_err(|error| CompileError::DeserializeArtifact {
+                path: path.display().to_string(),
+                error,
+            })?;
+        artifact.check_format_version(&path.display().to_string())
     }
 
     pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), CompileError> {
@@ -654,6 +688,13 @@ pub fn compile_program_file_to_json(
 
 pub fn compile_summary_lines(artifact: &CompiledProgramArtifact) -> BTreeMap<String, String> {
     let mut lines = BTreeMap::new();
+    lines.insert(
+        "artifact_format_version".to_string(),
+        artifact.artifact_format_version.to_string(),
+    );
+    if let Some(engine_version) = &artifact.engine_version {
+        lines.insert("engine_version".to_string(), engine_version.clone());
+    }
     lines.insert(
         "derived_outputs".to_string(),
         artifact.program.derived.len().to_string(),

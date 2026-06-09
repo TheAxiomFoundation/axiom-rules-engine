@@ -4,6 +4,35 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-06-09 — Compiled artifacts carry a format version and are bounded subprocesses
+
+**Decision.** `CompiledProgramArtifact` stamps `artifact_format_version`
+(currently 1) and `engine_version` at compile time. Loading rejects artifacts
+whose format version is newer than the engine supports; artifacts without the
+field (version 0, pre-stamping) still load. The Python wrapper bounds every
+engine subprocess with a configurable timeout (default 600 s, `None` to
+disable).
+
+**Why.**
+
+- Artifacts are durable and ship to consumers (finbot, microsim, demos).
+  Without a version field, an engine reading an artifact from a different
+  generation fails late or silently miscalculates; with one, mismatches fail
+  loudly at load.
+- A pathological or hung engine process previously blocked Python callers
+  forever; web apps and batch microsim runs sit on that path.
+
+**Consequences.**
+
+- New artifacts include two extra JSON fields; legacy artifacts deserialize
+  with `artifact_format_version: 0` and `engine_version: null`, so nothing
+  shipped breaks.
+- Future IR-breaking changes must bump `ARTIFACT_FORMAT_VERSION` so older
+  engines reject newer artifacts instead of guessing.
+- The `compile` CLI summary now reports both versions.
+- Callers that legitimately run longer than 600 s must pass an explicit
+  `timeout` (or `None`).
+
 ## 2026-05-20 — Filtered entities lower as derived runtime relations
 
 **Decision.** RuleSpec models filtered entity membership with
