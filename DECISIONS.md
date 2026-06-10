@@ -4,6 +4,46 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-06-10 — Module resolution is a host concern behind `ModuleSource`
+
+**Decision.** The core engine is a pure function over (modules, dataset):
+lowering, compilation, and execution never touch a filesystem, environment
+variable, or wall clock. Finding module text for a canonical target
+(`us:statutes/7/2015/e`) goes behind the `source::ModuleSource` trait
+(`load(target) -> Result<Option<String>, SourceError>`);
+`load_rulespec_with_source` and `CompiledProgramArtifact::from_rulespec_with_source`
+are the pure entry points. Resolving relative imports to canonical targets is
+pure string logic on the importer's canonical target and stays in the core
+(`resolve_import_target`). The existing filesystem resolution
+(sibling checkouts, country monorepos, `AXIOM_RULESPEC_REPO_ROOTS`) becomes
+`FsModuleSource` plus the unchanged `*_file` APIs, all behind a default-on
+`fs` feature; the CLI binary requires it. wasm32-unknown-unknown is a
+supported check target: CI runs
+`cargo check --target wasm32-unknown-unknown --no-default-features`.
+
+**Why.**
+
+- Running benefit calculations in the browser keeps household PII on-device —
+  zero round-trip. That requires the core to compile for wasm32 with no
+  filesystem assumptions.
+- Servers with modules in memory, registry clients, and test harnesses all
+  want to supply module text directly instead of staging checkouts on disk.
+- Splitting "resolve an import to a canonical target" (pure, in core) from
+  "find and read the text" (host) keeps durable ids identical across hosts:
+  an in-memory host and a checkout produce byte-identical programs.
+
+**Consequences.**
+
+- Default builds are unchanged: `fs` is on, the CLI, `load_rulespec_file`,
+  `from_rulespec_file`, and artifact file I/O behave exactly as before.
+- With `--no-default-features` the crate has no `std::fs` / `std::env` usage
+  and no clock reads; chrono is pinned `default-features = false` (no `clock`
+  feature) so wall-clock reads cannot creep into core paths unnoticed.
+- Hosts own availability semantics: `Ok(None)` means "no such module"
+  (reported with importer context), `Err(SourceError)` means the host failed.
+- Module identity, import cycles, and deduplication key on canonical targets
+  rather than canonicalized paths in the source-driven loader.
+
 ## 2026-06-10 — Reserve the assessment-time axis before content depends on it
 
 **Decision.** The engine is bitemporal by design: valid time (the benefit

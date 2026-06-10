@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(feature = "fs")]
 use std::fs;
+#[cfg(feature = "fs")]
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use crate::spec::{
 pub enum CompileError {
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    #[cfg(feature = "fs")]
     #[error("failed to read compiled artefact `{path}`: {error}")]
     ReadArtifactFile { path: String, error: std::io::Error },
     #[error("unknown derived dependency `{dependency}` referenced from `{derived}`")]
@@ -28,8 +31,10 @@ pub enum CompileError {
     },
     #[error("cyclic relation dependency detected involving: {cycle}")]
     CyclicRelationDependency { cycle: String },
+    #[cfg(feature = "fs")]
     #[error("failed to read program file `{path}`: {error}")]
     ReadProgramFile { path: String, error: std::io::Error },
+    #[cfg(feature = "fs")]
     #[error("failed to write compiled artefact `{path}`: {error}")]
     WriteArtifactFile { path: String, error: std::io::Error },
     #[error("failed to serialise compiled artefact: {0}")]
@@ -133,6 +138,24 @@ impl CompiledProgramArtifact {
         })
     }
 
+    /// Compile the module at `root_target` (canonical form, for example
+    /// `us:statutes/7/2015/e`), resolving every module through a
+    /// host-supplied [`crate::source::ModuleSource`]. The pure counterpart of
+    /// [`Self::from_rulespec_file`]: no filesystem or environment access.
+    pub fn from_rulespec_with_source(
+        root_target: &str,
+        source: &dyn crate::source::ModuleSource,
+    ) -> Result<Self, CompileError> {
+        let program = crate::rulespec::load_rulespec_with_source(root_target, source).map_err(
+            |error| CompileError::RuleSpec {
+                path: root_target.to_string(),
+                error,
+            },
+        )?;
+        Self::compile(program)
+    }
+
+    #[cfg(feature = "fs")]
     pub fn from_rulespec_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
         let p = path.as_ref();
         let source = fs::read_to_string(p).map_err(|error| CompileError::ReadProgramFile {
@@ -167,6 +190,7 @@ impl CompiledProgramArtifact {
         artifact.check_format_version("<memory>")
     }
 
+    #[cfg(feature = "fs")]
     pub fn from_json_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
         let path = path.as_ref();
         let source = fs::read_to_string(path).map_err(|error| CompileError::ReadArtifactFile {
@@ -181,6 +205,7 @@ impl CompiledProgramArtifact {
         artifact.check_format_version(&path.display().to_string())
     }
 
+    #[cfg(feature = "fs")]
     pub fn write_json_file(&self, path: impl AsRef<Path>) -> Result<(), CompileError> {
         let path = path.as_ref();
         let json = serde_json::to_string_pretty(self).map_err(CompileError::SerializeArtifact)?;
@@ -676,6 +701,7 @@ fn collect_relation_members_from_judgment(
     }
 }
 
+#[cfg(feature = "fs")]
 pub fn compile_program_file_to_json(
     program_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,

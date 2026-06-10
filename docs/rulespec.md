@@ -164,6 +164,17 @@ The loader searches sibling checkouts and any roots listed in
 `AXIOM_RULESPEC_REPO_ROOTS` (each entry may be a jurisdiction repo, a
 country monorepo, or a directory containing either).
 
+Filesystem search is one host strategy, not part of the core. A host can
+instead supply module text directly through the `source::ModuleSource` trait
+and the `load_rulespec_with_source` /
+`CompiledProgramArtifact::from_rulespec_with_source` entry points — for
+example a browser (wasm) bundle, a server holding modules in memory, or a
+registry client. Relative imports still resolve against the importing
+module's canonical target (pure string logic in the core), the host only
+answers "what is the YAML text for `us:statutes/7/2015/e`?", and durable ids
+come out identical to the filesystem layouts. The filesystem behavior above
+is packaged as `FsModuleSource` behind the default-on `fs` cargo feature.
+
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example
 `us:statutes/7/2017/a#snap_regular_month_allotment`. Formula strings may still

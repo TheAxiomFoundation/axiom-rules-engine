@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "fs")]
 use std::env;
+#[cfg(feature = "fs")]
 use std::fs;
+#[cfg(feature = "fs")]
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::source::ModuleSource;
 
 use crate::spec::{
     DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
@@ -19,12 +24,21 @@ pub enum RuleSpecError {
     Yaml(#[from] serde_yaml::Error),
     #[error("RuleSpec requires `format: rulespec/v1` or `schema: axiom.rules.*`")]
     MissingDiscriminator,
+    #[cfg(feature = "fs")]
     #[error("failed to read RuleSpec file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
     #[error("RuleSpec import `{target}` in `{path}` could not be resolved")]
     UnresolvedImport { path: String, target: String },
     #[error("RuleSpec import cycle detected at `{path}`")]
     ImportCycle { path: String },
+    #[error(
+        "`{target}` is not a canonical RuleSpec module target of the form `<jurisdiction>:<relative path without extension>`"
+    )]
+    InvalidModuleTarget { target: String },
+    #[error("module source has no module for `{target}`")]
+    ModuleNotFound { target: String },
+    #[error(transparent)]
+    Source(#[from] crate::source::SourceError),
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
@@ -360,6 +374,7 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
     document.to_program_spec()
 }
 
+#[cfg(feature = "fs")]
 pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpecError> {
     let path = path.as_ref();
     let mut context = RuleSpecLoadContext::default();
@@ -367,12 +382,190 @@ pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpe
     document.to_program_spec()
 }
 
+/// Load and lower the module at `root_target` (canonical form, for example
+/// `us:statutes/7/2015/e`), resolving every import through a host-supplied
+/// [`ModuleSource`]. No filesystem or environment access happens here: the
+/// core treats the program as a pure function over (modules, dataset), and
+/// where module text comes from is the host's concern.
+///
+/// Imports are resolved to canonical targets with [`resolve_import_target`]
+/// (relative imports resolve against the importing module's canonical
+/// target), then fetched from `source`. Module identity, deduplication,
+/// cycle detection, and durable rule ids all use the canonical target.
+pub fn load_rulespec_with_source(
+    root_target: &str,
+    source: &dyn ModuleSource,
+) -> Result<ProgramSpec, RuleSpecError> {
+    let root_target = normalize_module_target(root_target)?;
+    let mut context = SourceLoadContext::default();
+    let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
+    document.to_program_spec()
+}
+
+#[derive(Default)]
+struct SourceLoadContext {
+    stack: Vec<String>,
+    loaded: HashSet<String>,
+}
+
+fn load_rulespec_document_from_source(
+    target: &str,
+    source: &dyn ModuleSource,
+    context: &mut SourceLoadContext,
+) -> Result<RulesDocument, RuleSpecError> {
+    if context.stack.iter().any(|loading| loading == target) {
+        return Err(RuleSpecError::ImportCycle {
+            path: target.to_string(),
+        });
+    }
+    if context.loaded.contains(target) {
+        return Ok(RulesDocument::default());
+    }
+    let text = source
+        .load(target)?
+        .ok_or_else(|| RuleSpecError::ModuleNotFound {
+            target: target.to_string(),
+        })?;
+    if !looks_like_rulespec_yaml(&text) {
+        return Err(RuleSpecError::MissingDiscriminator);
+    }
+    context.stack.push(target.to_string());
+    let mut document: RulesDocument = serde_yaml::from_str(&text)?;
+    document.assign_origin_target(Some(target.to_string()));
+    let mut combined = RulesDocument::default();
+
+    if let Some(extends) = document.extends.as_deref() {
+        let base_target = resolve_import_target(target, extends)?;
+        let base = load_rulespec_document_from_source(&base_target, source, context)?;
+        combined = merge_rules_documents(combined, base);
+    }
+
+    for import in &document.imports {
+        let import_target = resolve_import_target(target, import)?;
+        let imported = load_rulespec_document_from_source(&import_target, source, context)?;
+        combined = merge_rules_documents(combined, imported);
+    }
+
+    combined = merge_rules_documents(combined, document.without_dependency_directives());
+    context.loaded.insert(target.to_string());
+    context.stack.pop();
+    Ok(combined)
+}
+
+/// Normalize a canonical module target: strip surrounding quotes, a
+/// `#fragment`, and a `.yaml`/`.yml` extension, and validate the
+/// `<jurisdiction>:<relative path>` shape. Pure string logic.
+pub fn normalize_module_target(target: &str) -> Result<String, RuleSpecError> {
+    let trimmed = target.trim().trim_matches(['"', '\'']);
+    let without_fragment = trimmed
+        .split_once('#')
+        .map(|(base, _)| base)
+        .unwrap_or(trimmed)
+        .trim();
+    let Some((prefix, relative)) = without_fragment.split_once(':') else {
+        return Err(RuleSpecError::InvalidModuleTarget {
+            target: target.to_string(),
+        });
+    };
+    if !is_canonical_repo_prefix(prefix) {
+        return Err(RuleSpecError::InvalidModuleTarget {
+            target: target.to_string(),
+        });
+    }
+    let relative = strip_module_extension(relative.trim().trim_matches('/'));
+    let mut segments = Vec::new();
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                return Err(RuleSpecError::InvalidModuleTarget {
+                    target: target.to_string(),
+                });
+            }
+            segment => segments.push(segment),
+        }
+    }
+    if segments.is_empty() {
+        return Err(RuleSpecError::InvalidModuleTarget {
+            target: target.to_string(),
+        });
+    }
+    Ok(format!("{prefix}:{}", segments.join("/")))
+}
+
+/// Resolve an import string to a canonical module target, given the
+/// IMPORTING module's canonical target. Canonical imports
+/// (`us:statutes/7/2015/e`) pass through normalized; relative imports
+/// (`../d`, `e/6/A`, `./sibling.yaml`) resolve against the importer's
+/// directory within the same jurisdiction, mirroring how filesystem loading
+/// resolves relative imports from the importing file's directory. Pure
+/// string logic — no filesystem.
+pub fn resolve_import_target(
+    importer_target: &str,
+    import: &str,
+) -> Result<String, RuleSpecError> {
+    let unresolved = || RuleSpecError::UnresolvedImport {
+        path: importer_target.to_string(),
+        target: import.to_string(),
+    };
+    let trimmed = import.trim().trim_matches(['"', '\'']);
+    let without_fragment = trimmed
+        .split_once('#')
+        .map(|(base, _)| base)
+        .unwrap_or(trimmed)
+        .trim();
+    if without_fragment.is_empty() {
+        return Err(unresolved());
+    }
+    if let Some((prefix, _)) = without_fragment.split_once(':') {
+        if is_canonical_repo_prefix(prefix) {
+            return normalize_module_target(without_fragment).map_err(|_| unresolved());
+        }
+    }
+    // Relative import: resolve against the importer's directory. Absolute
+    // filesystem paths have no meaning without a filesystem.
+    if without_fragment.starts_with('/') {
+        return Err(unresolved());
+    }
+    let importer = normalize_module_target(importer_target)?;
+    let (prefix, importer_path) = importer
+        .split_once(':')
+        .expect("normalized targets contain a prefix");
+    let mut segments = importer_path.split('/').collect::<Vec<&str>>();
+    segments.pop(); // The importer module itself; imports resolve from its directory.
+    let relative = strip_module_extension(without_fragment);
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                if segments.pop().is_none() {
+                    return Err(unresolved());
+                }
+            }
+            segment => segments.push(segment),
+        }
+    }
+    if segments.is_empty() {
+        return Err(unresolved());
+    }
+    Ok(format!("{prefix}:{}", segments.join("/")))
+}
+
+fn strip_module_extension(target: &str) -> &str {
+    target
+        .strip_suffix(".yaml")
+        .or_else(|| target.strip_suffix(".yml"))
+        .unwrap_or(target)
+}
+
+#[cfg(feature = "fs")]
 #[derive(Default)]
 struct RuleSpecLoadContext {
     stack: Vec<PathBuf>,
     loaded: HashSet<PathBuf>,
 }
 
+#[cfg(feature = "fs")]
 fn load_rulespec_document_inner(
     path: &Path,
     context: &mut RuleSpecLoadContext,
@@ -417,6 +610,7 @@ fn load_rulespec_document_inner(
     Ok(combined)
 }
 
+#[cfg(feature = "fs")]
 fn load_extended_document(
     path: &Path,
     context: &mut RuleSpecLoadContext,
@@ -440,6 +634,7 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     base
 }
 
+#[cfg(feature = "fs")]
 fn resolve_rulespec_import(importer_path: &Path, import: &str) -> Result<PathBuf, RuleSpecError> {
     let target = import.trim().trim_matches(['"', '\'']);
     let target_without_fragment = target
@@ -471,6 +666,7 @@ fn resolve_rulespec_import(importer_path: &Path, import: &str) -> Result<PathBuf
     })
 }
 
+#[cfg(feature = "fs")]
 fn resolve_canonical_rulespec_import(
     importer_path: &Path,
     prefix: &str,
@@ -501,6 +697,7 @@ fn resolve_canonical_rulespec_import(
     })
 }
 
+#[cfg(feature = "fs")]
 fn canonical_rulespec_target(path: &Path) -> Option<String> {
     let resolved_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let components = resolved_path
@@ -547,6 +744,7 @@ fn canonical_rulespec_target(path: &Path) -> Option<String> {
     }
 }
 
+#[cfg(feature = "fs")]
 fn import_target_to_rulespec_path(target: &str) -> PathBuf {
     let normalized = target.trim().trim_matches(['"', '\'']);
     let path = PathBuf::from(normalized);
@@ -557,7 +755,7 @@ fn import_target_to_rulespec_path(target: &str) -> PathBuf {
     }
 }
 
-fn is_canonical_repo_prefix(prefix: &str) -> bool {
+pub(crate) fn is_canonical_repo_prefix(prefix: &str) -> bool {
     !prefix.is_empty()
         && prefix
             .chars()
@@ -574,7 +772,8 @@ fn is_absolute_rulespec_ref(value: &str) -> bool {
         && !value.chars().any(char::is_whitespace)
 }
 
-fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> Vec<PathBuf> {
+#[cfg(feature = "fs")]
+pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> Vec<PathBuf> {
     // A jurisdiction's content root is either a legacy standalone repo
     // named rulespec-<prefix> (content at its root), or the <prefix>/
     // directory inside a country monorepo named rulespec-<country>
