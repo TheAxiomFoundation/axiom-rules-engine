@@ -286,6 +286,49 @@ rules:
         delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
 ```
 
+## Source pinning and provenance
+
+The `module:` block can carry optional metadata that grounds the module in
+source text and records how the encoding was produced and checked. Every
+field is optional and inert: absent fields mean exactly today's behavior,
+and nothing in lowering, compilation, or execution reads them. The lowered
+`ProgramSpec` keeps the (merged) root module's metadata on `program.module`,
+and compiled artifacts pass it through their JSON, so tooling can read it
+from a loaded module or artifact without re-parsing the YAML.
+
+```yaml
+module:
+  id: us:statutes/7/2017/a
+  source_verification:
+    corpus_citation_path: us/statute/7/2017/a
+    source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  encoding_provenance:
+    encoder: axiom-encode/0.2.645
+    model: claude-fable-5
+    run_id: run-2026-06-10-001
+    reviewed_by: human-reviewer
+  validation:
+    - oracle: policyengine-us
+      status: matches
+      last_run: 2026-06-09
+```
+
+- `source_verification.source_sha256` pins the SHA-256 hex digest of the
+  exact corpus provision text the module was encoded from. When the source
+  republishes (for example an eCFR update), recomputing the hash gives a
+  mechanical "this module is stale" signal; `axiom-encode
+  check-source-staleness` does exactly that. The value must be 64
+  hexadecimal characters — anything else is rejected at load with an error
+  naming the module file. Other `source_verification` subfields (such as
+  `corpus_citation_path`) are preserved verbatim.
+- `encoding_provenance` records the encoding tool (`encoder`, for example
+  `axiom-encode/0.2.645`), `model`, `run_id`, and human `reviewed_by` — all
+  optional strings. Unknown subfields are rejected so typos cannot pass for
+  provenance.
+- `validation` lists oracle-validation results: `oracle` (string), `status`
+  (one of `matches`, `mismatches`, `pending`), and optional `last_run`
+  (ISO date). Unknown statuses are rejected.
+
 Known hard gaps:
 
 - Formula strings are parsed by the internal `crate::formula` parser and

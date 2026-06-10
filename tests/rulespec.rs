@@ -4,7 +4,7 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompileError, CompiledProgramArtifact, compile_program_file_to_json,
 };
-use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
+use axiom_rules_engine::rulespec::{RuleSpecError, ValidationStatus, lower_rulespec_str};
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
     ScalarExprSpec, ScalarValueSpec,
@@ -2210,4 +2210,248 @@ rules:
     assert_eq!(value, "268");
 
     std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}
+
+#[test]
+fn rulespec_module_provenance_round_trips_into_artifact() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: us:statutes/7/2017/a
+  title: SNAP allotment
+  source_verification:
+    corpus_citation_path: us/statute/7/2017/a
+    corpus_citation_paths:
+      - us/statute/7/2017/a
+    source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  encoding_provenance:
+    encoder: axiom-encode/0.2.645
+    model: claude-fable-5
+    run_id: run-2026-06-10-001
+    reviewed_by: human-reviewer
+  validation:
+    - oracle: policyengine-us
+      status: matches
+      last_run: 2026-06-09
+    - oracle: snapscreener
+      status: pending
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("RuleSpec with provenance metadata compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    let artifact = CompiledProgramArtifact::from_json_str(&json).expect("artifact round-trips");
+
+    let module = artifact
+        .program
+        .module
+        .as_ref()
+        .expect("module metadata survives lowering and the artifact round trip");
+    assert_eq!(module.id.as_deref(), Some("us:statutes/7/2017/a"));
+
+    let verification = module
+        .source_verification
+        .as_ref()
+        .expect("source verification block survives");
+    assert_eq!(
+        verification.corpus_citation_path.as_deref(),
+        Some("us/statute/7/2017/a")
+    );
+    assert_eq!(
+        verification.source_sha256.as_deref(),
+        Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+    );
+    assert!(
+        verification.extra.contains_key("corpus_citation_paths"),
+        "unmodeled source_verification subfields are preserved verbatim"
+    );
+
+    let provenance = module
+        .encoding_provenance
+        .as_ref()
+        .expect("encoding provenance survives");
+    assert_eq!(provenance.encoder.as_deref(), Some("axiom-encode/0.2.645"));
+    assert_eq!(provenance.model.as_deref(), Some("claude-fable-5"));
+    assert_eq!(provenance.run_id.as_deref(), Some("run-2026-06-10-001"));
+    assert_eq!(provenance.reviewed_by.as_deref(), Some("human-reviewer"));
+
+    assert_eq!(module.validation.len(), 2);
+    assert_eq!(module.validation[0].oracle, "policyengine-us");
+    assert_eq!(module.validation[0].status, ValidationStatus::Matches);
+    assert_eq!(
+        module.validation[0]
+            .last_run
+            .expect("last_run parses as a date")
+            .to_string(),
+        "2026-06-09"
+    );
+    assert_eq!(module.validation[1].oracle, "snapscreener");
+    assert_eq!(module.validation[1].status, ValidationStatus::Pending);
+    assert_eq!(module.validation[1].last_run, None);
+}
+
+#[test]
+fn rulespec_artifact_omits_module_key_when_metadata_absent() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("compiles");
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    assert!(
+        !json.contains("\"module\""),
+        "artifacts without module metadata stay byte-identical to today's shape"
+    );
+}
+
+#[test]
+fn rulespec_rejects_malformed_source_sha256() {
+    for bad_sha in [
+        "abc123",
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a0", // 63 chars
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a0g", // non-hex char
+    ] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+module:
+  id: us:statutes/7/2017/a
+  source_verification:
+    corpus_citation_path: us/statute/7/2017/a
+    source_sha256: "{bad_sha}"
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#
+        );
+
+        let err = lower_rulespec_str(&rulespec).expect_err("malformed sha should fail");
+        assert!(matches!(
+            &err,
+            RuleSpecError::InvalidSourceSha256 { path, value }
+                if path == "us:statutes/7/2017/a" && value == bad_sha
+        ));
+    }
+}
+
+#[test]
+fn rulespec_malformed_source_sha256_error_names_the_file() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "axiom-rules-engine-source-sha-test-{}",
+        std::process::id()
+    ));
+    let program_path = temp_root.join("rules.yaml");
+    std::fs::create_dir_all(&temp_root).expect("temp dir is created");
+    std::fs::write(
+        &program_path,
+        r#"
+format: rulespec/v1
+module:
+  source_verification:
+    source_sha256: not-a-digest
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#,
+    )
+    .expect("RuleSpec fixture is written");
+
+    let err = CompiledProgramArtifact::from_rulespec_file(&program_path)
+        .expect_err("malformed sha should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("rules.yaml"),
+        "error should name the file, got: {message}"
+    );
+    assert!(
+        message.contains("not-a-digest"),
+        "error should echo the malformed value, got: {message}"
+    );
+    std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}
+
+#[test]
+fn rulespec_rejects_unknown_validation_status() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  validation:
+    - oracle: policyengine-us
+      status: disputed
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("unknown validation status should fail");
+    assert!(matches!(err, RuleSpecError::Yaml(_)));
+    let message = err.to_string();
+    assert!(
+        message.contains("disputed"),
+        "error should name the rejected status, got: {message}"
+    );
+    assert!(
+        message.contains("pending"),
+        "error should list the accepted statuses, got: {message}"
+    );
+}
+
+#[test]
+fn rulespec_rejects_unknown_encoding_provenance_field() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  encoding_provenance:
+    encoder: axiom-encode/0.2.645
+    vibes: high
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("unknown provenance field should fail");
+    assert!(matches!(err, RuleSpecError::Yaml(_)));
+    let message = err.to_string();
+    assert!(
+        message.contains("vibes"),
+        "error should name the rejected field, got: {message}"
+    );
 }

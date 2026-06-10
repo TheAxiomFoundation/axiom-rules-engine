@@ -43,6 +43,49 @@ targets: `--target web` (browser ESM) into `wasm/pkg-web/` and
 - JS-side ergonomics (typed wrappers, Web Worker hosting, module fetching)
   live with consuming apps, not in this crate; the exported surface stays
   four functions.
+## 2026-06-10 — Source pinning, encoding provenance, and validation status are module content
+
+**Decision.** The RuleSpec `module:` block grows three optional, inert
+fields: `source_verification.source_sha256` (the SHA-256 hex digest of the
+exact corpus provision text the module was encoded from),
+`encoding_provenance` (optional `encoder`, `model`, `run_id`, `reviewed_by`
+strings; unknown subfields rejected), and `validation` (a list of
+`{oracle, status, last_run}` records with `status` one of
+`matches` / `mismatches` / `pending`). The engine validates shape at load —
+a malformed sha fails with an error naming the module file — carries the
+merged root module's metadata on `ProgramSpec.module`, and passes it
+through compiled-artifact JSON. Nothing in lowering, compilation, or
+execution reads any of it.
+
+**Why.**
+
+- Modules ground to legal text through
+  `module.source_verification.corpus_citation_path`, but not to a content
+  hash of the exact text version encoded. When eCFR republishes a section
+  there is no mechanical "this module is stale" signal; pinning
+  `source_sha256` makes staleness a hash comparison
+  (`axiom-encode check-source-staleness`).
+- Encoding provenance (tool, model, run id, reviewer) lives in a
+  side-channel telemetry DB today. Provenance should travel with the
+  content it describes so review and audit need only the module file.
+- Oracle-validation status lives nowhere in content; consumers cannot tell
+  a validated module from a pending one without external systems.
+
+**Consequences.**
+
+- Every field is optional; absent means exactly today's behavior. Existing
+  modules and fixtures are untouched, and artifacts without module
+  metadata serialize byte-identically to before.
+- Artifacts gain an optional `program.module` pass-through. No
+  `ARTIFACT_FORMAT_VERSION` bump: the field is additive, ignored by older
+  engines, and evaluation semantics are unchanged.
+- Malformed `source_sha256` values (not 64 hex characters), unknown
+  `encoding_provenance` subfields, and unknown `validation[].status`
+  values are rejected at load instead of passing silently.
+- Unmodeled `source_verification` subfields (for example
+  `corpus_citation_paths`) are preserved verbatim for tooling.
+- axiom-encode owns stamping the blocks at encode time and the staleness
+  checker that compares pinned hashes against the current corpus.
 
 ## 2026-06-10 — Module resolution is a host concern behind `ModuleSource`
 
