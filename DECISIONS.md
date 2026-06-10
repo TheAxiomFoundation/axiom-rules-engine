@@ -4,6 +4,50 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-06-10 — Reserve the assessment-time axis before content depends on it
+
+**Decision.** The engine is bitemporal by design: valid time (the benefit
+period the law governs — the existing `period` / `effective_from` axis) and
+decision/assessment time (when the determination is made) are separate axes.
+`ExecutionQuery` reserves an optional `assessment_date` on both the direct and
+compiled request paths, mirrored in the Python models and echoed on each
+`QueryResult`. For now it is parsed and validated only — it must be on or
+after `period.start` — and has no effect on evaluation. RuleSpec versions will
+grow optional `enacted_on` / `known_from` alongside `effective_from`;
+`assessment_date` will select which enactments are visible while `period`
+keeps selecting which visible version applies. `docs/bitemporal.md` is the
+full design.
+
+**Why.**
+
+- Retroactive amendments (ARPA's 2021-03-11 enactment effective for tax year
+  2020), retroactive COLA corrections, SNAP retro-certification and restored
+  benefits (7 CFR 273.10, 273.17), and appeals all separate "law in force
+  during the period" from "law as known at assessment". One axis cannot
+  represent a correct-when-made determination once an encoding absorbs a
+  retroactive enactment.
+- Among versions sharing an `effective_from`, selection currently falls
+  through to document order — an accident of file layout. The assessment axis
+  turns that into a principled rule: the latest-enacted visible version wins.
+- Reserving the query field now lets requests, stored results, and callers
+  carry assessment dates before any encoding depends on the semantics, instead
+  of retrofitting the wire format later.
+
+**Consequences.**
+
+- Absent fields mean "known since forever": versions without
+  `enacted_on`/`known_from` are visible at every assessment date, so selection
+  reduces exactly to today's `effective_from` rule. Existing encodings,
+  requests, artifacts, and responses are unchanged; unset fields are omitted
+  from the wire.
+- Queries with `assessment_date` before the period start are rejected;
+  assessing a period before it begins is projection, which stays out of scope.
+- When the engine starts honoring visibility dates, `ARTIFACT_FORMAT_VERSION`
+  must bump (per the 2026-06-09 decision) and the evaluation cache key gains
+  an assessment dimension.
+- Explicitly out of scope: retro recalculation workflow, cross-period
+  corrections/claims ledgers, and knowledge time for input data.
+
 ## 2026-06-09 — Compiled artifacts carry a format version and are bounded subprocesses
 
 **Decision.** `CompiledProgramArtifact` stamps `artifact_format_version`
