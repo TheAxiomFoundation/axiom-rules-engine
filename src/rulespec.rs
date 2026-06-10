@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::source::ModuleSource;
@@ -105,6 +105,10 @@ pub enum RuleSpecError {
         existing: usize,
         new: usize,
     },
+    #[error(
+        "RuleSpec module `{path}` declares source_verification.source_sha256 `{value}`, which is not a 64-character hexadecimal SHA-256 digest"
+    )]
+    InvalidSourceSha256 { path: String, value: String },
     #[error("failed to load extended RuleSpec module: {0}")]
     Extended(#[from] crate::spec::SpecError),
 }
@@ -129,16 +133,102 @@ pub struct RulesDocument {
     pub rules: Vec<RuleDefinition>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Module-level metadata block of a RuleSpec document. Every field is
+/// optional; the whole block is descriptive and inert — it never affects
+/// lowering output names, compilation, or execution. The lowered
+/// [`ProgramSpec`] keeps the (merged) root module's metadata so tooling
+/// reading a loaded module or a compiled artifact can see it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ModuleMetadata {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_verification: Option<SourceVerification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding_provenance: Option<EncodingProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation: Vec<ValidationRecord>,
+}
+
+impl ModuleMetadata {
+    /// Validate the shape of declared metadata. `path` names the module for
+    /// error reporting: the file path for filesystem loads, the canonical
+    /// target for source-backed loads, or the module id / `<memory>` for
+    /// in-memory strings.
+    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+        if let Some(sha) = self
+            .source_verification
+            .as_ref()
+            .and_then(|verification| verification.source_sha256.as_deref())
+        {
+            if sha.len() != 64 || !sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(RuleSpecError::InvalidSourceSha256 {
+                    path: path.to_string(),
+                    value: sha.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Grounding of a module in legal source text. `corpus_citation_path`
+/// addresses the provision in the Axiom corpus; `source_sha256` pins the
+/// SHA-256 hex digest of the exact provision text the module was encoded
+/// from, so tooling can detect mechanically when the published source has
+/// changed out from under the encoding. Additional subfields (for example
+/// `corpus_citation_paths`) are preserved verbatim.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SourceVerification {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_citation_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// Who and what produced the encoding: tool (`encoder`, for example
+/// `axiom-encode/0.2.645`), `model`, `run_id`, and human `reviewed_by`.
+/// All fields optional; unknown subfields are rejected so typos do not
+/// silently pass for provenance.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncodingProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_by: Option<String>,
+}
+
+/// One oracle-validation result for the module: which oracle, whether the
+/// encoding currently matches it, and when it last ran.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ValidationRecord {
+    pub oracle: String,
+    pub status: ValidationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<NaiveDate>,
+}
+
+/// Outcome of an oracle validation run. Any other status string is
+/// rejected at parse time.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationStatus {
+    Matches,
+    Mismatches,
+    Pending,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,6 +460,7 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
         .module
         .as_ref()
         .and_then(|module| module.id.clone());
+    document.validate_module_metadata(origin_target.as_deref().unwrap_or("<memory>"))?;
     document.assign_origin_target(origin_target);
     document.to_program_spec()
 }
@@ -431,6 +522,7 @@ fn load_rulespec_document_from_source(
     }
     context.stack.push(target.to_string());
     let mut document: RulesDocument = serde_yaml::from_str(&text)?;
+    document.validate_module_metadata(target)?;
     document.assign_origin_target(Some(target.to_string()));
     let mut combined = RulesDocument::default();
 
@@ -589,6 +681,7 @@ fn load_rulespec_document_inner(
     }
     context.stack.push(resolved_path.clone());
     let mut document: RulesDocument = serde_yaml::from_str(&source)?;
+    document.validate_module_metadata(&path.display().to_string())?;
     document.assign_origin_target(canonical_rulespec_target(path));
     let mut combined = RulesDocument::default();
 
@@ -837,6 +930,13 @@ pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> V
 }
 
 impl RulesDocument {
+    fn validate_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
+        match &self.module {
+            Some(module) => module.validate(path),
+            None => Ok(()),
+        }
+    }
+
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
         for rule in &mut self.rules {
             rule.origin_target = origin_target.clone();
@@ -953,6 +1053,9 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
         rewrite_filtered_entity_member_aliases(&mut program);
+        // Carried for tooling and artifact pass-through only; nothing in
+        // compilation or execution reads it.
+        program.module = self.module.clone();
         Ok(program)
     }
 

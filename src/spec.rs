@@ -38,6 +38,11 @@ pub enum SpecError {
 pub struct ProgramSpec {
     #[serde(default)]
     pub extends: Option<String>,
+    /// Module-level metadata (source pinning, encoding provenance,
+    /// validation status) carried through RuleSpec lowering for tooling and
+    /// artifact pass-through. Compilation and execution never read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<crate::rulespec::ModuleMetadata>,
     #[serde(default)]
     pub units: Vec<UnitSpec>,
     #[serde(default)]
@@ -873,6 +878,9 @@ pub fn merge_programs(
     mut base: ProgramSpec,
     extension: ProgramSpec,
 ) -> Result<ProgramSpec, SpecError> {
+    if extension.module.is_some() {
+        base.module = extension.module;
+    }
     for unit in extension.units {
         if base.units.iter().any(|u| u.name == unit.name) {
             continue;
