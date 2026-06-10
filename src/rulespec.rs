@@ -489,8 +489,7 @@ fn resolve_canonical_rulespec_import(
         });
     }
 
-    let repo_name = format!("rulespec-{prefix}");
-    for root in candidate_rule_repo_roots(importer_path, &repo_name) {
+    for root in candidate_rule_repo_roots(importer_path, prefix) {
         let target_path = root.join(&relative_path);
         if target_path.exists() {
             return Ok(target_path);
@@ -511,12 +510,28 @@ fn canonical_rulespec_target(path: &Path) -> Option<String> {
     let repo_index = components
         .iter()
         .rposition(|component| component.starts_with("rulespec-"))?;
-    let prefix = components[repo_index].strip_prefix("rulespec-")?;
-    if prefix.is_empty() || repo_index + 1 >= components.len() {
+    let repo_prefix = components[repo_index].strip_prefix("rulespec-")?;
+    if repo_prefix.is_empty() || repo_index + 1 >= components.len() {
+        return None;
+    }
+    // Country-monorepo layout: a repo named rulespec-<country> holds one
+    // directory per jurisdiction (rulespec-us/us/…, rulespec-us/us-ca/…).
+    // A first component equal to the country code or extending it with a
+    // dash is the jurisdiction prefix; anything else is legacy layout where
+    // content sits at the repo root.
+    let next = components[repo_index + 1].as_str();
+    let is_jurisdiction_dir = next == repo_prefix
+        || (next.starts_with(repo_prefix) && next.as_bytes().get(repo_prefix.len()) == Some(&b'-'));
+    let (prefix, content_start) = if is_jurisdiction_dir {
+        (next.to_string(), repo_index + 2)
+    } else {
+        (repo_prefix.to_string(), repo_index + 1)
+    };
+    if content_start >= components.len() {
         return None;
     }
     let mut relative = PathBuf::new();
-    for component in &components[repo_index + 1..] {
+    for component in &components[content_start..] {
         relative.push(component);
     }
     let mut relative = relative.to_string_lossy().replace('\\', "/");
@@ -559,7 +574,16 @@ fn is_absolute_rulespec_ref(value: &str) -> bool {
         && !value.chars().any(char::is_whitespace)
 }
 
-fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathBuf> {
+fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> Vec<PathBuf> {
+    // A jurisdiction's content root is either a legacy standalone repo
+    // named rulespec-<prefix> (content at its root), or the <prefix>/
+    // directory inside a country monorepo named rulespec-<country>
+    // (rulespec-us containing us/, us-ca/, …). Legacy candidates come
+    // first so existing sibling checkouts keep their precedence.
+    let repo_name = format!("rulespec-{prefix}");
+    let country = prefix.split('-').next().unwrap_or(prefix);
+    let monorepo_name = format!("rulespec-{country}");
+
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
     let mut add = |candidate: PathBuf| {
@@ -570,27 +594,45 @@ fn candidate_rule_repo_roots(importer_path: &Path, repo_name: &str) -> Vec<PathB
 
     if let Some(env_roots) = env::var_os("AXIOM_RULESPEC_REPO_ROOTS") {
         for raw_root in env::split_paths(&env_roots) {
-            if raw_root.file_name().is_some_and(|name| name == repo_name) {
-                add(raw_root);
+            if raw_root.file_name().is_some_and(|name| name == repo_name.as_str()) {
+                add(raw_root.clone());
             } else {
-                add(raw_root.join(repo_name));
+                add(raw_root.join(&repo_name));
+            }
+            if raw_root
+                .file_name()
+                .is_some_and(|name| name == monorepo_name.as_str())
+            {
+                add(raw_root.join(prefix));
+            } else {
+                add(raw_root.join(&monorepo_name).join(prefix));
             }
         }
     }
 
     for ancestor in importer_path.ancestors() {
-        if ancestor.file_name().is_some_and(|name| name == repo_name) {
+        if ancestor.file_name().is_some_and(|name| name == repo_name.as_str()) {
             add(ancestor.to_path_buf());
         }
-        if let Some(parent) = ancestor.parent() {
-            add(parent.join(repo_name));
+        if ancestor
+            .file_name()
+            .is_some_and(|name| name == monorepo_name.as_str())
+        {
+            add(ancestor.join(prefix));
         }
-        add(ancestor.join("_axiom").join(repo_name));
+        if let Some(parent) = ancestor.parent() {
+            add(parent.join(&repo_name));
+            add(parent.join(&monorepo_name).join(prefix));
+        }
+        add(ancestor.join("_axiom").join(&repo_name));
+        add(ancestor.join("_axiom").join(&monorepo_name).join(prefix));
     }
 
     if let Ok(cwd) = env::current_dir() {
-        add(cwd.join(repo_name));
-        add(cwd.join("_axiom").join(repo_name));
+        add(cwd.join(&repo_name));
+        add(cwd.join(&monorepo_name).join(prefix));
+        add(cwd.join("_axiom").join(&repo_name));
+        add(cwd.join("_axiom").join(&monorepo_name).join(prefix));
     }
     candidates
 }

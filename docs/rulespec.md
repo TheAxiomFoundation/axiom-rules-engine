@@ -150,9 +150,19 @@ imports:
 ```
 
 The canonical form is `<jurisdiction>:<relative path without extension>`.
-`us:` resolves to the `rulespec-us` repository, `us-co:` resolves to
-`rulespec-us-co`, and so on. The loader searches sibling checkouts and any roots
-listed in `AXIOM_RULESPEC_REPO_ROOTS`.
+A jurisdiction prefix resolves against either layout, with the same durable
+ids in both:
+
+- **Country monorepo** — a repo named `rulespec-<country>` holding one
+  directory per jurisdiction: `us:` → `rulespec-us/us/…`, `us-co:` →
+  `rulespec-us/us-co/…`.
+- **Legacy standalone repo** — `us-co:` → a sibling checkout named
+  `rulespec-us-co` with content at its root. Legacy candidates are tried
+  first, so existing sibling checkouts keep their precedence.
+
+The loader searches sibling checkouts and any roots listed in
+`AXIOM_RULESPEC_REPO_ROOTS` (each entry may be a jurisdiction repo, a
+country monorepo, or a directory containing either).
 
 Executable rules loaded from jurisdiction repos receive a durable id of
 `<canonical file target>#<rule name>`, for example
