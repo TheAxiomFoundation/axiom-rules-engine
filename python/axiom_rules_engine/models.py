@@ -79,6 +79,8 @@ class CompiledProgramMetadata(BaseModel):
 
 
 class CompiledProgram(BaseModel):
+    artifact_format_version: int = 0
+    engine_version: str | None = None
     program: Program
     metadata: CompiledProgramMetadata
 

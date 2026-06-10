@@ -15,9 +15,25 @@ from .models import (
 )
 
 
+DEFAULT_TIMEOUT_SECONDS = 600.0
+
+
 class AxiomRulesEngine:
-    def __init__(self, binary_path: str | Path = "target/debug/axiom-rules-engine") -> None:
+    def __init__(
+        self,
+        binary_path: str | Path = "target/debug/axiom-rules-engine",
+        *,
+        timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        """Wrap the Rust engine binary.
+
+        ``timeout`` bounds every engine subprocess in seconds so a
+        pathological program cannot hang the caller; ``None`` disables the
+        bound. On expiry the engine process is killed and
+        ``subprocess.TimeoutExpired`` is raised.
+        """
         self.binary_path = Path(binary_path)
+        self.timeout = timeout
 
     def execute(self, request: ExecutionRequest) -> ExecutionResponse:
         process = subprocess.run(
@@ -26,6 +42,7 @@ class AxiomRulesEngine:
             text=True,
             capture_output=True,
             check=False,
+            timeout=self.timeout,
         )
         if process.returncode != 0:
             stderr = process.stderr.strip() or "Axiom Rules Engine executable failed"
@@ -46,6 +63,7 @@ class AxiomRulesEngine:
             text=True,
             capture_output=True,
             check=False,
+            timeout=self.timeout,
         )
         if process.returncode != 0:
             stderr = process.stderr.strip() or "Axiom Rules Engine executable failed"
@@ -67,6 +85,7 @@ class AxiomRulesEngine:
             text=True,
             capture_output=True,
             check=False,
+            timeout=self.timeout,
         )
         if process.returncode != 0:
             stderr = process.stderr.strip() or "Axiom Rules Engine compile failed"

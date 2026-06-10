@@ -19,7 +19,14 @@ def _looks_like_rulespec(spec: dict) -> bool:
     )
 
 
-def _compile_program(path: Path, binary_path: str | Path | None = None) -> Program:
+DEFAULT_TIMEOUT_SECONDS = 600.0
+
+
+def _compile_program(
+    path: Path,
+    binary_path: str | Path | None = None,
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+) -> Program:
     binary = (
         Path(binary_path)
         if binary_path is not None
@@ -39,6 +46,7 @@ def _compile_program(path: Path, binary_path: str | Path | None = None) -> Progr
             text=True,
             capture_output=True,
             check=False,
+            timeout=timeout,
         )
         if process.returncode != 0:
             stderr = process.stderr.strip() or "Axiom Rules Engine compile failed"
@@ -47,8 +55,17 @@ def _compile_program(path: Path, binary_path: str | Path | None = None) -> Progr
         return Program.model_validate(artifact["program"])
 
 
-def load_program(path: str | Path, *, binary_path: str | Path | None = None) -> Program:
-    """Load a RuleSpec module from RuleSpec YAML."""
+def load_program(
+    path: str | Path,
+    *,
+    binary_path: str | Path | None = None,
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+) -> Program:
+    """Load a RuleSpec module from RuleSpec YAML.
+
+    ``timeout`` bounds the compile subprocess in seconds; ``None`` disables
+    the bound. On expiry ``subprocess.TimeoutExpired`` is raised.
+    """
     path = Path(path)
     spec: dict = yaml.safe_load(path.read_text()) or {}
     if not _looks_like_rulespec(spec):
@@ -56,4 +73,4 @@ def load_program(path: str | Path, *, binary_path: str | Path | None = None) -> 
             f"{path} is not RuleSpec YAML; expected format: rulespec/v1 "
             "or schema: axiom.rules.*"
         )
-    return _compile_program(path, binary_path=binary_path)
+    return _compile_program(path, binary_path=binary_path, timeout=timeout)
