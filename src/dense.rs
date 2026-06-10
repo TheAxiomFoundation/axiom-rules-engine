@@ -133,6 +133,11 @@ pub enum DenseOutputValue {
     Judgment(Vec<JudgmentOutcome>),
 }
 
+/// Pseudo-entity assigned to formula parameters with no declared entity.
+/// Rules at this entity are row-constant, so they may be compiled into any
+/// root entity as a broadcast.
+const SCALAR_ENTITY: &str = "Scalar";
+
 #[derive(Clone, Debug)]
 pub struct DenseExecutionResult {
     pub row_count: usize,
@@ -298,6 +303,7 @@ impl DenseCompiledProgram {
                     .derived
                     .values()
                     .map(|derived| derived.entity.clone())
+                    .filter(|entity| entity != SCALAR_ENTITY)
                     .collect::<HashSet<String>>();
                 if entities.len() != 1 {
                     return Err(DenseCompileError::AmbiguousRootEntity);
@@ -555,7 +561,7 @@ impl<'a> DenseCompiler<'a> {
             self.program.derived.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown derived `{name}`"))
             })?;
-        if derived.entity != self.root_entity {
+        if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
             return Err(DenseCompileError::CrossEntityDependency {
                 derived: name.to_string(),
                 dependency: name.to_string(),
@@ -601,7 +607,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown scalar dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != self.root_entity {
+                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -731,7 +737,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown judgment dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != self.root_entity {
+                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -918,7 +924,10 @@ impl<'a> DenseCompiler<'a> {
                         "unknown scalar dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != entity && dependency.entity != self.root_entity {
+                if dependency.entity != entity
+                    && dependency.entity != self.root_entity
+                    && dependency.entity != SCALAR_ENTITY
+                {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -1034,7 +1043,10 @@ impl<'a> DenseCompiler<'a> {
                         "unknown judgment dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != entity && dependency.entity != self.root_entity {
+                if dependency.entity != entity
+                    && dependency.entity != self.root_entity
+                    && dependency.entity != SCALAR_ENTITY
+                {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),

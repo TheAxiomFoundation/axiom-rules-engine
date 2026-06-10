@@ -3027,3 +3027,62 @@ fn family_allowance_dataset(
 fn decimal(value: &str) -> Decimal {
     Decimal::from_str(value).expect("valid decimal")
 }
+
+const SCALAR_PARAMETER_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: taper_fraction
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2020-01-01'
+        formula: |-
+          1 / 2
+
+  - name: tapered_amount
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2020-01-01'
+        formula: |-
+          income * taper_fraction
+"#;
+
+#[test]
+fn dense_broadcasts_scalar_entity_formula_parameters() {
+    // Formula parameters with no declared entity lower to the `Scalar`
+    // pseudo-entity. They are row-constant, so dense compilation broadcasts
+    // them into the root entity instead of rejecting the cross-entity
+    // dependency, and default root-entity detection ignores them.
+    let period = month_period();
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SCALAR_PARAMETER_RULESPEC)
+        .expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, None)
+        .expect("dense compilation succeeds without an explicit entity");
+    assert_eq!(dense.root_entity(), "Person");
+
+    let result = dense
+        .execute(
+            &period.to_model().expect("period converts"),
+            DenseBatchSpec {
+                row_count: 2,
+                inputs: HashMap::from([(
+                    "income".to_string(),
+                    DenseColumn::Decimal(vec![decimal("100"), decimal("250")]),
+                )]),
+                relations: HashMap::new(),
+            },
+            &["tapered_amount".to_string()],
+        )
+        .expect("dense execution succeeds");
+
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) =
+        result.outputs.get("tapered_amount").expect("output present")
+    else {
+        panic!("expected decimal output");
+    };
+    assert_eq!(values, &vec![decimal("50"), decimal("125")]);
+}

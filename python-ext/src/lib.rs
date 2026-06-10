@@ -11,6 +11,7 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 #[pyclass(module = "axiom_rules_engine_dense")]
@@ -260,18 +261,38 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
     if let Ok(array) = value.extract::<PyReadonlyArray1<'_, i64>>() {
         return Ok(DenseColumn::Integer(array.as_slice()?.to_vec()));
     }
+    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
+        return decimal_column_from_f64(array.as_slice()?);
+    }
     if let Ok(values) = value.extract::<Vec<bool>>() {
         return Ok(DenseColumn::Bool(values));
     }
     if let Ok(values) = value.extract::<Vec<i64>>() {
         return Ok(DenseColumn::Integer(values));
     }
+    if let Ok(values) = value.extract::<Vec<f64>>() {
+        return decimal_column_from_f64(&values);
+    }
     if let Ok(values) = value.extract::<Vec<String>>() {
         return Ok(DenseColumn::Text(values));
     }
     Err(PyValueError::new_err(
-        "dense columns must be bool/int64 numpy arrays or simple Python lists",
+        "dense columns must be bool/int64/float64 numpy arrays or simple Python lists",
     ))
+}
+
+fn decimal_column_from_f64(values: &[f64]) -> PyResult<DenseColumn> {
+    values
+        .iter()
+        .map(|value| {
+            Decimal::from_f64_retain(*value)
+                .map(|decimal| decimal.round_dp(9).normalize())
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("cannot represent {value} as a decimal"))
+                })
+        })
+        .collect::<PyResult<Vec<Decimal>>>()
+        .map(DenseColumn::Decimal)
 }
 
 fn extract_index_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
