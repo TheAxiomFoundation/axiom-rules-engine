@@ -28,6 +28,23 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --verbose
 
+  wasm:
+    name: wasm32 core check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: cargo check (wasm32-unknown-unknown, no default features)
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --verbose
+
   python:
     name: Python package tests
     runs-on: ubuntu-latest

@@ -6,4 +6,5 @@ pub mod engine;
 mod formula;
 pub mod model;
 pub mod rulespec;
+pub mod source;
 pub mod spec;

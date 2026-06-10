@@ -5,8 +5,23 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Prototype temporal-relational Axiom Rules Engine in Rust"
 
+[features]
+default = ["fs"]
+# Filesystem-backed module resolution (FsModuleSource, the *_file loading and
+# artifact APIs, AXIOM_RULESPEC_REPO_ROOTS) and the CLI binary. With this
+# feature off, the core has no std::fs / std::env usage and checks cleanly for
+# wasm32-unknown-unknown; hosts supply modules through source::ModuleSource.
+fs = []
+
+[[bin]]
+name = "axiom-rules-engine"
+path = "src/main.rs"
+required-features = ["fs"]
+
 [dependencies]
-chrono = { version = "0.4.42", features = ["serde"] }
+# Default features off: the `clock` feature (wall-clock reads) stays out of
+# the core, which never reads the current time and must not on wasm hosts.
+chrono = { version = "0.4.42", default-features = false, features = ["serde", "std"] }
 rust_decimal = { version = "1.39.0", features = ["maths", "serde"] }
 rust_decimal_macros = "1.39.0"
 serde = { version = "1.0.228", features = ["derive"] }

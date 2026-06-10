@@ -19,6 +19,7 @@ pub enum SpecError {
     InvalidDecimal { literal: String },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[cfg(feature = "fs")]
     #[error("failed to read program file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
     #[error("duplicate {kind} `{name}` when merging extended program")]
@@ -57,6 +58,7 @@ impl ProgramSpec {
     /// have their versions concatenated, preserving effective_from order; the
     /// engine picks whichever version is live for the query period. Units,
     /// relations, and derived outputs are additive with duplicate-name errors.
+    #[cfg(feature = "fs")]
     pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self, SpecError> {
         let path = path.as_ref();
         let source = std::fs::read_to_string(path).map_err(|error| SpecError::ReadFile {
