@@ -3086,3 +3086,45 @@ fn dense_broadcasts_scalar_entity_formula_parameters() {
     };
     assert_eq!(values, &vec![decimal("50"), decimal("125")]);
 }
+
+#[test]
+fn dense_compiles_scalar_only_module_with_scalar_root() {
+    // A module containing only scalar formula parameters falls back to the
+    // Scalar pseudo-entity as its root and executes as a broadcast.
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: taper_fraction
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2020-01-01'
+        formula: |-
+          1 / 2
+"#;
+    let period = month_period();
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, None)
+        .expect("scalar-only dense compilation succeeds");
+    assert_eq!(dense.root_entity(), "Scalar");
+
+    let result = dense
+        .execute(
+            &period.to_model().expect("period converts"),
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: HashMap::new(),
+            },
+            &["taper_fraction".to_string()],
+        )
+        .expect("dense execution succeeds");
+
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) =
+        result.outputs.get("taper_fraction").expect("output present")
+    else {
+        panic!("expected decimal output");
+    };
+    assert_eq!(values, &vec![decimal("0.5")]);
+}

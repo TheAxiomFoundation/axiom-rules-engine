@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::EvalError;
 use crate::model::{
+    SCALAR_ENTITY,
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome, Period,
     Program, RelatedValueRef, ScalarExpr, ScalarValue,
 };
@@ -132,11 +133,6 @@ pub enum DenseOutputValue {
     Scalar(DenseColumn),
     Judgment(Vec<JudgmentOutcome>),
 }
-
-/// Pseudo-entity assigned to formula parameters with no declared entity.
-/// Rules at this entity are row-constant, so they may be compiled into any
-/// root entity as a broadcast.
-const SCALAR_ENTITY: &str = "Scalar";
 
 #[derive(Clone, Debug)]
 pub struct DenseExecutionResult {
@@ -305,10 +301,16 @@ impl DenseCompiledProgram {
                     .map(|derived| derived.entity.clone())
                     .filter(|entity| entity != SCALAR_ENTITY)
                     .collect::<HashSet<String>>();
-                if entities.len() != 1 {
+                if entities.len() > 1 {
                     return Err(DenseCompileError::AmbiguousRootEntity);
                 }
-                entities.into_iter().next().expect("one entity")
+                // A module whose derived rules are all scalar formula
+                // parameters compiles with the scalar pseudo-entity as its
+                // root and executes as a broadcast.
+                entities
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| SCALAR_ENTITY.to_string())
             }
         };
 
