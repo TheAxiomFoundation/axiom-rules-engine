@@ -7,6 +7,10 @@
 **/.venv/
 **/venv/
 
+# wasm-pack build output
+wasm/pkg-web/
+wasm/pkg-node/
+
 # macOS
 .DS_Store
 

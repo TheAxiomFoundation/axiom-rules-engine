@@ -4,6 +4,46 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-06-10 — Browser execution is a first-class target; the wasm boundary is the CLI's JSON
+
+**Decision.** `wasm/` hosts a sibling crate (the `python-ext/` convention),
+`axiom-rules-engine-wasm`: a cdylib over wasm-bindgen exposing exactly four
+functions — `compile(modules_json, root_target)`,
+`execute(artifact_json, request_json)`, `engine_version()`, and
+`artifact_format_version()`. The boundary is JSON strings in both directions,
+reusing the CLI's serde types unchanged: `compile` takes a
+`{canonical_target: yaml_text}` map (served to an in-memory `ModuleSource`)
+and returns a `CompiledProgramArtifact`; `execute` takes a
+`CompiledExecutionRequest` and returns an `ExecutionResponse`. The crate
+depends on the core with `default-features = false`. wasm-pack builds two
+targets: `--target web` (browser ESM) into `wasm/pkg-web/` and
+`--target nodejs` into `wasm/pkg-node/`, which a Node smoke test
+(`wasm/test/smoke.mjs`) runs in CI's `wasm-pkg` job — no browser required.
+
+**Why.**
+
+- Browser execution keeps household PII on-device with zero round-trip.
+  `ModuleSource` made the core pure over (modules, dataset); this crate is
+  the host layer that actually ships that purity to a page.
+- JSON strings, not structured `JsValue` marshalling (serde-wasm-bindgen),
+  keep one canonical wire format: any payload that works against the CLI
+  works unchanged against the wasm build, artifacts cache and transfer as
+  plain text, and the JS side needs no generated type definitions to drift.
+- `engine_version()` / `artifact_format_version()` give UIs provenance to
+  display alongside any result they render, matching the fields stamped
+  into artifacts.
+
+**Consequences.**
+
+- The core gains a one-line `ENGINE_VERSION` const so bindings can report
+  the core crate's version; nothing else in the core changes.
+- Determinations computed in the browser are byte-identical to CLI output
+  for the same artifact and request; the smoke test pins this with the
+  fixture pair from `tests/module_source.rs`.
+- JS-side ergonomics (typed wrappers, Web Worker hosting, module fetching)
+  live with consuming apps, not in this crate; the exported surface stays
+  four functions.
+
 ## 2026-06-10 — Module resolution is a host concern behind `ModuleSource`
 
 **Decision.** The core engine is a pure function over (modules, dataset):

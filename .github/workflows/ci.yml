@@ -45,6 +45,39 @@ jobs:
       - name: cargo check (wasm32-unknown-unknown, no default features)
         run: cargo check --target wasm32-unknown-unknown --no-default-features --verbose
 
+  wasm-pkg:
+    name: wasm bindings package + node smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: wasm
+
+      - name: Set up Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: wasm-pack build (nodejs)
+        run: wasm-pack build wasm --target nodejs --out-dir pkg-node
+
+      - name: wasm-pack build (web)
+        run: wasm-pack build wasm --target web --out-dir pkg-web
+
+      - name: Node smoke test
+        run: node wasm/test/smoke.mjs
+
   python:
     name: Python package tests
     runs-on: ubuntu-latest
