@@ -1177,7 +1177,10 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             )));
         }
         let dtype = parse_dtype(v.dtype.as_deref());
-        let entity = v.entity.clone().unwrap_or_else(|| "Scalar".to_string());
+        let entity = v
+            .entity
+            .clone()
+            .unwrap_or_else(|| crate::model::SCALAR_ENTITY.to_string());
         let last = v.values.last().ok_or_else(|| {
             FormulaError::lower(format!("variable `{}` has no temporal values", v.path))
         })?;

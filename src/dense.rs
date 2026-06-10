@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::EvalError;
 use crate::model::{
+    SCALAR_ENTITY,
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome, Period,
     Program, RelatedValueRef, ScalarExpr, ScalarValue,
 };
@@ -298,11 +299,18 @@ impl DenseCompiledProgram {
                     .derived
                     .values()
                     .map(|derived| derived.entity.clone())
+                    .filter(|entity| entity != SCALAR_ENTITY)
                     .collect::<HashSet<String>>();
-                if entities.len() != 1 {
+                if entities.len() > 1 {
                     return Err(DenseCompileError::AmbiguousRootEntity);
                 }
-                entities.into_iter().next().expect("one entity")
+                // A module whose derived rules are all scalar formula
+                // parameters compiles with the scalar pseudo-entity as its
+                // root and executes as a broadcast.
+                entities
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| SCALAR_ENTITY.to_string())
             }
         };
 
@@ -555,7 +563,7 @@ impl<'a> DenseCompiler<'a> {
             self.program.derived.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown derived `{name}`"))
             })?;
-        if derived.entity != self.root_entity {
+        if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
             return Err(DenseCompileError::CrossEntityDependency {
                 derived: name.to_string(),
                 dependency: name.to_string(),
@@ -601,7 +609,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown scalar dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != self.root_entity {
+                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -731,7 +739,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown judgment dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != self.root_entity {
+                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -918,7 +926,10 @@ impl<'a> DenseCompiler<'a> {
                         "unknown scalar dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != entity && dependency.entity != self.root_entity {
+                if dependency.entity != entity
+                    && dependency.entity != self.root_entity
+                    && dependency.entity != SCALAR_ENTITY
+                {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
@@ -1034,7 +1045,10 @@ impl<'a> DenseCompiler<'a> {
                         "unknown judgment dependency `{name}` referenced from `{derived_name}`"
                     ))
                 })?;
-                if dependency.entity != entity && dependency.entity != self.root_entity {
+                if dependency.entity != entity
+                    && dependency.entity != self.root_entity
+                    && dependency.entity != SCALAR_ENTITY
+                {
                     return Err(DenseCompileError::CrossEntityDependency {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),

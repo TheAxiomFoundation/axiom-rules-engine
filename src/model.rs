@@ -4,6 +4,10 @@ use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
+/// Pseudo-entity assigned to formula parameters with no declared entity.
+/// Rules at this entity are row-constant.
+pub const SCALAR_ENTITY: &str = "Scalar";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PeriodKind {
     Month,
