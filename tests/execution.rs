@@ -207,6 +207,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
     let queries = ["household-1", "household-2"]
         .into_iter()
         .map(|entity_id| ExecutionQuery {
+            assessment_date: None,
             entity_id: entity_id.to_string(),
             period: period.clone(),
             outputs: vec!["benefit".to_string()],
@@ -330,6 +331,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         ],
     };
     let queries = vec![ExecutionQuery {
+        assessment_date: None,
         entity_id: "household-1".to_string(),
         period,
         outputs: vec!["household_income".to_string()],
@@ -435,6 +437,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
         }],
     };
     let queries = vec![ExecutionQuery {
+        assessment_date: None,
         entity_id: "household-1".to_string(),
         period,
         outputs: vec!["has_elderly_or_disabled_member".to_string()],
@@ -571,6 +574,7 @@ rules:
         program,
         dataset,
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![
@@ -717,6 +721,7 @@ rules:
         program,
         dataset,
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![
@@ -854,11 +859,13 @@ rules:
         dataset,
         queries: vec![
             ExecutionQuery {
+                assessment_date: None,
                 entity_id: "household-1".to_string(),
                 period: period.clone(),
                 outputs: vec!["snap_unit_size".to_string()],
             },
             ExecutionQuery {
+                assessment_date: None,
                 entity_id: "household-2".to_string(),
                 period,
                 outputs: vec!["snap_unit_size".to_string()],
@@ -1021,6 +1028,7 @@ rules:
         program,
         dataset,
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec!["adult_snap_unit_size".to_string()],
@@ -1156,6 +1164,131 @@ fn cli_compile_and_run_compiled_round_trip() {
     std::fs::remove_dir(temp_root).ok();
 }
 
+// `assessment_date` is a reserved bitemporal field (see docs/bitemporal.md):
+// it is parsed, validated, and echoed, but must not affect evaluation yet.
+#[test]
+fn assessment_date_round_trips_and_evaluates_identically() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    let period = simple_period();
+    let assessment_date = chrono::NaiveDate::from_ymd_opt(2026, 3, 15).expect("valid date");
+
+    let without = simple_execution_request(ExecutionMode::Explain, program.clone());
+    let mut with = without.clone();
+    for query in &mut with.queries {
+        query.assessment_date = Some(assessment_date);
+    }
+
+    // Wire shape: the field is omitted when unset, so existing request JSON
+    // is unchanged, and legacy JSON without the field still deserializes.
+    let without_json = serde_json::to_value(&without).expect("request serialises");
+    assert!(
+        without_json["queries"][0].get("assessment_date").is_none(),
+        "unset assessment_date must not appear on the wire"
+    );
+    let with_json = serde_json::to_string(&with).expect("request serialises");
+    let reparsed: ExecutionRequest =
+        serde_json::from_str(&with_json).expect("request with assessment_date parses");
+    assert_eq!(reparsed.queries[0].assessment_date, Some(assessment_date));
+    let legacy: ExecutionQuery = serde_json::from_value(without_json["queries"][0].clone())
+        .expect("legacy query without assessment_date parses");
+    assert_eq!(legacy.assessment_date, None);
+
+    // Evaluation is identical with and without the field, in both modes.
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let mut without_request = without.clone();
+        without_request.mode = mode.clone();
+        let mut with_request = with.clone();
+        with_request.mode = mode;
+
+        let without_response =
+            execute_request(without_request).expect("request without assessment_date succeeds");
+        let with_response =
+            execute_request(with_request).expect("request with assessment_date succeeds");
+
+        assert_eq!(
+            serde_json::to_value(&without_response.metadata).expect("metadata serialises"),
+            serde_json::to_value(&with_response.metadata).expect("metadata serialises"),
+        );
+        assert_eq!(without_response.results.len(), with_response.results.len());
+        for (without_result, with_result) in without_response
+            .results
+            .iter()
+            .zip(with_response.results.iter())
+        {
+            assert_eq!(
+                serde_json::to_value(&without_result.outputs).expect("outputs serialise"),
+                serde_json::to_value(&with_result.outputs).expect("outputs serialise"),
+            );
+            assert_eq!(
+                serde_json::to_value(&without_result.trace).expect("trace serialises"),
+                serde_json::to_value(&with_result.trace).expect("trace serialises"),
+            );
+            // The response echoes the assessment the result was computed under.
+            assert_eq!(without_result.assessment_date, None);
+            assert_eq!(with_result.assessment_date, Some(assessment_date));
+        }
+    }
+
+    // The compiled-request path accepts and echoes the field identically.
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles from YAML");
+    let mut compiled_queries = simple_queries(&period);
+    for query in &mut compiled_queries {
+        query.assessment_date = Some(assessment_date);
+    }
+    let compiled_response = execute_compiled_request(
+        artifact,
+        CompiledExecutionRequest {
+            mode: ExecutionMode::Fast,
+            dataset: simple_dataset(&period),
+            queries: compiled_queries,
+        },
+    )
+    .expect("compiled request with assessment_date succeeds");
+    assert_eq!(
+        compiled_response.results[0].assessment_date,
+        Some(assessment_date)
+    );
+    assert_eq!(
+        decimal_output(
+            compiled_response.results[0]
+                .outputs
+                .get("adjusted_amount")
+                .expect("adjusted amount output")
+        ),
+        decimal("25")
+    );
+
+    // Boundary: an assessment on the first day of the period is allowed.
+    let mut boundary = without.clone();
+    for query in &mut boundary.queries {
+        query.assessment_date = Some(period.start);
+    }
+    execute_request(boundary).expect("assessment on the period start date is valid");
+}
+
+#[test]
+fn assessment_date_before_period_start_errors() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    let before_period = chrono::NaiveDate::from_ymd_opt(2025, 12, 31).expect("valid date");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let mut request = simple_execution_request(mode, program.clone());
+        request.queries[1].assessment_date = Some(before_period);
+
+        let error = execute_request(request)
+            .expect_err("assessment_date before the period start must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("assessment_date 2025-12-31")
+                && message.contains("period start 2026-01-01"),
+            "unexpected error message: {message}"
+        );
+    }
+}
+
 fn simple_period() -> PeriodSpec {
     PeriodSpec {
         kind: PeriodKindSpec::Month,
@@ -1194,6 +1327,7 @@ fn simple_queries(period: &PeriodSpec) -> Vec<ExecutionQuery> {
     ["household-1", "household-2"]
         .into_iter()
         .map(|entity_id| ExecutionQuery {
+            assessment_date: None,
             entity_id: entity_id.to_string(),
             period: period.clone(),
             outputs: vec!["adjusted_amount".to_string()],

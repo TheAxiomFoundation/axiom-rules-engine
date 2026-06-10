@@ -163,6 +163,7 @@ pub fn try_execute(
                 start: query.period.start,
                 end: query.period.end,
             },
+            assessment_date: query.assessment_date,
             outputs,
             trace: BTreeMap::new(),
         });

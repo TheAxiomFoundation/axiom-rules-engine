@@ -230,6 +230,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec!["max_allotment".to_string()],
@@ -349,6 +350,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec!["us:statutes/7/2017/a#snap_regular_month_allotment".to_string()],
@@ -419,6 +421,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -502,6 +505,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "tax-unit-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -596,6 +600,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -683,6 +688,7 @@ rules:
             }],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -777,6 +783,7 @@ rules:
             }],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -900,6 +907,7 @@ rules:
             }],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -1041,6 +1049,7 @@ rules:
             }],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "tax-unit-1".to_string(),
             period,
             outputs: vec![output_id.clone()],
@@ -1165,6 +1174,7 @@ rules: []
             ],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "tax-unit-1".to_string(),
             period,
             outputs: vec![ctc_output.clone(), standard_deduction_output.clone()],
@@ -2175,6 +2185,7 @@ rules:
             relations: Vec::new(),
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
             outputs: vec![output_id.clone()],

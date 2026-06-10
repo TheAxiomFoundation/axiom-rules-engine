@@ -221,6 +221,7 @@ fn dense_flat_tax_matches_explain_mode() {
         queries: people
             .iter()
             .map(|(person_id, _)| ExecutionQuery {
+                assessment_date: None,
                 entity_id: (*person_id).to_string(),
                 period: period.clone(),
                 outputs: vec![
@@ -346,6 +347,7 @@ fn dense_family_allowance_matches_explain_mode() {
         queries: households
             .iter()
             .map(|(household_id, _)| ExecutionQuery {
+                assessment_date: None,
                 entity_id: (*household_id).to_string(),
                 period: period.clone(),
                 outputs: vec![
@@ -517,6 +519,7 @@ fn dense_filtered_entity_scope_matches_explain_mode() {
         queries: ["household-1", "household-2"]
             .into_iter()
             .map(|entity_id| ExecutionQuery {
+                assessment_date: None,
                 entity_id: entity_id.to_string(),
                 period: period.clone(),
                 outputs: vec![
@@ -653,6 +656,7 @@ fn dense_filtered_entity_membership_can_depend_on_current_entity_predicates() {
         queries: ["household-1", "household-2"]
             .into_iter()
             .map(|entity_id| ExecutionQuery {
+                assessment_date: None,
                 entity_id: entity_id.to_string(),
                 period: period.clone(),
                 outputs: vec!["snap_unit_size".to_string()],
@@ -779,6 +783,7 @@ fn dense_filtered_entities_can_compose_source_relations() {
             ],
         },
         queries: vec![ExecutionQuery {
+            assessment_date: None,
             entity_id: "household-1".to_string(),
             period: period.clone(),
             outputs: vec!["adult_snap_unit_size".to_string()],
@@ -857,6 +862,7 @@ fn dense_child_benefit_responsibility_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.child_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1024,6 +1030,7 @@ fn dense_scottish_ctr_max_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.dwelling_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1199,6 +1206,7 @@ fn dense_child_benefit_rates_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.claimant_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1375,6 +1383,7 @@ fn dense_auto_enrolment_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.jobholder_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1527,6 +1536,7 @@ fn dense_ated_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.interest_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1695,6 +1705,7 @@ fn dense_ct_marginal_relief_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.company_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -1889,6 +1900,7 @@ fn dense_state_pension_transitional_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.person_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -2035,6 +2047,7 @@ fn dense_universal_credit_matches_explain_mode() {
             .cases
             .iter()
             .map(|case| ExecutionQuery {
+                assessment_date: None,
                 entity_id: case.benefit_unit_id.clone(),
                 period: case.period.clone(),
                 outputs: outputs.to_vec(),
@@ -2498,6 +2511,7 @@ fn dense_date_add_days_matches_explain_mode() {
         queries: part_weeks
             .iter()
             .map(|(id, _)| ExecutionQuery {
+                assessment_date: None,
                 entity_id: id.to_string(),
                 period: period.clone(),
                 outputs: outputs.to_vec(),
@@ -2703,6 +2717,7 @@ fn dense_notional_capital_matches_explain_mode() {
         queries: applicants
             .iter()
             .map(|applicant| ExecutionQuery {
+                assessment_date: None,
                 entity_id: applicant.id.to_string(),
                 period: period.clone(),
                 outputs: outputs.to_vec(),

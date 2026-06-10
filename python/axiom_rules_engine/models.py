@@ -58,6 +58,12 @@ class ExecutionQuery(BaseModel):
     entity_id: str
     period: Period
     outputs: list[str]
+    # Decision/assessment time: the date the determination is made, as opposed
+    # to `period` (valid time — the benefit period the law governs). Reserved
+    # for the bitemporal semantics in docs/bitemporal.md. The engine parses and
+    # validates it (it must be on or after `period.start`) but it has NO effect
+    # on evaluation yet.
+    assessment_date: date | None = None
 
 
 class ExecutionRequest(BaseModel):
@@ -142,6 +148,8 @@ DerivedTraceNode = Annotated[
 class QueryResult(BaseModel):
     entity_id: str
     period: Period
+    # Echo of the query's `assessment_date` (see docs/bitemporal.md).
+    assessment_date: date | None = None
     outputs: dict[str, OutputValue]
     trace: dict[str, DerivedTraceNode] = Field(default_factory=dict)
 

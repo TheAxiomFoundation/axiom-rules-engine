@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,6 +38,17 @@ pub struct ExecutionQuery {
     pub entity_id: String,
     pub period: PeriodSpec,
     pub outputs: Vec<String>,
+    /// Decision/assessment time: the date the determination is made, as
+    /// opposed to `period`, which is valid time — the benefit period the law
+    /// governs. Reserved for the bitemporal version-selection semantics in
+    /// `docs/bitemporal.md`.
+    ///
+    /// Today this field is parsed and validated only: when present it must be
+    /// on or after `period.start`, and it has NO effect on evaluation yet.
+    /// Version selection still considers every version, exactly as if the
+    /// assessment had full knowledge of all enactments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_date: Option<NaiveDate>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +68,10 @@ pub struct ExecutionMetadata {
 pub struct QueryResult {
     pub entity_id: String,
     pub period: PeriodSpec,
+    /// Echo of the query's `assessment_date`, so callers can tie a result to
+    /// the assessment it was requested under. See `docs/bitemporal.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_date: Option<NaiveDate>,
     pub outputs: BTreeMap<String, OutputValue>,
     #[serde(default)]
     pub trace: BTreeMap<String, DerivedTraceNode>,
@@ -117,9 +133,35 @@ pub enum ApiError {
     Eval(#[from] EvalError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    #[error(
+        "assessment_date {assessment_date} is before the query period start {period_start}; a determination cannot be assessed before the period it covers begins (see docs/bitemporal.md)"
+    )]
+    AssessmentDateBeforePeriodStart {
+        assessment_date: NaiveDate,
+        period_start: NaiveDate,
+    },
+}
+
+/// Reject queries whose `assessment_date` predates the period they assess.
+/// Assessing a period before it starts would be a projection, not a
+/// determination; projection semantics are explicitly out of scope for now
+/// (see docs/bitemporal.md).
+fn validate_assessment_dates(queries: &[ExecutionQuery]) -> Result<(), ApiError> {
+    for query in queries {
+        if let Some(assessment_date) = query.assessment_date {
+            if assessment_date < query.period.start {
+                return Err(ApiError::AssessmentDateBeforePeriodStart {
+                    assessment_date,
+                    period_start: query.period.start,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, ApiError> {
+    validate_assessment_dates(&request.queries)?;
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
     let dataset = request.dataset.to_dataset_for_program(&program)?;
@@ -236,6 +278,7 @@ fn execute_explain(
         results.push(QueryResult {
             entity_id: query.entity_id,
             period: query.period,
+            assessment_date: query.assessment_date,
             outputs,
             trace,
         });
