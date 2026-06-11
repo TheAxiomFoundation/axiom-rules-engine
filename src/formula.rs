@@ -1459,13 +1459,20 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     if let Expr::Var(rel) = obj.as_ref() {
                         ctx.relations.borrow_mut().insert(rel.clone());
                         let (current_slot, related_slot) = infer_slots(rel);
+                        let value = if ctx.derived.contains(field) {
+                            RelatedValueRefSpec::Derived {
+                                name: field.clone(),
+                            }
+                        } else {
+                            RelatedValueRefSpec::Input {
+                                name: field.clone(),
+                            }
+                        };
                         return Ok(ScalarExprSpec::SumRelated {
                             relation: rel.clone(),
                             current_slot,
                             related_slot,
-                            value: RelatedValueRefSpec::Input {
-                                name: field.clone(),
-                            },
+                            value,
                             where_clause: None,
                         });
                     }
