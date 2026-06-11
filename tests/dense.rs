@@ -448,6 +448,212 @@ fn dense_family_allowance_matches_explain_mode() {
     }
 }
 
+const PER_CHILD_AWARD_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_family
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: eldest_weekly_rate
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: '26.05'
+  - name: other_weekly_rate
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: '17.25'
+  - name: other_child_weekly_amount
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          if is_eligible_child: other_weekly_rate
+          else: 0
+  - name: child_weekly_amount
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          if is_eldest_eligible_child: eldest_weekly_rate
+          else: other_child_weekly_amount
+  - name: family_weekly_award
+    kind: derived
+    entity: Family
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: sum(member_of_family.child_weekly_amount)
+  - name: family_weekly_award_eligible_only
+    kind: derived
+    entity: Family
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2025-01-01'
+        formula: sum_where(member_of_family, child_weekly_amount, is_eligible_child)
+"#;
+
+#[test]
+fn dense_sum_related_over_derived_matches_explain_mode() {
+    // Family-level awards summing a per-child derived amount: the related
+    // expression inlines a derived chain (if/else, parameter references)
+    // instead of requiring the caller to pre-compute it as an input column.
+    let period = month_period();
+    let interval = period_interval(&period);
+    let artifact = CompiledProgramArtifact::from_rulespec_str(PER_CHILD_AWARD_RULESPEC)
+        .expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Family"))
+        .expect("dense compilation succeeds");
+
+    // (family, children: (id, is_eldest_eligible_child, is_eligible_child))
+    let families: [(&str, Vec<(&str, bool, bool)>); 4] = [
+        ("family-1", vec![("child-1", true, true)]),
+        (
+            "family-2",
+            vec![
+                ("child-2", true, true),
+                ("child-3", false, true),
+                ("child-4", false, true),
+            ],
+        ),
+        (
+            "family-3",
+            vec![("child-5", false, false), ("child-6", false, true)],
+        ),
+        ("family-4", vec![]),
+    ];
+
+    let mut dataset = DatasetSpec::default();
+    for (family_id, children) in &families {
+        for (child_id, is_eldest, is_eligible) in children {
+            dataset.inputs.push(InputRecordSpec {
+                name: "is_eldest_eligible_child".to_string(),
+                entity: "Person".to_string(),
+                entity_id: (*child_id).to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: *is_eldest },
+            });
+            dataset.inputs.push(InputRecordSpec {
+                name: "is_eligible_child".to_string(),
+                entity: "Person".to_string(),
+                entity_id: (*child_id).to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: *is_eligible },
+            });
+            dataset.relations.push(RelationRecordSpec {
+                name: "member_of_family".to_string(),
+                tuple: vec![(*child_id).to_string(), (*family_id).to_string()],
+                interval: interval.clone(),
+            });
+        }
+    }
+
+    let outputs = vec![
+        "family_weekly_award".to_string(),
+        "family_weekly_award_eligible_only".to_string(),
+    ];
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program.clone(),
+        dataset,
+        queries: families
+            .iter()
+            .map(|(family_id, _)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: (*family_id).to_string(),
+                period: period.clone(),
+                outputs: outputs.clone(),
+            })
+            .collect(),
+    })
+    .expect("explain execution succeeds");
+
+    let mut offsets = vec![0_usize];
+    let mut is_eldest_column = Vec::new();
+    let mut is_eligible_column = Vec::new();
+    for (_, children) in &families {
+        for (_, is_eldest, is_eligible) in children {
+            is_eldest_column.push(*is_eldest);
+            is_eligible_column.push(*is_eligible);
+        }
+        offsets.push(is_eldest_column.len());
+    }
+
+    let dense_result = dense
+        .execute(
+            &period.to_model().expect("period converts"),
+            DenseBatchSpec {
+                row_count: families.len(),
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    DenseRelationKey {
+                        name: "member_of_family".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                    },
+                    DenseRelationBatchSpec {
+                        offsets,
+                        inputs: HashMap::from([
+                            (
+                                "is_eldest_eligible_child".to_string(),
+                                DenseColumn::Bool(is_eldest_column),
+                            ),
+                            (
+                                "is_eligible_child".to_string(),
+                                DenseColumn::Bool(is_eligible_column),
+                            ),
+                        ]),
+                    },
+                )]),
+            },
+            &outputs,
+        )
+        .expect("dense execution succeeds");
+
+    for row in 0..families.len() {
+        for output in &outputs {
+            compare_scalar(
+                explain.results[row]
+                    .outputs
+                    .get(output)
+                    .expect("explain output"),
+                dense_result.outputs.get(output).expect("dense output"),
+                row,
+            );
+        }
+    }
+
+    // The award values are deterministic, so also pin them down exactly
+    // rather than relying solely on explain-mode agreement.
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(awards)) =
+        dense_result.outputs.get("family_weekly_award").expect("dense award")
+    else {
+        panic!("expected decimal award column");
+    };
+    let expected = ["26.05", "60.55", "17.25", "0"];
+    for (award, expected) in awards.iter().zip(expected) {
+        assert_eq!(award.normalize(), decimal(expected).normalize());
+    }
+}
+
 #[test]
 fn dense_filtered_entity_scope_matches_explain_mode() {
     let period = month_period();

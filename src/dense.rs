@@ -199,9 +199,9 @@ enum CompiledScalarExpr {
         relation: usize,
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
-    SumRelatedInput {
+    SumRelated {
         relation: usize,
-        input: usize,
+        value: Box<CompiledRelatedScalarExpr>,
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
     If {
@@ -215,8 +215,47 @@ enum CompiledScalarExpr {
 enum CompiledRelatedScalarExpr {
     Literal(ScalarValue),
     Input(usize),
-    InputOrElse { input: usize, default: ScalarValue },
+    InputOrElse {
+        input: usize,
+        default: ScalarValue,
+    },
     RootScalar(Box<CompiledScalarExpr>),
+    ParameterLookup {
+        parameter: usize,
+        index: Box<CompiledRelatedScalarExpr>,
+    },
+    Add(Vec<CompiledRelatedScalarExpr>),
+    Sub(
+        Box<CompiledRelatedScalarExpr>,
+        Box<CompiledRelatedScalarExpr>,
+    ),
+    Mul(
+        Box<CompiledRelatedScalarExpr>,
+        Box<CompiledRelatedScalarExpr>,
+    ),
+    Div(
+        Box<CompiledRelatedScalarExpr>,
+        Box<CompiledRelatedScalarExpr>,
+    ),
+    Max(Vec<CompiledRelatedScalarExpr>),
+    Min(Vec<CompiledRelatedScalarExpr>),
+    Ceil(Box<CompiledRelatedScalarExpr>),
+    Floor(Box<CompiledRelatedScalarExpr>),
+    PeriodStart,
+    PeriodEnd,
+    DateAddDays {
+        date: Box<CompiledRelatedScalarExpr>,
+        days: Box<CompiledRelatedScalarExpr>,
+    },
+    DaysBetween {
+        from: Box<CompiledRelatedScalarExpr>,
+        to: Box<CompiledRelatedScalarExpr>,
+    },
+    If {
+        condition: Box<CompiledRelatedJudgmentExpr>,
+        then_expr: Box<CompiledRelatedScalarExpr>,
+        else_expr: Box<CompiledRelatedScalarExpr>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -692,24 +731,26 @@ impl<'a> DenseCompiler<'a> {
                 related_slot,
                 value,
                 where_clause,
-            } => match value {
-                RelatedValueRef::Input(name) => {
-                    let relation_index = self.relation(relation, *current_slot, *related_slot)?;
-                    let input_index = self.related_input(relation_index, name, false);
-                    let predicate = where_clause
-                        .as_deref()
-                        .map(|inner| self.compile_related_predicate(relation_index, inner))
-                        .transpose()?;
-                    Ok(CompiledScalarExpr::SumRelatedInput {
-                        relation: relation_index,
-                        input: input_index,
-                        predicate,
-                    })
-                }
-                RelatedValueRef::Derived(name) => Err(DenseCompileError::Unsupported(format!(
-                    "sum_related over related derived values (`{name}`)"
-                ))),
-            },
+            } => {
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
+                let value = match value {
+                    RelatedValueRef::Input(name) => {
+                        let input_index = self.related_input(relation_index, name, false);
+                        CompiledRelatedScalarExpr::Input(input_index)
+                    }
+                    RelatedValueRef::Derived(name) => self
+                        .compile_related_scalar(relation_index, &ScalarExpr::Derived(name.clone()))?,
+                };
+                let predicate = where_clause
+                    .as_deref()
+                    .map(|inner| self.compile_related_predicate(relation_index, inner))
+                    .transpose()?;
+                Ok(CompiledScalarExpr::SumRelated {
+                    relation: relation_index,
+                    value: Box::new(value),
+                    predicate,
+                })
+            }
             ScalarExpr::If {
                 condition,
                 then_expr,
@@ -870,6 +911,7 @@ impl<'a> DenseCompiler<'a> {
                 let relation = &self.relations[relation_index];
                 if relation.current_entity.as_deref() == Some(derived.entity.as_str())
                     || derived.entity == self.root_entity
+                    || derived.entity == SCALAR_ENTITY
                 {
                     return match &derived.semantics {
                         DerivedSemantics::Scalar(expr) => Ok(CompiledRelatedScalarExpr::RootScalar(
@@ -881,7 +923,7 @@ impl<'a> DenseCompiler<'a> {
                         )),
                         DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(
                             format!(
-                                "where-clause scalar expressions cannot reference judgment derived values (`{name}`)"
+                                "related scalar expressions cannot reference judgment derived values (`{name}`)"
                             ),
                         )),
                     };
@@ -897,13 +939,76 @@ impl<'a> DenseCompiler<'a> {
                 match &derived.semantics {
                     DerivedSemantics::Scalar(expr) => self.compile_related_scalar(relation_index, expr),
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
-                        "where-clause scalar expressions cannot reference judgment derived values (`{name}`)"
+                        "related scalar expressions cannot reference judgment derived values (`{name}`)"
                     ))),
                 }
             }
-            other => Err(DenseCompileError::Unsupported(format!(
-                "where-clause predicates currently only support comparisons between related inputs and literals; got {other:?}"
+            ScalarExpr::ParameterLookup { parameter, index } => {
+                Ok(CompiledRelatedScalarExpr::ParameterLookup {
+                    parameter: self.parameter(parameter)?,
+                    index: Box::new(self.compile_related_scalar(relation_index, index)?),
+                })
+            }
+            ScalarExpr::Add(items) => Ok(CompiledRelatedScalarExpr::Add(
+                items
+                    .iter()
+                    .map(|item| self.compile_related_scalar(relation_index, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Sub(left, right) => Ok(CompiledRelatedScalarExpr::Sub(
+                Box::new(self.compile_related_scalar(relation_index, left)?),
+                Box::new(self.compile_related_scalar(relation_index, right)?),
+            )),
+            ScalarExpr::Mul(left, right) => Ok(CompiledRelatedScalarExpr::Mul(
+                Box::new(self.compile_related_scalar(relation_index, left)?),
+                Box::new(self.compile_related_scalar(relation_index, right)?),
+            )),
+            ScalarExpr::Div(left, right) => Ok(CompiledRelatedScalarExpr::Div(
+                Box::new(self.compile_related_scalar(relation_index, left)?),
+                Box::new(self.compile_related_scalar(relation_index, right)?),
+            )),
+            ScalarExpr::Max(items) => Ok(CompiledRelatedScalarExpr::Max(
+                items
+                    .iter()
+                    .map(|item| self.compile_related_scalar(relation_index, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Min(items) => Ok(CompiledRelatedScalarExpr::Min(
+                items
+                    .iter()
+                    .map(|item| self.compile_related_scalar(relation_index, item))
+                    .collect::<Result<Vec<_>, DenseCompileError>>()?,
+            )),
+            ScalarExpr::Ceil(value) => Ok(CompiledRelatedScalarExpr::Ceil(Box::new(
+                self.compile_related_scalar(relation_index, value)?,
             ))),
+            ScalarExpr::Floor(value) => Ok(CompiledRelatedScalarExpr::Floor(Box::new(
+                self.compile_related_scalar(relation_index, value)?,
+            ))),
+            ScalarExpr::PeriodStart => Ok(CompiledRelatedScalarExpr::PeriodStart),
+            ScalarExpr::PeriodEnd => Ok(CompiledRelatedScalarExpr::PeriodEnd),
+            ScalarExpr::DateAddDays { date, days } => Ok(CompiledRelatedScalarExpr::DateAddDays {
+                date: Box::new(self.compile_related_scalar(relation_index, date)?),
+                days: Box::new(self.compile_related_scalar(relation_index, days)?),
+            }),
+            ScalarExpr::DaysBetween { from, to } => Ok(CompiledRelatedScalarExpr::DaysBetween {
+                from: Box::new(self.compile_related_scalar(relation_index, from)?),
+                to: Box::new(self.compile_related_scalar(relation_index, to)?),
+            }),
+            ScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => Ok(CompiledRelatedScalarExpr::If {
+                condition: Box::new(self.compile_related_predicate(relation_index, condition)?),
+                then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
+                else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
+            }),
+            ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "aggregation over relation `{relation}` nested inside a related expression"
+                )))
+            }
         }
     }
 
@@ -1442,20 +1547,14 @@ impl<'a> DenseExecutor<'a> {
                     ))
                 }
             }
-            CompiledScalarExpr::SumRelatedInput {
+            CompiledScalarExpr::SumRelated {
                 relation,
-                input,
+                value,
                 predicate,
             } => {
                 let offsets = self.batch.relations[*relation].offsets.clone();
-                let values = self.batch.relations[*relation].inputs[*input]
-                    .as_ref()
-                    .ok_or_else(|| EvalError::MissingInput {
-                        name: format!("related_input[{input}]"),
-                        entity_id: String::new(),
-                        period_start: self.period.start,
-                        period_end: self.period.end,
-                    })?
+                let values = self
+                    .resolve_related_scalar(*relation, value)?
                     .as_decimal_vec()?;
                 let mask = self.relation_mask(*relation, predicate.as_ref())?;
                 let mut totals = Vec::with_capacity(self.batch.row_count);
@@ -1610,6 +1709,142 @@ impl<'a> DenseExecutor<'a> {
                 let offsets = self.batch.relations[relation].offsets.clone();
                 let values = self.eval_scalar_expr(expr)?;
                 project_root_column_to_related(&values, &offsets)
+            }
+            CompiledRelatedScalarExpr::ParameterLookup { parameter, index } => {
+                let keys = self
+                    .resolve_related_scalar(relation, index)?
+                    .as_index_vec()?;
+                lookup_parameter_dense(
+                    &self.program.parameters[*parameter].parameter,
+                    &keys,
+                    self.period,
+                )
+            }
+            CompiledRelatedScalarExpr::Add(items) => {
+                let mut total = vec![Decimal::ZERO; length];
+                for item in items {
+                    let values = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    for (index, value) in values.into_iter().enumerate() {
+                        total[index] += value;
+                    }
+                }
+                Ok(DenseColumn::Decimal(total))
+            }
+            CompiledRelatedScalarExpr::Sub(left, right) => {
+                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
+                let right = self
+                    .resolve_related_scalar(relation, right)?
+                    .as_decimal_vec()?;
+                Ok(DenseColumn::Decimal(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(left, right)| left - right)
+                        .collect(),
+                ))
+            }
+            CompiledRelatedScalarExpr::Mul(left, right) => {
+                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
+                let right = self
+                    .resolve_related_scalar(relation, right)?
+                    .as_decimal_vec()?;
+                Ok(DenseColumn::Decimal(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(left, right)| left * right)
+                        .collect(),
+                ))
+            }
+            CompiledRelatedScalarExpr::Div(left, right) => {
+                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
+                let right = self
+                    .resolve_related_scalar(relation, right)?
+                    .as_decimal_vec()?;
+                Ok(DenseColumn::Decimal(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(left, right)| {
+                            if right.is_zero() {
+                                Err(EvalError::DivisionByZero)
+                            } else {
+                                Ok(left / right)
+                            }
+                        })
+                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
+                ))
+            }
+            CompiledRelatedScalarExpr::Max(items) => {
+                let mut values = vec![Decimal::MIN; length];
+                for item in items {
+                    let candidate = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    for (index, value) in candidate.into_iter().enumerate() {
+                        if value > values[index] {
+                            values[index] = value;
+                        }
+                    }
+                }
+                Ok(DenseColumn::Decimal(values))
+            }
+            CompiledRelatedScalarExpr::Min(items) => {
+                let mut values = vec![Decimal::MAX; length];
+                for item in items {
+                    let candidate = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    for (index, value) in candidate.into_iter().enumerate() {
+                        if value < values[index] {
+                            values[index] = value;
+                        }
+                    }
+                }
+                Ok(DenseColumn::Decimal(values))
+            }
+            CompiledRelatedScalarExpr::Ceil(value) => Ok(DenseColumn::Decimal(
+                self.resolve_related_scalar(relation, value)?
+                    .as_decimal_vec()?
+                    .into_iter()
+                    .map(|value| value.ceil())
+                    .collect(),
+            )),
+            CompiledRelatedScalarExpr::Floor(value) => Ok(DenseColumn::Decimal(
+                self.resolve_related_scalar(relation, value)?
+                    .as_decimal_vec()?
+                    .into_iter()
+                    .map(|value| value.floor())
+                    .collect(),
+            )),
+            CompiledRelatedScalarExpr::PeriodStart => {
+                Ok(DenseColumn::Date(vec![self.period.start; length]))
+            }
+            CompiledRelatedScalarExpr::PeriodEnd => {
+                Ok(DenseColumn::Date(vec![self.period.end; length]))
+            }
+            CompiledRelatedScalarExpr::DateAddDays { date, days } => {
+                let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
+                let offset = self.resolve_related_scalar(relation, days)?.as_index_vec()?;
+                Ok(DenseColumn::Date(
+                    base.into_iter()
+                        .zip(offset)
+                        .map(|(base, offset)| base + chrono::Duration::days(offset))
+                        .collect(),
+                ))
+            }
+            CompiledRelatedScalarExpr::DaysBetween { from, to } => {
+                let a = self.resolve_related_scalar(relation, from)?.as_date_vec()?;
+                let b = self.resolve_related_scalar(relation, to)?.as_date_vec()?;
+                Ok(DenseColumn::Integer(
+                    a.into_iter()
+                        .zip(b)
+                        .map(|(a, b)| (b - a).num_days())
+                        .collect(),
+                ))
+            }
+            CompiledRelatedScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let condition = self.eval_related_predicate(relation, condition)?;
+                let then_values = self.resolve_related_scalar(relation, then_expr)?;
+                let else_values = self.resolve_related_scalar(relation, else_expr)?;
+                select_related_scalar_column(&condition, then_values, else_values)
             }
         }
     }
@@ -1911,6 +2146,24 @@ fn lookup_parameter_dense(
                 .collect::<Result<Vec<Decimal>, EvalError>>()?,
         ))
     }
+}
+
+fn select_related_scalar_column(
+    condition: &[bool],
+    then_values: DenseColumn,
+    else_values: DenseColumn,
+) -> Result<DenseColumn, EvalError> {
+    let condition = condition
+        .iter()
+        .map(|holds| {
+            if *holds {
+                JudgmentOutcome::Holds
+            } else {
+                JudgmentOutcome::NotHolds
+            }
+        })
+        .collect();
+    select_dense_scalar_column(condition, then_values, else_values)
 }
 
 fn select_dense_scalar_column(
