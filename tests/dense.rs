@@ -2288,6 +2288,77 @@ fn dense_universal_credit_matches_explain_mode() {
     }
 }
 
+#[test]
+fn dense_f64_mode_matches_decimal_mode_for_universal_credit() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(UC_PROGRAM_RULESPEC)
+        .expect("RuleSpec module compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("BenefitUnit"))
+        .expect("dense compilation succeeds");
+    let case_file: UcCaseFile = serde_yaml::from_str(UC_CASES_YAML).expect("fixture parses");
+    let period = case_file.cases[0]
+        .period
+        .to_model()
+        .expect("period converts");
+
+    let outputs = [
+        "standard_allowance".to_string(),
+        "child_element_total".to_string(),
+        "disabled_child_element_total".to_string(),
+        "lcwra_element".to_string(),
+        "carer_element".to_string(),
+        "housing_element".to_string(),
+        "max_uc".to_string(),
+        "work_allowance_amount".to_string(),
+        "earnings_deduction".to_string(),
+        "tariff_income".to_string(),
+        "over_capital_limit".to_string(),
+        "uc_award".to_string(),
+    ];
+
+    let decimal_result = dense
+        .execute(&period, uc_dense_batch(&case_file.cases), &outputs)
+        .expect("decimal execution succeeds");
+    let float_result = dense
+        .execute_f64(&period, uc_dense_batch(&case_file.cases), &outputs)
+        .expect("f64 execution succeeds");
+
+    fn as_f64s(value: &DenseOutputValue) -> Vec<f64> {
+        match value {
+            DenseOutputValue::Scalar(DenseColumn::Decimal(values)) => values
+                .iter()
+                .map(|value| value.to_string().parse::<f64>().expect("decimal parses"))
+                .collect(),
+            DenseOutputValue::Scalar(DenseColumn::Float(values)) => values.clone(),
+            DenseOutputValue::Scalar(DenseColumn::Integer(values)) => {
+                values.iter().map(|value| *value as f64).collect()
+            }
+            other => panic!("expected numeric scalar output, got {other:?}"),
+        }
+    }
+
+    for output in &outputs {
+        let decimal_value = &decimal_result.outputs[output];
+        let float_value = &float_result.outputs[output];
+        match (decimal_value, float_value) {
+            (DenseOutputValue::Judgment(decimal), DenseOutputValue::Judgment(float)) => {
+                assert_eq!(decimal, float, "judgment `{output}` diverges in f64 mode");
+            }
+            _ => {
+                let decimal = as_f64s(decimal_value);
+                let float = as_f64s(float_value);
+                assert_eq!(decimal.len(), float.len());
+                for (row, (decimal, float)) in decimal.iter().zip(&float).enumerate() {
+                    let tolerance = 1e-9 * decimal.abs().max(1.0);
+                    assert!(
+                        (decimal - float).abs() <= tolerance,
+                        "`{output}` row {row}: decimal mode {decimal} vs f64 mode {float}",
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct UcCaseFile {
     cases: Vec<UcCase>,

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
@@ -17,6 +17,9 @@ pub enum DenseColumn {
     Bool(Vec<bool>),
     Integer(Vec<i64>),
     Decimal(Vec<Decimal>),
+    /// f64 column for the fast (`execute_f64`) execution mode. Decimal mode
+    /// also accepts these as inputs, converting losslessly where possible.
+    Float(Vec<f64>),
     Text(Vec<String>),
     Date(Vec<chrono::NaiveDate>),
 }
@@ -27,18 +30,9 @@ impl DenseColumn {
             Self::Bool(values) => values.len(),
             Self::Integer(values) => values.len(),
             Self::Decimal(values) => values.len(),
+            Self::Float(values) => values.len(),
             Self::Text(values) => values.len(),
             Self::Date(values) => values.len(),
-        }
-    }
-
-    fn as_decimal_vec(&self) -> Result<Vec<Decimal>, EvalError> {
-        match self {
-            Self::Integer(values) => Ok(values.iter().map(|value| Decimal::from(*value)).collect()),
-            Self::Decimal(values) => Ok(values.clone()),
-            _ => Err(EvalError::TypeMismatch(
-                "expected decimal-compatible dense column".to_string(),
-            )),
         }
     }
 
@@ -53,6 +47,18 @@ impl DenseColumn {
                             "parameter key for dense lookup must be integral".to_string(),
                         )
                     })
+                })
+                .collect(),
+            Self::Float(values) => values
+                .iter()
+                .map(|value| {
+                    if value.is_finite() && value.fract() == 0.0 {
+                        Ok(*value as i64)
+                    } else {
+                        Err(EvalError::TypeMismatch(
+                            "parameter key for dense lookup must be integral".to_string(),
+                        ))
+                    }
                 })
                 .collect(),
             _ => Err(EvalError::TypeMismatch(
@@ -76,8 +82,127 @@ impl DenseColumn {
             (Self::Integer(values), DType::Integer) => ScalarValue::Integer(values[index]),
             (Self::Integer(values), _) => ScalarValue::Decimal(Decimal::from(values[index])),
             (Self::Decimal(values), _) => ScalarValue::Decimal(values[index]),
+            (Self::Float(values), _) => {
+                ScalarValue::Decimal(Decimal::from_f64(values[index]).unwrap_or_default())
+            }
             (Self::Text(values), _) => ScalarValue::Text(values[index].clone()),
             (Self::Date(values), _) => ScalarValue::Date(values[index]),
+        }
+    }
+}
+
+/// Numeric type the dense executor evaluates arithmetic in. `Decimal` is the
+/// canonical mode (exact, matches the sparse engine); `f64` trades exactness
+/// for roughly an order of magnitude in throughput for bulk microsimulation.
+trait DenseNum:
+    Copy
+    + PartialOrd
+    + std::ops::Add<Output = Self>
+    + std::ops::AddAssign
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+{
+    const ZERO: Self;
+    const MIN: Self;
+    const MAX: Self;
+
+    fn from_decimal(value: &Decimal) -> Self;
+    fn ceil(self) -> Self;
+    fn floor(self) -> Self;
+    fn is_zero(self) -> bool;
+    /// Wrap evaluated values in the column variant for this mode.
+    fn into_column(values: Vec<Self>) -> DenseColumn;
+    /// Read any numeric column as this mode's working vector.
+    fn vec_from_column(column: &DenseColumn) -> Result<Vec<Self>, EvalError>;
+}
+
+impl DenseNum for Decimal {
+    const ZERO: Self = Decimal::ZERO;
+    const MIN: Self = Decimal::MIN;
+    const MAX: Self = Decimal::MAX;
+
+    fn from_decimal(value: &Decimal) -> Self {
+        *value
+    }
+
+    fn ceil(self) -> Self {
+        Decimal::ceil(&self)
+    }
+
+    fn floor(self) -> Self {
+        Decimal::floor(&self)
+    }
+
+    fn is_zero(self) -> bool {
+        self == Decimal::ZERO
+    }
+
+    fn into_column(values: Vec<Self>) -> DenseColumn {
+        DenseColumn::Decimal(values)
+    }
+
+    fn vec_from_column(column: &DenseColumn) -> Result<Vec<Self>, EvalError> {
+        match column {
+            DenseColumn::Integer(values) => {
+                Ok(values.iter().map(|value| Decimal::from(*value)).collect())
+            }
+            DenseColumn::Decimal(values) => Ok(values.clone()),
+            DenseColumn::Float(values) => values
+                .iter()
+                .map(|value| {
+                    Decimal::from_f64(*value).ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "float column value is not representable as decimal".to_string(),
+                        )
+                    })
+                })
+                .collect(),
+            _ => Err(EvalError::TypeMismatch(
+                "expected decimal-compatible dense column".to_string(),
+            )),
+        }
+    }
+}
+
+impl DenseNum for f64 {
+    const ZERO: Self = 0.0;
+    const MIN: Self = f64::MIN;
+    const MAX: Self = f64::MAX;
+
+    fn from_decimal(value: &Decimal) -> Self {
+        value.to_f64().unwrap_or(f64::NAN)
+    }
+
+    fn ceil(self) -> Self {
+        f64::ceil(self)
+    }
+
+    fn floor(self) -> Self {
+        f64::floor(self)
+    }
+
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+
+    fn into_column(values: Vec<Self>) -> DenseColumn {
+        DenseColumn::Float(values)
+    }
+
+    fn vec_from_column(column: &DenseColumn) -> Result<Vec<Self>, EvalError> {
+        match column {
+            DenseColumn::Integer(values) => {
+                Ok(values.iter().map(|value| *value as f64).collect())
+            }
+            DenseColumn::Decimal(values) => Ok(values
+                .iter()
+                .map(|value| value.to_f64().unwrap_or(f64::NAN))
+                .collect()),
+            DenseColumn::Float(values) => Ok(values.clone()),
+            _ => Err(EvalError::TypeMismatch(
+                "expected decimal-compatible dense column".to_string(),
+            )),
         }
     }
 }
@@ -389,14 +514,37 @@ impl DenseCompiledProgram {
             .collect()
     }
 
+    /// Execute in canonical `Decimal` arithmetic.
     pub fn execute(
         &self,
         period: &Period,
         batch: DenseBatchSpec,
         outputs: &[String],
     ) -> Result<DenseExecutionResult, EvalError> {
+        self.execute_with::<Decimal>(period, batch, outputs)
+    }
+
+    /// Execute in `f64` arithmetic. Numeric outputs come back as
+    /// `DenseColumn::Float`. Substantially faster than `execute` for large
+    /// batches, at the cost of floating-point rounding; intended for
+    /// microsimulation-style workloads rather than exact legal determinations.
+    pub fn execute_f64(
+        &self,
+        period: &Period,
+        batch: DenseBatchSpec,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, EvalError> {
+        self.execute_with::<f64>(period, batch, outputs)
+    }
+
+    fn execute_with<N: DenseNum>(
+        &self,
+        period: &Period,
+        batch: DenseBatchSpec,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, EvalError> {
         let batch = self.bind_batch(batch)?;
-        let mut executor = DenseExecutor::new(self, period, batch);
+        let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch);
         let mut result = HashMap::new();
         for output in outputs {
             let Some(&derived_index) = self.derived_index.get(output) else {
@@ -1317,15 +1465,16 @@ impl<'a> DenseCompiler<'a> {
     }
 }
 
-struct DenseExecutor<'a> {
+struct DenseExecutor<'a, N: DenseNum> {
     program: &'a DenseCompiledProgram,
     period: &'a Period,
     batch: DenseBoundBatch,
     scalar_cache: Vec<Option<DenseColumn>>,
     judgment_cache: Vec<Option<Vec<JudgmentOutcome>>>,
+    _numeric_mode: std::marker::PhantomData<N>,
 }
 
-impl<'a> DenseExecutor<'a> {
+impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     fn new(program: &'a DenseCompiledProgram, period: &'a Period, batch: DenseBoundBatch) -> Self {
         Self {
             program,
@@ -1333,17 +1482,21 @@ impl<'a> DenseExecutor<'a> {
             scalar_cache: vec![None; program.derived.len()],
             judgment_cache: vec![None; program.derived.len()],
             batch,
+            _numeric_mode: std::marker::PhantomData,
         }
     }
 
     fn evaluate_scalar(&mut self, derived_index: usize) -> Result<&DenseColumn, EvalError> {
         if self.scalar_cache[derived_index].is_none() {
-            let semantics = self.program.derived[derived_index].semantics.clone();
-            let column = match semantics {
-                CompiledSemantics::Scalar(expr) => self.eval_scalar_expr(&expr)?,
+            // Borrow the expression tree through the program reference (not
+            // through `self`) so evaluation can take `&mut self` without
+            // cloning the tree.
+            let program = self.program;
+            let column = match &program.derived[derived_index].semantics {
+                CompiledSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
                 CompiledSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(
-                        self.program.derived[derived_index].name.clone(),
+                        program.derived[derived_index].name.clone(),
                     ));
                 }
             };
@@ -1357,12 +1510,12 @@ impl<'a> DenseExecutor<'a> {
         derived_index: usize,
     ) -> Result<&Vec<JudgmentOutcome>, EvalError> {
         if self.judgment_cache[derived_index].is_none() {
-            let semantics = self.program.derived[derived_index].semantics.clone();
-            let values = match semantics {
-                CompiledSemantics::Judgment(expr) => self.eval_judgment_expr(&expr)?,
+            let program = self.program;
+            let values = match &program.derived[derived_index].semantics {
+                CompiledSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
                 CompiledSemantics::Scalar(_) => {
                     return Err(EvalError::ExpectedJudgment(
-                        self.program.derived[derived_index].name.clone(),
+                        program.derived[derived_index].name.clone(),
                     ));
                 }
             };
@@ -1373,19 +1526,9 @@ impl<'a> DenseExecutor<'a> {
 
     fn eval_scalar_expr(&mut self, expr: &CompiledScalarExpr) -> Result<DenseColumn, EvalError> {
         match expr {
-            CompiledScalarExpr::Literal(value) => Ok(match value {
-                ScalarValue::Bool(value) => DenseColumn::Bool(vec![*value; self.batch.row_count]),
-                ScalarValue::Integer(value) => {
-                    DenseColumn::Integer(vec![*value; self.batch.row_count])
-                }
-                ScalarValue::Decimal(value) => {
-                    DenseColumn::Decimal(vec![*value; self.batch.row_count])
-                }
-                ScalarValue::Text(value) => {
-                    DenseColumn::Text(vec![value.clone(); self.batch.row_count])
-                }
-                ScalarValue::Date(value) => DenseColumn::Date(vec![*value; self.batch.row_count]),
-            }),
+            CompiledScalarExpr::Literal(value) => {
+                Ok(broadcast_scalar_literal::<N>(value, self.batch.row_count))
+            }
             CompiledScalarExpr::Input(index) => {
                 self.batch.inputs[*index]
                     .clone()
@@ -1399,32 +1542,32 @@ impl<'a> DenseExecutor<'a> {
             CompiledScalarExpr::InputOrElse { input, default } => {
                 match &self.batch.inputs[*input] {
                     Some(column) => Ok(column.clone()),
-                    None => Ok(broadcast_scalar_literal(default, self.batch.row_count)),
+                    None => Ok(broadcast_scalar_literal::<N>(default, self.batch.row_count)),
                 }
             }
             CompiledScalarExpr::Derived(index) => Ok(self.evaluate_scalar(*index)?.clone()),
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 let keys = self.eval_scalar_expr(index)?.as_index_vec()?;
-                lookup_parameter_dense(
+                lookup_parameter_dense::<N>(
                     &self.program.parameters[*parameter].parameter,
                     &keys,
                     self.period,
                 )
             }
             CompiledScalarExpr::Add(items) => {
-                let mut total = vec![Decimal::ZERO; self.batch.row_count];
+                let mut total = vec![N::ZERO; self.batch.row_count];
                 for item in items {
-                    let values = self.eval_scalar_expr(item)?.as_decimal_vec()?;
+                    let values = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
                     for (index, value) in values.into_iter().enumerate() {
                         total[index] += value;
                     }
                 }
-                Ok(DenseColumn::Decimal(total))
+                Ok(N::into_column(total))
             }
             CompiledScalarExpr::Sub(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| left - right)
@@ -1432,9 +1575,9 @@ impl<'a> DenseExecutor<'a> {
                 ))
             }
             CompiledScalarExpr::Mul(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| left * right)
@@ -1442,9 +1585,9 @@ impl<'a> DenseExecutor<'a> {
                 ))
             }
             CompiledScalarExpr::Div(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| {
@@ -1454,43 +1597,41 @@ impl<'a> DenseExecutor<'a> {
                                 Ok(left / right)
                             }
                         })
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledScalarExpr::Max(items) => {
-                let mut values = vec![Decimal::MIN; self.batch.row_count];
+                let mut values = vec![N::MIN; self.batch.row_count];
                 for item in items {
-                    let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
+                    let candidate = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
                     for (index, value) in candidate.into_iter().enumerate() {
                         if value > values[index] {
                             values[index] = value;
                         }
                     }
                 }
-                Ok(DenseColumn::Decimal(values))
+                Ok(N::into_column(values))
             }
             CompiledScalarExpr::Min(items) => {
-                let mut values = vec![Decimal::MAX; self.batch.row_count];
+                let mut values = vec![N::MAX; self.batch.row_count];
                 for item in items {
-                    let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
+                    let candidate = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
                     for (index, value) in candidate.into_iter().enumerate() {
                         if value < values[index] {
                             values[index] = value;
                         }
                     }
                 }
-                Ok(DenseColumn::Decimal(values))
+                Ok(N::into_column(values))
             }
-            CompiledScalarExpr::Ceil(value) => Ok(DenseColumn::Decimal(
-                self.eval_scalar_expr(value)?
-                    .as_decimal_vec()?
+            CompiledScalarExpr::Ceil(value) => Ok(N::into_column(
+                N::vec_from_column(&self.eval_scalar_expr(value)?)?
                     .into_iter()
                     .map(|value| value.ceil())
                     .collect(),
             )),
-            CompiledScalarExpr::Floor(value) => Ok(DenseColumn::Decimal(
-                self.eval_scalar_expr(value)?
-                    .as_decimal_vec()?
+            CompiledScalarExpr::Floor(value) => Ok(N::into_column(
+                N::vec_from_column(&self.eval_scalar_expr(value)?)?
                     .into_iter()
                     .map(|value| value.floor())
                     .collect(),
@@ -1553,15 +1694,13 @@ impl<'a> DenseExecutor<'a> {
                 predicate,
             } => {
                 let offsets = self.batch.relations[*relation].offsets.clone();
-                let values = self
-                    .resolve_related_scalar(*relation, value)?
-                    .as_decimal_vec()?;
+                let values = N::vec_from_column(&self.resolve_related_scalar(*relation, value)?)?;
                 let mask = self.relation_mask(*relation, predicate.as_ref())?;
                 let mut totals = Vec::with_capacity(self.batch.row_count);
                 for row in 0..self.batch.row_count {
                     let start = offsets[row];
                     let end = offsets[row + 1];
-                    let mut total = Decimal::ZERO;
+                    let mut total = N::ZERO;
                     match &mask {
                         Some(mask) => {
                             for (offset, value) in values[start..end].iter().enumerate() {
@@ -1578,7 +1717,7 @@ impl<'a> DenseExecutor<'a> {
                     }
                     totals.push(total);
                 }
-                Ok(DenseColumn::Decimal(totals))
+                Ok(N::into_column(totals))
             }
             CompiledScalarExpr::If {
                 condition,
@@ -1588,7 +1727,7 @@ impl<'a> DenseExecutor<'a> {
                 let condition = self.eval_judgment_expr(condition)?;
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
-                select_dense_scalar_column(condition, then_values, else_values)
+                select_dense_scalar_column::<N>(condition, then_values, else_values)
             }
         }
     }
@@ -1598,13 +1737,14 @@ impl<'a> DenseExecutor<'a> {
         relation: usize,
         predicate: Option<&CompiledRelatedJudgmentExpr>,
     ) -> Result<Option<Vec<bool>>, EvalError> {
-        let parent_relation = self.program.relations[relation].parent_relation;
+        let program = self.program;
+        let parent_relation = program.relations[relation].parent_relation;
         let parent_mask = parent_relation
             .map(|parent| self.relation_mask(parent, None))
             .transpose()?
             .flatten();
-        let base_filter = self.program.relations[relation].filter.clone();
-        let base_mask = base_filter
+        let base_mask = program.relations[relation]
+            .filter
             .as_ref()
             .map(|predicate| self.eval_related_predicate(relation, predicate))
             .transpose()?;
@@ -1648,7 +1788,7 @@ impl<'a> DenseExecutor<'a> {
             CompiledRelatedJudgmentExpr::Comparison { left, op, right } => {
                 let left = self.resolve_related_scalar(relation, left)?;
                 let right = self.resolve_related_scalar(relation, right)?;
-                Ok(compare_related_columns(&left, *op, &right)?)
+                Ok(compare_related_columns::<N>(&left, *op, &right)?)
             }
             CompiledRelatedJudgmentExpr::RootJudgment(expr) => {
                 let offsets = self.batch.relations[relation].offsets.clone();
@@ -1690,7 +1830,9 @@ impl<'a> DenseExecutor<'a> {
     ) -> Result<DenseColumn, EvalError> {
         let length = self.batch.relations[relation].related_count;
         match expr {
-            CompiledRelatedScalarExpr::Literal(value) => Ok(broadcast_scalar_literal(value, length)),
+            CompiledRelatedScalarExpr::Literal(value) => {
+                Ok(broadcast_scalar_literal::<N>(value, length))
+            }
             CompiledRelatedScalarExpr::Input(index) => self.batch.relations[relation].inputs[*index]
                 .clone()
                 .ok_or_else(|| EvalError::MissingInput {
@@ -1702,7 +1844,7 @@ impl<'a> DenseExecutor<'a> {
             CompiledRelatedScalarExpr::InputOrElse { input, default } => {
                 match &self.batch.relations[relation].inputs[*input] {
                     Some(column) => Ok(column.clone()),
-                    None => Ok(broadcast_scalar_literal(default, length)),
+                    None => Ok(broadcast_scalar_literal::<N>(default, length)),
                 }
             }
             CompiledRelatedScalarExpr::RootScalar(expr) => {
@@ -1714,28 +1856,26 @@ impl<'a> DenseExecutor<'a> {
                 let keys = self
                     .resolve_related_scalar(relation, index)?
                     .as_index_vec()?;
-                lookup_parameter_dense(
+                lookup_parameter_dense::<N>(
                     &self.program.parameters[*parameter].parameter,
                     &keys,
                     self.period,
                 )
             }
             CompiledRelatedScalarExpr::Add(items) => {
-                let mut total = vec![Decimal::ZERO; length];
+                let mut total = vec![N::ZERO; length];
                 for item in items {
-                    let values = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    let values = N::vec_from_column(&self.resolve_related_scalar(relation, item)?)?;
                     for (index, value) in values.into_iter().enumerate() {
                         total[index] += value;
                     }
                 }
-                Ok(DenseColumn::Decimal(total))
+                Ok(N::into_column(total))
             }
             CompiledRelatedScalarExpr::Sub(left, right) => {
-                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
-                let right = self
-                    .resolve_related_scalar(relation, right)?
-                    .as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
+                let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| left - right)
@@ -1743,11 +1883,9 @@ impl<'a> DenseExecutor<'a> {
                 ))
             }
             CompiledRelatedScalarExpr::Mul(left, right) => {
-                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
-                let right = self
-                    .resolve_related_scalar(relation, right)?
-                    .as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
+                let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| left * right)
@@ -1755,11 +1893,9 @@ impl<'a> DenseExecutor<'a> {
                 ))
             }
             CompiledRelatedScalarExpr::Div(left, right) => {
-                let left = self.resolve_related_scalar(relation, left)?.as_decimal_vec()?;
-                let right = self
-                    .resolve_related_scalar(relation, right)?
-                    .as_decimal_vec()?;
-                Ok(DenseColumn::Decimal(
+                let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
+                let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
+                Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
                         .map(|(left, right)| {
@@ -1769,43 +1905,43 @@ impl<'a> DenseExecutor<'a> {
                                 Ok(left / right)
                             }
                         })
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledRelatedScalarExpr::Max(items) => {
-                let mut values = vec![Decimal::MIN; length];
+                let mut values = vec![N::MIN; length];
                 for item in items {
-                    let candidate = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    let candidate =
+                        N::vec_from_column(&self.resolve_related_scalar(relation, item)?)?;
                     for (index, value) in candidate.into_iter().enumerate() {
                         if value > values[index] {
                             values[index] = value;
                         }
                     }
                 }
-                Ok(DenseColumn::Decimal(values))
+                Ok(N::into_column(values))
             }
             CompiledRelatedScalarExpr::Min(items) => {
-                let mut values = vec![Decimal::MAX; length];
+                let mut values = vec![N::MAX; length];
                 for item in items {
-                    let candidate = self.resolve_related_scalar(relation, item)?.as_decimal_vec()?;
+                    let candidate =
+                        N::vec_from_column(&self.resolve_related_scalar(relation, item)?)?;
                     for (index, value) in candidate.into_iter().enumerate() {
                         if value < values[index] {
                             values[index] = value;
                         }
                     }
                 }
-                Ok(DenseColumn::Decimal(values))
+                Ok(N::into_column(values))
             }
-            CompiledRelatedScalarExpr::Ceil(value) => Ok(DenseColumn::Decimal(
-                self.resolve_related_scalar(relation, value)?
-                    .as_decimal_vec()?
+            CompiledRelatedScalarExpr::Ceil(value) => Ok(N::into_column(
+                N::vec_from_column(&self.resolve_related_scalar(relation, value)?)?
                     .into_iter()
                     .map(|value| value.ceil())
                     .collect(),
             )),
-            CompiledRelatedScalarExpr::Floor(value) => Ok(DenseColumn::Decimal(
-                self.resolve_related_scalar(relation, value)?
-                    .as_decimal_vec()?
+            CompiledRelatedScalarExpr::Floor(value) => Ok(N::into_column(
+                N::vec_from_column(&self.resolve_related_scalar(relation, value)?)?
                     .into_iter()
                     .map(|value| value.floor())
                     .collect(),
@@ -1844,7 +1980,7 @@ impl<'a> DenseExecutor<'a> {
                 let condition = self.eval_related_predicate(relation, condition)?;
                 let then_values = self.resolve_related_scalar(relation, then_expr)?;
                 let else_values = self.resolve_related_scalar(relation, else_expr)?;
-                select_related_scalar_column(&condition, then_values, else_values)
+                select_related_scalar_column::<N>(&condition, then_values, else_values)
             }
         }
     }
@@ -1857,7 +1993,7 @@ impl<'a> DenseExecutor<'a> {
             CompiledJudgmentExpr::Comparison { left, op, right } => {
                 let left = self.eval_scalar_expr(left)?;
                 let right = self.eval_scalar_expr(right)?;
-                compare_dense_columns(left, *op, right)
+                compare_dense_columns::<N>(left, *op, right)
             }
             CompiledJudgmentExpr::Derived(index) => Ok(self.evaluate_judgment(*index)?.clone()),
             CompiledJudgmentExpr::And(items) => {
@@ -1970,6 +2106,15 @@ fn project_root_column_to_related(
             }
             DenseColumn::Decimal(projected)
         }
+        DenseColumn::Float(values) => {
+            let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
+            for row in 0..row_count {
+                for _ in offsets[row]..offsets[row + 1] {
+                    projected.push(values[row]);
+                }
+            }
+            DenseColumn::Float(projected)
+        }
         DenseColumn::Text(values) => {
             let mut projected = Vec::with_capacity(*offsets.last().unwrap_or(&0));
             for row in 0..row_count {
@@ -1991,7 +2136,7 @@ fn project_root_column_to_related(
     })
 }
 
-fn compare_related_columns(
+fn compare_related_columns<N: DenseNum>(
     left: &DenseColumn,
     op: ComparisonOp,
     right: &DenseColumn,
@@ -2028,8 +2173,8 @@ fn compare_related_columns(
             })
             .collect()),
         (left, right) => {
-            let left = left.as_decimal_vec()?;
-            let right = right.as_decimal_vec()?;
+            let left = N::vec_from_column(left)?;
+            let right = N::vec_from_column(right)?;
             Ok(left
                 .into_iter()
                 .zip(right)
@@ -2046,17 +2191,17 @@ fn compare_related_columns(
     }
 }
 
-fn broadcast_scalar_literal(value: &ScalarValue, length: usize) -> DenseColumn {
+fn broadcast_scalar_literal<N: DenseNum>(value: &ScalarValue, length: usize) -> DenseColumn {
     match value {
         ScalarValue::Bool(value) => DenseColumn::Bool(vec![*value; length]),
         ScalarValue::Integer(value) => DenseColumn::Integer(vec![*value; length]),
-        ScalarValue::Decimal(value) => DenseColumn::Decimal(vec![*value; length]),
+        ScalarValue::Decimal(value) => N::into_column(vec![N::from_decimal(value); length]),
         ScalarValue::Text(value) => DenseColumn::Text(vec![value.clone(); length]),
         ScalarValue::Date(value) => DenseColumn::Date(vec![*value; length]),
     }
 }
 
-fn lookup_parameter_dense(
+fn lookup_parameter_dense<N: DenseNum>(
     parameter: &IndexedParameter,
     keys: &[i64],
     period: &Period,
@@ -2133,22 +2278,25 @@ fn lookup_parameter_dense(
                 .collect::<Result<Vec<String>, EvalError>>()?,
         ))
     } else {
-        Ok(DenseColumn::Decimal(
+        Ok(N::into_column(
             values
                 .into_iter()
                 .map(|value| {
-                    value.as_decimal().ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "parameter values must be numeric in dense mode".to_string(),
-                        )
-                    })
+                    value
+                        .as_decimal()
+                        .map(|value| N::from_decimal(&value))
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "parameter values must be numeric in dense mode".to_string(),
+                            )
+                        })
                 })
-                .collect::<Result<Vec<Decimal>, EvalError>>()?,
+                .collect::<Result<Vec<N>, EvalError>>()?,
         ))
     }
 }
 
-fn select_related_scalar_column(
+fn select_related_scalar_column<N: DenseNum>(
     condition: &[bool],
     then_values: DenseColumn,
     else_values: DenseColumn,
@@ -2163,31 +2311,15 @@ fn select_related_scalar_column(
             }
         })
         .collect();
-    select_dense_scalar_column(condition, then_values, else_values)
+    select_dense_scalar_column::<N>(condition, then_values, else_values)
 }
 
-fn select_dense_scalar_column(
+fn select_dense_scalar_column<N: DenseNum>(
     condition: Vec<JudgmentOutcome>,
     then_values: DenseColumn,
     else_values: DenseColumn,
 ) -> Result<DenseColumn, EvalError> {
     match (then_values, else_values) {
-        (DenseColumn::Decimal(then_values), DenseColumn::Decimal(else_values)) => {
-            Ok(DenseColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
         (DenseColumn::Integer(then_values), DenseColumn::Integer(else_values)) => {
             Ok(DenseColumn::Integer(
                 condition
@@ -2197,38 +2329,6 @@ fn select_dense_scalar_column(
                     .map(|((condition, then_value), else_value)| {
                         if condition.is_holds() {
                             then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (DenseColumn::Decimal(then_values), DenseColumn::Integer(else_values)) => {
-            Ok(DenseColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            Decimal::from(else_value)
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (DenseColumn::Integer(then_values), DenseColumn::Decimal(else_values)) => {
-            Ok(DenseColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            Decimal::from(then_value)
                         } else {
                             else_value
                         }
@@ -2278,13 +2378,32 @@ fn select_dense_scalar_column(
                 })
                 .collect(),
         )),
-        _ => Err(EvalError::TypeMismatch(
-            "dense if() branches must have the same dtype".to_string(),
-        )),
+        (then_values, else_values) => {
+            let then_values = N::vec_from_column(&then_values).map_err(|_| {
+                EvalError::TypeMismatch("dense if() branches must have the same dtype".to_string())
+            })?;
+            let else_values = N::vec_from_column(&else_values).map_err(|_| {
+                EvalError::TypeMismatch("dense if() branches must have the same dtype".to_string())
+            })?;
+            Ok(N::into_column(
+                condition
+                    .into_iter()
+                    .zip(then_values)
+                    .zip(else_values)
+                    .map(|((condition, then_value), else_value)| {
+                        if condition.is_holds() {
+                            then_value
+                        } else {
+                            else_value
+                        }
+                    })
+                    .collect(),
+            ))
+        }
     }
 }
 
-fn compare_dense_columns(
+fn compare_dense_columns<N: DenseNum>(
     left: DenseColumn,
     op: ComparisonOp,
     right: DenseColumn,
@@ -2342,8 +2461,8 @@ fn compare_dense_columns(
             })
             .collect()),
         (left, right) => {
-            let left = left.as_decimal_vec()?;
-            let right = right.as_decimal_vec()?;
+            let left = N::vec_from_column(&left)?;
+            let right = N::vec_from_column(&right)?;
             Ok(left
                 .into_iter()
                 .zip(right)
