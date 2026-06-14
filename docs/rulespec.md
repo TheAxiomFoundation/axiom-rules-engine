@@ -62,8 +62,9 @@ Supported rule kinds in the current Rust loader:
   sets such as SNAP units, MAGI households, and qualifying-child sets.
 - `source_relation`: legal/provenance edges. It must declare
   `source_relation.type` and `source_relation.target`. Most source relations
-  are non-executable metadata; parameter-to-parameter `sets` records with
-  `source_relation.value` lower into delegated parameter bindings.
+  are non-executable metadata; same-kind `sets` records with
+  `source_relation.value` lower into delegated parameter bindings or derived
+  formula hooks.
 
 `kind` describes the record's schema and lowering behavior. Source/legal
 semantics live in `source_relation.type`, not in `kind`. The supported
@@ -267,6 +268,14 @@ upstream parameter and its `value` points to a local parameter. This lets
 federal formulas encode the legal structure once while state modules supply the
 delegated standards.
 
+For delegated formula hooks, the upstream source should expose the hook as a
+`kind: derived` placeholder with the same entity, dtype, unit, and period that
+the upstream formula consumes. A downstream `sets` relation can bind a local
+derived rule into that hook. Lowering copies the local derived semantics into
+the upstream hook while preserving the upstream name, public id, and source
+metadata. This is appropriate when federal law defines where a state option
+enters a formula, but state law defines the option's selection logic.
+
 Example delegated parameter setting:
 
 ```yaml
@@ -293,6 +302,42 @@ rules:
       value: us-co:policy/cdhs/snap/fy-2026#co_snap_heating_cooling_sua_fy_2026
       basis:
         delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+```
+
+Example delegated formula hook:
+
+```yaml
+rules:
+  - name: snap_standard_utility_allowance_state_option
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: 7 CFR 273.9(d)(6)(iii)
+    versions:
+      - effective_from: 2025-10-01
+        formula: "0"
+
+  - name: state_snap_standard_utility_allowance
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: State SNAP utility allowance rule
+    versions:
+      - effective_from: 2025-10-01
+        formula: if household_has_qualifying_heating_or_cooling_cost: state_sua_amount else: 0
+
+  - name: state_snap_standard_utility_allowance_sets_federal_hook
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#snap_standard_utility_allowance_state_option
+      value: us-state:policies/snap/utility-allowance#state_snap_standard_utility_allowance
+      basis:
+        delegation: us:regulations/7-cfr/273/9#snap_state_standard_utility_allowance_delegation
 ```
 
 ## Source pinning and provenance

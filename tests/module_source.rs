@@ -131,6 +131,71 @@ rules:
         delegation: us:regulations/42-cfr/435/118#state_plan_child_income_standard_delegation
 "#;
 
+const FEDERAL_SNAP_UTILITY_HOOK_MODULE: &str = r#"
+format: rulespec/v1
+rules:
+  - name: snap_state_standard_utility_allowance_delegation
+    kind: source_relation
+    source_relation:
+      type: delegates
+      target: us:regulations/7-cfr/273/9#snap_standard_utility_allowance_state_option
+      authority: federal
+  - name: snap_standard_utility_allowance_state_option
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: 7 CFR 273.9(d)(6)(iii)
+    versions:
+      - effective_from: 2025-10-01
+        formula: "0"
+  - name: snap_total_allowable_shelter_expenses
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: 7 CFR 273.9(d)(6)
+    versions:
+      - effective_from: 2025-10-01
+        formula: household_shelter_costs_incurred + snap_standard_utility_allowance_state_option
+"#;
+
+const GEORGIA_SNAP_SET_UTILITY_HOOK_MODULE: &str = r#"
+format: rulespec/v1
+imports:
+  - us:regulations/7-cfr/273/9
+rules:
+  - name: georgia_snap_standard_utility_allowance_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    source: Georgia SNAP utility allowance table
+    versions:
+      - effective_from: 2025-10-01
+        formula: "200"
+  - name: georgia_snap_standard_utility_allowance
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: Georgia SNAP utility allowance table
+    versions:
+      - effective_from: 2025-10-01
+        formula: georgia_snap_standard_utility_allowance_amount + 25
+  - name: sets_snap_standard_utility_allowance_state_option
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#snap_standard_utility_allowance_state_option
+      authority: state
+      value: us-ga:policies/dfcs/snap-utility-allowance#georgia_snap_standard_utility_allowance
+      basis:
+        delegation: us:regulations/7-cfr/273/9#snap_state_standard_utility_allowance_delegation
+"#;
+
 #[test]
 fn in_memory_module_source_compiles_and_executes_without_filesystem() {
     let source = InMemoryModuleSource::new(&[
@@ -302,6 +367,85 @@ fn source_relation_sets_bind_state_parameter_into_federal_formula() {
         panic!("expected judgment output");
     };
     assert_eq!(*outcome, JudgmentOutcomeSpec::Holds);
+}
+
+#[test]
+fn source_relation_sets_bind_state_derived_into_federal_formula_hook() {
+    let source = InMemoryModuleSource::new(&[
+        (
+            "us:regulations/7-cfr/273/9",
+            FEDERAL_SNAP_UTILITY_HOOK_MODULE,
+        ),
+        (
+            "us-ga:policies/dfcs/snap-utility-allowance",
+            GEORGIA_SNAP_SET_UTILITY_HOOK_MODULE,
+        ),
+    ]);
+
+    let artifact = CompiledProgramArtifact::from_rulespec_with_source(
+        "us-ga:policies/dfcs/snap-utility-allowance",
+        &source,
+    )
+    .expect("state module compiles with federal derived hook");
+    let federal_hook = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| {
+            derived.id.as_deref()
+                == Some("us:regulations/7-cfr/273/9#snap_standard_utility_allowance_state_option")
+        })
+        .expect("federal hook derived remains addressable");
+    assert_eq!(
+        federal_hook.name,
+        "snap_standard_utility_allowance_state_option"
+    );
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:regulations/7-cfr/273/9#snap_total_allowable_shelter_expenses".to_string();
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulations/7-cfr/273/9#input.household_shelter_costs_incurred"
+                    .to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "500".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("program executes with state-set federal derived hook");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_total_allowable_shelter_expenses output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "725");
 }
 
 #[test]

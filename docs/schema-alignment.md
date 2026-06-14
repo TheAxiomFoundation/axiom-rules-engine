@@ -32,9 +32,9 @@ RuleSpec should make machine-authored structure explicit:
 - Explicit data-relation arity and, in a follow-up, slot names/orientation.
 - Multi-source provenance and source-document anchors.
 - Legal/provenance graph edges such as `restates`, `sets`, `implements`, and
-  `amends` as `source_relation` records. Parameter-to-parameter `sets` edges
-  with `source_relation.value` lower into runtime as delegated parameter
-  bindings; other source relations remain provenance metadata.
+  `amends` as `source_relation` records. Same-kind `sets` edges with
+  `source_relation.value` lower into runtime as delegated parameter bindings
+  or derived formula hooks; other source relations remain provenance metadata.
 
 ## Current Gaps
 
@@ -45,10 +45,10 @@ schema/runtime gaps are explicit:
   bulk fast mode, and the generic dense compiler for related-input predicates,
   current/root predicates, and composed derived-relation source chains.
 - `source_relation` records are validated as provenance metadata.
-  Parameter-to-parameter `sets` records now lower into runtime parameter
-  bindings when both the upstream target and downstream value parameters are
-  present in the merged program; remaining relation types are still metadata for
-  validators, amendments, traces, and upstream-first checks.
+  Parameter-to-parameter and derived-to-derived `sets` records now lower into
+  runtime bindings when both the upstream target and downstream value concepts
+  are present in the merged program; remaining relation types are still metadata
+  for validators, amendments, traces, and upstream-first checks.
 - Downstream jurisdiction repos still need their own migrations to replace
   SNAP approximations with filtered-entity RuleSpec.
 - Formula strings currently support the implemented scalar/judgment expression
