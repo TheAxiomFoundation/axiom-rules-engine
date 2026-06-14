@@ -123,6 +123,48 @@ pub enum RuleSpecError {
         target: String,
         value: String,
     },
+    #[error(
+        "RuleSpec source relation `{name}` sets target `{target}`, but the target does not resolve to an executable parameter or derived rule in the merged program"
+    )]
+    SourceRelationSetTargetNotExecutable { name: String, target: String },
+    #[error(
+        "RuleSpec source relation `{name}` sets value `{value}`, but the value does not resolve to an executable parameter or derived rule in the merged program"
+    )]
+    SourceRelationSetValueNotExecutable { name: String, value: String },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` ({value_kind}) to `{target}` ({target_kind})"
+    )]
+    SourceRelationSetKindMismatch {
+        name: String,
+        target: String,
+        value: String,
+        target_kind: String,
+        value_kind: String,
+    },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` to `{target}` because their derived entities differ"
+    )]
+    SourceRelationSetEntityMismatch {
+        name: String,
+        target: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` to `{target}` because their derived dtypes differ"
+    )]
+    SourceRelationSetDTypeMismatch {
+        name: String,
+        target: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` to `{target}` because their derived periods differ"
+    )]
+    SourceRelationSetPeriodMismatch {
+        name: String,
+        target: String,
+        value: String,
+    },
     #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
@@ -1608,57 +1650,172 @@ fn apply_source_relation_sets(
             continue;
         }
 
-        let value_parameter_index = program
-            .parameters
-            .iter()
-            .position(|parameter| parameter.id.as_deref() == Some(value_ref));
-        let target_parameter_index = program
-            .parameters
-            .iter()
-            .position(|parameter| parameter.id.as_deref() == Some(target_ref));
+        let value_binding = find_set_binding(program, value_ref);
+        let target_binding = find_set_binding(program, target_ref);
 
-        let (Some(value_parameter_index), Some(target_parameter_index)) =
-            (value_parameter_index, target_parameter_index)
-        else {
-            if value_parameter_index.is_none() && target_parameter_index.is_none() {
+        let (Some(value_binding), Some(target_binding)) = (value_binding, target_binding) else {
+            if value_binding.is_none() && target_binding.is_none() {
                 continue;
             }
-            if value_parameter_index.is_none() {
-                return Err(RuleSpecError::SourceRelationSetValueNotParameter {
-                    name: rule.name.clone(),
-                    value: value_ref.to_string(),
-                });
+            if value_binding.is_none() {
+                return match target_binding
+                    .expect("target binding is present when value is absent")
+                    .kind
+                {
+                    SetBindingKind::Parameter => {
+                        Err(RuleSpecError::SourceRelationSetValueNotParameter {
+                            name: rule.name.clone(),
+                            value: value_ref.to_string(),
+                        })
+                    }
+                    SetBindingKind::Derived => {
+                        Err(RuleSpecError::SourceRelationSetValueNotExecutable {
+                            name: rule.name.clone(),
+                            value: value_ref.to_string(),
+                        })
+                    }
+                };
             }
-            return Err(RuleSpecError::SourceRelationSetTargetNotParameter {
-                name: rule.name.clone(),
-                target: target_ref.to_string(),
-            });
+            return match value_binding
+                .expect("value binding is present when target is absent")
+                .kind
+            {
+                SetBindingKind::Parameter => {
+                    Err(RuleSpecError::SourceRelationSetTargetNotParameter {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                    })
+                }
+                SetBindingKind::Derived => {
+                    Err(RuleSpecError::SourceRelationSetTargetNotExecutable {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                    })
+                }
+            };
         };
 
-        let value_parameter = program.parameters[value_parameter_index].clone();
-        let target_parameter = &mut program.parameters[target_parameter_index];
-
-        if target_parameter.indexed_by != value_parameter.indexed_by {
-            return Err(RuleSpecError::SourceRelationSetIndexedByMismatch {
+        if value_binding.kind != target_binding.kind {
+            return Err(RuleSpecError::SourceRelationSetKindMismatch {
                 name: rule.name.clone(),
                 target: target_ref.to_string(),
                 value: value_ref.to_string(),
-            });
-        }
-        if target_parameter.unit.is_some()
-            && value_parameter.unit.is_some()
-            && target_parameter.unit != value_parameter.unit
-        {
-            return Err(RuleSpecError::SourceRelationSetUnitMismatch {
-                name: rule.name.clone(),
-                target: target_ref.to_string(),
-                value: value_ref.to_string(),
+                target_kind: target_binding.kind.as_str().to_string(),
+                value_kind: value_binding.kind.as_str().to_string(),
             });
         }
 
-        target_parameter.versions = value_parameter.versions;
+        match value_binding.kind {
+            SetBindingKind::Parameter => {
+                let value_parameter = program.parameters[value_binding.index].clone();
+                let target_parameter = &mut program.parameters[target_binding.index];
+
+                if target_parameter.indexed_by != value_parameter.indexed_by {
+                    return Err(RuleSpecError::SourceRelationSetIndexedByMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+                if target_parameter.unit.is_some()
+                    && value_parameter.unit.is_some()
+                    && target_parameter.unit != value_parameter.unit
+                {
+                    return Err(RuleSpecError::SourceRelationSetUnitMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+
+                target_parameter.versions = value_parameter.versions;
+            }
+            SetBindingKind::Derived => {
+                let value_derived = program.derived[value_binding.index].clone();
+                let target_derived = &mut program.derived[target_binding.index];
+
+                if target_derived.entity != value_derived.entity {
+                    return Err(RuleSpecError::SourceRelationSetEntityMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+                if target_derived.dtype != value_derived.dtype {
+                    return Err(RuleSpecError::SourceRelationSetDTypeMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+                if target_derived.unit.is_some()
+                    && value_derived.unit.is_some()
+                    && target_derived.unit != value_derived.unit
+                {
+                    return Err(RuleSpecError::SourceRelationSetUnitMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+                if target_derived.period.is_some()
+                    && value_derived.period.is_some()
+                    && target_derived.period != value_derived.period
+                {
+                    return Err(RuleSpecError::SourceRelationSetPeriodMismatch {
+                        name: rule.name.clone(),
+                        target: target_ref.to_string(),
+                        value: value_ref.to_string(),
+                    });
+                }
+
+                target_derived.semantics = value_derived.semantics;
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetBindingKind {
+    Parameter,
+    Derived,
+}
+
+impl SetBindingKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Parameter => "parameter",
+            Self::Derived => "derived",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SetBinding {
+    kind: SetBindingKind,
+    index: usize,
+}
+
+fn find_set_binding(program: &ProgramSpec, reference: &str) -> Option<SetBinding> {
+    if let Some(index) = program
+        .parameters
+        .iter()
+        .position(|parameter| parameter.id.as_deref() == Some(reference))
+    {
+        return Some(SetBinding {
+            kind: SetBindingKind::Parameter,
+            index,
+        });
+    }
+    program
+        .derived
+        .iter()
+        .position(|derived| derived.id.as_deref() == Some(reference))
+        .map(|index| SetBinding {
+            kind: SetBindingKind::Derived,
+            index,
+        })
 }
 
 fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {

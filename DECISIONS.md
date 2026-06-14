@@ -412,3 +412,30 @@ downstream `source_relation.value` parameter supplies that slot's versions.
   `source_relation.basis.delegation`.
 - Non-parameter source relations, amendments, restatements, and source graph
   edges without a local `value` remain metadata-only.
+
+## 2026-06-14 — Derived `sets` lower into delegated formula hooks
+
+**Decision.** `source_relation.type: sets` also lowers same-kind
+derived-to-derived bindings. The upstream target remains the executable hook
+with its federal name and public id; the downstream value derived rule supplies
+the hook's semantics when both sides are present in the merged program.
+
+**Why.**
+
+- Some delegations are not raw parameter settings. Federal law can define the
+  formula surface and state-option category, while state law defines the
+  conditional selection logic that fills that surface.
+- SNAP utility allowances are the motivating case: federal rules define where
+  state standard utility allowances enter the shelter-cost calculation, while
+  state rules define the local HCSUA/LUA/individual allowance logic and amounts.
+- Keeping the upstream hook addressable avoids duplicating federal formulas in
+  every state module.
+
+**Consequences.**
+
+- Upstream formula hooks should be `kind: derived` placeholders with matching
+  entity, dtype, unit, and period.
+- Downstream state modules can bind local derived implementations to those
+  hooks with `source_relation.type: sets` and `source_relation.value`.
+- Lowering rejects cross-kind bindings and incompatible derived hooks instead
+  of silently copying formulas across unlike concepts.
