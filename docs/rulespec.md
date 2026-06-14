@@ -60,9 +60,10 @@ Supported rule kinds in the current Rust loader:
 - `derived_relation`: executable runtime predicates computed by filtering a
   source relation with a judgment formula. This supports filtered membership
   sets such as SNAP units, MAGI households, and qualifying-child sets.
-- `source_relation`: non-executable legal/provenance edges. It must declare
-  `source_relation.type` and `source_relation.target` and is ignored during
-  lowering into `ProgramSpec`.
+- `source_relation`: legal/provenance edges. It must declare
+  `source_relation.type` and `source_relation.target`. Most source relations
+  are non-executable metadata; parameter-to-parameter `sets` records with
+  `source_relation.value` lower into delegated parameter bindings.
 
 `kind` describes the record's schema and lowering behavior. Source/legal
 semantics live in `source_relation.type`, not in `kind`. The supported

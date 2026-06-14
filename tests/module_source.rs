@@ -92,6 +92,7 @@ rules:
   - name: state_plan_child_income_standard_fpl_ratio
     kind: parameter
     dtype: Rate
+    unit: FPL
     source: 42 CFR 435.118(b)
     versions:
       - effective_from: 2014-01-01
@@ -257,6 +258,7 @@ fn source_relation_sets_bind_state_parameter_into_federal_formula() {
         panic!("expected decimal state-set standard");
     };
     assert_eq!(value, "1.49");
+    assert_eq!(federal_slot.unit.as_deref(), Some("FPL"));
 
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
@@ -300,6 +302,69 @@ fn source_relation_sets_bind_state_parameter_into_federal_formula() {
         panic!("expected judgment output");
     };
     assert_eq!(*outcome, JudgmentOutcomeSpec::Holds);
+}
+
+#[test]
+fn source_relation_sets_reject_unresolved_value_parameter() {
+    let state_module = GEORGIA_MEDICAID_SET_SLOT_MODULE.replace(
+        "#georgia_child_income_standard_fpl_ratio",
+        "#misspelled_child_income_standard_fpl_ratio",
+    );
+    let source = InMemoryModuleSource::new(&[
+        (
+            "us:regulations/42-cfr/435/118",
+            FEDERAL_MEDICAID_DELEGATED_SLOT_MODULE,
+        ),
+        (
+            "us-ga:policies/cms/medicaid-eligibility",
+            state_module.as_str(),
+        ),
+    ]);
+
+    let error = load_rulespec_with_source("us-ga:policies/cms/medicaid-eligibility", &source)
+        .expect_err("unresolved executable value parameter is rejected");
+    assert!(
+        matches!(
+            error,
+            RuleSpecError::SourceRelationSetValueNotParameter { ref name, ref value }
+                if name == "sets_child_income_standard_fpl_ratio"
+                    && value == "us-ga:policies/cms/medicaid-eligibility#misspelled_child_income_standard_fpl_ratio"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn source_relation_sets_reject_indexed_by_mismatch() {
+    let state_module = GEORGIA_MEDICAID_SET_SLOT_MODULE.replace(
+        "source: CMS Medicaid, CHIP, and BHP Eligibility Levels\n    versions:",
+        "source: CMS Medicaid, CHIP, and BHP Eligibility Levels\n    indexed_by: household_size\n    versions:",
+    )
+    .replace(
+        "formula: \"1.49\"",
+        "values:\n          1: 1.49\n          2: 1.49",
+    );
+    let source = InMemoryModuleSource::new(&[
+        (
+            "us:regulations/42-cfr/435/118",
+            FEDERAL_MEDICAID_DELEGATED_SLOT_MODULE,
+        ),
+        (
+            "us-ga:policies/cms/medicaid-eligibility",
+            state_module.as_str(),
+        ),
+    ]);
+
+    let error = load_rulespec_with_source("us-ga:policies/cms/medicaid-eligibility", &source)
+        .expect_err("incompatible executable value parameter is rejected");
+    assert!(
+        matches!(
+            error,
+            RuleSpecError::SourceRelationSetIndexedByMismatch { ref name, .. }
+                if name == "sets_child_income_standard_fpl_ratio"
+        ),
+        "{error}"
+    );
 }
 
 #[test]

@@ -99,6 +99,30 @@ pub enum RuleSpecError {
         "RuleSpec source relation `{name}` cannot include executable formula, version, table, or runtime relation fields"
     )]
     SourceRelationHasExecutableBody { name: String },
+    #[error(
+        "RuleSpec source relation `{name}` sets target `{target}`, but the target does not resolve to a parameter in the merged program"
+    )]
+    SourceRelationSetTargetNotParameter { name: String, target: String },
+    #[error(
+        "RuleSpec source relation `{name}` sets value `{value}`, but the value does not resolve to a parameter in the merged program"
+    )]
+    SourceRelationSetValueNotParameter { name: String, value: String },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` to `{target}` because their indexed_by values differ"
+    )]
+    SourceRelationSetIndexedByMismatch {
+        name: String,
+        target: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec source relation `{name}` cannot bind `{value}` to `{target}` because their units differ"
+    )]
+    SourceRelationSetUnitMismatch {
+        name: String,
+        target: String,
+        value: String,
+    },
     #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
@@ -1052,7 +1076,7 @@ impl RulesDocument {
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
-        apply_source_relation_sets(&mut program, &self.rules);
+        apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
@@ -1553,7 +1577,10 @@ fn append_missing_relations(
     Ok(())
 }
 
-fn apply_source_relation_sets(program: &mut ProgramSpec, rules: &[RuleDefinition]) {
+fn apply_source_relation_sets(
+    program: &mut ProgramSpec,
+    rules: &[RuleDefinition],
+) -> Result<(), RuleSpecError> {
     for rule in rules {
         let Some(source_relation) = rule.source_relation.as_ref() else {
             continue;
@@ -1581,26 +1608,57 @@ fn apply_source_relation_sets(program: &mut ProgramSpec, rules: &[RuleDefinition
             continue;
         }
 
-        let Some(value_parameter) = program
+        let value_parameter_index = program
             .parameters
             .iter()
-            .find(|parameter| parameter.id.as_deref() == Some(value_ref))
-            .cloned()
-        else {
-            continue;
-        };
-        let Some(target_parameter) = program
+            .position(|parameter| parameter.id.as_deref() == Some(value_ref));
+        let target_parameter_index = program
             .parameters
-            .iter_mut()
-            .find(|parameter| parameter.id.as_deref() == Some(target_ref))
+            .iter()
+            .position(|parameter| parameter.id.as_deref() == Some(target_ref));
+
+        let (Some(value_parameter_index), Some(target_parameter_index)) =
+            (value_parameter_index, target_parameter_index)
         else {
-            continue;
+            if value_parameter_index.is_none() && target_parameter_index.is_none() {
+                continue;
+            }
+            if value_parameter_index.is_none() {
+                return Err(RuleSpecError::SourceRelationSetValueNotParameter {
+                    name: rule.name.clone(),
+                    value: value_ref.to_string(),
+                });
+            }
+            return Err(RuleSpecError::SourceRelationSetTargetNotParameter {
+                name: rule.name.clone(),
+                target: target_ref.to_string(),
+            });
         };
 
-        target_parameter.unit = value_parameter.unit;
-        target_parameter.indexed_by = value_parameter.indexed_by;
+        let value_parameter = program.parameters[value_parameter_index].clone();
+        let target_parameter = &mut program.parameters[target_parameter_index];
+
+        if target_parameter.indexed_by != value_parameter.indexed_by {
+            return Err(RuleSpecError::SourceRelationSetIndexedByMismatch {
+                name: rule.name.clone(),
+                target: target_ref.to_string(),
+                value: value_ref.to_string(),
+            });
+        }
+        if target_parameter.unit.is_some()
+            && value_parameter.unit.is_some()
+            && target_parameter.unit != value_parameter.unit
+        {
+            return Err(RuleSpecError::SourceRelationSetUnitMismatch {
+                name: rule.name.clone(),
+                target: target_ref.to_string(),
+                value: value_ref.to_string(),
+            });
+        }
+
         target_parameter.versions = value_parameter.versions;
     }
+    Ok(())
 }
 
 fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
