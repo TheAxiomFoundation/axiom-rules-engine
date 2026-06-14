@@ -13,7 +13,8 @@ use axiom_rules_engine::rulespec::{
 };
 use axiom_rules_engine::source::{ModuleSource, SourceError};
 use axiom_rules_engine::spec::{
-    DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ScalarValueSpec,
+    DatasetSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec, PeriodSpec,
+    ScalarValueSpec,
 };
 
 /// A `ModuleSource` over an in-memory map: the shape a wasm host, a server
@@ -83,6 +84,50 @@ rules:
     versions:
       - effective_from: 2025-10-01
         formula: floor(snap_maximum_allotment - (net_income * snap_household_food_contribution_rate))
+"#;
+
+const FEDERAL_MEDICAID_DELEGATED_SLOT_MODULE: &str = r#"
+format: rulespec/v1
+rules:
+  - name: state_plan_child_income_standard_fpl_ratio
+    kind: parameter
+    dtype: Rate
+    source: 42 CFR 435.118(b)
+    versions:
+      - effective_from: 2014-01-01
+        formula: "1.33"
+  - name: child_medicaid_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    source: 42 CFR 435.118(b)
+    versions:
+      - effective_from: 2014-01-01
+        formula: household_income_as_fraction_of_fpl <= state_plan_child_income_standard_fpl_ratio
+"#;
+
+const GEORGIA_MEDICAID_SET_SLOT_MODULE: &str = r#"
+format: rulespec/v1
+imports:
+  - us:regulations/42-cfr/435/118
+rules:
+  - name: georgia_child_income_standard_fpl_ratio
+    kind: parameter
+    dtype: Rate
+    source: CMS Medicaid, CHIP, and BHP Eligibility Levels
+    versions:
+      - effective_from: 2023-12-01
+        formula: "1.49"
+  - name: sets_child_income_standard_fpl_ratio
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/42-cfr/435/118#state_plan_child_income_standard_fpl_ratio
+      authority: state
+      value: us-ga:policies/cms/medicaid-eligibility#georgia_child_income_standard_fpl_ratio
+      basis:
+        delegation: us:regulations/42-cfr/435/118#state_plan_child_income_standard_delegation
 "#;
 
 #[test]
@@ -179,6 +224,82 @@ fn in_memory_module_source_compiles_and_executes_without_filesystem() {
         panic!("expected decimal scalar");
     };
     assert_eq!(value, "268");
+}
+
+#[test]
+fn source_relation_sets_bind_state_parameter_into_federal_formula() {
+    let source = InMemoryModuleSource::new(&[
+        (
+            "us:regulations/42-cfr/435/118",
+            FEDERAL_MEDICAID_DELEGATED_SLOT_MODULE,
+        ),
+        (
+            "us-ga:policies/cms/medicaid-eligibility",
+            GEORGIA_MEDICAID_SET_SLOT_MODULE,
+        ),
+    ]);
+
+    let artifact = CompiledProgramArtifact::from_rulespec_with_source(
+        "us-ga:policies/cms/medicaid-eligibility",
+        &source,
+    )
+    .expect("state module compiles with federal delegated slot");
+    let federal_slot = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| {
+            parameter.id.as_deref()
+                == Some("us:regulations/42-cfr/435/118#state_plan_child_income_standard_fpl_ratio")
+        })
+        .expect("federal slot parameter remains addressable");
+    let ScalarValueSpec::Decimal { value } = &federal_slot.versions[0].values[&0] else {
+        panic!("expected decimal state-set standard");
+    };
+    assert_eq!(value, "1.49");
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:regulations/42-cfr/435/118#child_medicaid_eligible".to_string();
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulations/42-cfr/435/118#input.household_income_as_fraction_of_fpl"
+                    .to_string(),
+                entity: "Person".to_string(),
+                entity_id: "child-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "1.40".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "child-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("program executes with state-set federal slot");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("child_medicaid_eligible output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(*outcome, JudgmentOutcomeSpec::Holds);
 }
 
 #[test]

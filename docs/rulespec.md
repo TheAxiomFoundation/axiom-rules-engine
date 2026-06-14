@@ -258,6 +258,14 @@ changes the target rule's legal effect, encode the executable local rule and add
 a `source_relation.type: sets`, `implements`, or `amends` edge to the upstream
 delegation or target.
 
+For delegated parameter settings, the upstream source should expose the
+reformable slot as a `kind: parameter`. A downstream source relation whose
+`source_relation.type` is `sets` binds the local parameter values into the
+upstream slot during RuleSpec lowering when its `target` points to that
+upstream parameter and its `value` points to a local parameter. This lets
+federal formulas encode the legal structure once while state modules supply the
+delegated standards.
+
 Example delegated parameter setting:
 
 ```yaml

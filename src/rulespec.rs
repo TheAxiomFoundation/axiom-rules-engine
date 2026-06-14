@@ -1052,6 +1052,7 @@ impl RulesDocument {
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
+        apply_source_relation_sets(&mut program, &self.rules);
         rewrite_filtered_entity_member_aliases(&mut program);
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
@@ -1550,6 +1551,56 @@ fn append_missing_relations(
         program.relations.push(relation.clone());
     }
     Ok(())
+}
+
+fn apply_source_relation_sets(program: &mut ProgramSpec, rules: &[RuleDefinition]) {
+    for rule in rules {
+        let Some(source_relation) = rule.source_relation.as_ref() else {
+            continue;
+        };
+        if source_relation.relation_type.as_ref() != Some(&SourceRelationType::Sets) {
+            continue;
+        }
+        let Some(target_ref) = source_relation
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|target| target.contains('#'))
+        else {
+            continue;
+        };
+        let Some(value_ref) = source_relation
+            .value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| value.contains('#'))
+        else {
+            continue;
+        };
+        if target_ref == value_ref {
+            continue;
+        }
+
+        let Some(value_parameter) = program
+            .parameters
+            .iter()
+            .find(|parameter| parameter.id.as_deref() == Some(value_ref))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(target_parameter) = program
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.id.as_deref() == Some(target_ref))
+        else {
+            continue;
+        };
+
+        target_parameter.unit = value_parameter.unit;
+        target_parameter.indexed_by = value_parameter.indexed_by;
+        target_parameter.versions = value_parameter.versions;
+    }
 }
 
 fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
