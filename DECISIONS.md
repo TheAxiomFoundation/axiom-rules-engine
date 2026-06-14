@@ -383,3 +383,32 @@ facts are consumed by validators, the Axiom app, and trace renderers.
 - A follow-up can teach explain traces to pull graph metadata for rendering.
 - The `source` / `source_url` fields on derived outputs should become arrays to
   support multi-document provenance.
+
+## 2026-06-14 — Parameter `sets` lower into executable bindings
+
+**Decision.** `source_relation.type: sets` remains graph/provenance metadata,
+but parameter-to-parameter `sets` records also lower into executable parameter
+bindings when both sides are present in the merged RuleSpec program. The
+upstream delegated slot stays addressable as the federal parameter; the
+downstream `source_relation.value` parameter supplies that slot's versions.
+
+**Why.**
+
+- Federal formulas should encode the legal structure once, with state modules
+  setting delegated standards rather than duplicating federal eligibility
+  formulas.
+- Keeping the upstream parameter name as the runtime slot preserves stable
+  formula references and public IDs.
+- The `sets` record still carries the legal edge needed for audit and trace
+  rendering.
+
+**Consequences.**
+
+- Upstream sources that delegate a reformable setting should expose that setting
+  as a `kind: parameter` slot.
+- Downstream state modules can import the upstream formula, define the local
+  value parameter, and bind it with `source_relation.type: sets`,
+  `source_relation.target`, `source_relation.value`, and
+  `source_relation.basis.delegation`.
+- Non-parameter source relations, amendments, restatements, and source graph
+  edges without a local `value` remain metadata-only.
