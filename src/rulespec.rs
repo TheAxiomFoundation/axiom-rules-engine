@@ -858,8 +858,7 @@ fn resolve_canonical_rulespec_import(
 
 #[cfg(feature = "fs")]
 fn canonical_rulespec_target(path: &Path) -> Option<String> {
-    let resolved_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let components = resolved_path
+    let components = path
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect::<Vec<String>>();
