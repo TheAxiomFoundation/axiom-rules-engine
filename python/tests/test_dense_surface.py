@@ -7,8 +7,6 @@ build the wheel). Build locally with::
     maturin develop --release --manifest-path python-ext/Cargo.toml
 """
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -19,8 +17,6 @@ pytestmark = pytest.mark.skipif(
     NativeCompiledDenseProgram is None,
     reason="axiom_rules_engine_dense extension is not built",
 )
-
-MODULE = Path(__file__).parent / "fixtures" / "dense_flat_tax.yaml"
 
 MODULE_SOURCE = """\
 format: rulespec/v1
