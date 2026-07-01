@@ -658,10 +658,7 @@ pub fn normalize_module_target(target: &str) -> Result<String, RuleSpecError> {
 /// directory within the same jurisdiction, mirroring how filesystem loading
 /// resolves relative imports from the importing file's directory. Pure
 /// string logic — no filesystem.
-pub fn resolve_import_target(
-    importer_target: &str,
-    import: &str,
-) -> Result<String, RuleSpecError> {
+pub fn resolve_import_target(importer_target: &str, import: &str) -> Result<String, RuleSpecError> {
     let unresolved = || RuleSpecError::UnresolvedImport {
         path: importer_target.to_string(),
         target: import.to_string(),
@@ -865,22 +862,30 @@ fn canonical_rulespec_target(path: &Path) -> Option<String> {
     let repo_index = components
         .iter()
         .rposition(|component| component.starts_with("rulespec-"))?;
-    let repo_prefix = components[repo_index].strip_prefix("rulespec-")?;
-    if repo_prefix.is_empty() || repo_index + 1 >= components.len() {
+    let repo_tail = components[repo_index].strip_prefix("rulespec-")?;
+    if repo_tail.is_empty() || repo_index + 1 >= components.len() {
         return None;
     }
     // Country-monorepo layout: a repo named rulespec-<country> holds one
     // directory per jurisdiction (rulespec-us/us/…, rulespec-us/us-ca/…).
-    // A first component equal to the country code or extending it with a
-    // dash is the jurisdiction prefix; anything else is legacy layout where
-    // content sits at the repo root.
+    // Worktrees often append a branch slug to the repo directory
+    // (rulespec-us-medicaid-fix/us/...). Treat those like the country
+    // monorepo when the first content component is a jurisdiction for the
+    // same country; anything else is legacy layout where content sits at the
+    // repo root.
     let next = components[repo_index + 1].as_str();
-    let is_jurisdiction_dir = next == repo_prefix
-        || (next.starts_with(repo_prefix) && next.as_bytes().get(repo_prefix.len()) == Some(&b'-'));
+    let country = repo_tail.split('-').next().unwrap_or(repo_tail);
+    let is_jurisdiction_dir = (next == country
+        || (next.starts_with(country) && next.as_bytes().get(country.len()) == Some(&b'-')))
+        && (repo_tail == country
+            || repo_tail
+                .as_bytes()
+                .get(country.len())
+                .is_some_and(|byte| *byte == b'-'));
     let (prefix, content_start) = if is_jurisdiction_dir {
         (next.to_string(), repo_index + 2)
     } else {
-        (repo_prefix.to_string(), repo_index + 1)
+        (repo_tail.to_string(), repo_index + 1)
     };
     if content_start >= components.len() {
         return None;
@@ -920,6 +925,18 @@ pub(crate) fn is_canonical_repo_prefix(prefix: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
+#[cfg(feature = "fs")]
+fn is_country_monorepo_root(path: &Path, country: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let monorepo_name = format!("rulespec-{country}");
+    if name == monorepo_name {
+        return true;
+    }
+    name.strip_prefix(&format!("{monorepo_name}-")).is_some() && path.join(country).exists()
+}
+
 fn is_absolute_rulespec_ref(value: &str) -> bool {
     let value = value.trim();
     let Some((prefix, relative)) = value.split_once(':') else {
@@ -951,15 +968,15 @@ pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> V
 
     if let Some(env_roots) = env::var_os("AXIOM_RULESPEC_REPO_ROOTS") {
         for raw_root in env::split_paths(&env_roots) {
-            if raw_root.file_name().is_some_and(|name| name == repo_name.as_str()) {
+            if raw_root
+                .file_name()
+                .is_some_and(|name| name == repo_name.as_str())
+            {
                 add(raw_root.clone());
             } else {
                 add(raw_root.join(&repo_name));
             }
-            if raw_root
-                .file_name()
-                .is_some_and(|name| name == monorepo_name.as_str())
-            {
+            if is_country_monorepo_root(&raw_root, country) {
                 add(raw_root.join(prefix));
             } else {
                 add(raw_root.join(&monorepo_name).join(prefix));
@@ -968,13 +985,13 @@ pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> V
     }
 
     for ancestor in importer_path.ancestors() {
-        if ancestor.file_name().is_some_and(|name| name == repo_name.as_str()) {
-            add(ancestor.to_path_buf());
-        }
         if ancestor
             .file_name()
-            .is_some_and(|name| name == monorepo_name.as_str())
+            .is_some_and(|name| name == repo_name.as_str())
         {
+            add(ancestor.to_path_buf());
+        }
+        if is_country_monorepo_root(ancestor, country) {
             add(ancestor.join(prefix));
         }
         if let Some(parent) = ancestor.parent() {

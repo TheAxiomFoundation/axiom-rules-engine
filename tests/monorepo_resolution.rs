@@ -3,6 +3,7 @@
 //! identical to the legacy sibling-checkout layout.
 
 use axiom_rules_engine::compile::compile_program_file_to_json;
+use axiom_rules_engine::spec::ScalarValueSpec;
 
 const FEDERAL_MODULE: &str = r#"
 format: rulespec/v1
@@ -156,8 +157,7 @@ fn symlinked_configured_roots_preserve_logical_rulespec_ids() {
     let state_module = state_repo.join("regulations/10-ccr-2506-1/4.407.31.yaml");
     let artifact_path = temp_root.join("utility.compiled.json");
 
-    std::fs::create_dir_all(federal_module.parent().expect("federal parent"))
-        .expect("federal dir");
+    std::fs::create_dir_all(federal_module.parent().expect("federal parent")).expect("federal dir");
     std::fs::create_dir_all(state_module.parent().expect("state parent")).expect("state dir");
     std::fs::create_dir_all(&configured_parent).expect("configured parent dir");
     std::fs::write(&federal_module, FEDERAL_UTILITY_HOOK_MODULE)
@@ -206,6 +206,92 @@ fn federal_content_under_country_dir_keeps_us_prefix() {
             == Some(
                 "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_table",
             )
+    }));
+
+    std::fs::remove_dir_all(&temp_root).ok();
+}
+
+#[test]
+fn suffixed_country_monorepo_worktree_uses_local_imports_and_country_ids() {
+    let temp_root = std::env::temp_dir().join(format!(
+        "axiom-rules-engine-monorepo-worktree-{}",
+        std::process::id()
+    ));
+    let worktree = temp_root.join("rulespec-us-medicaid-primary-categories-20260630");
+    let root_module = worktree.join("us/statutes/42/1396a/a/10.yaml");
+    let local_import = worktree.join("us/statutes/42/1396a/m.yaml");
+    let stale_sibling_import = temp_root.join("rulespec-us/us/statutes/42/1396a/m.yaml");
+    let artifact_path = temp_root.join("medicaid.compiled.json");
+
+    std::fs::create_dir_all(root_module.parent().expect("root parent")).expect("root dir");
+    std::fs::create_dir_all(local_import.parent().expect("local import parent"))
+        .expect("local import dir");
+    std::fs::create_dir_all(stale_sibling_import.parent().expect("stale import parent"))
+        .expect("stale import dir");
+    std::fs::write(
+        &local_import,
+        r#"
+format: rulespec/v1
+rules:
+  - name: optional_category_amount
+    kind: parameter
+    dtype: Count
+    versions:
+      - effective_from: 2026-01-01
+        formula: "2"
+"#,
+    )
+    .expect("local imported module is written");
+    std::fs::write(
+        &stale_sibling_import,
+        r#"
+format: rulespec/v1
+rules:
+  - name: optional_category_amount
+    kind: parameter
+    dtype: Count
+    versions:
+      - effective_from: 2026-01-01
+        formula: "9"
+"#,
+    )
+    .expect("stale sibling imported module is written");
+    std::fs::write(
+        &root_module,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/42/1396a/m#optional_category_amount
+rules:
+  - name: medicaid_category_marker
+    kind: derived
+    entity: Person
+    dtype: Count
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: optional_category_amount
+"#,
+    )
+    .expect("root module is written");
+
+    let artifact = compile_program_file_to_json(&root_module, &artifact_path)
+        .expect("suffixed country worktree compiles with local imports");
+
+    let amount = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| {
+            parameter.id.as_deref() == Some("us:statutes/42/1396a/m#optional_category_amount")
+        })
+        .expect("local imported parameter keeps us id");
+    assert!(matches!(
+        amount.versions[0].values.get(&0),
+        Some(ScalarValueSpec::Integer { value: 2 })
+    ));
+    assert!(artifact.program.derived.iter().any(|derived| {
+        derived.id.as_deref() == Some("us:statutes/42/1396a/a/10#medicaid_category_marker")
     }));
 
     std::fs::remove_dir_all(&temp_root).ok();
