@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 /// Pseudo-entity assigned to formula parameters with no declared entity.
 /// Rules at this entity are row-constant.
@@ -363,12 +363,20 @@ impl Program {
     }
 
     pub fn resolve_input_name(&self, reference: &str) -> Option<String> {
+        let input_slots = self.input_slots();
+        self.resolve_input_name_with_slots(reference, &input_slots)
+    }
+
+    pub(crate) fn resolve_input_name_with_slots(
+        &self,
+        reference: &str,
+        input_slots: &HashSet<&str>,
+    ) -> Option<String> {
         if !self.has_public_ids() {
             return Some(reference.to_string());
         }
 
         let public_reference = PublicReference::parse(reference)?;
-        let input_slots = self.input_slots();
         if let Some(input_name) = public_reference.fragment.strip_prefix("input.") {
             if input_slots.contains(input_name) {
                 return Some(input_name.to_string());
@@ -432,7 +440,7 @@ impl Program {
                 .any(|parameter| parameter.id.is_some())
     }
 
-    fn input_slots(&self) -> HashSet<&str> {
+    pub(crate) fn input_slots(&self) -> HashSet<&str> {
         let mut slots = HashSet::new();
         for derived in self.derived.values() {
             collect_input_slots_from_semantics(&derived.semantics, &mut slots);

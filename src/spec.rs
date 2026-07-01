@@ -128,10 +128,11 @@ impl DatasetSpec {
     }
 
     pub fn to_dataset_for_program(&self, program: &Program) -> Result<DataSet, SpecError> {
+        let input_slots = program.input_slots();
         let inputs = self
             .inputs
             .iter()
-            .map(|input| input.to_model_for_program(program))
+            .map(|input| input.to_model_for_program(program, &input_slots))
             .collect::<Result<Vec<InputRecord>, SpecError>>()?;
         let relations = self
             .relations
@@ -823,12 +824,16 @@ impl InputRecordSpec {
         })
     }
 
-    fn to_model_for_program(&self, program: &Program) -> Result<InputRecord, SpecError> {
-        let name = program.resolve_input_name(&self.name).ok_or_else(|| {
-            SpecError::InvalidDatasetInputReference {
+    fn to_model_for_program(
+        &self,
+        program: &Program,
+        input_slots: &std::collections::HashSet<&str>,
+    ) -> Result<InputRecord, SpecError> {
+        let name = program
+            .resolve_input_name_with_slots(&self.name, input_slots)
+            .ok_or_else(|| SpecError::InvalidDatasetInputReference {
                 reference: self.name.clone(),
-            }
-        })?;
+            })?;
         Ok(InputRecord {
             name,
             entity: self.entity.clone(),
