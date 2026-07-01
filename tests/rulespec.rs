@@ -1,10 +1,10 @@
 use axiom_rules_engine::api::{
-    ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
+    execute_request, ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue,
 };
 use axiom_rules_engine::compile::{
-    CompileError, CompiledProgramArtifact, compile_program_file_to_json,
+    compile_program_file_to_json, CompileError, CompiledProgramArtifact,
 };
-use axiom_rules_engine::rulespec::{RuleSpecError, ValidationStatus, lower_rulespec_str};
+use axiom_rules_engine::rulespec::{lower_rulespec_str, RuleSpecError, ValidationStatus};
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
     ScalarExprSpec, ScalarValueSpec,
@@ -121,19 +121,14 @@ rules:
     let program = &artifact.program;
     assert_eq!(program.parameters.len(), 2);
     assert_eq!(program.derived.len(), 7);
-    assert!(
-        program
-            .relations
-            .iter()
-            .any(|r| r.name
-                == "us-tx:policies/hhsc/snap/overlay-subset#relation.member_of_household")
-    );
-    assert!(
-        artifact
-            .metadata
-            .evaluation_order
-            .contains(&"snap_allotment".to_string())
-    );
+    assert!(program
+        .relations
+        .iter()
+        .any(|r| r.name == "us-tx:policies/hhsc/snap/overlay-subset#relation.member_of_household"));
+    assert!(artifact
+        .metadata
+        .evaluation_order
+        .contains(&"snap_allotment".to_string()));
 }
 
 #[test]
@@ -1301,20 +1296,16 @@ rules:
 
     let artifact =
         CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
-    assert!(
-        artifact
-            .program
-            .relations
-            .iter()
-            .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
-    );
-    assert!(
-        artifact
-            .program
-            .relations
-            .iter()
-            .any(|relation| relation.name == "member_of_tax_unit")
-    );
+    assert!(artifact
+        .program
+        .relations
+        .iter()
+        .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit"));
+    assert!(artifact
+        .program
+        .relations
+        .iter()
+        .any(|relation| relation.name == "member_of_tax_unit"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1873,13 +1864,11 @@ rules:
     assert_eq!(derivation.entity.as_deref(), Some("SnapUnit"));
     assert_eq!(derivation.member_relation.as_deref(), Some("members"));
     assert_eq!(derivation.slot_entities, vec!["Person", "Household"]);
-    assert!(
-        artifact
-            .program
-            .relations
-            .iter()
-            .all(|relation| relation.name != "members")
-    );
+    assert!(artifact
+        .program
+        .relations
+        .iter()
+        .all(|relation| relation.name != "members"));
 
     let snap_unit_size = artifact
         .program
@@ -1980,7 +1969,7 @@ rules:
 }
 
 #[test]
-fn rulespec_rejects_multi_version_derived_formula() {
+fn rulespec_lowers_multi_version_derived_formula() {
     let rulespec = r#"
 format: rulespec/v1
 rules:
@@ -1997,13 +1986,25 @@ rules:
         formula: able_account_contributions
 "#;
 
-    let err = lower_rulespec_str(rulespec)
-        .expect_err("multi-version derived formulas should fail before compilation");
-    assert!(
-        err.to_string()
-            .contains("versioned derived formulas are not supported yet"),
-        "unexpected error: {err}"
-    );
+    let program = lower_rulespec_str(rulespec).expect("multi-version derived formulas lower");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "savers_credit_gross_contributions")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 2);
+    assert!(matches!(
+        &derived.versions[0].semantics,
+        DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::Input { name },
+        } if name == "qualified_retirement_contributions"
+    ));
+    assert!(matches!(
+        &derived.versions[1].semantics,
+        DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::Input { name },
+        } if name == "able_account_contributions"
+    ));
 }
 
 #[test]
@@ -2113,13 +2114,11 @@ rules:
 
     let artifact = compile_program_file_to_json(&co_path, &artifact_path)
         .expect("RuleSpec file with canonical import compiles");
-    assert!(
-        artifact
-            .program
-            .parameters
-            .iter()
-            .any(|parameter| parameter.name == "snap_maximum_allotment_table")
-    );
+    assert!(artifact
+        .program
+        .parameters
+        .iter()
+        .any(|parameter| parameter.name == "snap_maximum_allotment_table"));
     assert!(
         artifact
             .program
@@ -2130,22 +2129,18 @@ rules:
                     "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_table"
                 ))
     );
-    assert!(
-        artifact
-            .program
-            .derived
-            .iter()
-            .any(|derived| derived.name == "snap_regular_month_allotment")
-    );
+    assert!(artifact
+        .program
+        .derived
+        .iter()
+        .any(|derived| derived.name == "snap_regular_month_allotment"));
     let output_id =
         "us-co:policies/cdhs/snap/fy-2026-benefit#snap_regular_month_allotment".to_string();
-    assert!(
-        artifact
-            .program
-            .derived
-            .iter()
-            .any(|derived| derived.id.as_deref() == Some(output_id.as_str()))
-    );
+    assert!(artifact
+        .program
+        .derived
+        .iter()
+        .any(|derived| derived.id.as_deref() == Some(output_id.as_str())));
 
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,

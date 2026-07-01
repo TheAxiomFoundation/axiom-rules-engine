@@ -146,12 +146,13 @@ impl CompiledProgramArtifact {
         root_target: &str,
         source: &dyn crate::source::ModuleSource,
     ) -> Result<Self, CompileError> {
-        let program = crate::rulespec::load_rulespec_with_source(root_target, source).map_err(
-            |error| CompileError::RuleSpec {
-                path: root_target.to_string(),
-                error,
-            },
-        )?;
+        let program =
+            crate::rulespec::load_rulespec_with_source(root_target, source).map_err(|error| {
+                CompileError::RuleSpec {
+                    path: root_target.to_string(),
+                    error,
+                }
+            })?;
         Self::compile(program)
     }
 
@@ -289,6 +290,9 @@ fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
     let mut blockers = Vec::new();
     for derived in &program.derived {
         collect_fast_blockers_from_semantics(&derived.name, &derived.semantics, &mut blockers);
+        for version in &derived.versions {
+            collect_fast_blockers_from_semantics(&derived.name, &version.semantics, &mut blockers);
+        }
     }
 
     FastPathMetadata {
@@ -501,6 +505,16 @@ fn derived_dependencies(
         }
         DerivedSemanticsSpec::Judgment { expr } => {
             collect_judgment_dependencies(expr, &mut dependencies, relation_dependencies);
+        }
+    }
+    for version in &derived.versions {
+        match &version.semantics {
+            DerivedSemanticsSpec::Scalar { expr } => {
+                collect_scalar_dependencies(expr, &mut dependencies, relation_dependencies);
+            }
+            DerivedSemanticsSpec::Judgment { expr } => {
+                collect_judgment_dependencies(expr, &mut dependencies, relation_dependencies);
+            }
         }
     }
     dependencies

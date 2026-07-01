@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, InputRecord,
-    Interval, JudgmentExpr, JudgmentOutcome, ParameterVersion, Period, PeriodKind, Program,
-    RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, ScalarExpr, ScalarValue,
-    UnitDef, UnitKind,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
+    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, ParameterVersion, Period, PeriodKind,
+    Program, RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, ScalarExpr,
+    ScalarValue, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -299,6 +299,8 @@ pub struct DerivedSpec {
     pub source_url: Option<String>,
     #[serde(flatten)]
     pub semantics: DerivedSemanticsSpec,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<DerivedVersionSpec>,
 }
 
 impl DerivedSpec {
@@ -311,6 +313,27 @@ impl DerivedSpec {
             unit: self.unit.clone(),
             source: self.source.clone(),
             source_url: self.source_url.clone(),
+            semantics: self.semantics.to_model()?,
+            versions: self
+                .versions
+                .iter()
+                .map(DerivedVersionSpec::to_model)
+                .collect::<Result<Vec<DerivedVersion>, SpecError>>()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DerivedVersionSpec {
+    pub effective_from: NaiveDate,
+    #[serde(flatten)]
+    pub semantics: DerivedSemanticsSpec,
+}
+
+impl DerivedVersionSpec {
+    fn to_model(&self) -> Result<DerivedVersion, SpecError> {
+        Ok(DerivedVersion {
+            effective_from: self.effective_from,
             semantics: self.semantics.to_model()?,
         })
     }

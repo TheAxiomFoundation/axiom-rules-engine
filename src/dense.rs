@@ -1,15 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::EvalError;
 use crate::model::{
-    SCALAR_ENTITY,
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome, Period,
-    Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    Program, RelatedValueRef, ScalarExpr, ScalarValue, SCALAR_ENTITY,
 };
 
 #[derive(Clone, Debug)]
@@ -192,9 +191,7 @@ impl DenseNum for f64 {
 
     fn vec_from_column(column: &DenseColumn) -> Result<Vec<Self>, EvalError> {
         match column {
-            DenseColumn::Integer(values) => {
-                Ok(values.iter().map(|value| *value as f64).collect())
-            }
+            DenseColumn::Integer(values) => Ok(values.iter().map(|value| *value as f64).collect()),
             DenseColumn::Decimal(values) => Ok(values
                 .iter()
                 .map(|value| value.to_f64().unwrap_or(f64::NAN))
@@ -750,6 +747,11 @@ impl<'a> DenseCompiler<'a> {
             self.program.derived.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown derived `{name}`"))
             })?;
+        if !derived.versions.is_empty() {
+            return Err(DenseCompileError::Unsupported(format!(
+                "versioned derived formulas in `{name}`; use generic API execution"
+            )));
+        }
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
             return Err(DenseCompileError::CrossEntityDependency {
                 derived: name.to_string(),
@@ -886,8 +888,10 @@ impl<'a> DenseCompiler<'a> {
                         let input_index = self.related_input(relation_index, name, false);
                         CompiledRelatedScalarExpr::Input(input_index)
                     }
-                    RelatedValueRef::Derived(name) => self
-                        .compile_related_scalar(relation_index, &ScalarExpr::Derived(name.clone()))?,
+                    RelatedValueRef::Derived(name) => self.compile_related_scalar(
+                        relation_index,
+                        &ScalarExpr::Derived(name.clone()),
+                    )?,
                 };
                 let predicate = where_clause
                     .as_deref()
@@ -937,11 +941,9 @@ impl<'a> DenseCompiler<'a> {
                 }
                 Ok(CompiledJudgmentExpr::Derived(self.compile_derived(name)?))
             }
-            JudgmentExpr::RelationMember { relation, .. } => {
-                Err(DenseCompileError::Unsupported(format!(
-                    "relation predicate `{relation}`"
-                )))
-            }
+            JudgmentExpr::RelationMember { relation, .. } => Err(DenseCompileError::Unsupported(
+                format!("relation predicate `{relation}`"),
+            )),
             JudgmentExpr::And(items) => Ok(CompiledJudgmentExpr::And(
                 items
                     .iter()
@@ -1198,12 +1200,16 @@ impl<'a> DenseCompiler<'a> {
                     ))),
                 }
             }
-            ScalarExpr::ParameterLookup { parameter, index } => Ok(
-                CompiledScalarExpr::ParameterLookup {
+            ScalarExpr::ParameterLookup { parameter, index } => {
+                Ok(CompiledScalarExpr::ParameterLookup {
                     parameter: self.parameter(parameter)?,
-                    index: Box::new(self.compile_current_scalar_expr(derived_name, entity, index)?),
-                },
-            ),
+                    index: Box::new(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        index,
+                    )?),
+                })
+            }
             ScalarExpr::Add(items) => Ok(CompiledScalarExpr::Add(
                 items
                     .iter()
@@ -1271,12 +1277,12 @@ impl<'a> DenseCompiler<'a> {
                     else_expr,
                 )?),
             }),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => Err(
-                DenseCompileError::Unsupported(
+            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
+                Err(DenseCompileError::Unsupported(
                     "current-entity derived relation predicates cannot aggregate another relation"
                         .to_string(),
-                ),
-            ),
+                ))
+            }
         }
     }
 
@@ -1833,7 +1839,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledRelatedScalarExpr::Literal(value) => {
                 Ok(broadcast_scalar_literal::<N>(value, length))
             }
-            CompiledRelatedScalarExpr::Input(index) => self.batch.relations[relation].inputs[*index]
+            CompiledRelatedScalarExpr::Input(index) => self.batch.relations[relation].inputs
+                [*index]
                 .clone()
                 .ok_or_else(|| EvalError::MissingInput {
                     name: format!("related_input[{index}]"),
@@ -1954,7 +1961,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledRelatedScalarExpr::DateAddDays { date, days } => {
                 let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
-                let offset = self.resolve_related_scalar(relation, days)?.as_index_vec()?;
+                let offset = self
+                    .resolve_related_scalar(relation, days)?
+                    .as_index_vec()?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)

@@ -3,14 +3,15 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{
-    CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest, ExecutionResponse,
-    OutputValue, execute_compiled_request, execute_request,
+    execute_compiled_request, execute_request, CompiledExecutionRequest, ExecutionMode,
+    ExecutionQuery, ExecutionRequest, ExecutionResponse, OutputValue,
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, InputRecordSpec,
-    IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec, PeriodSpec, ProgramSpec,
-    RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec, ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
+    DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec,
+    PeriodSpec, ProgramSpec, RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec,
+    ScalarValueSpec,
 };
 use rust_decimal::Decimal;
 
@@ -182,6 +183,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
                     }),
                 },
             },
+            versions: vec![],
         }],
         ..ProgramSpec::default()
     };
@@ -244,6 +246,114 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
 }
 
 #[test]
+fn derived_formula_versions_select_by_query_period() {
+    let false_semantics = DerivedSemanticsSpec::Judgment {
+        expr: axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::Literal {
+                value: ScalarValueSpec::Integer { value: 0 },
+            }),
+            op: ComparisonOpSpec::Eq,
+            right: Box::new(ScalarExprSpec::Literal {
+                value: ScalarValueSpec::Integer { value: 1 },
+            }),
+        },
+    };
+    let true_semantics = DerivedSemanticsSpec::Judgment {
+        expr: axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::Literal {
+                value: ScalarValueSpec::Integer { value: 1 },
+            }),
+            op: ComparisonOpSpec::Eq,
+            right: Box::new(ScalarExprSpec::Literal {
+                value: ScalarValueSpec::Integer { value: 1 },
+            }),
+        },
+    };
+    let program = ProgramSpec {
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "eligible".to_string(),
+            entity: "Person".to_string(),
+            dtype: DTypeSpec::Judgment,
+            unit: None,
+            source: None,
+            period: None,
+            source_url: None,
+            semantics: true_semantics.clone(),
+            versions: vec![
+                DerivedVersionSpec {
+                    effective_from: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                        .expect("valid date"),
+                    semantics: false_semantics,
+                },
+                DerivedVersionSpec {
+                    effective_from: chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+                        .expect("valid date"),
+                    semantics: true_semantics,
+                },
+            ],
+        }],
+        ..ProgramSpec::default()
+    };
+    let period_2024 = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2024, 1, 31).expect("valid date"),
+    };
+    let period_2026 = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date"),
+    };
+
+    let response_2024 = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: DatasetSpec::default(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "person-1".to_string(),
+            period: period_2024,
+            outputs: vec!["eligible".to_string()],
+        }],
+    })
+    .expect("2024 versioned derived formula request succeeds");
+    let response_2026 = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program,
+        dataset: DatasetSpec::default(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "person-1".to_string(),
+            period: period_2026,
+            outputs: vec!["eligible".to_string()],
+        }],
+    })
+    .expect("2026 versioned derived formula request succeeds");
+
+    assert_eq!(response_2024.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(response_2026.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(
+        judgment_output(
+            response_2024.results[0]
+                .outputs
+                .get("eligible")
+                .expect("2024 output")
+        ),
+        JudgmentOutcomeSpec::NotHolds
+    );
+    assert_eq!(
+        judgment_output(
+            response_2026.results[0]
+                .outputs
+                .get("eligible")
+                .expect("2026 output")
+        ),
+        JudgmentOutcomeSpec::Holds
+    );
+}
+
+#[test]
 fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
@@ -275,6 +385,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
                         name: "income".to_string(),
                     },
                 },
+                versions: vec![],
             },
             DerivedSpec {
                 id: None,
@@ -296,6 +407,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
                         where_clause: None,
                     },
                 },
+                versions: vec![],
             },
         ],
         ..ProgramSpec::default()
@@ -419,6 +531,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
                     }),
                 },
             },
+            versions: vec![],
         }],
         ..ProgramSpec::default()
     };
@@ -577,10 +690,7 @@ rules:
             assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
-            outputs: vec![
-                "snap_unit_size".to_string(),
-                "snap_unit_income".to_string(),
-            ],
+            outputs: vec!["snap_unit_size".to_string(), "snap_unit_income".to_string()],
         }],
     })
     .expect("request succeeds");
@@ -724,10 +834,7 @@ rules:
             assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
-            outputs: vec![
-                "snap_unit_size".to_string(),
-                "snap_unit_income".to_string(),
-            ],
+            outputs: vec!["snap_unit_size".to_string(), "snap_unit_income".to_string()],
         }],
     })
     .expect("filtered entity request succeeds");

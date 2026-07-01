@@ -239,7 +239,13 @@ fn execute_explain(
                 .clone()
                 .unwrap_or_else(|| output_name.to_string());
 
-            match &derived.semantics {
+            let semantics = derived.semantics_at(&period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: output_name.clone(),
+                    at: period.start,
+                }
+            })?;
+            match semantics {
                 DerivedSemantics::Scalar(_) => {
                     let value = engine.evaluate_scalar(&output_name, &query.entity_id, &period)?;
                     outputs.insert(
@@ -295,7 +301,10 @@ fn collect_trace(
 ) -> BTreeMap<String, DerivedTraceNode> {
     let mut trace = BTreeMap::new();
     for derived in program.derived.values() {
-        match &derived.semantics {
+        let Some(semantics) = derived.semantics_at(period) else {
+            continue;
+        };
+        match semantics {
             DerivedSemantics::Scalar(expr) => {
                 if let Some(value) = engine.cached_scalar(&derived.name, entity_id, period) {
                     trace.insert(
