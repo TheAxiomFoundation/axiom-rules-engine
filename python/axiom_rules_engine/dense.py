@@ -22,6 +22,25 @@ class DenseRelationSchema:
 
 
 @dataclass(frozen=True)
+class DerivedMetadata:
+    """Authoring-level metadata for one derived rule.
+
+    Captured from the RuleSpec module before lowering (the runtime model
+    drops ``period``). ``dtype`` is the engine vocabulary: ``judgment`` /
+    ``bool`` / ``integer`` / ``decimal`` / ``text`` / ``date``; ``period``
+    is the authored granularity (``Year`` / ``Month`` / ...) when declared.
+    """
+
+    name: str
+    id: str | None
+    entity: str
+    dtype: str
+    unit: str | None
+    period: str | None
+    source: str | None
+
+
+@dataclass(frozen=True)
 class DenseRelationBatch:
     offsets: np.ndarray
     inputs: dict[str, np.ndarray]
@@ -67,6 +86,22 @@ class CompiledDenseProgram:
             for item in self._native.relations()
         ]
 
+    @property
+    def derived_metadata(self) -> list[DerivedMetadata]:
+        """Metadata for every derived rule in the module, all entities."""
+        return [
+            DerivedMetadata(
+                name=item.name,
+                id=item.id,
+                entity=item.entity,
+                dtype=item.dtype,
+                unit=item.unit,
+                period=item.period,
+                source=item.source,
+            )
+            for item in self._native.derived_metadata()
+        ]
+
     def execute(
         self,
         *,
@@ -76,6 +111,45 @@ class CompiledDenseProgram:
         inputs: dict[str, np.ndarray],
         relations: dict[str, DenseRelationBatch] | None = None,
         outputs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self._run(
+            self._native.execute, period_kind, start, end, inputs, relations, outputs
+        )
+
+    def execute_f64(
+        self,
+        *,
+        period_kind: str,
+        start: str,
+        end: str,
+        inputs: dict[str, np.ndarray],
+        relations: dict[str, DenseRelationBatch] | None = None,
+        outputs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute in f64 arithmetic (faster; floating-point rounding).
+
+        Intended for microsimulation-style batch workloads; exact legal
+        determinations should use :meth:`execute`.
+        """
+        return self._run(
+            self._native.execute_f64,
+            period_kind,
+            start,
+            end,
+            inputs,
+            relations,
+            outputs,
+        )
+
+    def _run(
+        self,
+        native_execute: Any,
+        period_kind: str,
+        start: str,
+        end: str,
+        inputs: dict[str, np.ndarray],
+        relations: dict[str, DenseRelationBatch] | None,
+        outputs: list[str] | None,
     ) -> dict[str, Any]:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         prepared_relations = None
@@ -90,7 +164,7 @@ class CompiledDenseProgram:
                 }
                 for key, batch in relations.items()
             }
-        return self._native.execute(
+        return native_execute(
             period_kind,
             start,
             end,

@@ -6,6 +6,7 @@ use axiom_rules_engine::dense::{
     DenseRelationSchema,
 };
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
+use axiom_rules_engine::spec::DTypeSpec;
 use chrono::NaiveDate;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -41,9 +42,44 @@ impl From<&DenseRelationSchema> for RelationSchemaHandle {
     }
 }
 
+/// Authoring-level metadata for one derived rule: what the RuleSpec module
+/// declared, before lowering to the runtime model (which drops `period`).
+/// Adapters (e.g. populace's RulesEngine adapter) resolve variables through
+/// this instead of re-parsing YAML.
+#[pyclass(module = "axiom_rules_engine_dense")]
+#[derive(Clone)]
+struct DerivedMetadataHandle {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    id: Option<String>,
+    #[pyo3(get)]
+    entity: String,
+    #[pyo3(get)]
+    dtype: String,
+    #[pyo3(get)]
+    unit: Option<String>,
+    #[pyo3(get)]
+    period: Option<String>,
+    #[pyo3(get)]
+    source: Option<String>,
+}
+
+fn dtype_name(dtype: &DTypeSpec) -> &'static str {
+    match dtype {
+        DTypeSpec::Judgment => "judgment",
+        DTypeSpec::Bool => "bool",
+        DTypeSpec::Integer => "integer",
+        DTypeSpec::Decimal => "decimal",
+        DTypeSpec::Text => "text",
+        DTypeSpec::Date => "date",
+    }
+}
+
 #[pyclass(module = "axiom_rules_engine_dense", name = "CompiledDenseProgram")]
 struct CompiledDenseProgramHandle {
     compiled: DenseCompiledProgram,
+    derived_metadata: Vec<DerivedMetadataHandle>,
 }
 
 #[pymethods]
@@ -53,9 +89,35 @@ impl CompiledDenseProgramHandle {
     fn from_file(path: &str, entity: Option<&str>) -> PyResult<Self> {
         let artifact = CompiledProgramArtifact::from_rulespec_file(path)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        // Capture authoring metadata (including `period`, which the runtime
+        // model drops) for every derived rule across all entities — the
+        // dense program itself compiles only the root entity's rules.
+        let derived_metadata = artifact
+            .program
+            .derived
+            .iter()
+            .map(|spec| DerivedMetadataHandle {
+                name: spec.name.clone(),
+                id: spec.id.clone(),
+                entity: spec.entity.clone(),
+                dtype: dtype_name(&spec.dtype).to_string(),
+                unit: spec.unit.clone(),
+                period: spec.period.clone(),
+                source: spec.source.clone(),
+            })
+            .collect();
         let compiled = DenseCompiledProgram::from_artifact(&artifact, entity)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        Ok(Self { compiled })
+        Ok(Self {
+            compiled,
+            derived_metadata,
+        })
+    }
+
+    /// Metadata for every derived rule in the compiled module, across all
+    /// entities (not just the dense root). Order follows the module.
+    fn derived_metadata(&self) -> Vec<DerivedMetadataHandle> {
+        self.derived_metadata.clone()
     }
 
     #[getter]
@@ -90,6 +152,40 @@ impl CompiledDenseProgramHandle {
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        self.run(py, period_kind, start, end, inputs, relations, outputs, false)
+    }
+
+    /// Execute in `f64` arithmetic: numeric outputs skip the Decimal
+    /// round-trip entirely. Intended for microsimulation-style batch
+    /// workloads; exact legal determinations should use `execute`.
+    #[pyo3(signature = (period_kind, start, end, inputs, relations=None, outputs=None))]
+    fn execute_f64<'py>(
+        &self,
+        py: Python<'py>,
+        period_kind: &str,
+        start: &str,
+        end: &str,
+        inputs: Bound<'py, PyDict>,
+        relations: Option<Bound<'py, PyDict>>,
+        outputs: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.run(py, period_kind, start, end, inputs, relations, outputs, true)
+    }
+}
+
+impl CompiledDenseProgramHandle {
+    #[allow(clippy::too_many_arguments)]
+    fn run<'py>(
+        &self,
+        py: Python<'py>,
+        period_kind: &str,
+        start: &str,
+        end: &str,
+        inputs: Bound<'py, PyDict>,
+        relations: Option<Bound<'py, PyDict>>,
+        outputs: Option<Vec<String>>,
+        use_f64: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let period = Period {
             kind: parse_period_kind(period_kind),
             start: parse_date(start)?,
@@ -97,10 +193,12 @@ impl CompiledDenseProgramHandle {
         };
         let batch = build_batch(&self.compiled, inputs, relations)?;
         let output_names = outputs.unwrap_or_else(|| self.compiled.output_names());
-        let execution = self
-            .compiled
-            .execute(&period, batch, &output_names)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let execution = if use_f64 {
+            self.compiled.execute_f64(&period, batch, &output_names)
+        } else {
+            self.compiled.execute(&period, batch, &output_names)
+        }
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
         let output_dict = PyDict::new(py);
         for (name, value) in execution.outputs {
@@ -124,6 +222,9 @@ impl CompiledDenseProgramHandle {
                             })
                             .collect::<PyResult<Vec<f64>>>()?;
                         output_dict.set_item(name, PyArray1::from_vec(py, materialised))?;
+                    }
+                    DenseColumn::Float(values) => {
+                        output_dict.set_item(name, PyArray1::from_vec(py, values))?;
                     }
                     DenseColumn::Text(values) => {
                         output_dict.set_item(name, PyList::new(py, values)?)?;
@@ -157,6 +258,7 @@ impl CompiledDenseProgramHandle {
 fn axiom_rules_engine_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CompiledDenseProgramHandle>()?;
     module.add_class::<RelationSchemaHandle>()?;
+    module.add_class::<DerivedMetadataHandle>()?;
     Ok(())
 }
 

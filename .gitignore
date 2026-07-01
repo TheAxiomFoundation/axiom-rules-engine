@@ -22,3 +22,6 @@ wasm/pkg-node/
 viz/
 
 paper/_build/
+
+# setuptools build output from pip installs of python/
+python/build/

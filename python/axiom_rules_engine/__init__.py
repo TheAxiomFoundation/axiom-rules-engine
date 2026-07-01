@@ -1,5 +1,10 @@
 from .client import AxiomRulesEngine
-from .dense import CompiledDenseProgram, DenseRelationBatch, DenseRelationSchema
+from .dense import (
+    CompiledDenseProgram,
+    DenseRelationBatch,
+    DenseRelationSchema,
+    DerivedMetadata,
+)
 from .loader import load_program
 from .models import (
     CompiledExecutionRequest,
@@ -41,6 +46,7 @@ __all__ = [
     "Dataset",
     "DenseRelationBatch",
     "DenseRelationSchema",
+    "DerivedMetadata",
     "ExecutionMetadata",
     "ExecutionMode",
     "ExecutionQuery",
