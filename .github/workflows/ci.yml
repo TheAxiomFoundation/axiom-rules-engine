@@ -28,6 +28,12 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --verbose
 
+      # The PyO3 extension is a separate crate that CI otherwise never
+      # compiles — a core enum change once broke it silently (the
+      # DenseColumn::Float arm). Type-check it on every run.
+      - name: cargo check (python-ext)
+        run: cargo check --manifest-path python-ext/Cargo.toml --verbose
+
   wasm:
     name: wasm32 core check
     runs-on: ubuntu-latest
