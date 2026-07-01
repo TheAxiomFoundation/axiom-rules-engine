@@ -268,6 +268,12 @@ pub enum DerivedSemantics {
 }
 
 #[derive(Clone, Debug)]
+pub struct DerivedVersion {
+    pub effective_from: NaiveDate,
+    pub semantics: DerivedSemantics,
+}
+
+#[derive(Clone, Debug)]
 pub struct Derived {
     pub id: Option<String>,
     pub name: String,
@@ -277,6 +283,20 @@ pub struct Derived {
     pub source: Option<String>,
     pub source_url: Option<String>,
     pub semantics: DerivedSemantics,
+    pub versions: Vec<DerivedVersion>,
+}
+
+impl Derived {
+    pub fn semantics_at(&self, period: &Period) -> Option<&DerivedSemantics> {
+        if self.versions.is_empty() {
+            return Some(&self.semantics);
+        }
+        self.versions
+            .iter()
+            .filter(|version| version.effective_from <= period.start)
+            .max_by_key(|version| version.effective_from)
+            .map(|version| &version.semantics)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -444,6 +464,9 @@ impl Program {
         let mut slots = HashSet::new();
         for derived in self.derived.values() {
             collect_input_slots_from_semantics(&derived.semantics, &mut slots);
+            for version in &derived.versions {
+                collect_input_slots_from_semantics(&version.semantics, &mut slots);
+            }
         }
         for parameter in self.parameters.values() {
             if let Some(indexed_by) = parameter.indexed_by.as_deref() {

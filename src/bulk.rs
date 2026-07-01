@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
@@ -103,7 +103,13 @@ pub fn try_execute(
 
     for output in &requested {
         let derived = evaluator.get_derived(output)?;
-        let warmup = match &derived.semantics {
+        let semantics = derived.semantics_at(&evaluator.period).ok_or_else(|| {
+            EvalError::MissingDerivedFormulaVersion {
+                derived: output.clone(),
+                at: evaluator.period.start,
+            }
+        })?;
+        let warmup = match semantics {
             DerivedSemantics::Scalar(_) => evaluator.evaluate_scalar(output).map(|_| ()),
             DerivedSemantics::Judgment(_) => evaluator.evaluate_judgment(output).map(|_| ()),
         };
@@ -126,7 +132,13 @@ pub fn try_execute(
                 .id
                 .clone()
                 .unwrap_or_else(|| output_name.to_string());
-            match &derived.semantics {
+            let semantics = derived.semantics_at(&evaluator.period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: output_name.clone(),
+                    at: evaluator.period.start,
+                }
+            })?;
+            match semantics {
                 DerivedSemantics::Scalar(_) => {
                     let column = evaluator.evaluate_scalar(&output_name)?;
                     outputs.insert(
@@ -288,7 +300,13 @@ impl<'a> BulkEvaluator<'a> {
     fn evaluate_scalar(&mut self, name: &str) -> Result<&ScalarColumn, EvalError> {
         if !self.scalar_cache.contains_key(name) {
             let derived = self.get_derived(name)?.clone();
-            let column = match &derived.semantics {
+            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: name.to_string(),
+                    at: self.period.start,
+                }
+            })?;
+            let column = match semantics {
                 DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
                 DerivedSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(name.to_string()));
@@ -302,7 +320,13 @@ impl<'a> BulkEvaluator<'a> {
     fn evaluate_judgment(&mut self, name: &str) -> Result<&Vec<JudgmentOutcome>, EvalError> {
         if !self.judgment_cache.contains_key(name) {
             let derived = self.get_derived(name)?.clone();
-            let column = match &derived.semantics {
+            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: name.to_string(),
+                    at: self.period.start,
+                }
+            })?;
+            let column = match semantics {
                 DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
                 DerivedSemantics::Scalar(_) => {
                     return Err(EvalError::ExpectedJudgment(name.to_string()));
@@ -667,9 +691,9 @@ impl<'a> BulkEvaluator<'a> {
                 compare_columns(left, *op, right)
             }
             JudgmentExpr::Derived(name) => Ok(self.evaluate_judgment(name)?.clone()),
-            JudgmentExpr::RelationMember { relation, .. } => Err(EvalError::TypeMismatch(
-                format!("fast mode cannot evaluate relation predicate `{relation}`"),
-            )),
+            JudgmentExpr::RelationMember { relation, .. } => Err(EvalError::TypeMismatch(format!(
+                "fast mode cannot evaluate relation predicate `{relation}`"
+            ))),
             JudgmentExpr::And(items) => {
                 let mut results = vec![JudgmentOutcome::Holds; self.entity_ids.len()];
                 for item in items {
@@ -736,8 +760,11 @@ impl<'a> BulkEvaluator<'a> {
 
         if let Some(derivation) = schema.derivation.clone() {
             let current_id = self.entity_ids[row_index].clone();
-            let source_rows =
-                self.related_rows(&derivation.source_relation, derivation.current_slot, row_index)?;
+            let source_rows = self.related_rows(
+                &derivation.source_relation,
+                derivation.current_slot,
+                row_index,
+            )?;
             for tuple in source_rows {
                 let Some(related_id) = tuple.get(derivation.related_slot) else {
                     continue;
@@ -807,16 +834,20 @@ impl<'a> BulkEvaluator<'a> {
                 } else {
                     related_id
                 };
-                match &derived.semantics {
-                    DerivedSemantics::Judgment(expr) => {
-                        self.eval_related_judgment_expr(
-                            expr,
-                            current_id,
-                            target_id,
-                            current_entity,
-                            related_entity,
-                        )
+                let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                    EvalError::MissingDerivedFormulaVersion {
+                        derived: name.to_string(),
+                        at: self.period.start,
                     }
+                })?;
+                match semantics {
+                    DerivedSemantics::Judgment(expr) => self.eval_related_judgment_expr(
+                        expr,
+                        current_id,
+                        target_id,
+                        current_entity,
+                        related_entity,
+                    ),
                     DerivedSemantics::Scalar(_) => Err(EvalError::ExpectedJudgment(name.clone())),
                 }
             }
@@ -824,17 +855,19 @@ impl<'a> BulkEvaluator<'a> {
                 relation,
                 current_slot,
                 related_slot,
-            } => Ok(if self.relation_contains(
-                relation,
-                *current_slot,
-                *related_slot,
-                current_id,
-                related_id,
-            )? {
-                JudgmentOutcome::Holds
-            } else {
-                JudgmentOutcome::NotHolds
-            }),
+            } => Ok(
+                if self.relation_contains(
+                    relation,
+                    *current_slot,
+                    *related_slot,
+                    current_id,
+                    related_id,
+                )? {
+                    JudgmentOutcome::Holds
+                } else {
+                    JudgmentOutcome::NotHolds
+                },
+            ),
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
@@ -877,19 +910,19 @@ impl<'a> BulkEvaluator<'a> {
                     JudgmentOutcome::NotHolds
                 })
             }
-            JudgmentExpr::Not(item) => {
-                Ok(match self.eval_related_judgment_expr(
+            JudgmentExpr::Not(item) => Ok(
+                match self.eval_related_judgment_expr(
                     item,
                     current_id,
                     related_id,
                     current_entity,
                     related_entity,
                 )? {
-                        JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
-                        JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
-                        JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                    })
-            }
+                    JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
+                    JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
+                    JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
+                },
+            ),
         }
     }
 
@@ -920,7 +953,13 @@ impl<'a> BulkEvaluator<'a> {
                 } else {
                     related_id
                 };
-                match &derived.semantics {
+                let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                    EvalError::MissingDerivedFormulaVersion {
+                        derived: name.to_string(),
+                        at: self.period.start,
+                    }
+                })?;
+                match semantics {
                     DerivedSemantics::Scalar(expr) => self.eval_related_scalar_expr(
                         expr,
                         current_id,
@@ -943,7 +982,9 @@ impl<'a> BulkEvaluator<'a> {
                             related_entity,
                         )?
                         .as_decimal()
-                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch("expected numeric scalar".to_string())
+                        })?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
@@ -955,8 +996,8 @@ impl<'a> BulkEvaluator<'a> {
                     current_entity,
                     related_entity,
                 )?
-                    .as_decimal()
-                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                .as_decimal()
+                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     - self
                         .eval_related_scalar_expr(
                             right,
@@ -966,7 +1007,9 @@ impl<'a> BulkEvaluator<'a> {
                             related_entity,
                         )?
                         .as_decimal()
-                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch("expected numeric scalar".to_string())
+                        })?,
             )),
             ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
                 self.eval_related_scalar_expr(
@@ -976,8 +1019,8 @@ impl<'a> BulkEvaluator<'a> {
                     current_entity,
                     related_entity,
                 )?
-                    .as_decimal()
-                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                .as_decimal()
+                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                     * self
                         .eval_related_scalar_expr(
                             right,
@@ -987,7 +1030,9 @@ impl<'a> BulkEvaluator<'a> {
                             related_entity,
                         )?
                         .as_decimal()
-                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?,
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch("expected numeric scalar".to_string())
+                        })?,
             )),
             ScalarExpr::Div(left, right) => {
                 let divisor = self
@@ -999,7 +1044,9 @@ impl<'a> BulkEvaluator<'a> {
                         related_entity,
                     )?
                     .as_decimal()
-                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?;
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch("expected numeric scalar".to_string())
+                    })?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
@@ -1011,17 +1058,18 @@ impl<'a> BulkEvaluator<'a> {
                         current_entity,
                         related_entity,
                     )?
-                        .as_decimal()
-                        .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                        / divisor,
+                    .as_decimal()
+                    .ok_or_else(|| {
+                        EvalError::TypeMismatch("expected numeric scalar".to_string())
+                    })? / divisor,
                 ))
             }
-            ScalarExpr::Max(_) | ScalarExpr::Min(_) | ScalarExpr::ParameterLookup { .. } => Err(
-                EvalError::TypeMismatch(
+            ScalarExpr::Max(_) | ScalarExpr::Min(_) | ScalarExpr::ParameterLookup { .. } => {
+                Err(EvalError::TypeMismatch(
                     "bulk fast mode does not yet support this related scalar expression"
                         .to_string(),
-                ),
-            ),
+                ))
+            }
             ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
                 self.eval_related_scalar_expr(
                     value,
@@ -1030,9 +1078,9 @@ impl<'a> BulkEvaluator<'a> {
                     current_entity,
                     related_entity,
                 )?
-                    .as_decimal()
-                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    .ceil(),
+                .as_decimal()
+                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                .ceil(),
             )),
             ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
                 self.eval_related_scalar_expr(
@@ -1042,9 +1090,9 @@ impl<'a> BulkEvaluator<'a> {
                     current_entity,
                     related_entity,
                 )?
-                    .as_decimal()
-                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    .floor(),
+                .as_decimal()
+                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
+                .floor(),
             )),
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(self.period.start)),
             ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(self.period.end)),
@@ -1093,7 +1141,11 @@ impl<'a> BulkEvaluator<'a> {
         Ok(self
             .related_rows(relation, current_slot, row_index)?
             .iter()
-            .any(|tuple| tuple.get(related_slot).is_some_and(|candidate| candidate == related_id)))
+            .any(|tuple| {
+                tuple
+                    .get(related_slot)
+                    .is_some_and(|candidate| candidate == related_id)
+            }))
     }
 }
 

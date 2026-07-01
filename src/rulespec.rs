@@ -165,7 +165,9 @@ pub enum RuleSpecError {
         target: String,
         value: String,
     },
-    #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
+    #[error(
+        "RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}"
+    )]
     RelationArityConflict {
         name: String,
         existing: usize,
@@ -1786,6 +1788,7 @@ fn apply_source_relation_sets(
                 }
 
                 target_derived.semantics = value_derived.semantics;
+                target_derived.versions = value_derived.versions;
             }
         }
     }
@@ -1862,6 +1865,16 @@ fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
                 }
                 DerivedSemanticsSpec::Judgment { expr } => {
                     rewrite_relation_alias_in_judgment(expr, alias, relation_name);
+                }
+            }
+            for version in &mut derived.versions {
+                match &mut version.semantics {
+                    DerivedSemanticsSpec::Scalar { expr } => {
+                        rewrite_relation_alias_in_scalar(expr, alias, relation_name);
+                    }
+                    DerivedSemanticsSpec::Judgment { expr } => {
+                        rewrite_relation_alias_in_judgment(expr, alias, relation_name);
+                    }
                 }
             }
         }
@@ -2040,6 +2053,28 @@ fn rewrite_relation_references(
                 );
             }
         }
+        for version in &mut derived.versions {
+            match &mut version.semantics {
+                DerivedSemanticsSpec::Scalar { expr } => {
+                    rewrite_scalar_relation_references(
+                        expr,
+                        origin_target,
+                        rewrites,
+                        &unambiguous_short_rewrites,
+                        &derived_origin_targets,
+                    );
+                }
+                DerivedSemanticsSpec::Judgment { expr } => {
+                    rewrite_judgment_relation_references(
+                        expr,
+                        origin_target,
+                        rewrites,
+                        &unambiguous_short_rewrites,
+                        &derived_origin_targets,
+                    );
+                }
+            }
+        }
     }
     for relation in &mut program.relations {
         let Some(origin_target) = relation
@@ -2125,6 +2160,16 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
             }
             DerivedSemanticsSpec::Judgment { expr } => {
                 collect_judgment_relation_names(expr, &mut names);
+            }
+        }
+        for version in &derived.versions {
+            match &version.semantics {
+                DerivedSemanticsSpec::Scalar { expr } => {
+                    collect_scalar_relation_names(expr, &mut names);
+                }
+                DerivedSemanticsSpec::Judgment { expr } => {
+                    collect_judgment_relation_names(expr, &mut names);
+                }
             }
         }
     }

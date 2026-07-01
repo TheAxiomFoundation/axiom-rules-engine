@@ -33,6 +33,11 @@ pub enum EvalError {
         key: i64,
         at: chrono::NaiveDate,
     },
+    #[error("derived `{derived}` has no formula version at {at}")]
+    MissingDerivedFormulaVersion {
+        derived: String,
+        at: chrono::NaiveDate,
+    },
     #[error("derived `{0}` is scalar, but a judgment was requested")]
     ExpectedJudgment(String),
     #[error("derived `{0}` is judgment, but a scalar was requested")]
@@ -129,7 +134,13 @@ impl<'a> Engine<'a> {
 
         let derived = self.get_derived(derived_name)?.clone();
         self.validate_unit(&derived)?;
-        let value = match &derived.semantics {
+        let semantics = derived.semantics_at(period).ok_or_else(|| {
+            EvalError::MissingDerivedFormulaVersion {
+                derived: derived_name.to_string(),
+                at: period.start,
+            }
+        })?;
+        let value = match semantics {
             DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period)?,
             DerivedSemantics::Judgment(_) => {
                 return Err(EvalError::ExpectedScalar(derived_name.to_string()));
@@ -156,7 +167,13 @@ impl<'a> Engine<'a> {
 
         let derived = self.get_derived(derived_name)?.clone();
         self.validate_unit(&derived)?;
-        let value = match &derived.semantics {
+        let semantics = derived.semantics_at(period).ok_or_else(|| {
+            EvalError::MissingDerivedFormulaVersion {
+                derived: derived_name.to_string(),
+                at: period.start,
+            }
+        })?;
+        let value = match semantics {
             DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period)?,
             DerivedSemantics::Scalar(_) => {
                 return Err(EvalError::ExpectedJudgment(derived_name.to_string()));
@@ -474,7 +491,12 @@ impl<'a> Engine<'a> {
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+                    match self.eval_judgment_expr_inner(
+                        item,
+                        entity_id,
+                        period,
+                        relation_context,
+                    )? {
                         JudgmentOutcome::Holds => {}
                         JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -489,7 +511,12 @@ impl<'a> Engine<'a> {
             JudgmentExpr::Or(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+                    match self.eval_judgment_expr_inner(
+                        item,
+                        entity_id,
+                        period,
+                        relation_context,
+                    )? {
                         JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
                         JudgmentOutcome::NotHolds => {}
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -501,13 +528,13 @@ impl<'a> Engine<'a> {
                     JudgmentOutcome::NotHolds
                 })
             }
-            JudgmentExpr::Not(item) => {
-                Ok(match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+            JudgmentExpr::Not(item) => Ok(
+                match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
                     JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
                     JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
                     JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                })
-            }
+                },
+            ),
         }
     }
 
@@ -630,8 +657,14 @@ impl<'a> Engine<'a> {
                 let context = RelationEvalContext {
                     current_id: entity_id,
                     related_id: &related_id,
-                    current_entity: derivation.slot_entities.get(derivation.current_slot).map(String::as_str),
-                    related_entity: derivation.slot_entities.get(derivation.related_slot).map(String::as_str),
+                    current_entity: derivation
+                        .slot_entities
+                        .get(derivation.current_slot)
+                        .map(String::as_str),
+                    related_entity: derivation
+                        .slot_entities
+                        .get(derivation.related_slot)
+                        .map(String::as_str),
                 };
                 if self
                     .eval_judgment_expr_inner(

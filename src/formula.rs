@@ -22,9 +22,9 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::spec::{
-    ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec,
-    JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, RelationSpec,
-    ScalarExprSpec, ScalarValueSpec, UnitKindSpec, UnitSpec,
+    ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
+    IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
+    RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -1084,9 +1084,8 @@ pub fn parse_source(src: &str) -> Result<Module, FormulaError> {
 ///   literal lowers to a scalar `Parameter` keyed at index 0 (or at integer
 ///   keys if the literal is an integer-keyed table once indexed_by support
 ///   lands).
-/// - A `VariableDecl` with an `entity` lowers to a `Derived` output. Derived
-///   formulas must currently have a single temporal value; versioned derived
-///   lowering is not supported until execution can select formulas by period.
+/// - A `VariableDecl` with an `entity` lowers to a `Derived` output. Versioned
+///   derived formulas lower to dated derived versions selected by query period.
 /// - Non-literal scalar variables (with no entity but a computed expression)
 ///   lower to derived outputs attached to a synthetic `Scalar` entity so
 ///   they can be referenced from entity-scoped derived values.
@@ -1159,7 +1158,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         });
     }
 
-    // Second pass: derived outputs. Pick the latest temporal value's expr.
+    // Second pass: derived outputs. Single-version derived outputs use the
+    // historical semantics field; multi-version outputs also carry dated
+    // semantics for runtime period selection.
     let ctx = LowerCtx {
         scalars: scalar_names,
         derived: derived_names,
@@ -1170,12 +1171,6 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         if v.entity.is_none() && v.values.iter().all(|t| is_literal_expr(&t.expr)) {
             continue;
         }
-        if v.values.len() > 1 {
-            return Err(FormulaError::lower(format!(
-                "derived variable `{}` has multiple formula versions; versioned derived formulas are not supported yet",
-                v.path
-            )));
-        }
         let dtype = parse_dtype(v.dtype.as_deref());
         let entity = v
             .entity
@@ -1184,18 +1179,35 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         let last = v.values.last().ok_or_else(|| {
             FormulaError::lower(format!("variable `{}` has no temporal values", v.path))
         })?;
-        let semantics = match dtype {
-            DTypeSpec::Judgment => DerivedSemanticsSpec::Judgment {
-                expr: lower_to_judgment(&last.expr, &ctx)?,
-            },
-            DTypeSpec::Decimal => {
-                let mut expr = lower_to_scalar(&last.expr, &ctx)?;
-                promote_ints_to_decimal(&mut expr);
-                DerivedSemanticsSpec::Scalar { expr }
-            }
-            _ => DerivedSemanticsSpec::Scalar {
-                expr: lower_to_scalar(&last.expr, &ctx)?,
-            },
+        let lower_semantics =
+            |expr: &Expr, dtype: &DTypeSpec| -> Result<DerivedSemanticsSpec, FormulaError> {
+                match dtype {
+                    DTypeSpec::Judgment => Ok(DerivedSemanticsSpec::Judgment {
+                        expr: lower_to_judgment(expr, &ctx)?,
+                    }),
+                    DTypeSpec::Decimal => {
+                        let mut expr = lower_to_scalar(expr, &ctx)?;
+                        promote_ints_to_decimal(&mut expr);
+                        Ok(DerivedSemanticsSpec::Scalar { expr })
+                    }
+                    _ => Ok(DerivedSemanticsSpec::Scalar {
+                        expr: lower_to_scalar(expr, &ctx)?,
+                    }),
+                }
+            };
+        let semantics = lower_semantics(&last.expr, &dtype)?;
+        let versions = if v.values.len() > 1 {
+            v.values
+                .iter()
+                .map(|value| {
+                    Ok(DerivedVersionSpec {
+                        effective_from: value.start,
+                        semantics: lower_semantics(&value.expr, &dtype)?,
+                    })
+                })
+                .collect::<Result<Vec<DerivedVersionSpec>, FormulaError>>()?
+        } else {
+            Vec::new()
         };
         program.derived.push(DerivedSpec {
             id: None,
@@ -1207,6 +1219,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             source: v.source.clone(),
             source_url: v.source_url.clone(),
             semantics,
+            versions,
         });
     }
 
