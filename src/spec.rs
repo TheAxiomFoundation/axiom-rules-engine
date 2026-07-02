@@ -351,6 +351,13 @@ impl DerivedVersionSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// `schemars` derives only the canonical snake_case names and drops the serde
+// aliases below, which would make the schema reject a `dtype` serde accepts.
+// Override with the full accepted set (canonical + aliases).
+#[cfg_attr(
+    feature = "schema",
+    schemars(schema_with = "crate::schema::dtype_schema")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DTypeSpec {
     // Accept RuleSpec's PascalCase vocabulary alongside our snake_case. `Money`

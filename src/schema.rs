@@ -138,6 +138,30 @@ pub fn string_or_integer_schema(_generator: &mut schemars::SchemaGenerator) -> s
     })
 }
 
+/// The full set of `dtype` strings the `DTypeSpec` deserializer accepts: the
+/// six canonical snake_case names plus every serde alias (PascalCase forms and
+/// the `Money`/`money`/`Rate`/`rate` synonyms for `decimal`). `schemars`
+/// derives only the canonical names from the enum, dropping the aliases, which
+/// would make the artifact schema reject a `dtype` serde accepts — so the
+/// `dtype` field uses this instead. Emitted artifacts always use the canonical
+/// forms, but the schema must still accept a hand-written or round-tripped
+/// alias.
+#[cfg(feature = "schema")]
+pub fn dtype_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": [
+            "judgment", "Judgment",
+            "bool", "Bool", "Boolean", "boolean",
+            "integer", "Integer",
+            "decimal", "Decimal", "Money", "money", "Rate", "rate",
+            "text", "Text",
+            "date", "Date"
+        ],
+        "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal."
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Shared hand-written fragments.
 // ---------------------------------------------------------------------------

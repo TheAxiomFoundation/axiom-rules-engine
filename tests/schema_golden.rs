@@ -83,3 +83,88 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
         errors.join("\n")
     );
 }
+
+#[test]
+fn artifact_schema_accepts_the_annotated_divergences() {
+    // Exercise the manually-annotated spots in the derived artifact schema
+    // that a plain schemars derive would get wrong or narrow: `dtype` aliases
+    // (`money` for decimal), decimal values as both a bare integer and a
+    // string, a date value, module metadata with a flattened
+    // `source_verification.extra` field, and a judgment/comparison expression.
+    // If any of these regress, this artifact stops validating.
+    let artifact = serde_json::json!({
+        "artifact_format_version": 1,
+        "engine_version": "0.1.0",
+        "program": {
+            "module": {
+                "id": "us:statutes/7/2017/a",
+                "source_verification": {
+                    "corpus_citation_path": "us/statute/7/2017/a",
+                    "source_sha256": "a".repeat(64),
+                    "corpus_citation_paths": ["us/statute/7/2017/a"]
+                },
+                "encoding_provenance": {"encoder": "axiom-encode/0.2"},
+                "validation": [{"oracle": "taxsim", "status": "matches", "last_run": "2026-06-01"}]
+            },
+            "units": [{"name": "USD", "kind": "currency", "minor_units": 2}],
+            "relations": [],
+            "parameters": [{
+                "id": "us:statutes/7/2017/a#p",
+                "name": "p", "unit": "USD", "indexed_by": "household_size",
+                "versions": [{"effective_from": "2020-01-01", "values": {
+                    "1": {"kind": "decimal", "value": 200},
+                    "2": {"kind": "decimal", "value": "250.50"},
+                    "3": {"kind": "integer", "value": 3},
+                    "4": {"kind": "date", "value": "2026-01-01"},
+                    "5": {"kind": "bool", "value": true},
+                    "6": {"kind": "text", "value": "hi"}
+                }}]
+            }],
+            "derived": [{
+                "id": "us:statutes/7/2017/a#d",
+                "name": "d", "entity": "Household",
+                // `money` is a serde alias for `decimal`; the schema must accept it.
+                "dtype": "money", "unit": "USD",
+                "semantics": "scalar",
+                "expr": {"kind": "if",
+                    "condition": {"kind": "comparison",
+                        "left": {"kind": "input", "name": "x"}, "op": "gte",
+                        "right": {"kind": "literal", "value": {"kind": "decimal", "value": 0}}},
+                    "then_expr": {"kind": "parameter_lookup", "parameter": "p",
+                        "index": {"kind": "input", "name": "household_size"}},
+                    "else_expr": {"kind": "literal", "value": {"kind": "integer", "value": 0}}},
+                "versions": []
+            }]
+        },
+        "metadata": {"evaluation_order": ["d"],
+            "fast_path": {"strategy": "s", "compatible": true, "blockers": []}}
+    });
+
+    let schema_value = all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == "compiled-artifact.v1.schema.json")
+        .expect("artifact schema is published")
+        .schema;
+    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
+    let errors: Vec<String> = validator
+        .iter_errors(&artifact)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "annotated-divergence artifact did not validate:\n{}",
+        errors.join("\n")
+    );
+
+    // And the reverse: everything the schema advertises for `dtype` must
+    // actually deserialize into a DTypeSpec, so schema and serde agree.
+    for dtype in [
+        "judgment", "Judgment", "bool", "Bool", "Boolean", "boolean", "integer", "Integer",
+        "decimal", "Decimal", "Money", "money", "Rate", "rate", "text", "Text", "date", "Date",
+    ] {
+        let json = serde_json::json!(dtype);
+        serde_json::from_value::<axiom_rules_engine::spec::DTypeSpec>(json).unwrap_or_else(|e| {
+            panic!("schema advertises dtype `{dtype}` but serde rejects it: {e}")
+        });
+    }
+}

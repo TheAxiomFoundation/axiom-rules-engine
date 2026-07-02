@@ -30,13 +30,26 @@
       "type": "object"
     },
     "DTypeSpec": {
+      "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal.",
       "enum": [
         "judgment",
+        "Judgment",
         "bool",
+        "Bool",
+        "Boolean",
+        "boolean",
         "integer",
+        "Integer",
         "decimal",
+        "Decimal",
+        "Money",
+        "money",
+        "Rate",
+        "rate",
         "text",
-        "date"
+        "Text",
+        "date",
+        "Date"
       ],
       "type": "string"
     },
