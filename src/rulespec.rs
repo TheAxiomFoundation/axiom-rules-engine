@@ -207,6 +207,7 @@ pub struct RulesDocument {
 /// [`ProgramSpec`] keeps the (merged) root module's metadata so tooling
 /// reading a loaded module or a compiled artifact can see it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModuleMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -253,11 +254,20 @@ impl ModuleMetadata {
 /// changed out from under the encoding. Additional subfields (for example
 /// `corpus_citation_paths`) are preserved verbatim.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SourceVerification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus_citation_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
+    // `serde(flatten)` collects every unmodeled subfield here, so the schema
+    // this generates carries `additionalProperties: true`. `serde_yaml::Value`
+    // has no `JsonSchema` impl, so the field's value type is described as an
+    // arbitrary JSON value.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
+    )]
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
 }
@@ -267,6 +277,7 @@ pub struct SourceVerification {
 /// All fields optional; unknown subfields are rejected so typos do not
 /// silently pass for provenance.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EncodingProvenance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +293,7 @@ pub struct EncodingProvenance {
 /// One oracle-validation result for the module: which oracle, whether the
 /// encoding currently matches it, and when it last ran.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ValidationRecord {
     pub oracle: String,
     pub status: ValidationStatus,
@@ -292,6 +304,7 @@ pub struct ValidationRecord {
 /// Outcome of an oracle validation run. Any other status string is
 /// rejected at parse time.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStatus {
     Matches,

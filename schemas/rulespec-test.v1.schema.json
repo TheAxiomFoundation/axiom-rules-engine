@@ -1,0 +1,177 @@
+{
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/rulespec-test.v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A companion `*.test.yaml` case list: named cases with a period, inputs, and expected outputs, run against a RuleSpec module by the jurisdiction-repo and axiom-encode test harnesses.",
+  "items": {
+    "additionalProperties": true,
+    "properties": {
+      "description": {
+        "type": "string"
+      },
+      "input": {
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
+            {
+              "items": {
+                "oneOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          ]
+        },
+        "description": "Input/flag values keyed by durable id. Scalars, or lists (of scalars or related-entity objects).",
+        "type": "object"
+      },
+      "name": {
+        "type": "string"
+      },
+      "oracle_inputs": {
+        "additionalProperties": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "description": "Cross-engine validation inputs keyed by oracle name (e.g. policyengine).",
+        "type": "object"
+      },
+      "output": {
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
+            {
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "null"
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          ]
+        },
+        "description": "Expected outputs keyed by output name or durable id. Amounts, dates, or judgment outcomes (holds/not_holds/undetermined), optionally single-element-list-wrapped.",
+        "type": "object"
+      },
+      "period": {
+        "description": "A full period object, or a shorthand string such as `2026-01`.",
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": true,
+            "properties": {
+              "end": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "period_kind": {
+                "description": "e.g. month, tax_year, benefit_week, custom. When custom, `name` gives the label.",
+                "type": "string"
+              },
+              "start": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "period_kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "tables": {
+        "additionalProperties": {
+          "items": {
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": [
+                          "string",
+                          "number",
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "description": "Related-entity rows keyed by entity name (e.g. Payment): a list of input-row objects.",
+        "type": "object"
+      }
+    },
+    "required": [
+      "name",
+      "period",
+      "output"
+    ],
+    "type": "object"
+  },
+  "title": "Axiom RuleSpec companion test",
+  "type": "array"
+}

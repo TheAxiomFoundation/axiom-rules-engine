@@ -22,6 +22,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match command.as_str() {
             "compile" => return run_compile(args.collect()),
             "run-compiled" => return run_compiled(args.collect()),
+            #[cfg(feature = "schema")]
+            "emit-schemas" => return run_emit_schemas(args.collect()),
             _ => return Err(format!("unknown command `{command}`").into()),
         }
     }
@@ -90,5 +92,32 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let request: CompiledExecutionRequest = serde_json::from_str(&input)?;
     let response = execute_compiled_request(artifact, request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+/// `emit-schemas --out <dir>`: write the published JSON Schemas into `<dir>`.
+/// The checked-in `schemas/` directory is the golden copy; the
+/// `schemas_are_current` test regenerates in memory and fails on any drift, so
+/// this subcommand is a convenience for refreshing that directory, not the
+/// source of truth.
+#[cfg(feature = "schema")]
+fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out_dir: Option<PathBuf> = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--out" => {
+                out_dir = iter.next().map(PathBuf::from);
+            }
+            _ => {
+                return Err(format!("unknown emit-schemas argument `{arg}`").into());
+            }
+        }
+    }
+    let out_dir = out_dir.ok_or("missing required `--out /path/to/schemas` argument")?;
+    let written = axiom_rules_engine::schema::write_all_to_dir(&out_dir)?;
+    for path in written {
+        println!("wrote {}", path.display());
+    }
     Ok(())
 }

@@ -25,6 +25,15 @@ jobs:
       - name: cargo test
         run: cargo test --verbose
 
+      # Schema generation lives behind the non-default `schema` feature so
+      # pure-runtime consumers stay lean. These tests regenerate the published
+      # JSON Schemas and assert the checked-in `schemas/` copies are current
+      # (golden-file drift guard), check schema/serde fidelity, and — when a
+      # rulespec-us checkout is present — validate the corpus. The conformance
+      # test self-skips here, where no checkout exists.
+      - name: cargo test (schema feature)
+        run: cargo test --features schema --verbose
+
       - name: cargo build --release
         run: cargo build --release --verbose
 

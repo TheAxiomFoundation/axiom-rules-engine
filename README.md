@@ -132,6 +132,35 @@ IDs, data-relation IDs, source-relation IDs, and inferred `#input.*` leaves from
 RuleSpec formulas. This lets the Axiom app, validators, and encoding tools
 validate source-to-legal-concept alignment without importing the runtime.
 
+## JSON Schemas
+
+The `schemas/` directory holds the authoritative JSON Schemas (draft-07) for the
+formats the engine exchanges:
+
+- `rulespec-module.v1.schema.json` — the RuleSpec module/authoring format
+  (`format: rulespec/v1`).
+- `rulespec-test.v1.schema.json` — the companion `*.test.yaml` case format.
+- `compiled-artifact.v1.schema.json` — `CompiledProgramArtifact` (the compiled
+  program, embedding the `ProgramSpec` IR).
+
+These are the single source of truth for consumers that would otherwise
+re-implement the shape by hand. They mirror the engine's serde **deserialization**
+acceptance: a document that deserializes validates, and vice versa. A document
+can still validate and fail lowering for semantic reasons (unknown rule `kind`,
+top-level `relations:`, missing `effective_from`).
+
+Schema generation lives behind the non-default `schema` feature, so pure-runtime
+consumers do not compile `schemars`. Regenerate the checked-in files with:
+
+```bash
+cargo run --features schema -- emit-schemas --out schemas
+```
+
+A golden-file test (`cargo test --features schema`) fails if the checked-in
+schemas drift from the types. `schema_conformance` validates every module and
+companion test under a `rulespec-us` checkout (set `AXIOM_RULESPEC_US_ROOT` or
+place the checkout as a sibling) and self-skips when none is present.
+
 ## Python Package
 
 The Python wrapper lives under `python/axiom_rules_engine/`. It exposes `Program`,
@@ -143,8 +172,11 @@ binary for reference and compiled-artifact flows.
 
 ```bash
 cargo test
+cargo test --features schema
 python -m pytest -q python/tests
 ```
 
 The Rust tests cover parsing, lowering, execution, dense compilation, traces,
 and RuleSpec import/ID behavior using fixtures under `tests/fixtures/rulespec/`.
+The `--features schema` run adds the JSON Schema golden-file, fidelity, and
+`rulespec-us` conformance tests.
