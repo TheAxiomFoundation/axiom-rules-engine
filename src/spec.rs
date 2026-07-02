@@ -35,6 +35,7 @@ pub enum SpecError {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
     #[serde(default)]
     pub extends: Option<String>,
@@ -104,6 +105,7 @@ impl ProgramSpec {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetSpec {
     #[serde(default)]
     pub inputs: Vec<InputRecordSpec>,
@@ -144,6 +146,7 @@ impl DatasetSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UnitSpec {
     pub name: String,
     #[serde(flatten)]
@@ -160,6 +163,7 @@ impl UnitSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UnitKindSpec {
     Currency { minor_units: u8 },
@@ -184,6 +188,7 @@ impl UnitKindSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationSpec {
     pub name: String,
     pub arity: usize,
@@ -206,6 +211,7 @@ impl RelationSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationDerivationSpec {
     pub source_relation: String,
     pub current_slot: usize,
@@ -234,6 +240,7 @@ impl RelationDerivationSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IndexedParameterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -262,6 +269,7 @@ impl IndexedParameterSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ParameterVersionSpec {
     pub effective_from: NaiveDate,
     pub values: BTreeMap<i64, ScalarValueSpec>,
@@ -281,6 +289,7 @@ impl ParameterVersionSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DerivedSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -324,6 +333,7 @@ impl DerivedSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DerivedVersionSpec {
     pub effective_from: NaiveDate,
     #[serde(flatten)]
@@ -340,6 +350,14 @@ impl DerivedVersionSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// `schemars` derives only the canonical snake_case names and drops the serde
+// aliases below, which would make the schema reject a `dtype` serde accepts.
+// Override with the full accepted set (canonical + aliases).
+#[cfg_attr(
+    feature = "schema",
+    schemars(schema_with = "crate::schema::dtype_schema")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DTypeSpec {
     // Accept RuleSpec's PascalCase vocabulary alongside our snake_case. `Money`
@@ -390,6 +408,7 @@ impl DTypeSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "semantics", rename_all = "snake_case")]
 pub enum DerivedSemanticsSpec {
     Scalar { expr: ScalarExprSpec },
@@ -416,6 +435,7 @@ where
     // for example, round-trips through f64 as 0.1000000000000000055…),
     // which would silently corrupt currency parameters.
     #[derive(Deserialize)]
+    #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
     #[serde(untagged)]
     enum DecimalInput {
         Str(String),
@@ -428,6 +448,7 @@ where
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScalarValueSpec {
     Bool {
@@ -437,6 +458,14 @@ pub enum ScalarValueSpec {
         value: i64,
     },
     Decimal {
+        // `deserialise_decimal_as_string` accepts a quoted string (arbitrary
+        // precision) or a JSON/YAML integer, and rejects floats. The Rust
+        // field is `String`, but the accepted JSON is string-or-integer, so
+        // the schema says so rather than the misleading `string`.
+        #[cfg_attr(
+            feature = "schema",
+            schemars(schema_with = "crate::schema::string_or_integer_schema")
+        )]
         #[serde(deserialize_with = "deserialise_decimal_as_string")]
         value: String,
     },
@@ -477,6 +506,7 @@ impl ScalarValueSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScalarExprSpec {
     Literal {
@@ -655,6 +685,7 @@ impl ScalarExprSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelatedValueRefSpec {
     Input { name: String },
@@ -671,6 +702,7 @@ impl RelatedValueRefSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JudgmentExprSpec {
     Comparison {
@@ -733,6 +765,7 @@ impl JudgmentExprSpec {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ComparisonOpSpec {
     Lt,
@@ -757,6 +790,7 @@ impl ComparisonOpSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum JudgmentOutcomeSpec {
     Holds,
@@ -775,6 +809,7 @@ impl From<JudgmentOutcome> for JudgmentOutcomeSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PeriodSpec {
     #[serde(flatten)]
     pub kind: PeriodKindSpec,
@@ -793,6 +828,7 @@ impl PeriodSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "period_kind", rename_all = "snake_case")]
 pub enum PeriodKindSpec {
     Month,
@@ -813,6 +849,7 @@ impl PeriodKindSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IntervalSpec {
     pub start: NaiveDate,
     pub end: NaiveDate,
@@ -828,6 +865,7 @@ impl IntervalSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputRecordSpec {
     pub name: String,
     pub entity: String,
@@ -868,6 +906,7 @@ impl InputRecordSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationRecordSpec {
     pub name: String,
     pub tuple: Vec<String>,

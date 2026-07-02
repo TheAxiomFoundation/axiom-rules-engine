@@ -12,6 +12,13 @@ default = ["fs"]
 # feature off, the core has no std::fs / std::env usage and checks cleanly for
 # wasm32-unknown-unknown; hosts supply modules through source::ModuleSource.
 fs = []
+# JSON Schema generation for the serialized RuleSpec/artifact surface
+# (`schema` module, the `emit-schemas` CLI subcommand, and the golden/
+# conformance/fidelity tests). Pulls in `schemars`, which is std-only, so it
+# is kept OFF the default build to keep pure-runtime consumers (the PyO3
+# extension, wasm, finbot, microsim) lean. CI runs the schema tests with
+# `--features schema`; `cargo test --features schema` reproduces them locally.
+schema = ["dep:schemars"]
 
 [[bin]]
 name = "axiom-rules-engine"
@@ -24,7 +31,11 @@ required-features = ["fs"]
 chrono = { version = "0.4.42", default-features = false, features = ["serde", "std"] }
 rust_decimal = { version = "1.39.0", features = ["maths", "serde"] }
 rust_decimal_macros = "1.39.0"
+schemars = { version = "1", features = ["chrono04", "rust_decimal1"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9.34"
 thiserror = "2.0.17"
+
+[dev-dependencies]
+jsonschema = "0.46"

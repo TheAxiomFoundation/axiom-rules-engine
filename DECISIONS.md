@@ -4,6 +4,58 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-07-02 — The engine publishes the authoritative JSON Schemas for its serialized surface
+
+**Decision.** The engine is the single source of truth for the shape of the
+formats it exchanges, published as checked-in JSON Schemas under `schemas/`:
+`rulespec-module.v1` (the RuleSpec module/authoring format), `rulespec-test.v1`
+(the companion `*.test.yaml` case format), and `compiled-artifact.v1`
+(`CompiledProgramArtifact`, embedding the `ProgramSpec` IR). A non-default
+`schema` feature adds a `schema` module and an `emit-schemas --out <dir>` CLI
+subcommand; a golden-file test regenerates the schemas in memory and fails on
+any drift from the checked-in copies. The artifact schema is **derived** from
+the serde types with `schemars`; the module and test schemas are **hand-written**
+because their acceptance is wider than a derive can express.
+
+**Why.**
+
+- Python consumers (`axiom-encode`, `axiom-corpus`, `axiom-compose`) each
+  re-implement the RuleSpec shape and citation parsing by hand, and drift from
+  the engine silently. A published schema derived from — and tested against —
+  the actual deserializer is a shared contract those consumers can validate
+  and codegen from instead.
+- The schema must mirror **serde acceptance**, not a tidied ideal: a file that
+  deserializes must validate and vice versa. That forces hand-authoring where
+  `RuleKind` accepts any string (unknown kinds defer to a lowering error, so
+  the schema keeps `kind` an open string, not a closed enum), where
+  `versions[].values` reads bare integer-keyed scalars through a custom
+  deserializer, where `deserialize_optional_string_like` coerces
+  string/bool/number, where `serde_yaml` accepts explicit `null` for defaulted
+  `Vec`/`Option` fields, and where `EncodingProvenance` alone denies unknown
+  fields. Each divergence from a naive derive is commented at its definition.
+
+**Consequences.**
+
+- `schema` is off by default so pure-runtime consumers (the PyO3 extension,
+  wasm, finbot, microsim) do not compile `schemars`; the wasm32
+  `--no-default-features` check is unaffected. CI runs the schema tests with
+  `--features schema`.
+- Fidelity is enforced by tests, not asserted: `schema_fidelity` checks the
+  module schema agrees with the deserializer in both directions on adversarial
+  inputs (unknown kind accepted, unknown provenance field rejected, bad
+  enum/sha256 rejected); `schema_conformance` validates every module and
+  companion test under a `rulespec-us` checkout (3,017 modules and 3,010 tests
+  validate, 0 failures at introduction) against a ratchet, self-skipping when
+  no checkout is present. Program-spec files under `programs/**` are a
+  different format and are excluded.
+- The schemas describe the **deserialization** layer only. A document can
+  validate and still fail lowering for semantic reasons (unknown kind,
+  top-level `relations:`, missing `effective_from`); that boundary is
+  documented and asserted.
+- Out of scope, tracked elsewhere: Python codegen from these schemas; the
+  provision-record schema in `axiom-corpus`; the encoding-manifest schema in
+  `axiom-encode`.
+
 ## 2026-06-10 — Browser execution is a first-class target; the wasm boundary is the CLI's JSON
 
 **Decision.** `wasm/` hosts a sibling crate (the `python-ext/` convention),
