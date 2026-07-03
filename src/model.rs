@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 /// Pseudo-entity assigned to formula parameters with no declared entity.
 /// Rules at this entity are row-constant.
@@ -104,6 +104,67 @@ impl UnitDef {
             name: name.into(),
             kind: UnitKind::Custom(kind.into()),
         }
+    }
+}
+
+/// Rounding mode a currency rule applies to its output. Named for the
+/// statutory conventions encoders declare from source text: `HalfUp`
+/// (round-half-away-from-zero, the SNAP/tax default), `HalfEven` (banker's
+/// rounding), `Floor` (toward negative infinity), and `Ceil` (toward positive
+/// infinity). See DECISIONS.md (2026-07-03) for the opt-in contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundingMode {
+    HalfUp,
+    HalfEven,
+    Floor,
+    Ceil,
+}
+
+impl RoundingMode {
+    /// The `rust_decimal` strategy that realizes this mode. `HalfUp` maps to
+    /// `MidpointAwayFromZero` so a `-0.5` midpoint rounds to `-1` (away from
+    /// zero), matching how benefit and tax tables treat magnitudes.
+    fn strategy(self) -> RoundingStrategy {
+        match self {
+            Self::HalfUp => RoundingStrategy::MidpointAwayFromZero,
+            Self::HalfEven => RoundingStrategy::MidpointNearestEven,
+            Self::Floor => RoundingStrategy::ToNegativeInfinity,
+            Self::Ceil => RoundingStrategy::ToPositiveInfinity,
+        }
+    }
+
+    /// Round a decimal to `minor_units` decimal places under this mode. This is
+    /// the single definition of the rounding operation; every execution path
+    /// (explain, bulk fast, dense decimal) routes through it so the three paths
+    /// are byte-identical on the same value.
+    pub fn round_decimal(self, value: Decimal, minor_units: u8) -> Decimal {
+        value.round_dp_with_strategy(u32::from(minor_units), self.strategy())
+    }
+
+    /// Canonical serialized name (the RuleSpec `rounding:` vocabulary).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HalfUp => "half_up",
+            Self::HalfEven => "half_even",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+        }
+    }
+}
+
+/// A rule's declared output-rounding contract. Present only when an encoder
+/// explicitly declares `rounding:` on the rule; absent means today's behavior
+/// (no rounding). `minor_units` is resolved at compile time from the rule's
+/// currency unit, so the interpreter needs no unit lookup at evaluation time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rounding {
+    pub mode: RoundingMode,
+    pub minor_units: u8,
+}
+
+impl Rounding {
+    pub fn apply(&self, value: Decimal) -> Decimal {
+        self.mode.round_decimal(value, self.minor_units)
     }
 }
 
@@ -280,6 +341,12 @@ pub struct Derived {
     pub entity: String,
     pub dtype: DType,
     pub unit: Option<String>,
+    /// Output-rounding contract, resolved at compile time when the rule
+    /// declares `rounding:` AND its `unit` is `Currency`. `None` means today's
+    /// behavior: no rounding is applied. Held on the model (not looked up from
+    /// the unit at evaluation time) so every execution path applies exactly the
+    /// same operation without re-resolving units.
+    pub rounding: Option<Rounding>,
     pub source: Option<String>,
     pub source_url: Option<String>,
     pub semantics: DerivedSemantics,
@@ -364,6 +431,16 @@ impl Program {
 
     pub fn add_derived(&mut self, derived: Derived) {
         self.derived.insert(derived.name.clone(), derived);
+    }
+
+    /// `minor_units` of a declared currency unit by name, or `None` if the unit
+    /// is undeclared or is not a currency. Used to resolve a rule's rounding
+    /// scale from its `unit` at compile time.
+    pub fn currency_minor_units(&self, unit_name: &str) -> Option<u8> {
+        match self.units.get(unit_name).map(|unit| &unit.kind) {
+            Some(UnitKind::Currency { minor_units }) => Some(*minor_units),
+            _ => None,
+        }
     }
 
     pub fn resolve_derived_name(&self, reference: &str) -> Option<String> {
@@ -648,4 +725,117 @@ pub fn year_start(year: i32) -> NaiveDate {
 
 pub fn year_of(period: &Period) -> i32 {
     period.start.year()
+}
+
+#[cfg(test)]
+mod rounding_tests {
+    use super::{Rounding, RoundingMode};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    fn dec(value: &str) -> Decimal {
+        Decimal::from_str(value).expect("valid decimal")
+    }
+
+    /// Round `value` to whole dollars (`minor_units = 0`) under `mode`, the SNAP
+    /// case: whole-dollar allotments.
+    fn round0(mode: RoundingMode, value: &str) -> String {
+        Rounding {
+            mode,
+            minor_units: 0,
+        }
+        .apply(dec(value))
+        .normalize()
+        .to_string()
+    }
+
+    /// Round `value` to cents (`minor_units = 2`) under `mode`.
+    fn round2(mode: RoundingMode, value: &str) -> String {
+        Rounding {
+            mode,
+            minor_units: 2,
+        }
+        .apply(dec(value))
+        .to_string()
+    }
+
+    #[test]
+    fn half_up_rounds_midpoint_away_from_zero() {
+        // Exact .5 midpoints go away from zero, positive and negative.
+        assert_eq!(round0(RoundingMode::HalfUp, "0.5"), "1");
+        assert_eq!(round0(RoundingMode::HalfUp, "1.5"), "2");
+        assert_eq!(round0(RoundingMode::HalfUp, "2.5"), "3");
+        assert_eq!(round0(RoundingMode::HalfUp, "-0.5"), "-1");
+        assert_eq!(round0(RoundingMode::HalfUp, "-2.5"), "-3");
+        // Off-midpoint rounds to nearest.
+        assert_eq!(round0(RoundingMode::HalfUp, "2.4"), "2");
+        assert_eq!(round0(RoundingMode::HalfUp, "2.6"), "3");
+        assert_eq!(round0(RoundingMode::HalfUp, "-2.4"), "-2");
+        // Cents.
+        assert_eq!(round2(RoundingMode::HalfUp, "1.005"), "1.01");
+        assert_eq!(round2(RoundingMode::HalfUp, "-1.005"), "-1.01");
+    }
+
+    #[test]
+    fn half_even_rounds_midpoint_to_even() {
+        // Banker's rounding: .5 midpoints go to the nearest even digit.
+        assert_eq!(round0(RoundingMode::HalfEven, "0.5"), "0");
+        assert_eq!(round0(RoundingMode::HalfEven, "1.5"), "2");
+        assert_eq!(round0(RoundingMode::HalfEven, "2.5"), "2");
+        assert_eq!(round0(RoundingMode::HalfEven, "3.5"), "4");
+        assert_eq!(round0(RoundingMode::HalfEven, "-0.5"), "0");
+        assert_eq!(round0(RoundingMode::HalfEven, "-2.5"), "-2");
+        assert_eq!(round0(RoundingMode::HalfEven, "-3.5"), "-4");
+        // Off-midpoint rounds to nearest, same as any mode.
+        assert_eq!(round0(RoundingMode::HalfEven, "2.6"), "3");
+        assert_eq!(round2(RoundingMode::HalfEven, "1.005"), "1.00");
+        assert_eq!(round2(RoundingMode::HalfEven, "1.015"), "1.02");
+    }
+
+    #[test]
+    fn floor_rounds_toward_negative_infinity() {
+        assert_eq!(round0(RoundingMode::Floor, "2.9"), "2");
+        assert_eq!(round0(RoundingMode::Floor, "2.5"), "2");
+        assert_eq!(round0(RoundingMode::Floor, "2.1"), "2");
+        // Negative values go DOWN (more negative), not toward zero.
+        assert_eq!(round0(RoundingMode::Floor, "-2.1"), "-3");
+        assert_eq!(round0(RoundingMode::Floor, "-2.5"), "-3");
+        assert_eq!(round2(RoundingMode::Floor, "1.009"), "1.00");
+        assert_eq!(round2(RoundingMode::Floor, "-1.001"), "-1.01");
+    }
+
+    #[test]
+    fn ceil_rounds_toward_positive_infinity() {
+        assert_eq!(round0(RoundingMode::Ceil, "2.1"), "3");
+        assert_eq!(round0(RoundingMode::Ceil, "2.5"), "3");
+        assert_eq!(round0(RoundingMode::Ceil, "2.9"), "3");
+        // Negative values go UP (toward zero) under ceil.
+        assert_eq!(round0(RoundingMode::Ceil, "-2.9"), "-2");
+        assert_eq!(round0(RoundingMode::Ceil, "-2.5"), "-2");
+        assert_eq!(round2(RoundingMode::Ceil, "1.001"), "1.01");
+        assert_eq!(round2(RoundingMode::Ceil, "-1.009"), "-1.00");
+    }
+
+    #[test]
+    fn already_scaled_values_are_unchanged() {
+        // A value already at the target scale is a fixed point under every mode.
+        for mode in [
+            RoundingMode::HalfUp,
+            RoundingMode::HalfEven,
+            RoundingMode::Floor,
+            RoundingMode::Ceil,
+        ] {
+            assert_eq!(round0(mode, "7"), "7");
+            assert_eq!(round2(mode, "7.00"), "7.00");
+            assert_eq!(round0(mode, "-7"), "-7");
+        }
+    }
+
+    #[test]
+    fn as_str_round_trips_the_mode_vocabulary() {
+        assert_eq!(RoundingMode::HalfUp.as_str(), "half_up");
+        assert_eq!(RoundingMode::HalfEven.as_str(), "half_even");
+        assert_eq!(RoundingMode::Floor.as_str(), "floor");
+        assert_eq!(RoundingMode::Ceil.as_str(), "ceil");
+    }
 }

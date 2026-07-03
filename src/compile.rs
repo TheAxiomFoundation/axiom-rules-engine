@@ -96,6 +96,10 @@ pub struct FastPathMetadata {
 
 impl CompiledProgramArtifact {
     pub fn compile(program: ProgramSpec) -> Result<Self, CompileError> {
+        // Reject a rounding declaration on a non-currency (or undeclared) unit
+        // at compile time, so a malformed artifact never ships. Execution paths
+        // re-check the same invariant via `to_program`.
+        program.validate_rounding()?;
         let evaluation_order = evaluation_order(&program)?;
         let fast_path = fast_path_metadata(&program);
         Ok(Self {

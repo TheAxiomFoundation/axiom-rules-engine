@@ -313,6 +313,16 @@
               "null"
             ]
           },
+          "rounding": {
+            "description": "Output-rounding mode for a derived currency rule: half_up (away from zero on .5), half_even (banker's), floor (toward -inf), ceil (toward +inf). Applies only to derived rules whose unit is a currency.",
+            "enum": [
+              "half_up",
+              "half_even",
+              "floor",
+              "ceil"
+            ],
+            "type": "string"
+          },
           "source": {
             "description": "String, or a bool/number coerced to string on load; null clears the field.",
             "type": [

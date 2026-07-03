@@ -8,7 +8,7 @@ use crate::compile::CompiledProgramArtifact;
 use crate::engine::EvalError;
 use crate::model::{
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome, Period,
-    Program, RelatedValueRef, ScalarExpr, ScalarValue, SCALAR_ENTITY,
+    Program, RelatedValueRef, Rounding, RoundingMode, ScalarExpr, ScalarValue, SCALAR_ENTITY,
 };
 
 #[derive(Clone, Debug)]
@@ -109,6 +109,11 @@ trait DenseNum:
     fn from_decimal(value: &Decimal) -> Self;
     fn ceil(self) -> Self;
     fn floor(self) -> Self;
+    /// Round to a currency scale under a declared mode. `Decimal` rounds
+    /// exactly (identical to the sparse and bulk paths); `f64` is best-effort,
+    /// consistent with this mode being for throughput, not exact legal
+    /// determinations.
+    fn round_to(self, rounding: Rounding) -> Self;
     fn is_zero(self) -> bool;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
@@ -131,6 +136,10 @@ impl DenseNum for Decimal {
 
     fn floor(self) -> Self {
         Decimal::floor(&self)
+    }
+
+    fn round_to(self, rounding: Rounding) -> Self {
+        rounding.apply(self)
     }
 
     fn is_zero(self) -> bool {
@@ -181,6 +190,24 @@ impl DenseNum for f64 {
         f64::floor(self)
     }
 
+    fn round_to(self, rounding: Rounding) -> Self {
+        // Best-effort f64 rounding at the currency scale. f64 cannot represent
+        // most decimal fractions exactly, so this is intentionally not the
+        // exact Decimal path; the f64 mode is documented as throughput-oriented,
+        // not for exact legal determinations.
+        let scale = 10_f64.powi(i32::from(rounding.minor_units));
+        let scaled = self * scale;
+        let rounded = match rounding.mode {
+            // round_ties_even is half-to-even; the others match the Decimal
+            // strategies (away-from-zero on .5, toward ±infinity).
+            RoundingMode::HalfUp => scaled.round(),
+            RoundingMode::HalfEven => scaled.round_ties_even(),
+            RoundingMode::Floor => scaled.floor(),
+            RoundingMode::Ceil => scaled.ceil(),
+        };
+        rounded / scale
+    }
+
     fn is_zero(self) -> bool {
         self == 0.0
     }
@@ -200,6 +227,29 @@ impl DenseNum for f64 {
             _ => Err(EvalError::TypeMismatch(
                 "expected decimal-compatible dense column".to_string(),
             )),
+        }
+    }
+}
+
+/// Round a dense column's numeric values under `rounding`, in numeric mode `N`.
+/// Currency formulas evaluate to numeric columns (`Integer`/`Decimal`/`Float`),
+/// which are read as `N`, rounded elementwise, and rebuilt in `N`'s column
+/// variant; non-numeric columns are impossible for a currency rule and pass
+/// through unchanged.
+fn round_dense_column<N: DenseNum>(
+    column: DenseColumn,
+    rounding: Rounding,
+) -> Result<DenseColumn, EvalError> {
+    match column {
+        DenseColumn::Bool(_) | DenseColumn::Text(_) | DenseColumn::Date(_) => Ok(column),
+        numeric => {
+            let values = N::vec_from_column(&numeric)?;
+            Ok(N::into_column(
+                values
+                    .into_iter()
+                    .map(|value| value.round_to(rounding))
+                    .collect(),
+            ))
         }
     }
 }
@@ -417,6 +467,10 @@ enum CompiledSemantics {
 struct CompiledDerived {
     name: String,
     semantics: CompiledSemantics,
+    /// Opt-in output rounding, copied from the model `Derived` at compile time.
+    /// Applied to the whole evaluated column before it is cached, so dependents
+    /// and direct outputs observe the same rounded values as the other paths.
+    rounding: Option<Rounding>,
 }
 
 #[derive(Clone, Debug)]
@@ -775,6 +829,7 @@ impl<'a> DenseCompiler<'a> {
         self.derived.push(CompiledDerived {
             name: derived.name.clone(),
             semantics: compiled_semantics,
+            rounding: derived.rounding,
         });
         self.derived_index.insert(name.to_string(), index);
         Ok(index)
@@ -1498,7 +1553,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             // through `self`) so evaluation can take `&mut self` without
             // cloning the tree.
             let program = self.program;
-            let column = match &program.derived[derived_index].semantics {
+            let mut column = match &program.derived[derived_index].semantics {
                 CompiledSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
                 CompiledSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(
@@ -1506,6 +1561,14 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     ));
                 }
             };
+            // Opt-in output rounding, applied to the evaluated column before
+            // caching so both direct outputs and dependent rules see rounded
+            // values — the columnar mirror of the explain path. Rounds in the
+            // executor's numeric mode `N` (exact for Decimal, best-effort for
+            // f64), matching the arithmetic the column was computed in.
+            if let Some(rounding) = program.derived[derived_index].rounding {
+                column = round_dense_column::<N>(column, rounding)?;
+            }
             self.scalar_cache[derived_index] = Some(column);
         }
         Ok(self.scalar_cache[derived_index].as_ref().expect("cached"))

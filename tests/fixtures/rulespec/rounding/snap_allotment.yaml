@@ -1,0 +1,44 @@
+format: rulespec/v1
+module:
+  title: SNAP-style whole-dollar allotment (rounding fixture)
+  summary: |-
+    A deliberately small, illustrative SNAP-style calculation used to exercise
+    the currency output-rounding contract (Phase-A A8) end to end in both the
+    explain and dense paths. Amounts and coefficients are illustrative, not the
+    real SNAP figures.
+
+    net_income rounds a whole-dollar figure (a no-op when already whole), and
+    allotment both depends on the rounded net_income AND rounds its own output
+    half-up to whole dollars — so the fixture covers a rounded rule feeding a
+    second rounded rule, which is the composition the contract must preserve.
+units:
+  - name: USD
+    kind: currency
+    minor_units: 0
+rules:
+  # Net income after a flat standard deduction, rounded to whole dollars.
+  # Half-up is the SNAP/tax convention; here the subtraction is already whole,
+  # so rounding is a no-op that still records the applied mode in the trace.
+  - name: net_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    rounding: half_up
+    source: Illustrative fixture, not a real SNAP citation
+    effective_from: 2026-01-01
+    formula: max(0, earned_income - 100)
+  # Allotment computed from the ROUNDED net income, then itself rounded to whole
+  # dollars half-up. This is the case that separates paths: 200 - net*0.3 lands
+  # on a .5 midpoint for net = 505 (48.5 -> 49).
+  - name: allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    rounding: half_up
+    source: Illustrative fixture, not a real SNAP citation
+    effective_from: 2026-01-01
+    formula: max(0, 200 - net_income * 0.3)

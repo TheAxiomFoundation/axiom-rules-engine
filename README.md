@@ -17,6 +17,9 @@ under `tests/fixtures/rulespec/`.
   `us:statutes/7/2017/a#snap_regular_month_allotment`
 - `explain` execution with traces
 - `fast` execution through the generic dense path when supported
+- opt-in currency output rounding per rule (`rounding: half_up|half_even|floor|ceil`),
+  applied identically across the explain, fast, and dense paths — see
+  [`docs/rulespec.md`](docs/rulespec.md#currency-rounding)
 - compiled artifacts for repeated execution
 - Python request/response models and subprocess wrapper
 

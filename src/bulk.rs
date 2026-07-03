@@ -60,6 +60,21 @@ impl ScalarColumn {
             (Self::Text(values), _) => ScalarValue::Text(values[index].clone()),
         }
     }
+
+    /// Round a decimal column elementwise under `rounding`. Currency formulas
+    /// evaluate to `Decimal` columns, so only that variant rounds; other
+    /// variants are returned unchanged (a currency rule never produces them).
+    fn rounded(self, rounding: crate::model::Rounding) -> Self {
+        match self {
+            Self::Decimal(values) => Self::Decimal(
+                values
+                    .into_iter()
+                    .map(|value| rounding.apply(value))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
 }
 
 pub fn try_execute(
@@ -306,12 +321,18 @@ impl<'a> BulkEvaluator<'a> {
                     at: self.period.start,
                 }
             })?;
-            let column = match semantics {
+            let mut column = match semantics {
                 DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
                 DerivedSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(name.to_string()));
                 }
             };
+            // Opt-in output rounding, applied to the whole column before caching
+            // so dependents (`ScalarExpr::Derived`) and direct outputs both see
+            // the rounded values — identical to the explain path.
+            if let Some(rounding) = derived.rounding {
+                column = column.rounded(rounding);
+            }
             self.scalar_cache.insert(name.to_string(), column);
         }
         Ok(self.scalar_cache.get(name).expect("column cached"))

@@ -78,6 +78,10 @@ pub struct Engine<'a> {
     input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>>,
     relation_index: HashMap<(String, usize, String), Vec<&'a crate::model::RelationRecord>>,
     scalar_cache: HashMap<CacheKey, ScalarValue>,
+    /// Pre-rounding value of a currency rule whose declared rounding changed it,
+    /// keyed like `scalar_cache`. Only populated when rounding actually moved
+    /// the value; the trace uses it to show the rounding step for audit.
+    pre_rounding_cache: HashMap<CacheKey, ScalarValue>,
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
 }
 
@@ -113,6 +117,7 @@ impl<'a> Engine<'a> {
             input_index,
             relation_index,
             scalar_cache: HashMap::new(),
+            pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
         }
     }
@@ -146,8 +151,17 @@ impl<'a> Engine<'a> {
                 return Err(EvalError::ExpectedScalar(derived_name.to_string()));
             }
         };
-        self.scalar_cache.insert(key, value.clone());
-        Ok(value)
+        // Apply the rule's opt-in output rounding before caching, so the
+        // rounded value is what both direct queries and dependent rules
+        // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
+        // rounding actually moves the value, keep the pre-rounding amount so the
+        // trace can show the rounding step.
+        let rounded = apply_output_rounding(&derived, value.clone());
+        if rounded != value {
+            self.pre_rounding_cache.insert(key.clone(), value);
+        }
+        self.scalar_cache.insert(key, rounded.clone());
+        Ok(rounded)
     }
 
     pub fn evaluate_judgment(
@@ -190,6 +204,24 @@ impl<'a> Engine<'a> {
         period: &Period,
     ) -> Option<ScalarValue> {
         self.scalar_cache
+            .get(&CacheKey {
+                derived: derived.to_string(),
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+            })
+            .cloned()
+    }
+
+    /// The pre-rounding value of a derived output, present only when the rule
+    /// declared rounding AND rounding changed the value. Lets the trace show the
+    /// value before the statutory rounding step was applied.
+    pub fn cached_pre_rounding(
+        &self,
+        derived: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Option<ScalarValue> {
+        self.pre_rounding_cache
             .get(&CacheKey {
                 derived: derived.to_string(),
                 entity_id: entity_id.to_string(),
@@ -747,6 +779,20 @@ impl<'a> Engine<'a> {
                 })
             }
         }
+    }
+}
+
+/// Apply a derived rule's opt-in currency rounding to a just-computed scalar
+/// value. Rounding is defined only for decimal (currency) outputs; a rule with
+/// no `rounding` declared, or a non-decimal value, passes through unchanged.
+/// This is the sparse/explain counterpart of the columnar rounding the bulk and
+/// dense paths apply, and both call the same [`crate::model::Rounding::apply`].
+pub fn apply_output_rounding(derived: &Derived, value: ScalarValue) -> ScalarValue {
+    match (derived.rounding, value) {
+        (Some(rounding), ScalarValue::Decimal(amount)) => {
+            ScalarValue::Decimal(rounding.apply(amount))
+        }
+        (_, value) => value,
     }
 }
 

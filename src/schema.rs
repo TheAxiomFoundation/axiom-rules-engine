@@ -442,6 +442,16 @@ fn rule_definition_schema() -> Value {
             "dtype": string_like_schema(),
             "period": string_like_schema(),
             "unit": string_like_schema(),
+            // Opt-in output rounding for a `derived` currency rule. A closed
+            // snake_case enum: RoundingModeSpec deserializes only these four
+            // values, and an unknown mode is a load error, so (unlike `kind`)
+            // this stays a closed enum. Rejected at lowering on non-derived or
+            // non-currency rules.
+            "rounding": {
+                "type": "string",
+                "enum": ["half_up", "half_even", "floor", "ceil"],
+                "description": "Output-rounding mode for a derived currency rule: half_up (away from zero on .5), half_even (banker's), floor (toward -inf), ceil (toward +inf). Applies only to derived rules whose unit is a currency."
+            },
             "label": string_like_schema(),
             "description": string_like_schema(),
             "default": string_like_schema(),
