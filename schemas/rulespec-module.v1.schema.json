@@ -1,0 +1,626 @@
+{
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/rulespec-module.v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": [
+        "format"
+      ]
+    },
+    {
+      "required": [
+        "schema"
+      ]
+    }
+  ],
+  "description": "A RuleSpec module: `format: rulespec/v1` metadata, imports, units, and effective-dated rules (parameters, derived outputs, data/derived relations, and source-relation provenance edges).",
+  "properties": {
+    "extends": {
+      "description": "Relative or canonical target of a base module to merge before this one.",
+      "type": "string"
+    },
+    "format": {
+      "description": "RuleSpec format discriminator. Canonically `rulespec/v1`.",
+      "type": "string"
+    },
+    "imports": {
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "module": {
+      "additionalProperties": true,
+      "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
+      "properties": {
+        "encoding_provenance": {
+          "additionalProperties": false,
+          "description": "Who/what produced the encoding. Unknown subfields are rejected at load.",
+          "properties": {
+            "encoder": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "reviewed_by": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "source_verification": {
+          "additionalProperties": true,
+          "properties": {
+            "corpus_citation_path": {
+              "description": "Corpus provision path the module was encoded from.",
+              "type": "string"
+            },
+            "source_sha256": {
+              "description": "SHA-256 hex digest of the exact provision text. Validated at load — must be 64 hex chars.",
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "validation": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "last_run": {
+                "format": "date",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                "type": "string"
+              },
+              "oracle": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "matches",
+                  "mismatches",
+                  "pending"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "oracle",
+              "status"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "relations": {
+      "items": {
+        "type": "object"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "rules": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "arity": {
+            "description": "Deserializes, but lowering rejects top-level arity — use data_relation.arity / derived_relation.arity.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_relation": {
+            "additionalProperties": true,
+            "properties": {
+              "arity": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "default": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "derived_relation": {
+            "additionalProperties": true,
+            "properties": {
+              "arity": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "current_slot": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity": {
+                "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                "type": [
+                  "string",
+                  "boolean",
+                  "number",
+                  "null"
+                ]
+              },
+              "member_relation": {
+                "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                "type": [
+                  "string",
+                  "boolean",
+                  "number",
+                  "null"
+                ]
+              },
+              "related_slot": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "slot_entities": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "source_relation": {
+                "type": "string"
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "description": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "dtype": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "effective_from": {
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "effective_to": {
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "entity": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "formula": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "from": {
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "indexed_by": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "Rule kind. Known: parameter, derived, data_relation, derived_relation, source_relation. Any other string deserializes but fails at lowering (RuleKind::Unsupported).",
+            "examples": [
+              "parameter",
+              "derived",
+              "data_relation",
+              "derived_relation",
+              "source_relation"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "period": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "source_relation": {
+            "additionalProperties": true,
+            "properties": {
+              "amendment": {
+                "additionalProperties": true,
+                "properties": {
+                  "effective": true,
+                  "operation": {
+                    "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                    "type": [
+                      "string",
+                      "boolean",
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "superseding_rule": {
+                    "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                    "type": [
+                      "string",
+                      "boolean",
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "authority": {
+                "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                "type": [
+                  "string",
+                  "boolean",
+                  "number",
+                  "null"
+                ]
+              },
+              "basis": {
+                "additionalProperties": true,
+                "properties": {
+                  "delegation": {
+                    "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                    "type": [
+                      "string",
+                      "boolean",
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "target": {
+                "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                "type": [
+                  "string",
+                  "boolean",
+                  "number",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "defines",
+                  "delegates",
+                  "implements",
+                  "sets",
+                  "amends",
+                  "restates",
+                  "cites"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                "type": [
+                  "string",
+                  "boolean",
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "source_url": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "sources": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "citation": {
+                  "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                  "type": [
+                    "string",
+                    "boolean",
+                    "number",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                  "type": [
+                    "string",
+                    "boolean",
+                    "number",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                  "type": [
+                    "string",
+                    "boolean",
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "to": {
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "unit": {
+            "description": "String, or a bool/number coerced to string on load; null clears the field.",
+            "type": [
+              "string",
+              "boolean",
+              "number",
+              "null"
+            ]
+          },
+          "verification": true,
+          "versions": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "effective_from": {
+                  "format": "date",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                "effective_to": {
+                  "format": "date",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                "formula": {
+                  "description": "String, or a bool/number coerced to string on load; null clears the field.",
+                  "type": [
+                    "string",
+                    "boolean",
+                    "number",
+                    "null"
+                  ]
+                },
+                "from": {
+                  "format": "date",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                "to": {
+                  "format": "date",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                "values": {
+                  "additionalProperties": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean"
+                    ]
+                  },
+                  "description": "Indexed parameter table: integer keys (as strings in JSON) to bare scalar values. Distinct from the tagged ScalarValueSpec in compiled artifacts.",
+                  "propertyNames": {
+                    "pattern": "^-?\\d+$"
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "schema": {
+      "description": "Alternative discriminator; recognized when it starts with `axiom.rules`.",
+      "type": "string"
+    },
+    "units": {
+      "items": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "currency"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "minor_units"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "custom"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "label"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "currency",
+              "count",
+              "ratio",
+              "duration",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "description": "Required when kind is `custom`.",
+            "type": "string"
+          },
+          "minor_units": {
+            "description": "Required when kind is `currency`.",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    }
+  },
+  "title": "Axiom RuleSpec module",
+  "type": "object"
+}

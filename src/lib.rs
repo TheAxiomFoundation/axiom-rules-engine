@@ -9,5 +9,7 @@ pub mod engine;
 mod formula;
 pub mod model;
 pub mod rulespec;
+#[cfg(feature = "schema")]
+pub mod schema;
 pub mod source;
 pub mod spec;

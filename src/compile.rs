@@ -69,6 +69,7 @@ pub enum CompileError {
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramArtifact {
     #[serde(default)]
     pub artifact_format_version: u32,
@@ -79,12 +80,14 @@ pub struct CompiledProgramArtifact {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramMetadata {
     pub evaluation_order: Vec<String>,
     pub fast_path: FastPathMetadata,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FastPathMetadata {
     pub strategy: String,
     pub compatible: bool,
