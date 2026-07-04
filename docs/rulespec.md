@@ -340,6 +340,47 @@ rules:
         delegation: us:regulations/7-cfr/273/9#snap_state_standard_utility_allowance_delegation
 ```
 
+## Currency rounding
+
+A `derived` rule whose `unit` is a currency may declare an output-rounding
+mode. When declared, the engine rounds the rule's output to the unit's
+`minor_units` (the currency's fractional-digit count) under that mode, in every
+execution path — the explain interpreter, the bulk fast path, and the dense
+columnar path produce the identical rounded value. Rounding is applied to the
+rule's output before it is cached, so a rule that references a rounded rule sees
+the rounded figure (statutory rounding composes, as in SNAP where a rounded net
+income feeds the allotment).
+
+```yaml
+units:
+  - name: USD
+    kind: currency
+    minor_units: 0        # whole dollars (SNAP allotments); use 2 for cents
+rules:
+  - name: snap_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    rounding: half_up     # half_up | half_even | floor | ceil
+    effective_from: 2025-10-01
+    formula: max(0, snap_max_allotment - net_income * 0.3)
+```
+
+Modes: `half_up` rounds a `.5` midpoint away from zero (the benefit/tax
+default); `half_even` is banker's rounding; `floor` rounds toward negative
+infinity; `ceil` toward positive infinity. An explicitly declared unit overrides
+the engine's built-in currency defaults, so declaring `USD { minor_units: 0 }`
+gives whole-dollar rounding even though the default USD is two-decimal.
+
+Rounding is **opt-in**: a rule with no `rounding:` behaves exactly as before
+(no rounding). Declaring `rounding:` on a rule whose unit is not a currency, on
+a rule with no unit, or on a non-`derived` rule is a compile error. In
+explain-mode traces, a rounded node reports the applied `rounding` mode and,
+when rounding changed the value, the `pre_rounding_value`, so the rounding step
+is auditable.
+
 ## Source pinning and provenance
 
 The `module:` block can carry optional metadata that grounds the module in

@@ -9,8 +9,8 @@ use thiserror::Error;
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
     InputRecord, Interval, JudgmentExpr, JudgmentOutcome, ParameterVersion, Period, PeriodKind,
-    Program, RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, ScalarExpr,
-    ScalarValue, UnitDef, UnitKind,
+    Program, RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, Rounding,
+    RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -32,6 +32,14 @@ pub enum SpecError {
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error(
+        "derived rule `{derived}` declares `rounding: {mode}` but its unit {unit} is not a declared currency unit; output rounding only applies to Currency units (with minor_units)"
+    )]
+    RoundingOnNonCurrencyUnit {
+        derived: String,
+        mode: String,
+        unit: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -57,6 +65,32 @@ pub struct ProgramSpec {
 impl ProgramSpec {
     pub fn from_yaml_str(source: &str) -> Result<Self, SpecError> {
         Ok(serde_yaml::from_str(source)?)
+    }
+
+    /// Validate every declared `rounding:` against its rule's unit, without
+    /// building the full runtime [`Program`]. A rule that declares rounding on a
+    /// non-currency (or undeclared) unit is rejected. Called at compile time
+    /// (`CompiledProgramArtifact::compile`) so a malformed artifact never ships;
+    /// `to_program` performs the same check while resolving `minor_units`, so
+    /// the execution path is guarded too.
+    pub fn validate_rounding(&self) -> Result<(), SpecError> {
+        // A lightweight units view; the full `to_program` also does this, but
+        // this stays cheap and independent of relation/derived-graph checks.
+        let program = Program {
+            units: self
+                .units
+                .iter()
+                .map(|unit| {
+                    let unit = unit.to_model();
+                    (unit.name.clone(), unit)
+                })
+                .collect(),
+            ..Program::default()
+        };
+        for derived in &self.derived {
+            derived.resolve_rounding(&program)?;
+        }
+        Ok(())
     }
 
     /// Load a program from `path`, resolving any `extends: <other.yaml>`
@@ -96,8 +130,15 @@ impl ProgramSpec {
             program.add_parameter(parameter.to_model()?);
         }
 
+        // Units are already in `program`, so a derived rule's `rounding:` mode
+        // can be resolved against its currency unit here. A rule that declares
+        // rounding on a non-currency (or undeclared) unit is rejected — this is
+        // the compile-time validation the contract requires, enforced on every
+        // `to_program` so a malformed artifact cannot execute either.
         for derived in &self.derived {
-            program.add_derived(derived.to_model()?);
+            let mut model = derived.to_model()?;
+            model.rounding = derived.resolve_rounding(&program)?;
+            program.add_derived(model);
         }
 
         Ok(program)
@@ -302,6 +343,12 @@ pub struct DerivedSpec {
     // engine treats the query period as authoritative at runtime.
     #[serde(default)]
     pub period: Option<String>,
+    /// Opt-in output-rounding mode. When present AND `unit` is a declared
+    /// currency, the rule's output is rounded to the unit's `minor_units` under
+    /// this mode in every execution path. Absent means today's behavior (no
+    /// rounding). Declaring it on a non-currency unit is a compile error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounding: Option<RoundingModeSpec>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -320,6 +367,9 @@ impl DerivedSpec {
             entity: self.entity.clone(),
             dtype: self.dtype.to_model(),
             unit: self.unit.clone(),
+            // Resolved separately in `to_program`, where the units map is
+            // available to read `minor_units` and to validate.
+            rounding: None,
             source: self.source.clone(),
             source_url: self.source_url.clone(),
             semantics: self.semantics.to_model()?,
@@ -329,6 +379,63 @@ impl DerivedSpec {
                 .map(DerivedVersionSpec::to_model)
                 .collect::<Result<Vec<DerivedVersion>, SpecError>>()?,
         })
+    }
+
+    /// Resolve this rule's declared `rounding:` mode into a concrete
+    /// [`Rounding`] (mode + the unit's `minor_units`), or `None` when no
+    /// rounding is declared. Errors if rounding is declared but the rule's
+    /// `unit` is not a declared currency — the contract's compile-time check.
+    fn resolve_rounding(&self, program: &Program) -> Result<Option<Rounding>, SpecError> {
+        let Some(mode) = self.rounding else {
+            return Ok(None);
+        };
+        let mode = mode.to_model();
+        let minor_units = self
+            .unit
+            .as_deref()
+            .and_then(|unit| program.currency_minor_units(unit));
+        match minor_units {
+            Some(minor_units) => Ok(Some(Rounding { mode, minor_units })),
+            None => Err(SpecError::RoundingOnNonCurrencyUnit {
+                derived: self.name.clone(),
+                mode: mode.as_str().to_string(),
+                unit: match self.unit.as_deref() {
+                    Some(unit) => format!("`{unit}`"),
+                    None => "(none declared)".to_string(),
+                },
+            }),
+        }
+    }
+}
+
+/// The RuleSpec `rounding:` vocabulary, mirroring [`crate::model::RoundingMode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RoundingModeSpec {
+    HalfUp,
+    HalfEven,
+    Floor,
+    Ceil,
+}
+
+impl RoundingModeSpec {
+    fn to_model(self) -> RoundingMode {
+        match self {
+            Self::HalfUp => RoundingMode::HalfUp,
+            Self::HalfEven => RoundingMode::HalfEven,
+            Self::Floor => RoundingMode::Floor,
+            Self::Ceil => RoundingMode::Ceil,
+        }
+    }
+
+    pub fn from_model(mode: RoundingMode) -> Self {
+        match mode {
+            RoundingMode::HalfUp => Self::HalfUp,
+            RoundingMode::HalfEven => Self::HalfEven,
+            RoundingMode::Floor => Self::Floor,
+            RoundingMode::Ceil => Self::Ceil,
+        }
     }
 }
 

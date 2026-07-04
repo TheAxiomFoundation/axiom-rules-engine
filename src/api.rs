@@ -8,7 +8,8 @@ use crate::compile::CompiledProgramArtifact;
 use crate::engine::{Engine, EvalError};
 use crate::model::{DerivedSemantics, JudgmentOutcome};
 use crate::spec::{
-    DTypeSpec, DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec,
+    DTypeSpec, DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec,
+    ScalarValueSpec,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,7 +107,19 @@ pub enum DerivedTraceNode {
         id: Option<String>,
         dtype: DTypeSpec,
         unit: Option<String>,
+        /// The rule's output value. When the rule applied currency rounding,
+        /// this is the rounded (post-rounding) value.
         value: ScalarValueSpec,
+        /// The output-rounding mode the rule applied, if any. Present whenever
+        /// the rule declares `rounding:`, so an auditor sees the rounding step
+        /// was part of the determination even when the value was already whole.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounding: Option<crate::spec::RoundingModeSpec>,
+        /// The value before rounding, present only when rounding actually
+        /// changed it. Together with `value` and `rounding` this shows the
+        /// rounding step (pre-value → mode → rounded value) for auditable law.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pre_rounding_value: Option<ScalarValueSpec>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -307,6 +320,9 @@ fn collect_trace(
         match semantics {
             DerivedSemantics::Scalar(expr) => {
                 if let Some(value) = engine.cached_scalar(&derived.name, entity_id, period) {
+                    let pre_rounding_value = engine
+                        .cached_pre_rounding(&derived.name, entity_id, period)
+                        .map(ScalarValueSpec::from_model);
                     trace.insert(
                         program.public_derived_key(&derived.name),
                         DerivedTraceNode::Scalar {
@@ -315,6 +331,10 @@ fn collect_trace(
                             dtype: DTypeSpec::from_model(&derived.dtype),
                             unit: derived.unit.clone(),
                             value: ScalarValueSpec::from_model(value),
+                            rounding: derived
+                                .rounding
+                                .map(|rounding| RoundingModeSpec::from_model(rounding.mode)),
+                            pre_rounding_value,
                             source: derived.source.clone(),
                             source_url: derived.source_url.clone(),
                             dependencies: public_dependencies(program, scalar_dependencies(expr)),

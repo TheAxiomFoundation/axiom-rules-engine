@@ -45,6 +45,10 @@ pub enum RuleSpecError {
     UnsupportedRuleKind { name: String, kind: String },
     #[error("RuleSpec rule `{name}` must declare `kind`")]
     MissingRuleKind { name: String },
+    #[error(
+        "RuleSpec rule `{name}` declares `rounding` but has kind `{kind}`; output rounding applies only to `derived` currency rules"
+    )]
+    RoundingOnNonDerivedRule { name: String, kind: String },
     #[error("RuleSpec rule `{name}` has no formula version")]
     MissingFormula { name: String },
     #[error("RuleSpec rule `{name}` has a formula version without effective_from")]
@@ -339,6 +343,20 @@ impl<'de> Deserialize<'de> for RuleKind {
     }
 }
 
+impl RuleKind {
+    /// The declared kind string, for error messages.
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Parameter => "parameter",
+            Self::Derived => "derived",
+            Self::DataRelation => "data_relation",
+            Self::DerivedRelation => "derived_relation",
+            Self::SourceRelation => "source_relation",
+            Self::Unsupported(kind) => kind,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SourceRef {
     #[serde(
@@ -448,6 +466,11 @@ pub struct RuleDefinition {
     pub period: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub unit: Option<String>,
+    /// Opt-in output-rounding mode for a `derived` currency rule. Lowered onto
+    /// the resulting [`crate::spec::DerivedSpec`]; `to_program` resolves it
+    /// against the rule's currency unit and rejects it on a non-currency unit.
+    #[serde(default)]
+    pub rounding: Option<crate::spec::RoundingModeSpec>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub label: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
@@ -1083,6 +1106,15 @@ impl RulesDocument {
                 }
                 Err(error) => return Err(error),
             };
+            // Rounding is an output-rule concern; reject it on any non-derived
+            // kind up front (a parameter/relation with `rounding:` would
+            // otherwise be silently dropped by the name-match that attaches it).
+            if rule.rounding.is_some() && !matches!(kind, RuleKind::Derived) {
+                return Err(RuleSpecError::RoundingOnNonDerivedRule {
+                    name: rule.name.clone(),
+                    kind: kind.as_str().to_string(),
+                });
+            }
             match kind {
                 RuleKind::Unsupported(kind) => {
                     return Err(RuleSpecError::UnsupportedRuleKind {
@@ -1159,6 +1191,17 @@ impl RulesDocument {
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
         for rule in &self.rules {
+            // A rule's declared `rounding:` mode rides onto the lowered derived
+            // spec here (after the formula round-trip), mirroring how ids are
+            // reattached by name. The mode is validated against the unit later
+            // in `to_program`. Only `derived` rules carry rounding.
+            if rule.rounding.is_some() {
+                for derived in &mut program.derived {
+                    if derived.name == rule.name {
+                        derived.rounding = rule.rounding;
+                    }
+                }
+            }
             let Some(rule_id) = rule.canonical_rule_id() else {
                 continue;
             };
@@ -1610,14 +1653,19 @@ impl RuleDefinition {
     }
 }
 
+/// Merge the RuleSpec module's explicitly-declared `units:` into the program.
+/// A declaration for a name the formula layer already seeded (its currency
+/// defaults — GBP/USD/EUR at `minor_units: 2`, etc.) **overrides** that default
+/// rather than being dropped, so an encoder can declare e.g. whole-dollar
+/// `USD { minor_units: 0 }` for a program that rounds to dollars. New names are
+/// appended. This is what "RuleSpec modules may override their own units" in the
+/// formula-default seeding means; the rounding contract depends on the declared
+/// `minor_units` actually taking effect.
 fn append_missing_units(program: &mut ProgramSpec, units: &[UnitSpec]) {
-    let mut existing = program
-        .units
-        .iter()
-        .map(|unit| unit.name.clone())
-        .collect::<HashSet<_>>();
     for unit in units {
-        if existing.insert(unit.name.clone()) {
+        if let Some(existing) = program.units.iter_mut().find(|u| u.name == unit.name) {
+            existing.kind = unit.kind.clone();
+        } else {
             program.units.push(unit.clone());
         }
     }

@@ -111,6 +111,17 @@
             "null"
           ]
         },
+        "rounding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoundingModeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Opt-in output-rounding mode. When present AND `unit` is a declared\ncurrency, the rule's output is rounded to the unit's `minor_units` under\nthis mode in every execution path. Absent means today's behavior (no\nrounding). Declaring it on a non-currency unit is a compile error."
+        },
         "source": {
           "default": null,
           "type": [
@@ -643,6 +654,16 @@
         "arity"
       ],
       "type": "object"
+    },
+    "RoundingModeSpec": {
+      "description": "The RuleSpec `rounding:` vocabulary, mirroring [`crate::model::RoundingMode`].",
+      "enum": [
+        "half_up",
+        "half_even",
+        "floor",
+        "ceil"
+      ],
+      "type": "string"
     },
     "ScalarExprSpec": {
       "oneOf": [

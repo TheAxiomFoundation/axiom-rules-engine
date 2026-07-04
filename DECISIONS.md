@@ -4,6 +4,71 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-07-03 — Currency rules opt into output rounding; `minor_units` becomes live
+
+**Decision.** A `derived` rule may declare `rounding: <mode>` (one of
+`half_up`, `half_even`, `floor`, `ceil`). When the declaration is present AND
+the rule's `unit` is a `Currency { minor_units }`, the engine rounds the rule's
+output to `minor_units` decimal places under the declared mode. The mode rides
+on the RuleSpec rule, lowers onto `DerivedSpec.rounding`, and is resolved at
+`to_program` / compile time into a `model::Rounding { mode, minor_units }` on
+the model `Derived` (the unit's `minor_units` is read once at compile time, not
+at evaluation). Rounding is applied to a rule's output at the single per-rule
+memoization point in **every** execution path — the explain scalar interpreter
+(`engine.rs`), the bulk fast columnar path (`bulk.rs`), and the dense columnar
+path (`dense.rs`) — before the value is cached, so a rule that references a
+rounded rule observes the rounded figure. Half-up on `Decimal` is
+`MidpointAwayFromZero`; the three paths are byte-identical on the same value
+(cross-path tests cover negatives and exact `.5` midpoints). The dense `f64`
+mode rounds best-effort in `f64`, consistent with its documented
+throughput-not-exactness role.
+
+**Why.**
+
+- `UnitKind::Currency { minor_units }` was declared but never applied
+  (architecture review 2026-06-09 §3.4, P1 rec 6): every currency output
+  carried arbitrary `Decimal` precision, which de-synchronised population
+  comparisons and could not express statutory rounding (SNAP allotments to
+  whole dollars; many benefit and tax figures round per their own rule).
+- Rounding must be *declared*, not inferred from the unit: `minor_units`
+  describes a currency's fractional digits, not a mandate to round, and most
+  intermediate currency values are intentionally unrounded. Making rounding a
+  per-rule opt-in lets encoders round exactly the outputs the statute rounds.
+- Correct-by-construction across paths matters more than any single path:
+  the same declaration rounds identically in explain, fast, and dense, so a
+  program cannot round in one execution mode and not another.
+
+**Consequences.**
+
+- **Opt-in; no silent artifact change.** A rule with no `rounding:` behaves
+  exactly as before — no path rounds it — so every existing compiled artifact
+  and rule keeps its current numeric behavior. `minor_units` had no runtime
+  effect before this change, so nothing shipped changes value without an
+  explicit `rounding:` declaration.
+- **Compile-time validation.** `rounding:` on a rule whose unit is not a
+  currency, on a rule with no unit, or on a non-`derived` rule is a compile
+  error (`CompiledProgramArtifact::compile` calls `ProgramSpec::validate_rounding`;
+  `to_program` re-checks while resolving, so execution is guarded too).
+- **Explicit units override built-in defaults.** The formula layer seeds
+  common currency defaults (USD/GBP/EUR at `minor_units: 2`). A module that
+  declares its own unit of the same name now overrides that default instead of
+  being dropped, so `USD { minor_units: 0 }` yields whole-dollar rounding. This
+  only affects `minor_units` (previously unread), so it changes no prior
+  numeric result; it is what "modules may override their own units" always
+  intended.
+- **Trace shows the rounding step.** Explain-mode scalar trace nodes carry the
+  applied `rounding` mode and, when rounding moved the value, the
+  `pre_rounding_value`, so auditable law can show pre-value → mode → rounded.
+- **Serde/schema additivity.** `DerivedSpec` gains an optional `rounding`
+  field (a closed `half_up|half_even|floor|ceil` enum); absent it serializes
+  as before. The derived artifact schema regenerates from `schemars`; the
+  hand-written module schema adds the `rounding` property. No
+  `ARTIFACT_FORMAT_VERSION` bump: the field is additive and ignored by older
+  engines, which simply do not round.
+- Out of scope, tracked elsewhere: teaching the encoder to *emit* `rounding:`
+  from statutory text is an `axiom-encode` prompt/gate follow-up; this change
+  only makes the engine honor the declaration.
+
 ## 2026-07-02 — The engine publishes the authoritative JSON Schemas for its serialized surface
 
 **Decision.** The engine is the single source of truth for the shape of the

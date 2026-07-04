@@ -1216,6 +1216,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             dtype,
             unit: v.unit.clone(),
             period: v.period.clone(),
+            // The formula-source layer doesn't carry rounding; the RuleSpec
+            // `rounding:` mode is reattached by name in `apply_rule_ids`.
+            rounding: None,
             source: v.source.clone(),
             source_url: v.source_url.clone(),
             semantics,
