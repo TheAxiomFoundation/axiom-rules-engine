@@ -69,7 +69,7 @@ pub enum EvalError {
     #[error(
         "lifetime execution cannot evaluate `{0}` outside an over-periods reduction because it is period-specific; wrap it in a reduction (e.g. sum_over_periods) so its period is defined"
     )]
-    LifetimeAmbiguousLeaf(&'static str),
+    LifetimeAmbiguousLeaf(String),
     #[error("sum_top_n_over_periods requires n >= 1, got {0}")]
     OverPeriodsTopNInvalid(i64),
 }

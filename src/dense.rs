@@ -351,6 +351,13 @@ pub enum DenseCompileError {
     #[error("dense compilation does not yet support {0}")]
     Unsupported(String),
     #[error(
+        "over-periods reductions cannot be nested: `{outer}` contains `{inner}` in its argument — reduce over the period axis once"
+    )]
+    NestedOverPeriods {
+        outer: &'static str,
+        inner: &'static str,
+    },
+    #[error(
         "dense compilation only supports dependencies within the same root entity; `{dependency}` from `{derived}` crosses into `{entity}`"
     )]
     CrossEntityDependency {
@@ -1204,13 +1211,30 @@ impl<'a> DenseCompiler<'a> {
                 then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
                 else_expr: Box::new(self.compile_scalar_expr(derived_name, else_expr)?),
             }),
-            ScalarExpr::OverPeriods { kind, value, n } => Ok(CompiledScalarExpr::OverPeriods {
-                kind: *kind,
-                value: Box::new(self.compile_scalar_expr(derived_name, value)?),
-                n: n.as_ref()
+            ScalarExpr::OverPeriods { kind, value, n } => {
+                let value = self.compile_scalar_expr(derived_name, value)?;
+                let n = n
+                    .as_ref()
                     .map(|inner| self.compile_scalar_expr(derived_name, inner).map(Box::new))
-                    .transpose()?,
-            }),
+                    .transpose()?;
+                // A reduction reduces the period axis away, so nesting another
+                // reduction directly in its argument is meaningless. Reject it at
+                // compile time with a precise message rather than letting the
+                // inner reduction surface an opaque per-period error at run time.
+                if let Some(inner) = nested_over_periods_kind(&value)
+                    .or_else(|| n.as_deref().and_then(nested_over_periods_kind))
+                {
+                    return Err(DenseCompileError::NestedOverPeriods {
+                        outer: kind.as_call_name(),
+                        inner: inner.as_call_name(),
+                    });
+                }
+                Ok(CompiledScalarExpr::OverPeriods {
+                    kind: *kind,
+                    value: Box::new(value),
+                    n,
+                })
+            }
         }
     }
 
@@ -2563,27 +2587,29 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             // Period-specific leaves have no defined period outside a reduction.
             CompiledScalarExpr::Input(index) => Err(EvalError::LifetimeAmbiguousLeaf(
-                leaked_input_name(&self.program.root_inputs[*index]),
+                self.program.root_inputs[*index].clone(),
             )),
             CompiledScalarExpr::InputOrElse { input, .. } => Err(EvalError::LifetimeAmbiguousLeaf(
-                leaked_input_name(&self.program.root_inputs[*input]),
+                self.program.root_inputs[*input].clone(),
             )),
             CompiledScalarExpr::PeriodStart => {
-                Err(EvalError::LifetimeAmbiguousLeaf("period_start"))
+                Err(EvalError::LifetimeAmbiguousLeaf("period_start".to_string()))
             }
-            CompiledScalarExpr::PeriodEnd => Err(EvalError::LifetimeAmbiguousLeaf("period_end")),
-            CompiledScalarExpr::DateAddDays { .. } => {
-                Err(EvalError::LifetimeAmbiguousLeaf("date_add_days"))
+            CompiledScalarExpr::PeriodEnd => {
+                Err(EvalError::LifetimeAmbiguousLeaf("period_end".to_string()))
             }
+            CompiledScalarExpr::DateAddDays { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "date_add_days".to_string(),
+            )),
             CompiledScalarExpr::DaysBetween { .. } => {
-                Err(EvalError::LifetimeAmbiguousLeaf("days_between"))
+                Err(EvalError::LifetimeAmbiguousLeaf("days_between".to_string()))
             }
             CompiledScalarExpr::CountRelated { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
-                "count/len over a relation",
+                "count/len over a relation".to_string(),
             )),
-            CompiledScalarExpr::SumRelated { .. } => {
-                Err(EvalError::LifetimeAmbiguousLeaf("sum over a relation"))
-            }
+            CompiledScalarExpr::SumRelated { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "sum over a relation".to_string(),
+            )),
         }
     }
 
@@ -2597,6 +2623,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         n: Option<&CompiledScalarExpr>,
     ) -> Result<DenseColumn, EvalError> {
         let period_count = self.period_executors.len();
+
+        // Count is the number of supplied periods, identical for every row, and
+        // does not depend on the inner value — so short-circuit before touching
+        // it (a period count must not fail because the body is unevaluable).
+        if kind == OverPeriodsKind::Count {
+            return Ok(DenseColumn::Integer(vec![
+                period_count as i64;
+                self.row_count
+            ]));
+        }
+
         // period-major: per_period[p][r] is entity r's inner value in period p.
         let mut per_period: Vec<Vec<N>> = Vec::with_capacity(period_count);
         for executor in &mut self.period_executors {
@@ -2605,14 +2642,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         }
 
         let result = match kind {
-            OverPeriodsKind::Count => {
-                // Count of supplied periods, identical for every row. Integer
-                // column regardless of numeric mode.
-                return Ok(DenseColumn::Integer(vec![
-                    period_count as i64;
-                    self.row_count
-                ]));
-            }
+            // Handled above, before the per-period matrix is built.
+            OverPeriodsKind::Count => unreachable!("count short-circuits above"),
             OverPeriodsKind::Sum => (0..self.row_count)
                 .map(|row| {
                     let mut total = N::ZERO;
@@ -2742,12 +2773,48 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
     }
 }
 
-/// Leak a root-input name to a `&'static str` for the lifetime-ambiguous-leaf
-/// diagnostic. Called only on the error path (a caller mistake), so the tiny,
-/// bounded leak — one per distinct offending input name across a process — is
-/// an acceptable trade for a specific message that names the input.
-fn leaked_input_name(name: &str) -> &'static str {
-    Box::leak(name.to_string().into_boxed_str())
+/// Find a directly-nested over-periods reduction inside a compiled scalar
+/// expression, returning its kind. Used at compile time to reject
+/// `sum_over_periods(max_over_periods(x))` and similar: a reduction consumes the
+/// period axis, so nesting another in its argument is meaningless. This walks
+/// the compiled tree structurally; a reduction reached only through a `Derived`
+/// reference is not flagged here (it still errors safely at run time), because
+/// that transitive check needs the whole compiled program, not one expression.
+fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind> {
+    match expr {
+        CompiledScalarExpr::OverPeriods { kind, .. } => Some(*kind),
+        CompiledScalarExpr::Literal(_)
+        | CompiledScalarExpr::Input(_)
+        | CompiledScalarExpr::InputOrElse { .. }
+        | CompiledScalarExpr::Derived(_)
+        | CompiledScalarExpr::PeriodStart
+        | CompiledScalarExpr::PeriodEnd
+        | CompiledScalarExpr::CountRelated { .. }
+        | CompiledScalarExpr::SumRelated { .. } => None,
+        CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),
+        CompiledScalarExpr::Add(items)
+        | CompiledScalarExpr::Max(items)
+        | CompiledScalarExpr::Min(items) => items.iter().find_map(nested_over_periods_kind),
+        CompiledScalarExpr::Sub(left, right)
+        | CompiledScalarExpr::Mul(left, right)
+        | CompiledScalarExpr::Div(left, right) => {
+            nested_over_periods_kind(left).or_else(|| nested_over_periods_kind(right))
+        }
+        CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+            nested_over_periods_kind(value)
+        }
+        CompiledScalarExpr::DateAddDays { date, days } => {
+            nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
+        }
+        CompiledScalarExpr::DaysBetween { from, to } => {
+            nested_over_periods_kind(from).or_else(|| nested_over_periods_kind(to))
+        }
+        CompiledScalarExpr::If {
+            then_expr,
+            else_expr,
+            ..
+        } => nested_over_periods_kind(then_expr).or_else(|| nested_over_periods_kind(else_expr)),
+    }
 }
 
 fn project_root_judgment_to_related(

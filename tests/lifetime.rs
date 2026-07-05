@@ -44,6 +44,17 @@ fn compile(rulespec: &str, entity: &str) -> DenseCompiledProgram {
         .expect("dense compilation succeeds")
 }
 
+/// Attempt dense compilation, returning the error string on failure. The
+/// rulespec layer itself compiles; the dense compiler is where nesting is
+/// rejected.
+fn try_compile_error(rulespec: &str, entity: &str) -> String {
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("rulespec module compiles");
+    DenseCompiledProgram::from_artifact(&artifact, Some(entity))
+        .expect_err("dense compilation must fail")
+        .to_string()
+}
+
 /// Read a single-output scalar result as a `Vec<f64>`, accepting whichever
 /// numeric column variant the mode produced (`Decimal` for `execute_lifetime`,
 /// `Float` for `execute_lifetime_f64`, `Integer` for `count_over_periods`).
@@ -529,6 +540,41 @@ fn errors_when_sum_top_n_n_is_less_than_one() {
     assert!(
         error.to_string().contains("requires n >= 1"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_directly_nested_over_periods_at_compile_time() {
+    // A reduction consumes the period axis, so nesting another reduction in its
+    // argument is meaningless. The dense compiler rejects it with a precise
+    // message naming both the outer and inner reduction.
+    let module = single_rule_module(
+        "nested",
+        "Money",
+        "sum_over_periods(max_over_periods(earnings))",
+    );
+    let message = try_compile_error(&module, "Worker");
+    assert!(
+        message.contains("cannot be nested")
+            && message.contains("sum_over_periods")
+            && message.contains("max_over_periods"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn rejects_nested_over_periods_in_the_n_argument() {
+    // The `n` of sum_top_n is also an argument that consumes no period axis;
+    // a reduction there is likewise rejected.
+    let module = single_rule_module(
+        "nested_n",
+        "Money",
+        "sum_top_n_over_periods(earnings, count_over_periods(earnings))",
+    );
+    let message = try_compile_error(&module, "Worker");
+    assert!(
+        message.contains("cannot be nested") && message.contains("count_over_periods"),
+        "unexpected error: {message}"
     );
 }
 

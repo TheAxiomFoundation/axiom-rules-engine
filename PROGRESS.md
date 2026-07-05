@@ -81,12 +81,41 @@ CI workflow, and tests/dense.rs. Starting implementation.
 - clippy: baseline origin/main already emits 36 lib warnings; my additions introduce ZERO new warnings
   (every warning location is in pre-existing code). Not touching the 36 pre-existing ones (scope).
 
+- python-ext/src/lib.rs: execute_lifetime_f64 PyO3 method + shared execution_to_pydict +
+  split_lifetime_batch; python/dense.py: execute_lifetime_f64 wrapper.
+- tests/lifetime.rs: 22 Rust tests — AIME acceptance (Decimal + f64, =2833), each builtin, top-n
+  (ties, n>period_count zero-pad, n as param expr, non-integer n truncation, negatives), multi-row
+  alignment, outer-formula-with-parameter, all validation/error paths, per-period rejection, Decimal exactness.
+- python/tests/test_dense_lifetime.py: 4 tests — AIME acceptance (=2833), two-worker row alignment,
+  period/batch-count and row-count mismatch errors. Built wheel via maturin (py3.14 venv), 36/36 python tests pass.
+
+## Acceptance test AIME value
+AIME = 2833. Synthetic 40-year worker, indexed earnings year k = 12_000 + 1_000*(k-1) (12_000..51_000).
+Top 35 of 40 drops the lowest 5; sum(top 35) = 35*(17_000+51_000)/2 = 1_190_000;
+floor(1_190_000 / 420) = floor(2833.33..) = 2833.
+
+## Independent review + fixes (applied)
+An independent read-only review found NO correctness bugs (verified AIME math, Max empty-slice safety,
+SumTopN zero-pad/ties/negatives, rejection completeness, transitive gate + cycle protection, serde
+round-trip, PyO3 layer). Three polish items applied:
+- LifetimeAmbiguousLeaf now carries a String (removed the Box::leak &'static str helper).
+- count_over_periods short-circuits before building the per-period matrix (a period count must not fail
+  because the inner body is unevaluable).
+- Directly-nested reductions (e.g. sum_over_periods(max_over_periods(x)), or a reduction in the `n` arg)
+  are now rejected at DENSE COMPILE TIME (DenseCompileError::NestedOverPeriods) with a precise message,
+  instead of surfacing an opaque per-period runtime error. Reduction-via-Derived still errors safely at
+  runtime (documented; transitive check needs the whole program, not one expr).
+Added 2 Rust tests for the nested-reduction rejection (24 lifetime tests total).
+
+## Final gate (all GREEN)
+- cargo fmt --check clean; cargo build; cargo test (default) all pass; cargo test --features schema all pass;
+  cargo check python-ext; cargo check wasm32-unknown-unknown --no-default-features.
+- clippy: 36 lib warnings, identical to origin/main baseline — ZERO introduced by this change; no warnings
+  in tests/lifetime.rs or python-ext.
+- 24 Rust lifetime tests + 36 Python tests pass against the maturin-built extension.
+
 ## Next
-1. python-ext/src/lib.rs + python/dense.py: execute_lifetime_f64 (parallel to execute_f64).
-2. Rust unit tests (tests/lifetime.rs): each builtin (top-n ties, n>period_count, n as expr, negatives),
-   alignment/validation errors, per-period-context rejection, count, max, sum, f64==decimal.
-3. Python acceptance test (test_dense_lifetime.py): AIME 40-yr worker, hand-derived expected in comment.
-4. Build wheel locally (maturin) to run Python tests; final fmt/clippy/test/schema/python-ext; draft PR.
+- Open DRAFT PR; record URL here and in final message.
 
 ## Concerns
 - Reference-period choice for non-reduction scalars (parameters/derived) inside the outer formula:
