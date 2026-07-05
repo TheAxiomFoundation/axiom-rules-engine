@@ -442,6 +442,12 @@ fn collect_scalar_deps(
             collect_scalar_deps(then_expr, deps);
             collect_scalar_deps(else_expr, deps);
         }
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            collect_scalar_deps(value, deps);
+            if let Some(n) = n {
+                collect_scalar_deps(n, deps);
+            }
+        }
     }
 }
 

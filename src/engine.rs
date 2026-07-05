@@ -44,6 +44,34 @@ pub enum EvalError {
     ExpectedScalar(String),
     #[error("division by zero")]
     DivisionByZero,
+    #[error(
+        "over-periods reduction `{0}` is valid only under lifetime execution (execute_lifetime); it has no meaning in per-period execution"
+    )]
+    OverPeriodsOutsideLifetime(&'static str),
+    #[error(
+        "lifetime execution requires one input batch per period: got {periods} periods and {batches} batches"
+    )]
+    LifetimePeriodBatchMismatch { periods: usize, batches: usize },
+    #[error("lifetime execution requires at least one period")]
+    LifetimeNoPeriods,
+    #[error(
+        "lifetime execution requires every period's batch to have the same entity row count (positional alignment): period {period} has {row_count} rows but period 0 has {expected}"
+    )]
+    LifetimeRowCountMismatch {
+        period: usize,
+        row_count: usize,
+        expected: usize,
+    },
+    #[error(
+        "lifetime execution only supports outputs whose formula contains an over-periods reduction; `{0}` does not — use the per-period execute / execute_f64 entry points instead"
+    )]
+    LifetimeOutputWithoutReduction(String),
+    #[error(
+        "lifetime execution cannot evaluate `{0}` outside an over-periods reduction because it is period-specific; wrap it in a reduction (e.g. sum_over_periods) so its period is defined"
+    )]
+    LifetimeAmbiguousLeaf(&'static str),
+    #[error("sum_top_n_over_periods requires n >= 1, got {0}")]
+    OverPeriodsTopNInvalid(i64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -456,6 +484,12 @@ impl<'a> Engine<'a> {
                 } else {
                     self.eval_scalar_expr(else_expr, entity_id, period)
                 }
+            }
+            // Cross-period reductions are only defined when a batch is supplied
+            // per period (the dense lifetime surface). The sparse single-period
+            // interpreter has no period axis to reduce over.
+            ScalarExpr::OverPeriods { kind, .. } => {
+                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
             }
         }
     }

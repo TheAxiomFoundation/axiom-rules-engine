@@ -8,9 +8,9 @@ use thiserror::Error;
 
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
-    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, ParameterVersion, Period, PeriodKind,
-    Program, RelatedValueRef, RelationDerivation, RelationRecord, RelationSchema, Rounding,
-    RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
+    Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
+    RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -690,6 +690,47 @@ pub enum ScalarExprSpec {
         then_expr: Box<ScalarExprSpec>,
         else_expr: Box<ScalarExprSpec>,
     },
+    /// Reduction over an entity's own period axis (lifetime execution only).
+    /// `n` is present only for the `sum_top_n` reduction. Expression-level,
+    /// additive to the serialized surface — no artifact-format-version bump.
+    OverPeriods {
+        over: OverPeriodsKindSpec,
+        value: Box<ScalarExprSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        n: Option<Box<ScalarExprSpec>>,
+    },
+}
+
+/// The over-periods reduction vocabulary, mirroring
+/// [`crate::model::OverPeriodsKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum OverPeriodsKindSpec {
+    Sum,
+    Max,
+    Count,
+    SumTopN,
+}
+
+impl OverPeriodsKindSpec {
+    fn to_model(self) -> OverPeriodsKind {
+        match self {
+            Self::Sum => OverPeriodsKind::Sum,
+            Self::Max => OverPeriodsKind::Max,
+            Self::Count => OverPeriodsKind::Count,
+            Self::SumTopN => OverPeriodsKind::SumTopN,
+        }
+    }
+
+    pub fn from_model(kind: OverPeriodsKind) -> Self {
+        match kind {
+            OverPeriodsKind::Sum => Self::Sum,
+            OverPeriodsKind::Max => Self::Max,
+            OverPeriodsKind::Count => Self::Count,
+            OverPeriodsKind::SumTopN => Self::SumTopN,
+        }
+    }
 }
 
 impl ScalarExprSpec {
@@ -786,6 +827,13 @@ impl ScalarExprSpec {
                 condition: Box::new(condition.to_model()?),
                 then_expr: Box::new(then_expr.to_model()?),
                 else_expr: Box::new(else_expr.to_model()?),
+            }),
+            Self::OverPeriods { over, value, n } => Ok(ScalarExpr::OverPeriods {
+                kind: over.to_model(),
+                value: Box::new(value.to_model()?),
+                n: n.as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
             }),
         }
     }

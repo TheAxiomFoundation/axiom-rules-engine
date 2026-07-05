@@ -3,8 +3,8 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{
-    execute_compiled_request, execute_request, CompiledExecutionRequest, ExecutionMode,
-    ExecutionQuery, ExecutionRequest, ExecutionResponse, OutputValue,
+    CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest, ExecutionResponse,
+    OutputValue, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::spec::{

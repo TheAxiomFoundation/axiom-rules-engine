@@ -17,8 +17,7 @@ fn env_root_at_monorepo_resolves_jurisdiction_dirs() {
     let artifact_path = temp_root.join("program.compiled.json");
 
     std::fs::create_dir_all(us_path.parent().expect("us parent")).expect("us dir");
-    std::fs::create_dir_all(program_path.parent().expect("program parent"))
-        .expect("program dir");
+    std::fs::create_dir_all(program_path.parent().expect("program parent")).expect("program dir");
     std::fs::write(
         &us_path,
         r#"

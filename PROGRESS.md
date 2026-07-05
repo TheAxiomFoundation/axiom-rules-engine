@@ -67,16 +67,26 @@ CI workflow, and tests/dense.rs. Starting implementation.
 
 ## Done
 - Full exploration; PROGRESS.md seeded.
+- model.rs: OverPeriodsKind (+ as_call_name) + ScalarExpr::OverPeriods + input-slot collector arm.
+- spec.rs: ScalarExprSpec::OverPeriods + OverPeriodsKindSpec + to_model.
+- formula.rs: parse sum/max/count/sum_top_n_over_periods in lower_to_scalar; promote_ints descends into value.
+- engine.rs: EvalError variants (OverPeriodsOutsideLifetime, Lifetime*, OverPeriodsTopNInvalid) + sparse reject arm.
+- bulk.rs (both paths) + api.rs collector: new arms.
+- compile.rs: fast-blocker (adds blocker), dependency collector, relation-member collector arms.
+- rulespec.rs: 4 traversal arms (alias rewrite, relation-name collect, relation-ref rewrite, imported-derived check).
+- dense.rs: CompiledScalarExpr::OverPeriods + compile arm + per-period reject + related/current reject +
+  DenseNum::to_i64_trunc + LifetimeExecutor + execute_lifetime[_f64] + derived_reduces_over_periods gate.
+- schemas/compiled-artifact.v1.schema.json regenerated (additive over_periods variant; no format-version bump).
+- GREEN: cargo build, fmt, cargo test (default + schema feature), cargo check python-ext.
+- clippy: baseline origin/main already emits 36 lib warnings; my additions introduce ZERO new warnings
+  (every warning location is in pre-existing code). Not touching the 36 pre-existing ones (scope).
 
 ## Next
-1. model.rs: OverPeriodsKind + ScalarExpr::OverPeriods + collector arm.
-2. spec.rs: ScalarExprSpec::OverPeriods + to_model.
-3. formula.rs: parse four builtins in lower_to_scalar.
-4. engine.rs / bulk.rs / api.rs: new arms (reject in sparse+bulk, recurse in collectors).
-5. dense.rs: CompiledScalarExpr arm + compile arms + per-period reject + LifetimeExecutor + execute_lifetime[_f64] + EvalError variants.
-6. python-ext + dense.py: execute_lifetime_f64.
-7. Rust unit tests (new tests file) + Python acceptance test (AIME 40-yr worker).
-8. fmt / clippy / test / schema feature / python-ext check; draft PR.
+1. python-ext/src/lib.rs + python/dense.py: execute_lifetime_f64 (parallel to execute_f64).
+2. Rust unit tests (tests/lifetime.rs): each builtin (top-n ties, n>period_count, n as expr, negatives),
+   alignment/validation errors, per-period-context rejection, count, max, sum, f64==decimal.
+3. Python acceptance test (test_dense_lifetime.py): AIME 40-yr worker, hand-derived expected in comment.
+4. Build wheel locally (maturin) to run Python tests; final fmt/clippy/test/schema/python-ext; draft PR.
 
 ## Concerns
 - Reference-period choice for non-reduction scalars (parameters/derived) inside the outer formula:
