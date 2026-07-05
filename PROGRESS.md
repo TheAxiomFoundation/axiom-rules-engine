@@ -114,8 +114,10 @@ Added 2 Rust tests for the nested-reduction rejection (24 lifetime tests total).
   in tests/lifetime.rs or python-ext.
 - 24 Rust lifetime tests + 36 Python tests pass against the maturin-built extension.
 
-## Next
-- Open DRAFT PR; record URL here and in final message.
+## DRAFT PR
+https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/68
+(draft, base main, head cross-period-reduction, title "Cross-period reductions: lifetime execution surface (#67)").
+Do NOT merge.
 
 ## Concerns
 - Reference-period choice for non-reduction scalars (parameters/derived) inside the outer formula:
