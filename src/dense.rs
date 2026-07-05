@@ -2673,9 +2673,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let raw = N::vec_from_column(&self.eval_scalar(n)?)?;
         raw.into_iter()
             .map(|value| {
-                // Truncate toward zero, then require >= 1.
-                let truncated = value.floor();
-                let as_i64 = N::to_i64_trunc(truncated);
+                // Truncate toward zero to an integer count, then require >= 1.
+                let as_i64 = N::to_i64_trunc(value);
                 if as_i64 < 1 {
                     Err(EvalError::OverPeriodsTopNInvalid(as_i64))
                 } else {

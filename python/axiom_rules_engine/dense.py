@@ -141,6 +141,67 @@ class CompiledDenseProgram:
             outputs,
         )
 
+    def execute_lifetime_f64(
+        self,
+        *,
+        periods: list[tuple[str, str, str]],
+        batches: list[dict[str, np.ndarray]]
+        | list[tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None]],
+        outputs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute over an entity's lifetime in f64 arithmetic.
+
+        One positionally aligned input batch per period, so formulas can reduce
+        over the period axis with ``sum_over_periods`` / ``max_over_periods`` /
+        ``count_over_periods`` / ``sum_top_n_over_periods``.
+
+        ``periods`` is a list of ``(period_kind, start, end)`` triples;
+        ``batches`` is a same-length list where each entry is either a bare
+        ``inputs`` dict (no relations) or an ``(inputs, relations)`` tuple, using
+        the same column and relation shapes :meth:`execute` accepts. Row ``i``
+        must be the same entity in every batch (identical row order and count).
+        Every requested output's formula must contain an over-periods reduction;
+        period-specific outputs should use :meth:`execute_f64`.
+        """
+        if len(periods) != len(batches):
+            raise ValueError(
+                "execute_lifetime_f64 needs one batch per period: "
+                f"got {len(periods)} periods and {len(batches)} batches"
+            )
+        prepared_batches = [
+            self._prepare_lifetime_batch(batch) for batch in batches
+        ]
+        prepared_periods = [
+            (str(kind), str(start), str(end)) for kind, start, end in periods
+        ]
+        return self._native.execute_lifetime_f64(
+            prepared_periods, prepared_batches, outputs
+        )
+
+    @staticmethod
+    def _prepare_lifetime_batch(
+        batch: dict[str, np.ndarray]
+        | tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None],
+    ) -> Any:
+        if isinstance(batch, dict):
+            inputs: dict[str, np.ndarray] = batch
+            relations: dict[str, DenseRelationBatch] | None = None
+        else:
+            inputs, relations = batch
+        prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
+        if relations is None:
+            return (prepared_inputs, None)
+        prepared_relations = {
+            key: {
+                "offsets": np.asarray(rel.offsets),
+                "inputs": {
+                    name: np.asarray(values) for name, values in rel.inputs.items()
+                },
+            }
+            for key, rel in relations.items()
+        }
+        return (prepared_inputs, prepared_relations)
+
     def _run(
         self,
         native_execute: Any,
