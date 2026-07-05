@@ -169,9 +169,7 @@ pub enum RuleSpecError {
         target: String,
         value: String,
     },
-    #[error(
-        "RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}"
-    )]
+    #[error("RuleSpec relation `{name}` is declared with conflicting arities {existing} and {new}")]
     RelationArityConflict {
         name: String,
         existing: usize,
@@ -2018,6 +2016,12 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(then_expr, alias, relation_name);
             rewrite_relation_alias_in_scalar(else_expr, alias, relation_name);
         }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            rewrite_relation_alias_in_scalar(value, alias, relation_name);
+            if let Some(n) = n {
+                rewrite_relation_alias_in_scalar(n, alias, relation_name);
+            }
+        }
     }
 }
 
@@ -2306,6 +2310,12 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(then_expr, names);
             collect_scalar_relation_names(else_expr, names);
         }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            collect_scalar_relation_names(value, names);
+            if let Some(n) = n {
+                collect_scalar_relation_names(n, names);
+            }
+        }
     }
 }
 
@@ -2496,6 +2506,24 @@ fn rewrite_scalar_relation_references(
                 derived_origin_targets,
             );
         }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            rewrite_scalar_relation_references(
+                value,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            if let Some(n) = n {
+                rewrite_scalar_relation_references(
+                    n,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
+            }
+        }
     }
 }
 
@@ -2679,6 +2707,12 @@ fn scalar_uses_imported_derived(
             judgment_uses_imported_derived(condition, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(then_expr, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(else_expr, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            scalar_uses_imported_derived(value, origin_target, derived_origin_targets)
+                || n.as_deref().is_some_and(|n| {
+                    scalar_uses_imported_derived(n, origin_target, derived_origin_targets)
+                })
         }
     }
 }

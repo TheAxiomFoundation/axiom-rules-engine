@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::EvalError;
 use crate::model::{
-    ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome, Period,
-    Program, RelatedValueRef, Rounding, RoundingMode, ScalarExpr, ScalarValue, SCALAR_ENTITY,
+    ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
+    OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
+    ScalarExpr, ScalarValue,
 };
 
 #[derive(Clone, Debug)]
@@ -115,6 +116,11 @@ trait DenseNum:
     /// determinations.
     fn round_to(self, rounding: Rounding) -> Self;
     fn is_zero(self) -> bool;
+    /// Truncate toward zero to an exact `i64`, or `None` when the value is
+    /// non-finite or lies beyond the `i64` range. Used to read the `n` of
+    /// `sum_top_n_over_periods`: `None` (and any out-of-range integer) is a hard
+    /// error under the strict n contract, never a silent saturation.
+    fn try_to_i64_trunc(self) -> Option<i64>;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
     /// Read any numeric column as this mode's working vector.
@@ -144,6 +150,13 @@ impl DenseNum for Decimal {
 
     fn is_zero(self) -> bool {
         self == Decimal::ZERO
+    }
+
+    fn try_to_i64_trunc(self) -> Option<i64> {
+        // Truncate toward zero; `to_i64` returns None when the truncated value
+        // is beyond the i64 range, which the strict n contract treats as a hard
+        // error (never a saturation to i64::MAX).
+        self.trunc().to_i64()
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -210,6 +223,17 @@ impl DenseNum for f64 {
 
     fn is_zero(self) -> bool {
         self == 0.0
+    }
+
+    fn try_to_i64_trunc(self) -> Option<i64> {
+        // Reject non-finite and out-of-range values instead of saturating: the
+        // strict n contract errors on a garbage n rather than silently reading
+        // it as 0 (NaN) or a clamped extreme.
+        let truncated = self.trunc();
+        if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
+            return None;
+        }
+        Some(truncated as i64)
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -327,6 +351,13 @@ pub enum DenseCompileError {
     #[error("dense compilation does not yet support {0}")]
     Unsupported(String),
     #[error(
+        "over-periods reductions cannot be nested: `{outer}` contains `{inner}` in its argument — reduce over the period axis once"
+    )]
+    NestedOverPeriods {
+        outer: &'static str,
+        inner: &'static str,
+    },
+    #[error(
         "dense compilation only supports dependencies within the same root entity; `{dependency}` from `{derived}` crosses into `{entity}`"
     )]
     CrossEntityDependency {
@@ -380,6 +411,15 @@ enum CompiledScalarExpr {
         condition: Box<CompiledJudgmentExpr>,
         then_expr: Box<CompiledScalarExpr>,
         else_expr: Box<CompiledScalarExpr>,
+    },
+    /// Cross-period reduction, evaluated only by the lifetime executor. `value`
+    /// is compiled as an ordinary per-period scalar (evaluated once per supplied
+    /// period); `n` (SumTopN only) is compiled likewise and read at the
+    /// reference period. The per-period executor rejects this node.
+    OverPeriods {
+        kind: OverPeriodsKind,
+        value: Box<CompiledScalarExpr>,
+        n: Option<Box<CompiledScalarExpr>>,
     },
 }
 
@@ -616,6 +656,232 @@ impl DenseCompiledProgram {
             row_count: executor.batch.row_count,
             outputs: result,
         })
+    }
+
+    /// Execute over an entity's lifetime — one positionally aligned input batch
+    /// per period — in canonical `Decimal` arithmetic. See
+    /// [`Self::execute_lifetime_f64`] for the full contract.
+    pub fn execute_lifetime(
+        &self,
+        periods: &[Period],
+        batches: Vec<DenseBatchSpec>,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, EvalError> {
+        self.execute_lifetime_with::<Decimal>(periods, batches, outputs)
+    }
+
+    /// Execute over an entity's lifetime in `f64` arithmetic (throughput mode).
+    ///
+    /// `periods` and `batches` must have equal length (one batch per period),
+    /// the periods must be strictly ascending by start date, and every batch
+    /// must describe the SAME entity rows in the SAME order and count (v1
+    /// positional alignment — row `i` is the same entity in every period). Each
+    /// requested output's formula must contain at least one over-periods
+    /// reduction (`sum_over_periods`, `max_over_periods`, `count_over_periods`,
+    /// `sum_top_n_over_periods`); outputs with no reduction are period-specific
+    /// and should use the per-period [`Self::execute_f64`] entry point instead.
+    ///
+    /// Each reduction's inner expression is evaluated once per period with the
+    /// ordinary per-period executor; the per-period vectors are stacked and
+    /// reduced row-wise. Non-reduction scalars combined with a reduction
+    /// resolve at the reference period — the chronologically-last supplied
+    /// period (parameters like a bend point index to the determination year);
+    /// a derived referenced outside a reduction means its body inlined in this
+    /// same lifetime context, and a bare period-invariant input binds its
+    /// common value.
+    pub fn execute_lifetime_f64(
+        &self,
+        periods: &[Period],
+        batches: Vec<DenseBatchSpec>,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, EvalError> {
+        self.execute_lifetime_with::<f64>(periods, batches, outputs)
+    }
+
+    fn execute_lifetime_with<N: DenseNum>(
+        &self,
+        periods: &[Period],
+        batches: Vec<DenseBatchSpec>,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, EvalError> {
+        if periods.is_empty() {
+            return Err(EvalError::LifetimeNoPeriods);
+        }
+        if periods.len() != batches.len() {
+            return Err(EvalError::LifetimePeriodBatchMismatch {
+                periods: periods.len(),
+                batches: batches.len(),
+            });
+        }
+
+        // Periods must be strictly ascending by start date. The reference period
+        // for period-specific scalars (parameters, and the `n` of
+        // `sum_top_n_over_periods`) is the chronologically-last supplied period;
+        // an unsorted or descending list would otherwise resolve a bend point or
+        // COLA at the wrong year with no signal. Reject rather than silently sort
+        // so the caller's period/batch pairing stays authoritative.
+        for (earlier_index, window) in periods.windows(2).enumerate() {
+            let (earlier, later) = (&window[0], &window[1]);
+            if earlier.start >= later.start {
+                return Err(EvalError::LifetimePeriodsNotAscending {
+                    earlier_index,
+                    earlier: format!("{}..{}", earlier.start, earlier.end),
+                    later_index: earlier_index + 1,
+                    later: format!("{}..{}", later.start, later.end),
+                });
+            }
+        }
+
+        // Bind every period's batch and require identical row counts (positional
+        // alignment). Row `i` is the same entity across every period.
+        let mut bound = Vec::with_capacity(batches.len());
+        let mut expected_row_count = None;
+        for (index, batch) in batches.into_iter().enumerate() {
+            let bound_batch = self.bind_batch(batch)?;
+            match expected_row_count {
+                None => expected_row_count = Some(bound_batch.row_count),
+                Some(expected) if bound_batch.row_count != expected => {
+                    return Err(EvalError::LifetimeRowCountMismatch {
+                        period: index,
+                        row_count: bound_batch.row_count,
+                        expected,
+                    });
+                }
+                Some(_) => {}
+            }
+            bound.push(bound_batch);
+        }
+        let row_count = expected_row_count.unwrap_or(0);
+
+        // Every requested output must reduce over the period axis; a purely
+        // per-period output has no single-column lifetime meaning.
+        for output in outputs {
+            let Some(&derived_index) = self.derived_index.get(output) else {
+                return Err(EvalError::UnknownDerived(output.clone()));
+            };
+            if !self.derived_reduces_over_periods(derived_index) {
+                return Err(EvalError::LifetimeOutputWithoutReduction(output.clone()));
+            }
+        }
+
+        let mut executor: LifetimeExecutor<'_, N> =
+            LifetimeExecutor::new(self, periods, bound, row_count);
+        let mut result = HashMap::new();
+        for output in outputs {
+            let derived_index = self.derived_index[output];
+            let value = match &self.derived[derived_index].semantics {
+                CompiledSemantics::Scalar(_) => {
+                    DenseOutputValue::Scalar(executor.evaluate_scalar(derived_index)?.clone())
+                }
+                CompiledSemantics::Judgment(_) => {
+                    DenseOutputValue::Judgment(executor.evaluate_judgment(derived_index)?.clone())
+                }
+            };
+            result.insert(output.clone(), value);
+        }
+        Ok(DenseExecutionResult {
+            row_count,
+            outputs: result,
+        })
+    }
+
+    /// Does this derived's compiled formula contain an over-periods reduction,
+    /// directly or through the derived values it depends on? Used to gate
+    /// lifetime execution to reduction outputs only.
+    fn derived_reduces_over_periods(&self, derived_index: usize) -> bool {
+        let mut visiting = HashSet::new();
+        self.derived_reduces_over_periods_inner(derived_index, &mut visiting)
+    }
+
+    fn derived_reduces_over_periods_inner(
+        &self,
+        derived_index: usize,
+        visiting: &mut HashSet<usize>,
+    ) -> bool {
+        if !visiting.insert(derived_index) {
+            return false;
+        }
+        let result = match &self.derived[derived_index].semantics {
+            CompiledSemantics::Scalar(expr) => self.scalar_reduces_over_periods(expr, visiting),
+            CompiledSemantics::Judgment(expr) => self.judgment_reduces_over_periods(expr, visiting),
+        };
+        visiting.remove(&derived_index);
+        result
+    }
+
+    fn scalar_reduces_over_periods(
+        &self,
+        expr: &CompiledScalarExpr,
+        visiting: &mut HashSet<usize>,
+    ) -> bool {
+        match expr {
+            CompiledScalarExpr::OverPeriods { .. } => true,
+            CompiledScalarExpr::Literal(_)
+            | CompiledScalarExpr::Input(_)
+            | CompiledScalarExpr::InputOrElse { .. }
+            | CompiledScalarExpr::PeriodStart
+            | CompiledScalarExpr::PeriodEnd => false,
+            CompiledScalarExpr::Derived(index) => {
+                self.derived_reduces_over_periods_inner(*index, visiting)
+            }
+            CompiledScalarExpr::ParameterLookup { index, .. } => {
+                self.scalar_reduces_over_periods(index, visiting)
+            }
+            CompiledScalarExpr::Add(items)
+            | CompiledScalarExpr::Max(items)
+            | CompiledScalarExpr::Min(items) => items
+                .iter()
+                .any(|item| self.scalar_reduces_over_periods(item, visiting)),
+            CompiledScalarExpr::Sub(left, right)
+            | CompiledScalarExpr::Mul(left, right)
+            | CompiledScalarExpr::Div(left, right) => {
+                self.scalar_reduces_over_periods(left, visiting)
+                    || self.scalar_reduces_over_periods(right, visiting)
+            }
+            CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+                self.scalar_reduces_over_periods(value, visiting)
+            }
+            CompiledScalarExpr::DateAddDays { date, days } => {
+                self.scalar_reduces_over_periods(date, visiting)
+                    || self.scalar_reduces_over_periods(days, visiting)
+            }
+            CompiledScalarExpr::DaysBetween { from, to } => {
+                self.scalar_reduces_over_periods(from, visiting)
+                    || self.scalar_reduces_over_periods(to, visiting)
+            }
+            CompiledScalarExpr::CountRelated { .. } | CompiledScalarExpr::SumRelated { .. } => {
+                false
+            }
+            CompiledScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.judgment_reduces_over_periods(condition, visiting)
+                    || self.scalar_reduces_over_periods(then_expr, visiting)
+                    || self.scalar_reduces_over_periods(else_expr, visiting)
+            }
+        }
+    }
+
+    fn judgment_reduces_over_periods(
+        &self,
+        expr: &CompiledJudgmentExpr,
+        visiting: &mut HashSet<usize>,
+    ) -> bool {
+        match expr {
+            CompiledJudgmentExpr::Comparison { left, right, .. } => {
+                self.scalar_reduces_over_periods(left, visiting)
+                    || self.scalar_reduces_over_periods(right, visiting)
+            }
+            CompiledJudgmentExpr::Derived(index) => {
+                self.derived_reduces_over_periods_inner(*index, visiting)
+            }
+            CompiledJudgmentExpr::And(items) | CompiledJudgmentExpr::Or(items) => items
+                .iter()
+                .any(|item| self.judgment_reduces_over_periods(item, visiting)),
+            CompiledJudgmentExpr::Not(item) => self.judgment_reduces_over_periods(item, visiting),
+        }
     }
 
     fn bind_batch(&self, batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
@@ -967,6 +1233,30 @@ impl<'a> DenseCompiler<'a> {
                 then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
                 else_expr: Box::new(self.compile_scalar_expr(derived_name, else_expr)?),
             }),
+            ScalarExpr::OverPeriods { kind, value, n } => {
+                let value = self.compile_scalar_expr(derived_name, value)?;
+                let n = n
+                    .as_ref()
+                    .map(|inner| self.compile_scalar_expr(derived_name, inner).map(Box::new))
+                    .transpose()?;
+                // A reduction reduces the period axis away, so nesting another
+                // reduction directly in its argument is meaningless. Reject it at
+                // compile time with a precise message rather than letting the
+                // inner reduction surface an opaque per-period error at run time.
+                if let Some(inner) = nested_over_periods_kind(&value)
+                    .or_else(|| n.as_deref().and_then(nested_over_periods_kind))
+                {
+                    return Err(DenseCompileError::NestedOverPeriods {
+                        outer: kind.as_call_name(),
+                        inner: inner.as_call_name(),
+                    });
+                }
+                Ok(CompiledScalarExpr::OverPeriods {
+                    kind: *kind,
+                    value: Box::new(value),
+                    n,
+                })
+            }
         }
     }
 
@@ -1041,16 +1331,16 @@ impl<'a> DenseCompiler<'a> {
                     || derived.entity == self.root_entity
                 {
                     return match &derived.semantics {
-                        DerivedSemantics::Judgment(expr) => Ok(
-                            CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
+                        DerivedSemantics::Judgment(expr) => {
+                            Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
                                 self.compile_current_judgment_expr(name, &derived.entity, expr)?,
-                            )),
-                        ),
-                        DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(
-                            format!(
+                            )))
+                        }
+                        DerivedSemantics::Scalar(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
                                 "where-clause predicates cannot reference scalar derived values (`{name}`)"
-                            ),
-                        )),
+                            )))
+                        }
                     };
                 }
                 if relation.related_entity.is_some()
@@ -1119,18 +1409,16 @@ impl<'a> DenseCompiler<'a> {
                     || derived.entity == SCALAR_ENTITY
                 {
                     return match &derived.semantics {
-                        DerivedSemantics::Scalar(expr) => Ok(CompiledRelatedScalarExpr::RootScalar(
-                            Box::new(self.compile_current_scalar_expr(
-                                name,
-                                &derived.entity,
-                                expr,
-                            )?),
-                        )),
-                        DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(
-                            format!(
+                        DerivedSemantics::Scalar(expr) => {
+                            Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
+                                self.compile_current_scalar_expr(name, &derived.entity, expr)?,
+                            )))
+                        }
+                        DerivedSemantics::Judgment(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
                                 "related scalar expressions cannot reference judgment derived values (`{name}`)"
-                            ),
-                        )),
+                            )))
+                        }
                     };
                 }
                 if relation.related_entity.is_some()
@@ -1142,7 +1430,9 @@ impl<'a> DenseCompiler<'a> {
                     )));
                 }
                 match &derived.semantics {
-                    DerivedSemantics::Scalar(expr) => self.compile_related_scalar(relation_index, expr),
+                    DerivedSemantics::Scalar(expr) => {
+                        self.compile_related_scalar(relation_index, expr)
+                    }
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "related scalar expressions cannot reference judgment derived values (`{name}`)"
                     ))),
@@ -1214,6 +1504,10 @@ impl<'a> DenseCompiler<'a> {
                     "aggregation over relation `{relation}` nested inside a related expression"
                 )))
             }
+            ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
+                "over-periods reduction `{}` nested inside a related expression",
+                kind.as_call_name()
+            ))),
         }
     }
 
@@ -1338,6 +1632,10 @@ impl<'a> DenseCompiler<'a> {
                         .to_string(),
                 ))
             }
+            ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
+                "over-periods reduction `{}` nested inside a current-entity related expression",
+                kind.as_call_name()
+            ))),
         }
     }
 
@@ -1798,6 +2096,11 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
             }
+            // Cross-period reductions require a batch per period; they are
+            // evaluated by the lifetime executor, never here.
+            CompiledScalarExpr::OverPeriods { kind, .. } => {
+                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+            }
         }
     }
 
@@ -2112,6 +2415,674 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 })
                 .collect()),
         }
+    }
+}
+
+/// Executor for the lifetime surface: it owns one bound batch (and one
+/// [`DenseExecutor`]) per period, all describing the same entity rows in the
+/// same order. It evaluates a formula once, row-wise, collapsing each
+/// over-periods reduction to a per-entity column by evaluating the reduction's
+/// inner expression across every period's executor and reducing down the period
+/// axis. Scalars outside any reduction that need a period (parameters) resolve
+/// at the reference period — the chronologically-last supplied period, which
+/// the `execute_lifetime` entry points validate the period list to end with. A
+/// derived referenced outside a reduction is evaluated by inlining its body in
+/// this same lifetime context (so it means exactly its definition), and a bare
+/// period-invariant input binds its common value.
+struct LifetimeExecutor<'a, N: DenseNum> {
+    program: &'a DenseCompiledProgram,
+    /// One per-period executor, index-aligned with `periods`. Each carries its
+    /// own per-period scalar/judgment memoization.
+    period_executors: Vec<DenseExecutor<'a, N>>,
+    /// Index of the reference period — the chronologically-last supplied period
+    /// (the entry points validate the list is strictly ascending, so this is the
+    /// final index) — for period-specific scalars combined with a reduction.
+    reference_period: usize,
+    row_count: usize,
+    /// Lifetime-level memoization of derived values (keyed by derived index),
+    /// so a derived referenced from several places reduces once. Rounding is
+    /// applied before caching, mirroring the per-period path.
+    scalar_cache: Vec<Option<DenseColumn>>,
+    judgment_cache: Vec<Option<Vec<JudgmentOutcome>>>,
+}
+
+impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
+    fn new(
+        program: &'a DenseCompiledProgram,
+        periods: &'a [Period],
+        bound: Vec<DenseBoundBatch>,
+        row_count: usize,
+    ) -> Self {
+        let period_executors = periods
+            .iter()
+            .zip(bound)
+            .map(|(period, batch)| DenseExecutor::new(program, period, batch))
+            .collect();
+        Self {
+            program,
+            period_executors,
+            reference_period: periods.len() - 1,
+            row_count,
+            scalar_cache: vec![None; program.derived.len()],
+            judgment_cache: vec![None; program.derived.len()],
+        }
+    }
+
+    fn evaluate_scalar(&mut self, derived_index: usize) -> Result<&DenseColumn, EvalError> {
+        if self.scalar_cache[derived_index].is_none() {
+            let program = self.program;
+            let mut column = match &program.derived[derived_index].semantics {
+                CompiledSemantics::Scalar(expr) => self.eval_scalar(expr)?,
+                CompiledSemantics::Judgment(_) => {
+                    return Err(EvalError::ExpectedScalar(
+                        program.derived[derived_index].name.clone(),
+                    ));
+                }
+            };
+            if let Some(rounding) = program.derived[derived_index].rounding {
+                column = round_dense_column::<N>(column, rounding)?;
+            }
+            self.scalar_cache[derived_index] = Some(column);
+        }
+        Ok(self.scalar_cache[derived_index].as_ref().expect("cached"))
+    }
+
+    fn evaluate_judgment(
+        &mut self,
+        derived_index: usize,
+    ) -> Result<&Vec<JudgmentOutcome>, EvalError> {
+        if self.judgment_cache[derived_index].is_none() {
+            let program = self.program;
+            let values = match &program.derived[derived_index].semantics {
+                CompiledSemantics::Judgment(expr) => self.eval_judgment(expr)?,
+                CompiledSemantics::Scalar(_) => {
+                    return Err(EvalError::ExpectedJudgment(
+                        program.derived[derived_index].name.clone(),
+                    ));
+                }
+            };
+            self.judgment_cache[derived_index] = Some(values);
+        }
+        Ok(self.judgment_cache[derived_index].as_ref().expect("cached"))
+    }
+
+    fn eval_scalar(&mut self, expr: &CompiledScalarExpr) -> Result<DenseColumn, EvalError> {
+        match expr {
+            CompiledScalarExpr::OverPeriods { kind, value, n } => {
+                self.eval_over_periods(*kind, value, n.as_deref())
+            }
+            CompiledScalarExpr::Literal(value) => {
+                Ok(broadcast_scalar_literal::<N>(value, self.row_count))
+            }
+            CompiledScalarExpr::Derived(index) => Ok(self.evaluate_scalar(*index)?.clone()),
+            CompiledScalarExpr::ParameterLookup { parameter, index } => {
+                // Period-specific: resolve at the reference period. The index
+                // expression is itself lifetime-evaluated (typically a literal
+                // or derived), then used as integer keys.
+                let keys = self.eval_scalar(index)?.as_index_vec()?;
+                lookup_parameter_dense::<N>(
+                    &self.program.parameters[*parameter].parameter,
+                    &keys,
+                    self.period_executors[self.reference_period].period,
+                )
+            }
+            CompiledScalarExpr::Add(items) => {
+                let mut total = vec![N::ZERO; self.row_count];
+                for item in items {
+                    let values = N::vec_from_column(&self.eval_scalar(item)?)?;
+                    for (index, value) in values.into_iter().enumerate() {
+                        total[index] += value;
+                    }
+                }
+                Ok(N::into_column(total))
+            }
+            CompiledScalarExpr::Sub(left, right) => {
+                let left = N::vec_from_column(&self.eval_scalar(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar(right)?)?;
+                Ok(N::into_column(
+                    left.into_iter().zip(right).map(|(l, r)| l - r).collect(),
+                ))
+            }
+            CompiledScalarExpr::Mul(left, right) => {
+                let left = N::vec_from_column(&self.eval_scalar(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar(right)?)?;
+                Ok(N::into_column(
+                    left.into_iter().zip(right).map(|(l, r)| l * r).collect(),
+                ))
+            }
+            CompiledScalarExpr::Div(left, right) => {
+                let left = N::vec_from_column(&self.eval_scalar(left)?)?;
+                let right = N::vec_from_column(&self.eval_scalar(right)?)?;
+                Ok(N::into_column(
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(l, r)| {
+                            if r.is_zero() {
+                                Err(EvalError::DivisionByZero)
+                            } else {
+                                Ok(l / r)
+                            }
+                        })
+                        .collect::<Result<Vec<N>, EvalError>>()?,
+                ))
+            }
+            CompiledScalarExpr::Max(items) => {
+                let mut values = vec![N::MIN; self.row_count];
+                for item in items {
+                    let candidate = N::vec_from_column(&self.eval_scalar(item)?)?;
+                    for (index, value) in candidate.into_iter().enumerate() {
+                        if value > values[index] {
+                            values[index] = value;
+                        }
+                    }
+                }
+                Ok(N::into_column(values))
+            }
+            CompiledScalarExpr::Min(items) => {
+                let mut values = vec![N::MAX; self.row_count];
+                for item in items {
+                    let candidate = N::vec_from_column(&self.eval_scalar(item)?)?;
+                    for (index, value) in candidate.into_iter().enumerate() {
+                        if value < values[index] {
+                            values[index] = value;
+                        }
+                    }
+                }
+                Ok(N::into_column(values))
+            }
+            CompiledScalarExpr::Ceil(value) => Ok(N::into_column(
+                N::vec_from_column(&self.eval_scalar(value)?)?
+                    .into_iter()
+                    .map(|value| value.ceil())
+                    .collect(),
+            )),
+            CompiledScalarExpr::Floor(value) => Ok(N::into_column(
+                N::vec_from_column(&self.eval_scalar(value)?)?
+                    .into_iter()
+                    .map(|value| value.floor())
+                    .collect(),
+            )),
+            CompiledScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let condition = self.eval_judgment(condition)?;
+                let then_values = self.eval_scalar(then_expr)?;
+                let else_values = self.eval_scalar(else_expr)?;
+                select_dense_scalar_column::<N>(condition, then_values, else_values)
+            }
+            // A bare input outside a reduction has no single period in general,
+            // but a per-person-constant input (a birth / age-attainment year —
+            // the shape every statutory computation-year count bottoms out in)
+            // carries the same value in every supplied period. Bind it per row
+            // when it is verified period-invariant; error naming the input and
+            // the first divergence when it is not. This is reached directly and
+            // through a derived chain (e.g. an elapsed-years count built from
+            // `year_attained_62 - year_attained_21`), and it may sit in scalar
+            // or in the `n` position of `sum_top_n_over_periods`.
+            CompiledScalarExpr::Input(index) => {
+                let name = self.program.root_inputs[*index].clone();
+                self.eval_period_invariant_input(expr, &name)
+            }
+            CompiledScalarExpr::InputOrElse { input, .. } => {
+                let name = self.program.root_inputs[*input].clone();
+                self.eval_period_invariant_input(expr, &name)
+            }
+            CompiledScalarExpr::PeriodStart => {
+                Err(EvalError::LifetimeAmbiguousLeaf("period_start".to_string()))
+            }
+            CompiledScalarExpr::PeriodEnd => {
+                Err(EvalError::LifetimeAmbiguousLeaf("period_end".to_string()))
+            }
+            CompiledScalarExpr::DateAddDays { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "date_add_days".to_string(),
+            )),
+            CompiledScalarExpr::DaysBetween { .. } => {
+                Err(EvalError::LifetimeAmbiguousLeaf("days_between".to_string()))
+            }
+            CompiledScalarExpr::CountRelated { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "count/len over a relation".to_string(),
+            )),
+            CompiledScalarExpr::SumRelated { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "sum over a relation".to_string(),
+            )),
+        }
+    }
+
+    /// Collapse an over-periods reduction to a per-entity column: evaluate the
+    /// inner `value` under every period's executor, then reduce down the period
+    /// axis for each row.
+    fn eval_over_periods(
+        &mut self,
+        kind: OverPeriodsKind,
+        value: &CompiledScalarExpr,
+        n: Option<&CompiledScalarExpr>,
+    ) -> Result<DenseColumn, EvalError> {
+        let period_count = self.period_executors.len();
+
+        // Count evaluates its argument per period (same leaf rules as the other
+        // reductions — period-specific leaves are legal inside a reduction) and
+        // counts, per row, the periods whose value is nonzero. This is
+        // referentially consistent with the sibling reductions rather than a
+        // special-cased period count: `count_over_periods(x)` means "how many
+        // periods had a nonzero `x`". A Bool/judgment-shaped inner value counts
+        // `true`; every numeric variant counts `!= 0`.
+        if kind == OverPeriodsKind::Count {
+            let mut counts = vec![0_i64; self.row_count];
+            for executor in &mut self.period_executors {
+                let column = executor.eval_scalar_expr(value)?;
+                accumulate_nonzero_counts(&column, &mut counts)?;
+            }
+            return Ok(DenseColumn::Integer(counts));
+        }
+
+        // period-major: per_period[p][r] is entity r's inner value in period p.
+        let mut per_period: Vec<Vec<N>> = Vec::with_capacity(period_count);
+        for executor in &mut self.period_executors {
+            let column = executor.eval_scalar_expr(value)?;
+            per_period.push(N::vec_from_column(&column)?);
+        }
+
+        let result = match kind {
+            // Handled above: count does not build the numeric period matrix.
+            OverPeriodsKind::Count => unreachable!("count is handled above"),
+            OverPeriodsKind::Sum => (0..self.row_count)
+                .map(|row| {
+                    let mut total = N::ZERO;
+                    for period in &per_period {
+                        total += period[row];
+                    }
+                    total
+                })
+                .collect::<Vec<N>>(),
+            OverPeriodsKind::Max => (0..self.row_count)
+                .map(|row| {
+                    // period_count >= 1 is guaranteed by the caller.
+                    let mut best = per_period[0][row];
+                    for period in &per_period[1..] {
+                        if period[row] > best {
+                            best = period[row];
+                        }
+                    }
+                    best
+                })
+                .collect::<Vec<N>>(),
+            OverPeriodsKind::SumTopN => {
+                // `eval_top_n_counts` enforces 1 <= n <= period_count for every
+                // row, so `take` below never exceeds the number of periods: a
+                // top-N sum is a mathematical no-op past the period count (extra
+                // slots would only add zeros), so over-length n is rejected as a
+                // likely data error rather than silently padded.
+                let counts = self.eval_top_n_counts(n, period_count)?;
+                (0..self.row_count)
+                    .map(|row| {
+                        let mut values: Vec<N> =
+                            per_period.iter().map(|period| period[row]).collect();
+                        // Descending sort. N is Decimal or f64; per-period inner
+                        // values are finite in practice, so a total order via
+                        // partial_cmp is safe here.
+                        values
+                            .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                        // n is bounded by the period count, so this takes a
+                        // genuine prefix of the sorted values (no zero padding).
+                        let take = counts[row];
+                        let mut total = N::ZERO;
+                        for value in &values[..take] {
+                            total += *value;
+                        }
+                        total
+                    })
+                    .collect::<Vec<N>>()
+            }
+        };
+        Ok(N::into_column(result))
+    }
+
+    /// Resolve the `n` of `sum_top_n_over_periods` into a per-row count under the
+    /// strict n contract. `n` is evaluated under EVERY period's executor and must
+    /// resolve to the same value in every period (parameter- and input-sourced n
+    /// are held to the identical contract — a period-varying parameter n is a
+    /// data error, not a silent pin to the reference period). The reference
+    /// period's column is then truncated toward zero to an exact `i64`; a
+    /// non-finite or out-of-range value (`try_to_i64_trunc` -> `None`) and any
+    /// `n` outside `1 <= n <= period_count` both raise typed errors — never a
+    /// clamp to `i64::MAX`, never a silent pin, never a pad past the period count
+    /// (which would be an arithmetic no-op masking the bad count).
+    fn eval_top_n_counts(
+        &mut self,
+        n: Option<&CompiledScalarExpr>,
+        period_count: usize,
+    ) -> Result<Vec<usize>, EvalError> {
+        let n = n.ok_or_else(|| {
+            EvalError::TypeMismatch("sum_top_n_over_periods requires an n argument".to_string())
+        })?;
+        let reduction = OverPeriodsKind::SumTopN.as_call_name();
+
+        // Evaluate `n` under each period's executor: one column per period,
+        // positionally aligned by row. A parameter-sourced n indexes each
+        // period's date, so a year-varying parameter yields different columns and
+        // is caught below; an n derived from period-invariant inputs (the
+        // 42 USC 415(b) computation-year count) is identical in every period and
+        // passes.
+        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
+        for executor in &mut self.period_executors {
+            per_period.push(executor.eval_scalar_expr(n)?);
+        }
+        let (reference, others) = per_period
+            .split_last()
+            .expect("lifetime execution guarantees at least one period");
+        // Reject a period-varying n: compare every earlier period against the
+        // reference (chronologically-last) period, in each column's own dtype.
+        for (index, column) in others.iter().enumerate() {
+            if let Some(row) = first_differing_row(reference, column) {
+                return Err(EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period: period_label(self.period_executors[index].period),
+                    first_value: dense_value_label(column, row),
+                    second_period: period_label(
+                        self.period_executors[self.reference_period].period,
+                    ),
+                    second_value: dense_value_label(reference, row),
+                });
+            }
+        }
+
+        // n is period-invariant: truncate the reference column toward zero to an
+        // exact i64 and enforce 1 <= n <= period_count per row.
+        let raw = N::vec_from_column(reference)?;
+        raw.into_iter()
+            .enumerate()
+            .map(|(row, value)| {
+                let as_i64 = value.try_to_i64_trunc().ok_or_else(|| {
+                    // Non-finite or beyond the i64 range: a garbage n, reported
+                    // as out of range rather than saturated to a clamp.
+                    EvalError::OverPeriodsTopNOutOfRange {
+                        reduction,
+                        n: dense_value_label(reference, row),
+                        period_count,
+                    }
+                })?;
+                if as_i64 < 1 || (as_i64 as u64) > period_count as u64 {
+                    Err(EvalError::OverPeriodsTopNOutOfRange {
+                        reduction,
+                        n: as_i64.to_string(),
+                        period_count,
+                    })
+                } else {
+                    Ok(as_i64 as usize)
+                }
+            })
+            .collect()
+    }
+
+    /// Bind a bare input evaluated OUTSIDE any reduction, when — and only when —
+    /// its supplied value is verified identical across every period for a given
+    /// row.
+    ///
+    /// A reduction defines the period axis explicitly; a bare input does not, so
+    /// it is period-ambiguous in general. But the derived counts real statutes
+    /// build (42 USC 415(b)'s benefit-computation-year count, from the year a
+    /// worker attains 21 and 62) bottom out in inputs that are constant across
+    /// the whole history by construction. Rather than reject every such input, we
+    /// evaluate `expr` under each period's ordinary executor and check PER ROW
+    /// that the value never changes. If a row is invariant across all periods,
+    /// that single value is bound for it; if any row diverges, we error, naming
+    /// the input and the first two differing period labels and values. Truly
+    /// period-varying inputs therefore still fail loudly — the check only
+    /// legalizes provably unambiguous bindings.
+    ///
+    /// Values are compared in each column's own dtype (numeric, bool, text or
+    /// date), so the invariance test is exact and never rounds. `expr` is the
+    /// original `Input` / `InputOrElse` node, replayed identically in every
+    /// period; an absent `InputOrElse` broadcasts the same default in each and so
+    /// is trivially invariant, binding that default.
+    fn eval_period_invariant_input(
+        &mut self,
+        expr: &CompiledScalarExpr,
+        input_name: &str,
+    ) -> Result<DenseColumn, EvalError> {
+        // Evaluate the leaf under every period's executor: one column per
+        // period, each of length `row_count` and positionally aligned by row.
+        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
+        for executor in &mut self.period_executors {
+            per_period.push(executor.eval_scalar_expr(expr)?);
+        }
+        // A single period is invariant by definition; nothing to compare.
+        let (first, rest) = per_period
+            .split_first()
+            .expect("lifetime execution guarantees at least one period");
+        for (offset, column) in rest.iter().enumerate() {
+            if let Some(row) = first_differing_row(first, column) {
+                // `offset` indexes `rest`, so the diverging period is `offset + 1`.
+                let later_period = offset + 1;
+                return Err(EvalError::LifetimePeriodVaryingInput {
+                    input: input_name.to_string(),
+                    first_period: period_label(self.period_executors[0].period),
+                    first_value: dense_value_label(first, row),
+                    second_period: period_label(self.period_executors[later_period].period),
+                    second_value: dense_value_label(column, row),
+                });
+            }
+        }
+        // Every row agrees across all periods: bind the (identical) first
+        // period's column, preserving its original dtype for the caller.
+        Ok(first.clone())
+    }
+
+    fn eval_judgment(
+        &mut self,
+        expr: &CompiledJudgmentExpr,
+    ) -> Result<Vec<JudgmentOutcome>, EvalError> {
+        match expr {
+            CompiledJudgmentExpr::Comparison { left, op, right } => {
+                let left = self.eval_scalar(left)?;
+                let right = self.eval_scalar(right)?;
+                compare_dense_columns::<N>(left, *op, right)
+            }
+            CompiledJudgmentExpr::Derived(index) => Ok(self.evaluate_judgment(*index)?.clone()),
+            CompiledJudgmentExpr::And(items) => {
+                let mut results = vec![JudgmentOutcome::Holds; self.row_count];
+                for item in items {
+                    let values = self.eval_judgment(item)?;
+                    for (index, value) in values.into_iter().enumerate() {
+                        results[index] = match (results[index], value) {
+                            (JudgmentOutcome::NotHolds, _) | (_, JudgmentOutcome::NotHolds) => {
+                                JudgmentOutcome::NotHolds
+                            }
+                            (JudgmentOutcome::Undetermined, _)
+                            | (_, JudgmentOutcome::Undetermined) => JudgmentOutcome::Undetermined,
+                            _ => JudgmentOutcome::Holds,
+                        };
+                    }
+                }
+                Ok(results)
+            }
+            CompiledJudgmentExpr::Or(items) => {
+                let mut results = vec![JudgmentOutcome::NotHolds; self.row_count];
+                for item in items {
+                    let values = self.eval_judgment(item)?;
+                    for (index, value) in values.into_iter().enumerate() {
+                        results[index] = match (results[index], value) {
+                            (JudgmentOutcome::Holds, _) | (_, JudgmentOutcome::Holds) => {
+                                JudgmentOutcome::Holds
+                            }
+                            (JudgmentOutcome::Undetermined, _)
+                            | (_, JudgmentOutcome::Undetermined) => JudgmentOutcome::Undetermined,
+                            _ => JudgmentOutcome::NotHolds,
+                        };
+                    }
+                }
+                Ok(results)
+            }
+            CompiledJudgmentExpr::Not(item) => Ok(self
+                .eval_judgment(item)?
+                .into_iter()
+                .map(|value| match value {
+                    JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
+                    JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
+                    JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
+                })
+                .collect()),
+        }
+    }
+}
+
+/// A human-readable label for a period, used in period-invariance error
+/// messages. The `start..end` boundaries identify the period unambiguously and
+/// match how periods are otherwise surfaced to callers.
+fn period_label(period: &Period) -> String {
+    format!("in {}..{}", period.start, period.end)
+}
+
+/// Format the value at `row` of a dense column for an error message, in the
+/// column's own dtype (so an integer year reads `1985`, not `1985.0`).
+fn dense_value_label(column: &DenseColumn, row: usize) -> String {
+    match column {
+        DenseColumn::Bool(values) => values[row].to_string(),
+        DenseColumn::Integer(values) => values[row].to_string(),
+        DenseColumn::Decimal(values) => values[row].to_string(),
+        DenseColumn::Float(values) => values[row].to_string(),
+        DenseColumn::Text(values) => format!("{:?}", values[row]),
+        DenseColumn::Date(values) => values[row].to_string(),
+    }
+}
+
+/// Add one to `counts[row]` for each row whose value in `column` is nonzero,
+/// used by `count_over_periods` to count the periods with a nonzero inner value.
+/// Numeric variants count `!= 0`; a `Bool` column counts `true`; `Date`/`Text`
+/// columns have no zero and cannot be produced by an arithmetic inner value, so
+/// they are rejected rather than silently counted.
+fn accumulate_nonzero_counts(column: &DenseColumn, counts: &mut [i64]) -> Result<(), EvalError> {
+    if column.len() != counts.len() {
+        return Err(EvalError::TypeMismatch(format!(
+            "count_over_periods inner value produced {} rows but the batch has {}",
+            column.len(),
+            counts.len()
+        )));
+    }
+    match column {
+        DenseColumn::Bool(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Integer(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value != 0 {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Decimal(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if !value.is_zero() {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Float(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value != 0.0 {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Text(_) | DenseColumn::Date(_) => {
+            return Err(EvalError::TypeMismatch(
+                "count_over_periods requires a numeric or boolean inner value (text and date have no zero to count against)".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return the first row index at which two positionally aligned dense columns
+/// disagree, or `None` if every row is identical. Comparison is exact and in
+/// each column's dtype; two numeric columns of different variants (e.g. an
+/// `Integer` and a `Float`) are compared by numeric value so an input supplied
+/// as `1985` in one period and `1985.0` in another is still period-invariant.
+/// Columns whose lengths differ, or whose types are non-numeric and mismatched,
+/// are treated as differing at the first row (this errors loudly, which is the
+/// safe outcome for a period that supplied a structurally different value).
+fn first_differing_row(left: &DenseColumn, right: &DenseColumn) -> Option<usize> {
+    // Length mismatch cannot arise under positional lifetime alignment (every
+    // period's batch has the same row count), but guard it: report row 0.
+    if left.len() != right.len() {
+        return Some(0);
+    }
+    match (left, right) {
+        (DenseColumn::Bool(a), DenseColumn::Bool(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        (DenseColumn::Text(a), DenseColumn::Text(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        (DenseColumn::Date(a), DenseColumn::Date(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        // Any pairing of numeric variants (Integer / Decimal / Float) compares
+        // by numeric value. `vec_from_column::<Decimal>` promotes both sides to
+        // Decimal for an exact comparison when representable; a value not
+        // representable as Decimal — an f64 that is non-finite or beyond
+        // Decimal's magnitude (~7.9e28), neither of which a per-person constant
+        // year or money amount ever is — falls back to differing.
+        (
+            DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
+            DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
+        ) => match (
+            <Decimal as DenseNum>::vec_from_column(left),
+            <Decimal as DenseNum>::vec_from_column(right),
+        ) {
+            (Ok(a), Ok(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+            // Non-representable value on at least one side (non-finite or out of
+            // Decimal range): cannot prove invariance, so treat as differing at
+            // the first row.
+            _ => Some(0),
+        },
+        // Genuinely different, non-numeric column shapes: not provably
+        // invariant.
+        _ => Some(0),
+    }
+}
+
+/// Find a directly-nested over-periods reduction inside a compiled scalar
+/// expression, returning its kind. Used at compile time to reject
+/// `sum_over_periods(max_over_periods(x))` and similar: a reduction consumes the
+/// period axis, so nesting another in its argument is meaningless. This walks
+/// the compiled tree structurally; a reduction reached only through a `Derived`
+/// reference is not flagged here (it still errors safely at run time), because
+/// that transitive check needs the whole compiled program, not one expression.
+fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind> {
+    match expr {
+        CompiledScalarExpr::OverPeriods { kind, .. } => Some(*kind),
+        CompiledScalarExpr::Literal(_)
+        | CompiledScalarExpr::Input(_)
+        | CompiledScalarExpr::InputOrElse { .. }
+        | CompiledScalarExpr::Derived(_)
+        | CompiledScalarExpr::PeriodStart
+        | CompiledScalarExpr::PeriodEnd
+        | CompiledScalarExpr::CountRelated { .. }
+        | CompiledScalarExpr::SumRelated { .. } => None,
+        CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),
+        CompiledScalarExpr::Add(items)
+        | CompiledScalarExpr::Max(items)
+        | CompiledScalarExpr::Min(items) => items.iter().find_map(nested_over_periods_kind),
+        CompiledScalarExpr::Sub(left, right)
+        | CompiledScalarExpr::Mul(left, right)
+        | CompiledScalarExpr::Div(left, right) => {
+            nested_over_periods_kind(left).or_else(|| nested_over_periods_kind(right))
+        }
+        CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+            nested_over_periods_kind(value)
+        }
+        CompiledScalarExpr::DateAddDays { date, days } => {
+            nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
+        }
+        CompiledScalarExpr::DaysBetween { from, to } => {
+            nested_over_periods_kind(from).or_else(|| nested_over_periods_kind(to))
+        }
+        CompiledScalarExpr::If {
+            then_expr,
+            else_expr,
+            ..
+        } => nested_over_periods_kind(then_expr).or_else(|| nested_over_periods_kind(else_expr)),
     }
 }
 

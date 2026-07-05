@@ -82,10 +82,8 @@ impl ModuleSource for FsModuleSource {
         if !crate::rulespec::is_canonical_repo_prefix(prefix) {
             return Ok(None);
         }
-        let relative_path = std::path::PathBuf::from(format!(
-            "{}.yaml",
-            relative.trim().trim_matches('/')
-        ));
+        let relative_path =
+            std::path::PathBuf::from(format!("{}.yaml", relative.trim().trim_matches('/')));
         if relative_path.is_absolute()
             || relative_path
                 .components()

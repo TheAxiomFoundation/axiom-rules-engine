@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
@@ -594,6 +594,9 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::DaysBetween { .. } => Err(EvalError::TypeMismatch(
                 "bulk fast mode does not yet support days_between".to_string(),
             )),
+            ScalarExpr::OverPeriods { kind, .. } => {
+                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1117,6 +1120,9 @@ impl<'a> BulkEvaluator<'a> {
             )),
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(self.period.start)),
             ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(self.period.end)),
+            ScalarExpr::OverPeriods { kind, .. } => {
+                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+            }
             ScalarExpr::DateAddDays { .. }
             | ScalarExpr::DaysBetween { .. }
             | ScalarExpr::CountRelated { .. }

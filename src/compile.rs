@@ -389,6 +389,15 @@ fn collect_fast_blockers_from_scalar_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, then_expr, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, else_expr, blockers);
         }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            blockers.push(format!(
+                "{derived_name}: bulk fast mode does not support over-periods reductions; use the dense lifetime execution surface"
+            ));
+            collect_fast_blockers_from_scalar_expr(derived_name, value, blockers);
+            if let Some(n) = n {
+                collect_fast_blockers_from_scalar_expr(derived_name, n, blockers);
+            }
+        }
     }
 }
 
@@ -604,6 +613,12 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(then_expr, dependencies, relation_dependencies);
             collect_scalar_dependencies(else_expr, dependencies, relation_dependencies);
         }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            collect_scalar_dependencies(value, dependencies, relation_dependencies);
+            if let Some(n) = n {
+                collect_scalar_dependencies(n, dependencies, relation_dependencies);
+            }
+        }
     }
 }
 
@@ -694,6 +709,12 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_judgment(condition, relations);
             collect_relation_members_from_scalar(then_expr, relations);
             collect_relation_members_from_scalar(else_expr, relations);
+        }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            collect_relation_members_from_scalar(value, relations);
+            if let Some(n) = n {
+                collect_relation_members_from_scalar(n, relations);
+            }
         }
     }
 }

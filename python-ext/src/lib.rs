@@ -171,6 +171,60 @@ impl CompiledDenseProgramHandle {
     ) -> PyResult<Bound<'py, PyDict>> {
         self.run(py, period_kind, start, end, inputs, relations, outputs, true)
     }
+
+    /// Execute over an entity's lifetime in `f64` arithmetic: one positionally
+    /// aligned input batch per period, so formulas can reduce over the period
+    /// axis with `sum_over_periods` / `max_over_periods` / `count_over_periods`
+    /// / `sum_top_n_over_periods`.
+    ///
+    /// `periods` is a list of `(period_kind, start, end)` triples and `batches`
+    /// a same-length list of `(inputs[, relations])` — each `inputs` a dict of
+    /// column arrays and each optional `relations` the dict shape `execute`
+    /// accepts. Row `i` must be the same entity in every batch (identical row
+    /// order and count). Every requested output's formula must contain an
+    /// over-periods reduction; period-specific outputs should use `execute_f64`.
+    #[pyo3(signature = (periods, batches, outputs=None))]
+    fn execute_lifetime_f64<'py>(
+        &self,
+        py: Python<'py>,
+        periods: Vec<(String, String, String)>,
+        batches: Vec<Bound<'py, PyAny>>,
+        outputs: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if periods.len() != batches.len() {
+            return Err(PyValueError::new_err(format!(
+                "lifetime execution needs one batch per period: got {} periods and {} batches",
+                periods.len(),
+                batches.len()
+            )));
+        }
+
+        let parsed_periods = periods
+            .iter()
+            .map(|(period_kind, start, end)| {
+                Ok(Period {
+                    kind: parse_period_kind(period_kind),
+                    start: parse_date(start)?,
+                    end: parse_date(end)?,
+                })
+            })
+            .collect::<PyResult<Vec<Period>>>()?;
+
+        let built_batches = batches
+            .into_iter()
+            .map(|batch| {
+                let (inputs, relations) = split_lifetime_batch(&batch)?;
+                build_batch(&self.compiled, inputs, relations)
+            })
+            .collect::<PyResult<Vec<DenseBatchSpec>>>()?;
+
+        let output_names = outputs.unwrap_or_else(|| self.compiled.output_names());
+        let execution = self
+            .compiled
+            .execute_lifetime_f64(&parsed_periods, built_batches, &output_names)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        execution_to_pydict(py, execution)
+    }
 }
 
 impl CompiledDenseProgramHandle {
@@ -200,58 +254,91 @@ impl CompiledDenseProgramHandle {
         }
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-        let output_dict = PyDict::new(py);
-        for (name, value) in execution.outputs {
-            match value {
-                axiom_rules_engine::dense::DenseOutputValue::Scalar(column) => match column {
-                    DenseColumn::Bool(values) => {
-                        output_dict.set_item(name, PyArray1::from_vec(py, values))?;
-                    }
-                    DenseColumn::Integer(values) => {
-                        output_dict.set_item(name, PyArray1::from_vec(py, values))?;
-                    }
-                    DenseColumn::Decimal(values) => {
-                        let materialised = values
-                            .into_iter()
-                            .map(|value| {
-                                value.to_f64().ok_or_else(|| {
-                                    PyRuntimeError::new_err(
-                                        "failed to materialise decimal output as float64",
-                                    )
-                                })
-                            })
-                            .collect::<PyResult<Vec<f64>>>()?;
-                        output_dict.set_item(name, PyArray1::from_vec(py, materialised))?;
-                    }
-                    DenseColumn::Float(values) => {
-                        output_dict.set_item(name, PyArray1::from_vec(py, values))?;
-                    }
-                    DenseColumn::Text(values) => {
-                        output_dict.set_item(name, PyList::new(py, values)?)?;
-                    }
-                    DenseColumn::Date(values) => {
-                        let materialised = values
-                            .into_iter()
-                            .map(|value| value.to_string())
-                            .collect::<Vec<String>>();
-                        output_dict.set_item(name, PyList::new(py, materialised)?)?;
-                    }
-                },
-                axiom_rules_engine::dense::DenseOutputValue::Judgment(values) => {
+        execution_to_pydict(py, execution)
+    }
+}
+
+/// Materialise a dense execution result into the `{row_count, outputs}` dict the
+/// Python surface returns. Shared by the per-period and lifetime entry points.
+fn execution_to_pydict(
+    py: Python<'_>,
+    execution: axiom_rules_engine::dense::DenseExecutionResult,
+) -> PyResult<Bound<'_, PyDict>> {
+    let output_dict = PyDict::new(py);
+    for (name, value) in execution.outputs {
+        match value {
+            axiom_rules_engine::dense::DenseOutputValue::Scalar(column) => match column {
+                DenseColumn::Bool(values) => {
+                    output_dict.set_item(name, PyArray1::from_vec(py, values))?;
+                }
+                DenseColumn::Integer(values) => {
+                    output_dict.set_item(name, PyArray1::from_vec(py, values))?;
+                }
+                DenseColumn::Decimal(values) => {
                     let materialised = values
                         .into_iter()
-                        .map(|value| judgment_code(&value))
-                        .collect::<Vec<i8>>();
+                        .map(|value| {
+                            value.to_f64().ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "failed to materialise decimal output as float64",
+                                )
+                            })
+                        })
+                        .collect::<PyResult<Vec<f64>>>()?;
                     output_dict.set_item(name, PyArray1::from_vec(py, materialised))?;
                 }
+                DenseColumn::Float(values) => {
+                    output_dict.set_item(name, PyArray1::from_vec(py, values))?;
+                }
+                DenseColumn::Text(values) => {
+                    output_dict.set_item(name, PyList::new(py, values)?)?;
+                }
+                DenseColumn::Date(values) => {
+                    let materialised = values
+                        .into_iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<String>>();
+                    output_dict.set_item(name, PyList::new(py, materialised)?)?;
+                }
+            },
+            axiom_rules_engine::dense::DenseOutputValue::Judgment(values) => {
+                let materialised = values
+                    .into_iter()
+                    .map(|value| judgment_code(&value))
+                    .collect::<Vec<i8>>();
+                output_dict.set_item(name, PyArray1::from_vec(py, materialised))?;
             }
         }
-
-        let result = PyDict::new(py);
-        result.set_item("row_count", execution.row_count)?;
-        result.set_item("outputs", output_dict)?;
-        Ok(result)
     }
+
+    let result = PyDict::new(py);
+    result.set_item("row_count", execution.row_count)?;
+    result.set_item("outputs", output_dict)?;
+    Ok(result)
+}
+
+/// Split one lifetime batch entry into its `(inputs, relations)` parts. A batch
+/// is either a bare inputs dict, or a `(inputs[, relations])` tuple/list — the
+/// same relation dict shape `build_batch` already consumes.
+fn split_lifetime_batch<'py>(
+    batch: &Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyDict>, Option<Bound<'py, PyDict>>)> {
+    if let Ok(inputs) = batch.cast::<PyDict>() {
+        return Ok((inputs.clone(), None));
+    }
+    // Otherwise expect a sequence: (inputs,) or (inputs, relations).
+    let items = batch.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    if items.is_empty() || items.len() > 2 {
+        return Err(PyValueError::new_err(
+            "each lifetime batch must be an inputs dict or an (inputs[, relations]) tuple",
+        ));
+    }
+    let inputs = items[0].cast::<PyDict>()?.clone();
+    let relations = match items.get(1) {
+        Some(value) if !value.is_none() => Some(value.cast::<PyDict>()?.clone()),
+        _ => None,
+    };
+    Ok((inputs, relations))
 }
 
 #[pymodule]

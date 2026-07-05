@@ -248,6 +248,41 @@ pub enum RelatedValueRef {
     Derived(String),
 }
 
+/// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
+/// own period axis. Valid only under the lifetime execution surface
+/// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
+/// reject these because a single period has no period axis to reduce over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverPeriodsKind {
+    /// Sum of the inner value across all supplied periods.
+    Sum,
+    /// Maximum of the inner value across all supplied periods.
+    Max,
+    /// Count, per entity, of the supplied periods whose inner value is nonzero
+    /// (a `Bool` inner value counts `true`). The inner value IS evaluated per
+    /// period and tested against zero — this is not a bare period count.
+    Count,
+    /// Sum of the `n` largest per-period inner values. `n` must satisfy
+    /// `1 <= n <= the supplied period count` (the strict n contract): an
+    /// over-length `n` would only pad with zeros — an arithmetic no-op — so it
+    /// is rejected as a likely data error rather than silently summing every
+    /// period. `n` must also be period-invariant.
+    SumTopN,
+}
+
+impl OverPeriodsKind {
+    /// The formula builtin name that lowers to this reduction, used in
+    /// diagnostics (e.g. rejecting the node under per-period execution).
+    pub fn as_call_name(self) -> &'static str {
+        match self {
+            Self::Sum => "sum_over_periods",
+            Self::Max => "max_over_periods",
+            Self::Count => "count_over_periods",
+            Self::SumTopN => "sum_top_n_over_periods",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
     Literal(ScalarValue),
@@ -301,6 +336,17 @@ pub enum ScalarExpr {
         condition: Box<JudgmentExpr>,
         then_expr: Box<ScalarExpr>,
         else_expr: Box<ScalarExpr>,
+    },
+    /// Reduction over an entity's own period axis (lifetime execution only).
+    /// `value` is the inner per-period expression, evaluated once per supplied
+    /// period; `n` is present only for [`OverPeriodsKind::SumTopN`] and gives
+    /// the number of largest per-period values to sum. The per-period execution
+    /// paths reject this node — it is meaningful only when a batch is supplied
+    /// per period through `execute_lifetime`.
+    OverPeriods {
+        kind: OverPeriodsKind,
+        value: Box<ScalarExpr>,
+        n: Option<Box<ScalarExpr>>,
     },
 }
 
@@ -640,6 +686,12 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_judgment_expr(condition, slots);
             collect_input_slots_from_scalar_expr(then_expr, slots);
             collect_input_slots_from_scalar_expr(else_expr, slots);
+        }
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            collect_input_slots_from_scalar_expr(value, slots);
+            if let Some(n) = n {
+                collect_input_slots_from_scalar_expr(n, slots);
+            }
         }
     }
 }

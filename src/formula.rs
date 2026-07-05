@@ -23,8 +23,8 @@ use thiserror::Error;
 
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
-    IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec, UnitSpec,
+    IndexedParameterSpec, JudgmentExprSpec, OverPeriodsKindSpec, ParameterVersionSpec, ProgramSpec,
+    RelatedValueRefSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -1444,6 +1444,46 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     days: Box::new(lower_to_scalar(&args[1], ctx)?),
                 }
             }
+            // Over-periods reductions: reduce the inner expression across an
+            // entity's own period axis. Meaningful only under the lifetime
+            // execution surface; the per-period execution paths reject them.
+            // The kind is chosen by an EXHAUSTIVE match with an explicit error
+            // arm — never a wildcard falling through to `Count` — so a future
+            // one-arg reduction added to this arm's guard cannot silently parse
+            // as the period count. `sum_top_n_over_periods` (two args) is handled
+            // separately below.
+            "sum_over_periods" | "max_over_periods" | "count_over_periods" => {
+                if args.len() != 1 {
+                    return Err(FormulaError::lower(format!("{func} takes 1 arg")));
+                }
+                let over = match func.as_str() {
+                    "sum_over_periods" => OverPeriodsKindSpec::Sum,
+                    "max_over_periods" => OverPeriodsKindSpec::Max,
+                    "count_over_periods" => OverPeriodsKindSpec::Count,
+                    other => {
+                        return Err(FormulaError::lower(format!(
+                            "unknown one-argument over-periods reduction `{other}`"
+                        )));
+                    }
+                };
+                ScalarExprSpec::OverPeriods {
+                    over,
+                    value: Box::new(lower_to_scalar(&args[0], ctx)?),
+                    n: None,
+                }
+            }
+            "sum_top_n_over_periods" => {
+                if args.len() != 2 {
+                    return Err(FormulaError::lower(
+                        "sum_top_n_over_periods takes 2 args".to_string(),
+                    ));
+                }
+                ScalarExprSpec::OverPeriods {
+                    over: OverPeriodsKindSpec::SumTopN,
+                    value: Box::new(lower_to_scalar(&args[0], ctx)?),
+                    n: Some(Box::new(lower_to_scalar(&args[1], ctx)?)),
+                }
+            }
             "len" => {
                 let rel = match args.first() {
                     Some(Expr::Var(rel)) => rel.clone(),
@@ -1559,6 +1599,15 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     where_clause: Some(Box::new(where_clause)),
                 }
             }
+            // Any other `*_over_periods` name is an unrecognized reduction, not a
+            // generic unknown function: reject it explicitly so a typo or a
+            // not-yet-implemented reduction fails to parse loudly instead of
+            // being mistaken for a plain call.
+            other if other.ends_with("_over_periods") => {
+                return Err(FormulaError::lower(format!(
+                    "unknown over-periods reduction `{other}` (expected one of sum_over_periods, max_over_periods, count_over_periods, sum_top_n_over_periods)"
+                )));
+            }
             _ => {
                 return Err(FormulaError::lower(format!("unknown function `{}`", func)));
             }
@@ -1655,6 +1704,14 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
         } => {
             promote_ints_to_decimal(then_expr);
             promote_ints_to_decimal(else_expr);
+        }
+        // A Sum / Max / SumTopN reduction is Decimal-typed, so promote integer
+        // literals in its inner value to keep it Decimal. `n` (SumTopN count) is
+        // an integer count and is deliberately left alone. Count reduces to an
+        // integer, but promoting literals in its (ignored) inner value is
+        // harmless, so we descend uniformly.
+        ScalarExprSpec::OverPeriods { value, .. } => {
+            promote_ints_to_decimal(value);
         }
         // Don't descend into:
         //   * Comparisons (operands compare by their own type)

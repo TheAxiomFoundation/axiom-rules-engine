@@ -474,6 +474,16 @@
       },
       "type": "object"
     },
+    "OverPeriodsKindSpec": {
+      "description": "The over-periods reduction vocabulary, mirroring\n[`crate::model::OverPeriodsKind`].",
+      "enum": [
+        "sum",
+        "max",
+        "count",
+        "sum_top_n"
+      ],
+      "type": "string"
+    },
     "ParameterVersionSpec": {
       "properties": {
         "effective_from": {
@@ -1071,6 +1081,37 @@
             "condition",
             "then_expr",
             "else_expr"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reduction over an entity's own period axis (lifetime execution only).\n`n` is present only for the `sum_top_n` reduction. Expression-level,\nadditive to the serialized surface — no artifact-format-version bump.",
+          "properties": {
+            "kind": {
+              "const": "over_periods",
+              "type": "string"
+            },
+            "n": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScalarExprSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "over": {
+              "$ref": "#/$defs/OverPeriodsKindSpec"
+            },
+            "value": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "over",
+            "value"
           ],
           "type": "object"
         }

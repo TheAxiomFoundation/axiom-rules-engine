@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{
-    execute_request, ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue,
+    ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
