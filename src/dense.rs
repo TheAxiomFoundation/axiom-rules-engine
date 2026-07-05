@@ -2585,13 +2585,23 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let else_values = self.eval_scalar(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
             }
-            // Period-specific leaves have no defined period outside a reduction.
-            CompiledScalarExpr::Input(index) => Err(EvalError::LifetimeAmbiguousLeaf(
-                self.program.root_inputs[*index].clone(),
-            )),
-            CompiledScalarExpr::InputOrElse { input, .. } => Err(EvalError::LifetimeAmbiguousLeaf(
-                self.program.root_inputs[*input].clone(),
-            )),
+            // A bare input outside a reduction has no single period in general,
+            // but a per-person-constant input (a birth / age-attainment year —
+            // the shape every statutory computation-year count bottoms out in)
+            // carries the same value in every supplied period. Bind it per row
+            // when it is verified period-invariant; error naming the input and
+            // the first divergence when it is not. This is reached directly and
+            // through a derived chain (e.g. an elapsed-years count built from
+            // `year_attained_62 - year_attained_21`), and it may sit in scalar
+            // or in the `n` position of `sum_top_n_over_periods`.
+            CompiledScalarExpr::Input(index) => {
+                let name = self.program.root_inputs[*index].clone();
+                self.eval_period_invariant_input(expr, &name)
+            }
+            CompiledScalarExpr::InputOrElse { input, .. } => {
+                let name = self.program.root_inputs[*input].clone();
+                self.eval_period_invariant_input(expr, &name)
+            }
             CompiledScalarExpr::PeriodStart => {
                 Err(EvalError::LifetimeAmbiguousLeaf("period_start".to_string()))
             }
@@ -2715,6 +2725,60 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             .collect()
     }
 
+    /// Bind a bare input evaluated OUTSIDE any reduction, when — and only when —
+    /// its supplied value is verified identical across every period for a given
+    /// row.
+    ///
+    /// A reduction defines the period axis explicitly; a bare input does not, so
+    /// it is period-ambiguous in general. But the derived counts real statutes
+    /// build (42 USC 415(b)'s benefit-computation-year count, from the year a
+    /// worker attains 21 and 62) bottom out in inputs that are constant across
+    /// the whole history by construction. Rather than reject every such input, we
+    /// evaluate `expr` under each period's ordinary executor and check PER ROW
+    /// that the value never changes. If a row is invariant across all periods,
+    /// that single value is bound for it; if any row diverges, we error, naming
+    /// the input and the first two differing period labels and values. Truly
+    /// period-varying inputs therefore still fail loudly — the check only
+    /// legalizes provably unambiguous bindings.
+    ///
+    /// Values are compared in each column's own dtype (numeric, bool, text or
+    /// date), so the invariance test is exact and never rounds. `expr` is the
+    /// original `Input` / `InputOrElse` node, replayed identically in every
+    /// period; an absent `InputOrElse` broadcasts the same default in each and so
+    /// is trivially invariant, binding that default.
+    fn eval_period_invariant_input(
+        &mut self,
+        expr: &CompiledScalarExpr,
+        input_name: &str,
+    ) -> Result<DenseColumn, EvalError> {
+        // Evaluate the leaf under every period's executor: one column per
+        // period, each of length `row_count` and positionally aligned by row.
+        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
+        for executor in &mut self.period_executors {
+            per_period.push(executor.eval_scalar_expr(expr)?);
+        }
+        // A single period is invariant by definition; nothing to compare.
+        let (first, rest) = per_period
+            .split_first()
+            .expect("lifetime execution guarantees at least one period");
+        for (offset, column) in rest.iter().enumerate() {
+            if let Some(row) = first_differing_row(first, column) {
+                // `offset` indexes `rest`, so the diverging period is `offset + 1`.
+                let later_period = offset + 1;
+                return Err(EvalError::LifetimePeriodVaryingInput {
+                    input: input_name.to_string(),
+                    first_period: period_label(self.period_executors[0].period),
+                    first_value: dense_value_label(first, row),
+                    second_period: period_label(self.period_executors[later_period].period),
+                    second_value: dense_value_label(column, row),
+                });
+            }
+        }
+        // Every row agrees across all periods: bind the (identical) first
+        // period's column, preserving its original dtype for the caller.
+        Ok(first.clone())
+    }
+
     fn eval_judgment(
         &mut self,
         expr: &CompiledJudgmentExpr,
@@ -2770,6 +2834,69 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 })
                 .collect()),
         }
+    }
+}
+
+/// A human-readable label for a period, used in period-invariance error
+/// messages. The `start..end` boundaries identify the period unambiguously and
+/// match how periods are otherwise surfaced to callers.
+fn period_label(period: &Period) -> String {
+    format!("in {}..{}", period.start, period.end)
+}
+
+/// Format the value at `row` of a dense column for an error message, in the
+/// column's own dtype (so an integer year reads `1985`, not `1985.0`).
+fn dense_value_label(column: &DenseColumn, row: usize) -> String {
+    match column {
+        DenseColumn::Bool(values) => values[row].to_string(),
+        DenseColumn::Integer(values) => values[row].to_string(),
+        DenseColumn::Decimal(values) => values[row].to_string(),
+        DenseColumn::Float(values) => values[row].to_string(),
+        DenseColumn::Text(values) => format!("{:?}", values[row]),
+        DenseColumn::Date(values) => values[row].to_string(),
+    }
+}
+
+/// Return the first row index at which two positionally aligned dense columns
+/// disagree, or `None` if every row is identical. Comparison is exact and in
+/// each column's dtype; two numeric columns of different variants (e.g. an
+/// `Integer` and a `Float`) are compared by numeric value so an input supplied
+/// as `1985` in one period and `1985.0` in another is still period-invariant.
+/// Columns whose lengths differ, or whose types are non-numeric and mismatched,
+/// are treated as differing at the first row (this errors loudly, which is the
+/// safe outcome for a period that supplied a structurally different value).
+fn first_differing_row(left: &DenseColumn, right: &DenseColumn) -> Option<usize> {
+    // Length mismatch cannot arise under positional lifetime alignment (every
+    // period's batch has the same row count), but guard it: report row 0.
+    if left.len() != right.len() {
+        return Some(0);
+    }
+    match (left, right) {
+        (DenseColumn::Bool(a), DenseColumn::Bool(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        (DenseColumn::Text(a), DenseColumn::Text(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        (DenseColumn::Date(a), DenseColumn::Date(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+        // Any pairing of numeric variants (Integer / Decimal / Float) compares
+        // by numeric value. `vec_from_column::<Decimal>` promotes both sides to
+        // Decimal for an exact comparison when representable; a value not
+        // representable as Decimal — an f64 that is non-finite or beyond
+        // Decimal's magnitude (~7.9e28), neither of which a per-person constant
+        // year or money amount ever is — falls back to differing.
+        (
+            DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
+            DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
+        ) => match (
+            <Decimal as DenseNum>::vec_from_column(left),
+            <Decimal as DenseNum>::vec_from_column(right),
+        ) {
+            (Ok(a), Ok(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
+            // Non-representable value on at least one side (non-finite or out of
+            // Decimal range): cannot prove invariance, so treat as differing at
+            // the first row.
+            _ => Some(0),
+        },
+        // Genuinely different, non-numeric column shapes: not provably
+        // invariant.
+        _ => Some(0),
     }
 }
 

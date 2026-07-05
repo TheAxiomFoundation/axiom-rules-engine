@@ -123,5 +123,60 @@ Do NOT merge.
 - Reference-period choice for non-reduction scalars (parameters/derived) inside the outer formula:
   chose LAST supplied period. Documented; flag for review. For the AIME acceptance formula the outer
   formula only combines the reduction with a literal (420), so this choice is not exercised there.
-- Lifetime execution intentionally rejects period-ambiguous bare leaves outside reductions rather than
-  silently picking a period — the safe faithful reading of the brief.
+- (Superseded for INPUTS by the amendment below.) Lifetime execution previously rejected ALL
+  period-ambiguous bare leaves outside reductions. Bare inputs are now bound when provably invariant;
+  the reference-period-for-parameters convention above is unchanged.
+
+## Amendment — runtime-verified period-invariant binding for inputs (this session)
+
+### Why
+42 USC 415(b)'s benefit-computation-year count is a derived scalar built from per-person-constant
+inputs (year the worker attains 21 / 62) and must feed `sum_top_n_over_periods` as its `n`. Under the
+original design that `n` — a bare input reached through a derived chain, sitting OUTSIDE every reduction
+— hit the blanket `LifetimeAmbiguousLeaf` rejection, so real 415(b) logic could not run end to end.
+Empirically confirmed failing (scratchpad/check_derived_n_lifetime.py errored on `year_attained_62`).
+
+### What changed (dense.rs lifetime paths only; no schema change; per-period execute/execute_f64 unchanged)
+- `LifetimeExecutor::eval_scalar` `Input` / `InputOrElse` arms no longer error. They call the new
+  `eval_period_invariant_input(expr, name)`, which evaluates the SAME bare-input node under every
+  period's `DenseExecutor` (one column per period, positionally aligned) and checks PER ROW that the
+  value is identical across ALL supplied periods.
+  - All rows invariant → bind period 0's column (dtype preserved); the caller consumes it exactly like
+    any other column, so a value in scalar OR in the `n` position, reached directly OR through a derived
+    chain (Sub/Max/… compose row-wise), all work.
+  - Any row varies → new `EvalError::LifetimePeriodVaryingInput`, naming the input and the first two
+    differing period labels (`start..end`) and values. Truly period-varying inputs still fail loudly.
+- New free helpers in dense.rs: `first_differing_row` (exact per-row equality; numeric variants compared
+  by Decimal-promoted value so `1985` == `1985.0`; non-numeric mismatch or non-finite → treated as
+  differing = safe error), `period_label`, `dense_value_label`.
+- New `EvalError::LifetimePeriodVaryingInput` variant in engine.rs. `LifetimeAmbiguousLeaf` still used
+  for the genuinely period-specific leaves (PeriodStart/End, Date*, Count/SumRelated).
+- Parameters keep their existing last-supplied-period behavior; the amendment touches inputs only.
+
+### Tests
+- tests/lifetime.rs (+4, 28 total): (a) per-person-constant input binds outside a reduction;
+  (b) per-row-varying but per-period-constant input binds per row (rows 100 vs 500);
+  (c) period-VARYING input errors, message names the input; (d) the derived-n-from-constant-inputs
+  chain end to end (two workers, n = 36 and 31; earnings_total [3_456_000, 1_922_000]; aime [8000, 5166]).
+- python/tests/test_dense_lifetime.py (+2): two-worker derived-n case (mirrors the scratchpad script) and
+  a period-varying-input error case naming the input.
+
+### Acceptance-script arithmetic note (IMPORTANT — flagged for review)
+scratchpad/check_derived_n_lifetime.py as delivered expected `aime[1] = 5167` for worker B, with a
+comment `floor(5167.20)`. That is wrong: worker B has total 1_922_000, n = 31, so
+`aime = floor(1_922_000 / (12*31 = 372)) = floor(5166.666…) = 5166`. 5167 is the round-HALF-UP value,
+not the `floor` the module (and 42 USC 415(b)(2)(A) / 20 CFR 404.211(d), which round DOWN) use — and no
+integer months divisor can even produce 5167 for this total (floor jumps 5180 at d=371 to 5166 at d=372,
+skipping 5167). Independently re-derived. The engine is statutorily correct at 5166; the fixture's one
+expected constant was corrected 5167 → 5166 (worker A's 8000 is unaffected: floor and round agree there).
+The binding mechanism the script exercises — two workers with DIFFERENT derived n binding correctly — is
+proven by `earnings_total = [3_456_000, 1_922_000]`, which matches exactly.
+
+### Final gate (all GREEN, this amendment)
+- cargo fmt --check clean; cargo build; cargo test (default) 0 failed; cargo test --features schema
+  0 failed (schema golden-file guard passes — no artifact-schema change); cargo check python-ext;
+  cargo check wasm32-unknown-unknown --no-default-features.
+- clippy --all-targets: actual lint findings BYTE-IDENTICAL to the pre-amendment branch tip (37 finding
+  lines; 35 lib + 35 lib-test as before) — ZERO new warnings; none reference the new code.
+- 28 Rust lifetime tests + 38 Python tests pass against the maturin-rebuilt extension; the corrected
+  scratchpad acceptance script passes (earnings_total [3456000, 1922000], aime [8000, 5166]).

@@ -70,6 +70,16 @@ pub enum EvalError {
         "lifetime execution cannot evaluate `{0}` outside an over-periods reduction because it is period-specific; wrap it in a reduction (e.g. sum_over_periods) so its period is defined"
     )]
     LifetimeAmbiguousLeaf(String),
+    #[error(
+        "lifetime execution cannot evaluate input `{input}` outside an over-periods reduction: its value is not period-invariant for at least one entity — {first_period} it is {first_value} but {second_period} it is {second_value}; wrap it in a reduction (e.g. sum_over_periods) so its period is defined, or supply the same value for every period"
+    )]
+    LifetimePeriodVaryingInput {
+        input: String,
+        first_period: String,
+        first_value: String,
+        second_period: String,
+        second_value: String,
+    },
     #[error("sum_top_n_over_periods requires n >= 1, got {0}")]
     OverPeriodsTopNInvalid(i64),
 }

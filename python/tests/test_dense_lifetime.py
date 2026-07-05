@@ -118,6 +118,153 @@ class TestAimeAcceptance:
         np.testing.assert_allclose(result["outputs"]["aime"], [2833.0, 1666.0])
 
 
+# A benefit-computation-year count derived from per-person-constant inputs (the
+# years a worker attains 21 and 62), used both as the person-varying `n` of
+# sum_top_n_over_periods and as an outer divisor — the exact shape of 42 USC
+# 415(b). The count sits outside every reduction and is reached only through a
+# derived chain; lifetime execution binds the per-person-constant inputs it
+# bottoms out in because they are supplied identically in every period.
+DERIVED_N_MODULE = """\
+format: rulespec/v1
+module:
+  summary: |-
+    Shape-mirror of 42 USC 415(b): a benefit-computation-year count derived from
+    per-person-constant inputs feeds sum_top_n_over_periods as a person-varying n
+    and divides the total to an AIME.
+rules:
+  - name: dropout_years
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '5'
+  - name: minimum_computation_years
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '2'
+  - name: months_per_year
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '12'
+  - name: elapsed_years
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          year_attained_62 - max(1950, year_attained_21)
+  - name: computation_year_count
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          max(minimum_computation_years, elapsed_years - dropout_years)
+  - name: earnings_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          sum_top_n_over_periods(indexed_earnings, computation_year_count)
+  - name: aime
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          floor(earnings_total / (months_per_year * computation_year_count))
+"""
+
+
+@pytest.fixture(scope="module")
+def derived_n_program(tmp_path_factory) -> CompiledDenseProgram:
+    path = tmp_path_factory.mktemp("derived_n") / "aime.yaml"
+    path.write_text(DERIVED_N_MODULE, encoding="utf-8")
+    return CompiledDenseProgram.from_file(path, entity="Worker")
+
+
+class TestDerivedPersonVaryingN:
+    """Two workers with DIFFERENT derived `n` (36 vs 31) in one batch, mirroring
+    the scratchpad acceptance fixture and rulespec-us #541's 415(b) shape.
+
+    Worker A: year21=1985, year62=2026 -> elapsed 41, count max(2, 41-5) = 36.
+        Earnings 96_000 x36 then 12_000, 6_000, 0, 0, 0 (41 periods).
+        top-36 sum = 36 * 96_000 = 3_456_000.
+        aime = floor(3_456_000 / (12*36 = 432)) = floor(8000.0) = 8000.
+    Worker B: year21=1990, year62=2026 -> elapsed 36, count max(2, 36-5) = 31.
+        Earnings flat 62_000 (41 periods). top-31 sum = 31 * 62_000 = 1_922_000.
+        aime = floor(1_922_000 / (12*31 = 372)) = floor(5166.666...) = 5166.
+            (Statutory floor per 42 USC 415(b)(2)(A) / 20 CFR 404.211(d); the
+             quotient rounds DOWN, so 5166 — not the round-half-up 5167, which no
+             integer months divisor can even produce for this total.)
+    """
+
+    def test_two_workers_with_different_derived_n(self, derived_n_program) -> None:
+        n_periods = 41
+        periods = [
+            ("calendar_year", f"{1985 + k}-01-01", f"{1985 + k}-12-31")
+            for k in range(n_periods)
+        ]
+        a_earn = [96_000.0] * 36 + [12_000.0, 6_000.0, 0.0, 0.0, 0.0]
+        b_earn = [62_000.0] * n_periods
+        batches = [
+            {
+                "indexed_earnings": np.array([a_earn[k], b_earn[k]]),
+                "year_attained_21": np.array([1985.0, 1990.0]),
+                "year_attained_62": np.array([2026.0, 2026.0]),
+            }
+            for k in range(n_periods)
+        ]
+        result = derived_n_program.execute_lifetime_f64(
+            periods=periods,
+            batches=batches,
+            outputs=["earnings_total", "aime"],
+        )
+        assert result["row_count"] == 2
+        np.testing.assert_allclose(
+            result["outputs"]["earnings_total"], [3_456_000.0, 1_922_000.0]
+        )
+        np.testing.assert_allclose(result["outputs"]["aime"], [8_000.0, 5_166.0])
+
+    def test_period_varying_input_raises_naming_it(self, derived_n_program) -> None:
+        # If a bare input actually varies across periods it is period-ambiguous
+        # outside a reduction and must error, naming the input. Here worker 0's
+        # year_attained_62 changes between the two periods.
+        periods = [
+            ("calendar_year", "1985-01-01", "1985-12-31"),
+            ("calendar_year", "1986-01-01", "1986-12-31"),
+        ]
+        batches = [
+            {
+                "indexed_earnings": np.array([50_000.0]),
+                "year_attained_21": np.array([1985.0]),
+                "year_attained_62": np.array([2026.0]),
+            },
+            {
+                "indexed_earnings": np.array([50_000.0]),
+                "year_attained_21": np.array([1985.0]),
+                "year_attained_62": np.array([2027.0]),  # varies -> ambiguous
+            },
+        ]
+        with pytest.raises(RuntimeError, match="year_attained_62"):
+            derived_n_program.execute_lifetime_f64(
+                periods=periods, batches=batches, outputs=["aime"]
+            )
+
+
 class TestLifetimeErrors:
     def test_period_and_batch_count_mismatch_raises(self, program) -> None:
         periods = [("calendar_year", "1990-01-01", "1990-12-31")]

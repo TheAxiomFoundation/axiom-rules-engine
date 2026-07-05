@@ -37,6 +37,23 @@ fn batch(input: &str, values: Vec<f64>) -> DenseBatchSpec {
     }
 }
 
+/// A batch with several named float inputs, all describing the same rows in the
+/// same order. Every column must have `row_count` entries.
+fn batch_multi(row_count: usize, columns: &[(&str, Vec<f64>)]) -> DenseBatchSpec {
+    let inputs = columns
+        .iter()
+        .map(|(name, values)| {
+            assert_eq!(values.len(), row_count, "column `{name}` has wrong length");
+            (name.to_string(), DenseColumn::Float(values.clone()))
+        })
+        .collect();
+    DenseBatchSpec {
+        row_count,
+        inputs,
+        relations: HashMap::new(),
+    }
+}
+
 fn compile(rulespec: &str, entity: &str) -> DenseCompiledProgram {
     let artifact =
         CompiledProgramArtifact::from_rulespec_str(rulespec).expect("rulespec module compiles");
@@ -637,4 +654,249 @@ fn decimal_mode_sums_exactly() {
         panic!("decimal mode must return a Decimal column");
     };
     assert_eq!(values, &vec![Decimal::from_str_exact("0.3").unwrap()]);
+}
+
+// ---------------------------------------------------------------------------
+// Period-invariant binding of bare inputs outside a reduction
+//
+// A bare input evaluated outside any reduction has no single period in general.
+// But the derived counts real statutes build (42 USC 415(b)'s computation-year
+// count) bottom out in per-person-constant inputs supplied identically in every
+// period. Lifetime execution binds such an input when — and only when — its
+// value is verified identical across all supplied periods for each row; a value
+// that actually varies across periods still errors, naming the input.
+// ---------------------------------------------------------------------------
+
+/// The 415(b) benefit-computation-year count shape, as a standalone module: a
+/// derived integer count built from two per-person-constant inputs (the years a
+/// worker attains 21 and 62), then that count is used both as the `n` of
+/// `sum_top_n_over_periods` AND as a divisor in the outer formula. The count is
+/// reached only through a derived chain and sits outside every reduction — the
+/// exact pattern the amendment legalizes.
+const DERIVED_N_MODULE: &str = r#"
+format: rulespec/v1
+module:
+  summary: |-
+    Shape-mirror of 42 USC 415(b): a benefit-computation-year count derived from
+    per-person-constant inputs feeds sum_top_n_over_periods as a person-varying n
+    and divides the total to an AIME.
+rules:
+  - name: dropout_years
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '5'
+  - name: minimum_computation_years
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '2'
+  - name: months_per_year
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1979-01-01'
+        formula: '12'
+  - name: elapsed_years
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          year_attained_62 - max(1950, year_attained_21)
+  - name: computation_year_count
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          max(minimum_computation_years, elapsed_years - dropout_years)
+  - name: earnings_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          sum_top_n_over_periods(indexed_earnings, computation_year_count)
+  - name: aime
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          floor(earnings_total / (months_per_year * computation_year_count))
+"#;
+
+#[test]
+fn per_person_constant_input_binds_outside_a_reduction() {
+    // A single per-person-constant input used directly in the outer formula
+    // (added to a reduction). The input is the same in every period, so it binds
+    // to that value. base_year = 2000 (constant); sum = 10 + 20 + 30 = 60;
+    // result = 60 + 2000 = 2060.
+    let module = r#"
+format: rulespec/v1
+rules:
+  - name: shifted_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1990-01-01'
+        formula: |-
+          sum_over_periods(earnings) + base_year
+"#;
+    let program = compile(module, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    let batches = vec![
+        batch_multi(1, &[("earnings", vec![10.0]), ("base_year", vec![2000.0])]),
+        batch_multi(1, &[("earnings", vec![20.0]), ("base_year", vec![2000.0])]),
+        batch_multi(1, &[("earnings", vec![30.0]), ("base_year", vec![2000.0])]),
+    ];
+    let result = program
+        .execute_lifetime(&periods, batches, &["shifted_total".to_string()])
+        .expect("period-invariant input must bind");
+    assert_eq!(scalar_f64(&result, "shifted_total"), vec![2060.0]);
+}
+
+#[test]
+fn per_row_varying_but_per_period_constant_input_binds_per_row() {
+    // Two workers with DIFFERENT constant inputs. Each row's input is invariant
+    // across the three periods, but the rows differ from each other — the bind
+    // is per row. Row 0: base 100, sum 6 -> 106. Row 1: base 500, sum 60 -> 560.
+    let module = r#"
+format: rulespec/v1
+rules:
+  - name: shifted_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1990-01-01'
+        formula: |-
+          sum_over_periods(earnings) + base
+"#;
+    let program = compile(module, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    let batches = vec![
+        batch_multi(
+            2,
+            &[("earnings", vec![1.0, 10.0]), ("base", vec![100.0, 500.0])],
+        ),
+        batch_multi(
+            2,
+            &[("earnings", vec![2.0, 20.0]), ("base", vec![100.0, 500.0])],
+        ),
+        batch_multi(
+            2,
+            &[("earnings", vec![3.0, 30.0]), ("base", vec![100.0, 500.0])],
+        ),
+    ];
+    let result = program
+        .execute_lifetime(&periods, batches, &["shifted_total".to_string()])
+        .expect("per-row-constant input must bind per row");
+    assert_eq!(result.row_count, 2);
+    assert_eq!(scalar_f64(&result, "shifted_total"), vec![106.0, 560.0]);
+}
+
+#[test]
+fn period_varying_input_still_errors_naming_the_input() {
+    // The same input `base` is supplied a DIFFERENT value in period 1 than in
+    // period 0 for the (single) row. That is genuinely period-ambiguous outside
+    // a reduction, so it must error, and the message must name the input.
+    let module = r#"
+format: rulespec/v1
+rules:
+  - name: shifted_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '1990-01-01'
+        formula: |-
+          sum_over_periods(earnings) + base
+"#;
+    let program = compile(module, "Worker");
+    let periods = vec![year(2001), year(2002)];
+    let batches = vec![
+        batch_multi(1, &[("earnings", vec![1.0]), ("base", vec![100.0])]),
+        // base changes from 100 to 200 across periods -> ambiguous.
+        batch_multi(1, &[("earnings", vec![2.0]), ("base", vec![200.0])]),
+    ];
+    let error = program
+        .execute_lifetime(&periods, batches, &["shifted_total".to_string()])
+        .expect_err("a period-varying input must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("base")
+            && message.contains("not period-invariant")
+            && message.contains("100")
+            && message.contains("200"),
+        "unexpected error: {message}"
+    );
+}
+
+/// Two workers with genuinely different derived `n` (36 and 31) in one batch,
+/// mirroring the Python acceptance fixture and rulespec-us #541's 415(b) shape.
+/// The count is derived from per-person-constant inputs and used as the `n` of
+/// `sum_top_n_over_periods` and as an outer divisor. Hand-derived:
+///   Worker A: year21=1985, year62=2026 -> elapsed 41, count max(2,41-5)=36.
+///     Earnings: 96_000 x36 then 12_000, 6_000, 0, 0, 0 (41 periods).
+///     top-36 sum = 36*96_000 = 3_456_000.
+///     aime = floor(3_456_000 / (12*36=432)) = floor(8000.0) = 8000.
+///   Worker B: year21=1990, year62=2026 -> elapsed 36, count max(2,36-5)=31.
+///     Earnings: flat 62_000 (41 periods). top-31 sum = 31*62_000 = 1_922_000.
+///     aime = floor(1_922_000 / (12*31=372)) = floor(5166.666...) = 5166.
+///       (Statutory floor per 42 USC 415(b)(2)(A) / 20 CFR 404.211(d); NOT the
+///        round-half-up 5167 — no integer months divisor even yields 5167.)
+#[test]
+fn derived_n_from_constant_inputs_end_to_end() {
+    let program = compile(DERIVED_N_MODULE, "Worker");
+    let n_periods = 41;
+    let periods = (0..n_periods)
+        .map(|k| year(1985 + k as i32))
+        .collect::<Vec<_>>();
+
+    let mut a_earn = vec![96_000.0; 36];
+    a_earn.extend([12_000.0, 6_000.0, 0.0, 0.0, 0.0]);
+    let b_earn = vec![62_000.0; n_periods];
+
+    let batches = (0..n_periods)
+        .map(|k| {
+            batch_multi(
+                2,
+                &[
+                    ("indexed_earnings", vec![a_earn[k], b_earn[k]]),
+                    ("year_attained_21", vec![1985.0, 1990.0]),
+                    ("year_attained_62", vec![2026.0, 2026.0]),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let result = program
+        .execute_lifetime(
+            &periods,
+            batches,
+            &["earnings_total".to_string(), "aime".to_string()],
+        )
+        .expect("derived-n lifetime execution succeeds");
+    assert_eq!(result.row_count, 2);
+    assert_eq!(
+        scalar_f64(&result, "earnings_total"),
+        vec![3_456_000.0, 1_922_000.0]
+    );
+    assert_eq!(scalar_f64(&result, "aime"), vec![8_000.0, 5_166.0]);
 }
