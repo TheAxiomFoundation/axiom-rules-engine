@@ -116,10 +116,11 @@ trait DenseNum:
     /// determinations.
     fn round_to(self, rounding: Rounding) -> Self;
     fn is_zero(self) -> bool;
-    /// Truncate an already-floored value to `i64`, saturating past the `i64`
-    /// range. Used to read the `n` of `sum_top_n_over_periods` (a small count)
-    /// from a numeric column.
-    fn to_i64_trunc(self) -> i64;
+    /// Truncate toward zero to an exact `i64`, or `None` when the value is
+    /// non-finite or lies beyond the `i64` range. Used to read the `n` of
+    /// `sum_top_n_over_periods`: `None` (and any out-of-range integer) is a hard
+    /// error under the strict n contract, never a silent saturation.
+    fn try_to_i64_trunc(self) -> Option<i64>;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
     /// Read any numeric column as this mode's working vector.
@@ -151,17 +152,11 @@ impl DenseNum for Decimal {
         self == Decimal::ZERO
     }
 
-    fn to_i64_trunc(self) -> i64 {
-        // `self` is already floored by the caller; clamp to the i64 range so an
-        // absurd `n` cannot panic (it will simply exceed the period count and
-        // be clamped there).
-        self.trunc().to_i64().unwrap_or_else(|| {
-            if self > Decimal::ZERO {
-                i64::MAX
-            } else {
-                i64::MIN
-            }
-        })
+    fn try_to_i64_trunc(self) -> Option<i64> {
+        // Truncate toward zero; `to_i64` returns None when the truncated value
+        // is beyond the i64 range, which the strict n contract treats as a hard
+        // error (never a saturation to i64::MAX).
+        self.trunc().to_i64()
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -230,10 +225,15 @@ impl DenseNum for f64 {
         self == 0.0
     }
 
-    fn to_i64_trunc(self) -> i64 {
-        // Saturating cast: NaN -> 0, out-of-range -> i64::MIN/MAX (Rust's
-        // `as` on floats already saturates and maps NaN to 0).
-        self.trunc() as i64
+    fn try_to_i64_trunc(self) -> Option<i64> {
+        // Reject non-finite and out-of-range values instead of saturating: the
+        // strict n contract errors on a garbage n rather than silently reading
+        // it as 0 (NaN) or a clamped extreme.
+        let truncated = self.trunc();
+        if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
+            return None;
+        }
+        Some(truncated as i64)
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -673,18 +673,22 @@ impl DenseCompiledProgram {
     /// Execute over an entity's lifetime in `f64` arithmetic (throughput mode).
     ///
     /// `periods` and `batches` must have equal length (one batch per period),
-    /// and every batch must describe the SAME entity rows in the SAME order and
-    /// count (v1 positional alignment — row `i` is the same entity in every
-    /// period). Each requested output's formula must contain at least one
-    /// over-periods reduction (`sum_over_periods`, `max_over_periods`,
-    /// `count_over_periods`, `sum_top_n_over_periods`); outputs with no
-    /// reduction are period-specific and should use the per-period
-    /// [`Self::execute_f64`] entry point instead.
+    /// the periods must be strictly ascending by start date, and every batch
+    /// must describe the SAME entity rows in the SAME order and count (v1
+    /// positional alignment — row `i` is the same entity in every period). Each
+    /// requested output's formula must contain at least one over-periods
+    /// reduction (`sum_over_periods`, `max_over_periods`, `count_over_periods`,
+    /// `sum_top_n_over_periods`); outputs with no reduction are period-specific
+    /// and should use the per-period [`Self::execute_f64`] entry point instead.
     ///
     /// Each reduction's inner expression is evaluated once per period with the
     /// ordinary per-period executor; the per-period vectors are stacked and
     /// reduced row-wise. Non-reduction scalars combined with a reduction
-    /// (parameters, derived values) resolve at the last supplied period.
+    /// resolve at the reference period — the chronologically-last supplied
+    /// period (parameters like a bend point index to the determination year);
+    /// a derived referenced outside a reduction means its body inlined in this
+    /// same lifetime context, and a bare period-invariant input binds its
+    /// common value.
     pub fn execute_lifetime_f64(
         &self,
         periods: &[Period],
@@ -708,6 +712,24 @@ impl DenseCompiledProgram {
                 periods: periods.len(),
                 batches: batches.len(),
             });
+        }
+
+        // Periods must be strictly ascending by start date. The reference period
+        // for period-specific scalars (parameters, and the `n` of
+        // `sum_top_n_over_periods`) is the chronologically-last supplied period;
+        // an unsorted or descending list would otherwise resolve a bend point or
+        // COLA at the wrong year with no signal. Reject rather than silently sort
+        // so the caller's period/batch pairing stays authoritative.
+        for (earlier_index, window) in periods.windows(2).enumerate() {
+            let (earlier, later) = (&window[0], &window[1]);
+            if earlier.start >= later.start {
+                return Err(EvalError::LifetimePeriodsNotAscending {
+                    earlier_index,
+                    earlier: format!("{}..{}", earlier.start, earlier.end),
+                    later_index: earlier_index + 1,
+                    later: format!("{}..{}", later.start, later.end),
+                });
+            }
         }
 
         // Bind every period's batch and require identical row counts (positional
@@ -2401,15 +2423,20 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
 /// same order. It evaluates a formula once, row-wise, collapsing each
 /// over-periods reduction to a per-entity column by evaluating the reduction's
 /// inner expression across every period's executor and reducing down the period
-/// axis. Scalars outside any reduction that need a period (parameters, derived
-/// values) resolve at the reference period (the last one supplied).
+/// axis. Scalars outside any reduction that need a period (parameters) resolve
+/// at the reference period — the chronologically-last supplied period, which
+/// the `execute_lifetime` entry points validate the period list to end with. A
+/// derived referenced outside a reduction is evaluated by inlining its body in
+/// this same lifetime context (so it means exactly its definition), and a bare
+/// period-invariant input binds its common value.
 struct LifetimeExecutor<'a, N: DenseNum> {
     program: &'a DenseCompiledProgram,
     /// One per-period executor, index-aligned with `periods`. Each carries its
     /// own per-period scalar/judgment memoization.
     period_executors: Vec<DenseExecutor<'a, N>>,
-    /// Index of the reference period (last supplied) for period-specific
-    /// scalars combined with a reduction.
+    /// Index of the reference period — the chronologically-last supplied period
+    /// (the entry points validate the list is strictly ascending, so this is the
+    /// final index) — for period-specific scalars combined with a reduction.
     reference_period: usize,
     row_count: usize,
     /// Lifetime-level memoization of derived values (keyed by derived index),
@@ -2634,14 +2661,20 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
     ) -> Result<DenseColumn, EvalError> {
         let period_count = self.period_executors.len();
 
-        // Count is the number of supplied periods, identical for every row, and
-        // does not depend on the inner value — so short-circuit before touching
-        // it (a period count must not fail because the body is unevaluable).
+        // Count evaluates its argument per period (same leaf rules as the other
+        // reductions — period-specific leaves are legal inside a reduction) and
+        // counts, per row, the periods whose value is nonzero. This is
+        // referentially consistent with the sibling reductions rather than a
+        // special-cased period count: `count_over_periods(x)` means "how many
+        // periods had a nonzero `x`". A Bool/judgment-shaped inner value counts
+        // `true`; every numeric variant counts `!= 0`.
         if kind == OverPeriodsKind::Count {
-            return Ok(DenseColumn::Integer(vec![
-                period_count as i64;
-                self.row_count
-            ]));
+            let mut counts = vec![0_i64; self.row_count];
+            for executor in &mut self.period_executors {
+                let column = executor.eval_scalar_expr(value)?;
+                accumulate_nonzero_counts(&column, &mut counts)?;
+            }
+            return Ok(DenseColumn::Integer(counts));
         }
 
         // period-major: per_period[p][r] is entity r's inner value in period p.
@@ -2652,8 +2685,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         }
 
         let result = match kind {
-            // Handled above, before the per-period matrix is built.
-            OverPeriodsKind::Count => unreachable!("count short-circuits above"),
+            // Handled above: count does not build the numeric period matrix.
+            OverPeriodsKind::Count => unreachable!("count is handled above"),
             OverPeriodsKind::Sum => (0..self.row_count)
                 .map(|row| {
                     let mut total = N::ZERO;
@@ -2676,7 +2709,12 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 })
                 .collect::<Vec<N>>(),
             OverPeriodsKind::SumTopN => {
-                let counts = self.eval_top_n_counts(n)?;
+                // `eval_top_n_counts` enforces 1 <= n <= period_count for every
+                // row, so `take` below never exceeds the number of periods: a
+                // top-N sum is a mathematical no-op past the period count (extra
+                // slots would only add zeros), so over-length n is rejected as a
+                // likely data error rather than silently padded.
+                let counts = self.eval_top_n_counts(n, period_count)?;
                 (0..self.row_count)
                     .map(|row| {
                         let mut values: Vec<N> =
@@ -2686,10 +2724,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                         // partial_cmp is safe here.
                         values
                             .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-                        // Take the top `n`; when fewer than `n` periods exist the
-                        // shortfall contributes zero (missing computation years),
-                        // which is exactly summing the available values.
-                        let take = counts[row].min(values.len());
+                        // n is bounded by the period count, so this takes a
+                        // genuine prefix of the sorted values (no zero padding).
+                        let take = counts[row];
                         let mut total = N::ZERO;
                         for value in &values[..take] {
                             total += *value;
@@ -2702,22 +2739,76 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         Ok(N::into_column(result))
     }
 
-    /// Evaluate the `n` of `sum_top_n_over_periods` at the reference period into
-    /// a per-row count, truncating toward zero and rejecting `n < 1`.
+    /// Resolve the `n` of `sum_top_n_over_periods` into a per-row count under the
+    /// strict n contract. `n` is evaluated under EVERY period's executor and must
+    /// resolve to the same value in every period (parameter- and input-sourced n
+    /// are held to the identical contract — a period-varying parameter n is a
+    /// data error, not a silent pin to the reference period). The reference
+    /// period's column is then truncated toward zero to an exact `i64`; a
+    /// non-finite or out-of-range value (`try_to_i64_trunc` -> `None`) and any
+    /// `n` outside `1 <= n <= period_count` both raise typed errors — never a
+    /// clamp to `i64::MAX`, never a silent pin, never a pad past the period count
+    /// (which would be an arithmetic no-op masking the bad count).
     fn eval_top_n_counts(
         &mut self,
         n: Option<&CompiledScalarExpr>,
+        period_count: usize,
     ) -> Result<Vec<usize>, EvalError> {
         let n = n.ok_or_else(|| {
             EvalError::TypeMismatch("sum_top_n_over_periods requires an n argument".to_string())
         })?;
-        let raw = N::vec_from_column(&self.eval_scalar(n)?)?;
+        let reduction = OverPeriodsKind::SumTopN.as_call_name();
+
+        // Evaluate `n` under each period's executor: one column per period,
+        // positionally aligned by row. A parameter-sourced n indexes each
+        // period's date, so a year-varying parameter yields different columns and
+        // is caught below; an n derived from period-invariant inputs (the
+        // 42 USC 415(b) computation-year count) is identical in every period and
+        // passes.
+        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
+        for executor in &mut self.period_executors {
+            per_period.push(executor.eval_scalar_expr(n)?);
+        }
+        let (reference, others) = per_period
+            .split_last()
+            .expect("lifetime execution guarantees at least one period");
+        // Reject a period-varying n: compare every earlier period against the
+        // reference (chronologically-last) period, in each column's own dtype.
+        for (index, column) in others.iter().enumerate() {
+            if let Some(row) = first_differing_row(reference, column) {
+                return Err(EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period: period_label(self.period_executors[index].period),
+                    first_value: dense_value_label(column, row),
+                    second_period: period_label(
+                        self.period_executors[self.reference_period].period,
+                    ),
+                    second_value: dense_value_label(reference, row),
+                });
+            }
+        }
+
+        // n is period-invariant: truncate the reference column toward zero to an
+        // exact i64 and enforce 1 <= n <= period_count per row.
+        let raw = N::vec_from_column(reference)?;
         raw.into_iter()
-            .map(|value| {
-                // Truncate toward zero to an integer count, then require >= 1.
-                let as_i64 = N::to_i64_trunc(value);
-                if as_i64 < 1 {
-                    Err(EvalError::OverPeriodsTopNInvalid(as_i64))
+            .enumerate()
+            .map(|(row, value)| {
+                let as_i64 = value.try_to_i64_trunc().ok_or_else(|| {
+                    // Non-finite or beyond the i64 range: a garbage n, reported
+                    // as out of range rather than saturated to a clamp.
+                    EvalError::OverPeriodsTopNOutOfRange {
+                        reduction,
+                        n: dense_value_label(reference, row),
+                        period_count,
+                    }
+                })?;
+                if as_i64 < 1 || (as_i64 as u64) > period_count as u64 {
+                    Err(EvalError::OverPeriodsTopNOutOfRange {
+                        reduction,
+                        n: as_i64.to_string(),
+                        period_count,
+                    })
                 } else {
                     Ok(as_i64 as usize)
                 }
@@ -2855,6 +2946,57 @@ fn dense_value_label(column: &DenseColumn, row: usize) -> String {
         DenseColumn::Text(values) => format!("{:?}", values[row]),
         DenseColumn::Date(values) => values[row].to_string(),
     }
+}
+
+/// Add one to `counts[row]` for each row whose value in `column` is nonzero,
+/// used by `count_over_periods` to count the periods with a nonzero inner value.
+/// Numeric variants count `!= 0`; a `Bool` column counts `true`; `Date`/`Text`
+/// columns have no zero and cannot be produced by an arithmetic inner value, so
+/// they are rejected rather than silently counted.
+fn accumulate_nonzero_counts(column: &DenseColumn, counts: &mut [i64]) -> Result<(), EvalError> {
+    if column.len() != counts.len() {
+        return Err(EvalError::TypeMismatch(format!(
+            "count_over_periods inner value produced {} rows but the batch has {}",
+            column.len(),
+            counts.len()
+        )));
+    }
+    match column {
+        DenseColumn::Bool(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Integer(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value != 0 {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Decimal(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if !value.is_zero() {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Float(values) => {
+            for (row, value) in values.iter().enumerate() {
+                if *value != 0.0 {
+                    counts[row] += 1;
+                }
+            }
+        }
+        DenseColumn::Text(_) | DenseColumn::Date(_) => {
+            return Err(EvalError::TypeMismatch(
+                "count_over_periods requires a numeric or boolean inner value (text and date have no zero to count against)".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Return the first row index at which two positionally aligned dense columns

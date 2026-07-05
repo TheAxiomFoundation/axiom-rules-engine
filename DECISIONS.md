@@ -4,6 +4,93 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-07-05 — Lifetime execution surface: over-periods reductions and their semantics
+
+**Decision.** A `derived` formula may reduce a value across an entity's own
+period axis with one of four builtins — `sum_over_periods(x)`,
+`max_over_periods(x)`, `count_over_periods(x)`, and
+`sum_top_n_over_periods(x, n)` — which lower to a single additive expression
+node (`ScalarExpr::OverPeriods { kind, value, n }`, serde-tagged, no artifact
+format-version bump). They evaluate only under a new lifetime execution surface
+(`DenseCompiledProgram::execute_lifetime` / `execute_lifetime_f64`), which takes
+one input batch per supplied period, all describing the same entity rows in the
+same positional order. The per-period execution paths reject every reduction
+node (`EvalError::OverPeriodsOutsideLifetime`). The following semantics are
+settled:
+
+- **Reference period = the chronologically-last supplied period.** The entry
+  points require the supplied periods to be **strictly ascending by start
+  date** and error otherwise (`EvalError::LifetimePeriodsNotAscending`, naming
+  the offending adjacent pair) rather than silently sorting — so the caller's
+  period/batch pairing stays authoritative and a bend point / COLA parameter
+  cannot resolve at the wrong year. Every period-specific scalar combined with a
+  reduction (a `ParameterLookup`, and the `n` of `sum_top_n_over_periods`)
+  resolves at that reference period.
+
+- **Referential transparency (period-invariant input binding + inlined-body
+  derived).** Inside any reduction, the inner expression is evaluated once per
+  period with the ordinary per-period executor. Outside every reduction: a
+  `ParameterLookup` resolves at the reference period; a bare **input** is bound
+  only when it is provably identical across all supplied periods for each row
+  (`eval_period_invariant_input`), else `EvalError::LifetimePeriodVaryingInput`
+  names the input and the first divergence — this legalizes exactly the
+  per-person-constant inputs (year attained 21 / 62) that a real
+  computation-year count bottoms out in, and nothing else; and a **derived**
+  reference means its body inlined and evaluated in this same lifetime context,
+  so a derived denotes exactly its definition whether referenced inside or
+  outside a reduction. A parameter-bearing derived reused in both contexts with
+  a period-varying input inside it therefore errors loudly instead of silently
+  computing two different values.
+
+- **`count_over_periods` counts nonzero.** It evaluates its argument per period
+  (the same leaf rules as the other reductions) and counts, per row, the
+  periods whose value is nonzero (a `Bool` inner value counts `true`). It is not
+  a bare supplied-period count; a text/date inner value has no zero and is
+  rejected.
+
+- **Strict `n` contract for `sum_top_n_over_periods`.** After truncation toward
+  zero to an exact `i64`, `n` must satisfy `1 <= n <= the supplied period
+  count`. A non-finite or out-of-range `n` (`try_to_i64_trunc` -> `None`), an
+  over-length `n`, and an `n` that is not period-invariant all raise typed
+  errors (`OverPeriodsTopNOutOfRange`, `OverPeriodsTopNPeriodVarying`) — no
+  clamp to `i64::MAX`, no silent pin to the reference period, no zero-padding
+  past the period count. Parameter-sourced and input-sourced `n` are held to the
+  identical contract (both evaluated under every period's executor and required
+  invariant). Summing more slots than periods only pads with zeros — an
+  arithmetic no-op — so an over-length count is treated as a data error, not
+  absorbed.
+
+**Why.**
+
+- 42 USC 415(b)'s AIME is the motivating shape: sum the top `n` of a worker's
+  indexed annual earnings, where `n` (the benefit-computation-year count) is
+  itself derived from per-person-constant inputs. That needs a period axis the
+  per-period executor does not have, an `n` reached through a derived chain
+  outside every reduction, and a floor-divided quotient — all of which the
+  surface above supports end to end.
+- The reductions must be *referentially consistent*: a named derived reused
+  inside and outside a reduction, or a `count`/`n` whose value silently depends
+  on evaluation position, would compute wrong money without any signal. Each
+  ambiguous case is resolved by a single documented rule and a loud typed error
+  when the inputs violate it, rather than a clamp or a positional default.
+
+**Consequences.**
+
+- **Additive; no artifact format-version bump.** The `over_periods` variant is
+  additive on `ScalarExprSpec`; existing compiled artifacts and per-period
+  execution are unchanged. Reductions are rejected in every non-lifetime path
+  (per-period dense, sparse, bulk) with a clear error.
+- **Lifetime outputs must reduce.** `execute_lifetime[_f64]` only supports
+  outputs whose formula contains at least one over-periods reduction
+  (`LifetimeOutputWithoutReduction`); period-specific outputs still use the
+  per-period entry points.
+- **Directly-nested reductions are a compile error**
+  (`DenseCompileError::NestedOverPeriods`); a reduction reached only through a
+  derived reference still fails safely at runtime.
+- **PyO3 exposure is f64-only for now** (`execute_lifetime_f64`), matching the
+  existing `execute_f64` parity; the exact Decimal `execute_lifetime` is staged
+  for a follow-up before a consumer migrates an exact per-period workflow.
+
 ## 2026-07-03 — Currency rules opt into output rounding; `minor_units` becomes live
 
 **Decision.** A `derived` rule may declare `rounding: <mode>` (one of

@@ -225,23 +225,45 @@ fn max_over_periods_takes_the_largest_period() {
 }
 
 #[test]
-fn count_over_periods_counts_supplied_periods() {
-    // The inner value is evaluated but ignored; the count is the period count,
-    // identical for every row.
+fn count_over_periods_counts_nonzero_periods_per_row() {
+    // count_over_periods evaluates its argument per period and counts, PER ROW,
+    // the periods whose value is nonzero — it is not a bare supplied-period
+    // count. Review reproduction: mixed zero/nonzero earnings per row.
+    // Row 0 earnings: [0, 20, 0, 40] -> 2 nonzero years.
+    // Row 1 earnings: [9, 0, 7, 6]   -> 3 nonzero years.
     let module = single_rule_module("years", "Integer", "count_over_periods(earnings)");
     let program = compile(&module, "Worker");
     let periods = vec![year(2001), year(2002), year(2003), year(2004)];
     let batches = vec![
-        batch("earnings", vec![1.0, 9.0]),
-        batch("earnings", vec![2.0, 8.0]),
-        batch("earnings", vec![3.0, 7.0]),
-        batch("earnings", vec![4.0, 6.0]),
+        batch("earnings", vec![0.0, 9.0]),
+        batch("earnings", vec![20.0, 0.0]),
+        batch("earnings", vec![0.0, 7.0]),
+        batch("earnings", vec![40.0, 6.0]),
     ];
     let result = program
         .execute_lifetime(&periods, batches, &["years".to_string()])
         .expect("lifetime execution succeeds");
-    // Two entities (rows), each sees the same period count of 4.
-    assert_eq!(scalar_f64(&result, "years"), vec![4.0, 4.0]);
+    assert_eq!(scalar_f64(&result, "years"), vec![2.0, 3.0]);
+}
+
+#[test]
+fn count_over_periods_all_zero_is_zero() {
+    // A row whose value is zero in every supplied period counts zero — the
+    // count is over nonzero periods, so an all-zero history is 0, not the
+    // period count.
+    let module = single_rule_module("years", "Integer", "count_over_periods(earnings)");
+    let program = compile(&module, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    let batches = vec![
+        batch("earnings", vec![0.0, 5.0]),
+        batch("earnings", vec![0.0, 0.0]),
+        batch("earnings", vec![0.0, 8.0]),
+    ];
+    let result = program
+        .execute_lifetime(&periods, batches, &["years".to_string()])
+        .expect("lifetime execution succeeds");
+    // Row 0 is zero in all three periods -> 0; row 1 has two nonzero periods.
+    assert_eq!(scalar_f64(&result, "years"), vec![0.0, 2.0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,10 +308,11 @@ fn sum_top_n_with_ties_sums_the_right_multiplicity() {
 }
 
 #[test]
-fn sum_top_n_zero_pads_when_fewer_periods_than_n() {
-    // n = 5 but only 3 periods supplied: the two missing computation years
-    // contribute zero, so the result is just the sum of the three (mirrors
-    // 415(b), where computation years count whether or not there were earnings).
+fn sum_top_n_errors_when_n_exceeds_the_period_count() {
+    // Strict n contract: n = 5 with only 3 supplied periods is out of range.
+    // Padding the two missing slots with zeros would be an arithmetic no-op, so
+    // an over-length n is rejected as a likely data error rather than silently
+    // summing every period.
     let module = single_rule_module("top5", "Money", "sum_top_n_over_periods(earnings, 5)");
     let program = compile(&module, "Worker");
     let periods = vec![year(2001), year(2002), year(2003)];
@@ -298,10 +321,14 @@ fn sum_top_n_zero_pads_when_fewer_periods_than_n() {
         batch("earnings", vec![200.0]),
         batch("earnings", vec![300.0]),
     ];
-    let result = program
+    let error = program
         .execute_lifetime(&periods, batches, &["top5".to_string()])
-        .expect("lifetime execution succeeds");
-    assert_eq!(scalar_f64(&result, "top5"), vec![600.0]);
+        .expect_err("n > period count must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("1 <= n <=") && message.contains("3 supplied periods"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
@@ -554,9 +581,11 @@ fn errors_when_sum_top_n_n_is_less_than_one() {
     let error = program
         .execute_lifetime(&periods, batches, &["top".to_string()])
         .expect_err("n < 1 must error");
+    // Strict n contract: n outside 1..=period_count is an out-of-range error.
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("requires n >= 1"),
-        "unexpected error: {error}"
+        message.contains("1 <= n <=") && message.contains("supplied periods"),
+        "unexpected error: {message}"
     );
 }
 
@@ -899,4 +928,200 @@ fn derived_n_from_constant_inputs_end_to_end() {
         vec![3_456_000.0, 1_922_000.0]
     );
     assert_eq!(scalar_f64(&result, "aime"), vec![8_000.0, 5_166.0]);
+}
+
+// ---------------------------------------------------------------------------
+// Review reproductions: the exact failing cases from PR #68's review, now
+// pinned to their FIXED (post-review) semantics.
+// ---------------------------------------------------------------------------
+
+/// A named derived reused both inside a reduction and bare outside it means the
+/// same thing in both positions: its body inlined in the lifetime context.
+/// Review's live case — `credit = rate + earnings` (rate a period-keyed
+/// parameter, 100 from 2000 and 200 from 2003), and the reuse
+/// `combined = sum_over_periods(credit) plus credit` over 2001-2003 — used to
+/// return 600 (400 from the per-period reduction and 200 from a
+/// reference-period-only outside evaluation), a value no consistent semantics
+/// produces. Under referential transparency the bare `credit` inlines
+/// `rate + earnings`; `earnings` is a period-VARYING input outside every
+/// reduction, so the whole output errors loudly instead of silently computing
+/// 600.
+#[test]
+fn derived_reused_inside_and_outside_reduction_errors_on_period_varying_input() {
+    let module = r#"
+format: rulespec/v1
+rules:
+  - name: rate
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2000-01-01'
+        formula: '100'
+      - effective_from: '2003-01-01'
+        formula: '200'
+  - name: credit
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2000-01-01'
+        formula: |-
+          rate + earnings
+  - name: combined
+    kind: derived
+    entity: Worker
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2000-01-01'
+        formula: |-
+          sum_over_periods(credit) + credit
+"#;
+    let program = compile(module, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    // earnings varies by period (10, 20, 30), so the bare `credit` outside the
+    // reduction is period-ambiguous and must error rather than silently pinning.
+    let batches = vec![
+        batch("earnings", vec![10.0]),
+        batch("earnings", vec![20.0]),
+        batch("earnings", vec![30.0]),
+    ];
+    let error = program
+        .execute_lifetime(&periods, batches, &["combined".to_string()])
+        .expect_err("a period-varying input reached outside a reduction must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("earnings") && message.contains("not period-invariant"),
+        "unexpected error: {message}"
+    );
+}
+
+/// Supplied periods must be strictly ascending by start date; a descending pair
+/// is rejected naming the offending adjacent periods, rather than silently
+/// resolving parameters (and any top-N n) at the wrong — positionally last but
+/// chronologically earlier — year.
+#[test]
+fn errors_when_periods_are_not_strictly_ascending() {
+    let module = single_rule_module("total", "Money", "sum_over_periods(earnings)");
+    let program = compile(&module, "Worker");
+    // Descending: 2020 then 2019.
+    let periods = vec![year(2020), year(2019)];
+    let batches = vec![
+        batch("earnings", vec![100.0]),
+        batch("earnings", vec![200.0]),
+    ];
+    let error = program
+        .execute_lifetime(&periods, batches, &["total".to_string()])
+        .expect_err("descending periods must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("strictly ascending")
+            && message.contains("2020")
+            && message.contains("2019"),
+        "unexpected error: {message}"
+    );
+}
+
+/// The strict n contract holds identically in the Decimal path: n = 45 with 41
+/// supplied periods is out of range (padding the four missing slots with zeros
+/// is a no-op), so `execute_lifetime` errors rather than silently summing every
+/// period into a plausible-but-wrong AIME.
+#[test]
+fn sum_top_n_n_exceeds_period_count_errors_in_decimal_path() {
+    let module = single_rule_module("top", "Money", "sum_top_n_over_periods(earnings, 45)");
+    let program = compile(&module, "Worker");
+    let periods = (0..41).map(|k| year(1985 + k)).collect::<Vec<_>>();
+    let batches = (0..41)
+        .map(|_| batch("earnings", vec![1_000.0]))
+        .collect::<Vec<_>>();
+    let error = program
+        .execute_lifetime(&periods, batches, &["top".to_string()])
+        .expect_err("n=45 over 41 periods must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("1 <= n <=") && message.contains("41 supplied periods"),
+        "unexpected error: {message}"
+    );
+}
+
+/// The same n=45-over-41-periods case errors identically in the f64 throughput
+/// path — the contract is enforced in both dtype paths, not just Decimal.
+#[test]
+fn sum_top_n_n_exceeds_period_count_errors_in_f64_path() {
+    let module = single_rule_module("top", "Money", "sum_top_n_over_periods(earnings, 45)");
+    let program = compile(&module, "Worker");
+    let periods = (0..41).map(|k| year(1985 + k)).collect::<Vec<_>>();
+    let batches = (0..41)
+        .map(|_| batch("earnings", vec![1_000.0]))
+        .collect::<Vec<_>>();
+    let error = program
+        .execute_lifetime_f64(&periods, batches, &["top".to_string()])
+        .expect_err("n=45 over 41 periods must error (f64 path)");
+    let message = error.to_string();
+    assert!(
+        message.contains("1 <= n <=") && message.contains("41 supplied periods"),
+        "unexpected error: {message}"
+    );
+}
+
+/// A parameter-sourced n that varies by period is a data error under the strict
+/// n contract — held to the same period-invariance requirement as an
+/// input-sourced n — not silently pinned to the reference period.
+#[test]
+fn sum_top_n_period_varying_parameter_n_errors() {
+    let module = r#"
+format: rulespec/v1
+rules:
+  - name: keep_n
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2000-01-01'
+        formula: '2'
+      - effective_from: '2003-01-01'
+        formula: '3'
+  - name: top
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2000-01-01'
+        formula: |-
+          sum_top_n_over_periods(earnings, keep_n)
+"#;
+    let program = compile(module, "Worker");
+    // keep_n is 2 in 2001/2002 and 3 from 2003 -> not period-invariant.
+    let periods = vec![year(2001), year(2002), year(2003), year(2004)];
+    let batches = vec![
+        batch("earnings", vec![5.0]),
+        batch("earnings", vec![4.0]),
+        batch("earnings", vec![3.0]),
+        batch("earnings", vec![2.0]),
+    ];
+    let error = program
+        .execute_lifetime(&periods, batches, &["top".to_string()])
+        .expect_err("a period-varying parameter n must error");
+    let message = error.to_string();
+    assert!(
+        message.contains("not period-invariant") && message.contains("sum_top_n_over_periods"),
+        "unexpected error: {message}"
+    );
+}
+
+/// An unknown `*_over_periods` reduction name fails to PARSE (the rulespec /
+/// formula layer), not at some later stage: the builtin match is exhaustive with
+/// an explicit error arm, so a typo or not-yet-implemented reduction cannot be
+/// mistaken for the period count or a plain call.
+#[test]
+fn unknown_over_periods_reduction_fails_to_parse() {
+    let module = single_rule_module("bad", "Money", "avg_over_periods(earnings)");
+    let error = CompiledProgramArtifact::from_rulespec_str(&module)
+        .expect_err("an unknown over-periods reduction must fail to parse");
+    let message = error.to_string();
+    assert!(
+        message.contains("avg_over_periods") && message.contains("over-periods reduction"),
+        "unexpected error: {message}"
+    );
 }

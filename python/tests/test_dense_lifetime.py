@@ -27,9 +27,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 # 42 USC 415(b): AIME is the sum of a worker's highest-35 years of indexed
-# earnings divided by 420 (35 years x 12 months), rounded down. The computation
-# years count whether or not the worker had earnings, so sum_top_n zero-pads
-# missing years — here there are 40 years, so the lowest 5 are dropped instead.
+# earnings divided by 420 (35 years x 12 months), rounded down. Under the strict
+# n contract n must be within 1..=the supplied period count; here 40 years are
+# supplied and the top 35 drop the lowest 5.
 AIME_MODULE = """\
 format: rulespec/v1
 module:
@@ -239,10 +239,15 @@ class TestDerivedPersonVaryingN:
         )
         np.testing.assert_allclose(result["outputs"]["aime"], [8_000.0, 5_166.0])
 
-    def test_period_varying_input_raises_naming_it(self, derived_n_program) -> None:
-        # If a bare input actually varies across periods it is period-ambiguous
-        # outside a reduction and must error, naming the input. Here worker 0's
-        # year_attained_62 changes between the two periods.
+    def test_period_varying_n_raises_under_strict_contract(
+        self, derived_n_program
+    ) -> None:
+        # year_attained_62 feeds computation_year_count, which is the `n` of
+        # sum_top_n_over_periods. When that input varies across periods the
+        # derived n varies too, so the strict n contract catches it first with a
+        # precise "n is not period-invariant" error (36 vs 37) rather than
+        # silently pinning n to the reference period. Parameter- and
+        # input-sourced n are held to the identical invariance requirement.
         periods = [
             ("calendar_year", "1985-01-01", "1985-12-31"),
             ("calendar_year", "1986-01-01", "1986-12-31"),
@@ -256,10 +261,10 @@ class TestDerivedPersonVaryingN:
             {
                 "indexed_earnings": np.array([50_000.0]),
                 "year_attained_21": np.array([1985.0]),
-                "year_attained_62": np.array([2027.0]),  # varies -> ambiguous
+                "year_attained_62": np.array([2027.0]),  # varies -> n varies
             },
         ]
-        with pytest.raises(RuntimeError, match="year_attained_62"):
+        with pytest.raises(RuntimeError, match="n is not period-invariant"):
             derived_n_program.execute_lifetime_f64(
                 periods=periods, batches=batches, outputs=["aime"]
             )
@@ -283,3 +288,85 @@ class TestLifetimeErrors:
         ]
         with pytest.raises(RuntimeError, match="same entity row count"):
             program.execute_lifetime_f64(periods=periods, batches=batches, outputs=["aime"])
+
+    def test_descending_periods_raise(self, program) -> None:
+        # Supplied periods must be strictly ascending by start date.
+        periods = [
+            ("calendar_year", "1991-01-01", "1991-12-31"),
+            ("calendar_year", "1990-01-01", "1990-12-31"),
+        ]
+        batches = [
+            {"indexed_earnings": np.array([10_000.0])},
+            {"indexed_earnings": np.array([20_000.0])},
+        ]
+        with pytest.raises(RuntimeError, match="strictly ascending"):
+            program.execute_lifetime_f64(periods=periods, batches=batches, outputs=["aime"])
+
+
+def _single_rule_module(name: str, dtype: str, formula: str) -> str:
+    return f"""\
+format: rulespec/v1
+rules:
+  - name: {name}
+    kind: derived
+    entity: Worker
+    dtype: {dtype}
+    period: Year
+    versions:
+      - effective_from: '1979-01-01'
+        formula: |-
+          {formula}
+"""
+
+
+class TestReductionSemantics:
+    """Post-review semantics exercised through the exposed f64 lifetime path."""
+
+    def test_count_over_periods_counts_nonzero_per_row(self, tmp_path) -> None:
+        # count_over_periods counts, per row, the periods with a nonzero value.
+        module = _single_rule_module("years", "Integer", "count_over_periods(earnings)")
+        path = tmp_path / "count.yaml"
+        path.write_text(module, encoding="utf-8")
+        program = CompiledDenseProgram.from_file(path, entity="Worker")
+        periods = [
+            ("calendar_year", f"{2001 + k}-01-01", f"{2001 + k}-12-31")
+            for k in range(4)
+        ]
+        # Row 0: [0, 20, 0, 40] -> 2 nonzero. Row 1: [9, 0, 7, 6] -> 3 nonzero.
+        batches = [
+            {"earnings": np.array([0.0, 9.0])},
+            {"earnings": np.array([20.0, 0.0])},
+            {"earnings": np.array([0.0, 7.0])},
+            {"earnings": np.array([40.0, 6.0])},
+        ]
+        result = program.execute_lifetime_f64(
+            periods=periods, batches=batches, outputs=["years"]
+        )
+        np.testing.assert_allclose(result["outputs"]["years"], [2.0, 3.0])
+
+    def test_sum_top_n_n_exceeds_period_count_raises(self, tmp_path) -> None:
+        # Strict n contract in the exposed f64 path: n=45 with 41 periods is out
+        # of range (the four extra slots would only pad zeros).
+        module = _single_rule_module(
+            "top", "Money", "sum_top_n_over_periods(earnings, 45)"
+        )
+        path = tmp_path / "topn.yaml"
+        path.write_text(module, encoding="utf-8")
+        program = CompiledDenseProgram.from_file(path, entity="Worker")
+        periods = [
+            ("calendar_year", f"{1985 + k}-01-01", f"{1985 + k}-12-31")
+            for k in range(41)
+        ]
+        batches = [{"earnings": np.array([1_000.0])} for _ in range(41)]
+        with pytest.raises(RuntimeError, match="1 <= n <="):
+            program.execute_lifetime_f64(
+                periods=periods, batches=batches, outputs=["top"]
+            )
+
+    def test_unknown_over_periods_reduction_fails_to_parse(self, tmp_path) -> None:
+        # An unknown *_over_periods name fails at parse/compile time.
+        module = _single_rule_module("bad", "Money", "avg_over_periods(earnings)")
+        path = tmp_path / "bad.yaml"
+        path.write_text(module, encoding="utf-8")
+        with pytest.raises((ValueError, RuntimeError), match="avg_over_periods"):
+            CompiledDenseProgram.from_file(path, entity="Worker")

@@ -258,12 +258,15 @@ pub enum OverPeriodsKind {
     Sum,
     /// Maximum of the inner value across all supplied periods.
     Max,
-    /// Count of supplied periods (the inner value is evaluated but ignored).
+    /// Count, per entity, of the supplied periods whose inner value is nonzero
+    /// (a `Bool` inner value counts `true`). The inner value IS evaluated per
+    /// period and tested against zero — this is not a bare period count.
     Count,
-    /// Sum of the `n` largest per-period inner values. When fewer than `n`
-    /// periods are supplied, the missing periods contribute zero — mirroring
-    /// 42 USC 415(b), where the computation years count whether or not the
-    /// worker had earnings.
+    /// Sum of the `n` largest per-period inner values. `n` must satisfy
+    /// `1 <= n <= the supplied period count` (the strict n contract): an
+    /// over-length `n` would only pad with zeros — an arithmetic no-op — so it
+    /// is rejected as a likely data error rather than silently summing every
+    /// period. `n` must also be period-invariant.
     SumTopN,
 }
 

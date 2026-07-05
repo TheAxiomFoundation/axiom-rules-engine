@@ -1447,6 +1447,11 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             // Over-periods reductions: reduce the inner expression across an
             // entity's own period axis. Meaningful only under the lifetime
             // execution surface; the per-period execution paths reject them.
+            // The kind is chosen by an EXHAUSTIVE match with an explicit error
+            // arm — never a wildcard falling through to `Count` — so a future
+            // one-arg reduction added to this arm's guard cannot silently parse
+            // as the period count. `sum_top_n_over_periods` (two args) is handled
+            // separately below.
             "sum_over_periods" | "max_over_periods" | "count_over_periods" => {
                 if args.len() != 1 {
                     return Err(FormulaError::lower(format!("{func} takes 1 arg")));
@@ -1454,7 +1459,12 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 let over = match func.as_str() {
                     "sum_over_periods" => OverPeriodsKindSpec::Sum,
                     "max_over_periods" => OverPeriodsKindSpec::Max,
-                    _ => OverPeriodsKindSpec::Count,
+                    "count_over_periods" => OverPeriodsKindSpec::Count,
+                    other => {
+                        return Err(FormulaError::lower(format!(
+                            "unknown one-argument over-periods reduction `{other}`"
+                        )));
+                    }
                 };
                 ScalarExprSpec::OverPeriods {
                     over,
@@ -1588,6 +1598,15 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     value,
                     where_clause: Some(Box::new(where_clause)),
                 }
+            }
+            // Any other `*_over_periods` name is an unrecognized reduction, not a
+            // generic unknown function: reject it explicitly so a typo or a
+            // not-yet-implemented reduction fails to parse loudly instead of
+            // being mistaken for a plain call.
+            other if other.ends_with("_over_periods") => {
+                return Err(FormulaError::lower(format!(
+                    "unknown over-periods reduction `{other}` (expected one of sum_over_periods, max_over_periods, count_over_periods, sum_top_n_over_periods)"
+                )));
             }
             _ => {
                 return Err(FormulaError::lower(format!("unknown function `{}`", func)));

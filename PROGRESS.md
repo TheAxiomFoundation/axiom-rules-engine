@@ -180,3 +180,80 @@ proven by `earnings_total = [3_456_000, 1_922_000]`, which matches exactly.
   lines; 35 lib + 35 lib-test as before) — ZERO new warnings; none reference the new code.
 - 28 Rust lifetime tests + 38 Python tests pass against the maturin-rebuilt extension; the corrected
   scratchpad acceptance script passes (earnings_total [3456000, 1922000], aime [8000, 5166]).
+
+## Review response — six fixes (this session, PR #68 review)
+
+Six confirmed review findings addressed; semantics decided by the feature-brief
+author. Referential transparency, ordering validation, and count-nonzero were
+already implemented from the prior session; this session completed the strict n
+contract, the exhaustive reduction parse, and the DECISIONS.md entry, corrected
+the stale comments, and pinned every case as a test.
+
+1. **Referential transparency (dense.rs).** A derived referenced OUTSIDE a
+   reduction is evaluated by inlining its body in the lifetime context (the
+   `Derived` arm recurses through the lifetime executor): parameters resolve at
+   the reference period, and a bare input inside that body goes through the
+   per-row period-invariance guard. A parameter-bearing derived reused both
+   inside a reduction and bare outside it therefore denotes exactly its
+   definition in both positions. The review's 600-case
+   (`sum_over_periods(credit) + credit`, `credit = rate + earnings`, `earnings`
+   period-varying) now errors loudly via `LifetimePeriodVaryingInput` naming
+   `earnings`, instead of silently returning 600. Test:
+   `derived_reused_inside_and_outside_reduction_errors_on_period_varying_input`.
+
+2. **Strictly-ascending periods (dense.rs + engine.rs).** `execute_lifetime[_f64]`
+   validate that supplied periods strictly ascend by start date and error with
+   `LifetimePeriodsNotAscending` (naming the offending adjacent pair) rather than
+   silently resolving parameters / n at a positionally-last-but-chronologically-
+   earlier year. Reference period = the (now guaranteed chronologically-last)
+   final period. Tests: `errors_when_periods_are_not_strictly_ascending`
+   (Rust), `test_descending_periods_raise` (Python).
+
+3. **count_over_periods counts nonzero (dense.rs + model.rs).** `count_over_periods`
+   now evaluates its argument per period and counts, per row, the periods whose
+   value is nonzero (`Bool` counts `true`; text/date rejected). It is no longer a
+   bare supplied-period count. The stale "evaluated but ignored" doc on
+   `OverPeriodsKind::Count` (model.rs) was corrected. Tests:
+   `count_over_periods_counts_nonzero_periods_per_row`,
+   `count_over_periods_all_zero_is_zero` (Rust), and a Python analogue.
+
+4. **Strict n contract for sum_top_n (dense.rs + engine.rs + model.rs).**
+   `DenseNum::try_to_i64_trunc(self) -> Option<i64>` replaces the saturating
+   `to_i64_trunc` in both dtype impls. `eval_top_n_counts` now: evaluates n under
+   EVERY period's executor and rejects a period-VARYING n (parameter- and
+   input-sourced held to the identical contract) with
+   `OverPeriodsTopNPeriodVarying`; truncates the reference column toward zero to
+   an exact i64 (a non-finite / out-of-range value -> `None` -> hard error); and
+   enforces `1 <= n <= period_count`, erroring `OverPeriodsTopNOutOfRange` on
+   under- and over-length n. No clamp to i64::MAX, no silent reference-period
+   pin, no zero-pad past the period count. Tests:
+   `sum_top_n_n_exceeds_period_count_errors_in_decimal_path`,
+   `...in_f64_path`, `sum_top_n_period_varying_parameter_n_errors`, updated
+   `errors_when_sum_top_n_n_is_less_than_one` and the former zero-pad test
+   (now `sum_top_n_errors_when_n_exceeds_the_period_count`); Python analogues.
+
+5. **Exhaustive reduction parse (formula.rs).** The one-argument over-periods
+   arm chooses its kind by an exhaustive match with an explicit error arm (no
+   wildcard falling through to `Count`), and any other `*_over_periods` name is
+   rejected with a reduction-specific parse error rather than the generic
+   "unknown function". Tests: `unknown_over_periods_reduction_fails_to_parse`
+   (Rust + Python).
+
+6. **DECISIONS.md.** One new most-recent-first entry (2026-07-05) covering the
+   lifetime execution surface: the `OverPeriods` node + four builtins, reference
+   period = chronologically-last supplied period, strictly-ascending validation,
+   period-invariant input binding + inlined-body derived semantics,
+   count-nonzero, and the strict n contract.
+
+### Final gate (all GREEN, this session)
+- `cargo fmt` applied; `cargo fmt --check` clean; `cargo build`; `cargo test`
+  (default) 0 failed; `cargo test --features schema` 0 failed;
+  `cargo check --manifest-path python-ext/Cargo.toml`;
+  `cargo check --target wasm32-unknown-unknown --no-default-features`.
+- clippy: `--lib` and `--all-targets` finding multisets BYTE-IDENTICAL to branch
+  tip 984a4e0 (per-file counts diff empty) — ZERO new warnings; python-ext clippy
+  identical to baseline (2 pre-existing).
+- 35 Rust lifetime tests + 42 Python tests pass against the maturin-rebuilt
+  (`--release`) extension; the acceptance script
+  `scratchpad/check_derived_n_lifetime.py` prints
+  `earnings_total [3456000. 1922000.]`, `aime [8000. 5166.]` and all assertions pass.

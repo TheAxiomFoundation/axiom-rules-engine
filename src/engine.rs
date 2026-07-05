@@ -80,8 +80,33 @@ pub enum EvalError {
         second_period: String,
         second_value: String,
     },
-    #[error("sum_top_n_over_periods requires n >= 1, got {0}")]
-    OverPeriodsTopNInvalid(i64),
+    #[error(
+        "lifetime execution requires supplied periods in strictly ascending order by start date, but period {earlier_index} ({earlier}) does not start before period {later_index} ({later})"
+    )]
+    LifetimePeriodsNotAscending {
+        earlier_index: usize,
+        earlier: String,
+        later_index: usize,
+        later: String,
+    },
+    #[error(
+        "{reduction} requires an integer n with 1 <= n <= the {period_count} supplied periods, but n resolved to {n} for at least one entity; a top-N sum over more periods than exist only pads with zeros (a no-op), so this masks a data error — supply an n within range or pad the period history explicitly"
+    )]
+    OverPeriodsTopNOutOfRange {
+        reduction: &'static str,
+        n: String,
+        period_count: usize,
+    },
+    #[error(
+        "{reduction}'s n is not period-invariant for at least one entity — {first_period} it is {first_value} but {second_period} it is {second_value}; n must resolve to the same value in every supplied period (parameter- and input-sourced n are held to the same contract)"
+    )]
+    OverPeriodsTopNPeriodVarying {
+        reduction: &'static str,
+        first_period: String,
+        first_value: String,
+        second_period: String,
+        second_value: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
