@@ -137,6 +137,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_ghana_cedi_money_parameter() {
+    // Ghana Cedi (GHS, ISO 4217, 2 minor units = pesewas) must be a seeded
+    // currency so rulespec-gh modules can declare `unit: GHS` without a repo
+    // inline unit declaration, exactly like USD/GBP/EUR.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: gh:statutes/act-1111/income-tax/first-schedule
+  title: Ghana income tax first schedule (GHS unit check)
+rules:
+  - name: first_band_upper_chargeable_income
+    kind: parameter
+    dtype: Money
+    unit: GHS
+    source: "Income Tax Act 2015 (Act 896), First Schedule para 1(1) as amended by Act 1111"
+    versions:
+      - effective_from: 2024-01-01
+        formula: "5880"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("GHS RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "GHS"),
+        "GHS should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_source_metadata_allows_quoted_phrases() {
     let rulespec = r#"
 format: rulespec/v1
