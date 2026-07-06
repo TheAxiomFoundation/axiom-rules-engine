@@ -1100,6 +1100,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         ("GBP", UnitKindSpec::Currency { minor_units: 2 }),
         ("USD", UnitKindSpec::Currency { minor_units: 2 }),
         ("EUR", UnitKindSpec::Currency { minor_units: 2 }),
+        ("GHS", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
