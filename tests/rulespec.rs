@@ -167,6 +167,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_nigerian_naira_money_parameter() {
+    // Nigerian Naira (NGN, ISO 4217, 2 minor units = kobo) must be a seeded
+    // currency so rulespec-ng modules can declare `unit: NGN` without a repo
+    // inline unit declaration, exactly like USD/GBP/EUR/GHS.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: ng:statutes/nigeria-tax-act-2025/fourth-schedule
+  title: Nigeria Tax Act 2025 rate schedule (NGN unit check)
+rules:
+  - name: first_band_upper_chargeable_income
+    kind: parameter
+    dtype: Money
+    unit: NGN
+    source: "Nigeria Tax Act 2025, personal income tax rate schedule"
+    versions:
+      - effective_from: 2026-01-01
+        formula: "800000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("NGN RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "NGN"),
+        "NGN should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_source_metadata_allows_quoted_phrases() {
     let rulespec = r#"
 format: rulespec/v1
