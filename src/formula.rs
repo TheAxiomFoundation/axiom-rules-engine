@@ -1101,6 +1101,10 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         ("USD", UnitKindSpec::Currency { minor_units: 2 }),
         ("EUR", UnitKindSpec::Currency { minor_units: 2 }),
         ("GHS", UnitKindSpec::Currency { minor_units: 2 }),
+        // Ghana pesewas: the Energy Sector Levies Act, 2025 schedule states
+        // its per-litre and per-kilogramme rates in GHp, so modules ground
+        // those amounts in the schedule's own unit (100 GHp = 1 GHS).
+        ("GHp", UnitKindSpec::Currency { minor_units: 0 }),
         ("NGN", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
