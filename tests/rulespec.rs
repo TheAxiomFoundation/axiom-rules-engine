@@ -167,6 +167,37 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_ugandan_shilling_money_parameter() {
+    // Uganda Shilling (UGX, ISO 4217, exponent 0 — no minor unit in
+    // circulation) must be a seeded currency so rulespec-ug modules can
+    // declare `unit: UGX` without a repo inline unit declaration, exactly
+    // like USD/GBP/EUR/GHS/NGN.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: ug:statutes/cap-340/income-tax/third-schedule
+  title: Uganda income tax third schedule (UGX unit check)
+rules:
+  - name: paye_annual_threshold
+    kind: parameter
+    dtype: Money
+    unit: UGX
+    source: "Income Tax Act (Cap 340), Third Schedule Part I"
+    versions:
+      - effective_from: 2025-07-01
+        formula: "2820000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("UGX RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "UGX"),
+        "UGX should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_nigerian_naira_money_parameter() {
     // Nigerian Naira (NGN, ISO 4217, 2 minor units = kobo) must be a seeded
     // currency so rulespec-ng modules can declare `unit: NGN` without a repo

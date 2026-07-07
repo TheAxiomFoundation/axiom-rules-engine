@@ -1106,6 +1106,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // those amounts in the schedule's own unit (100 GHp = 1 GHS).
         ("GHp", UnitKindSpec::Currency { minor_units: 0 }),
         ("NGN", UnitKindSpec::Currency { minor_units: 2 }),
+        // Uganda Shilling: ISO 4217 lists no minor unit in circulation
+        // (exponent 0); Ugandan statutes state amounts in whole shillings.
+        ("UGX", UnitKindSpec::Currency { minor_units: 0 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
