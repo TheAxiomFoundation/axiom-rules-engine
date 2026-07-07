@@ -395,6 +395,9 @@ pub struct Derived {
     pub rounding: Option<Rounding>,
     pub source: Option<String>,
     pub source_url: Option<String>,
+    /// Corpus provision path of the rule's origin module, for joining the
+    /// rule to its legal source. Descriptive only; never read by execution.
+    pub corpus_citation_path: Option<String>,
     pub semantics: DerivedSemantics,
     pub versions: Vec<DerivedVersion>,
 }
@@ -442,6 +445,12 @@ pub struct IndexedParameter {
     pub name: String,
     pub unit: Option<String>,
     pub indexed_by: Option<String>,
+    pub source: Option<String>,
+    pub source_url: Option<String>,
+    /// Corpus provision path of the parameter's origin module, for joining
+    /// the parameter to its legal source. Descriptive only; never read by
+    /// execution.
+    pub corpus_citation_path: Option<String>,
     pub versions: Vec<ParameterVersion>,
 }
 

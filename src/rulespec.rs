@@ -454,6 +454,11 @@ pub struct RuleDefinition {
     pub name: String,
     #[serde(skip)]
     pub origin_target: Option<String>,
+    /// `source_verification.corpus_citation_path` of the module the rule was
+    /// declared in, stamped at load time alongside `origin_target` so the
+    /// module-level join key survives import merging.
+    #[serde(skip)]
+    pub origin_citation_path: Option<String>,
     #[serde(default)]
     pub kind: Option<RuleKind>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
@@ -1056,8 +1061,18 @@ impl RulesDocument {
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        // The module-level corpus citation path rides onto every rule here,
+        // because `merge_rules_documents` keeps only the root module's
+        // metadata: without stamping, an imported module's join key would be
+        // lost with its `module:` block.
+        let citation_path = self
+            .module
+            .as_ref()
+            .and_then(|module| module.source_verification.as_ref())
+            .and_then(|verification| verification.corpus_citation_path.clone());
         for rule in &mut self.rules {
             rule.origin_target = origin_target.clone();
+            rule.origin_citation_path = citation_path.clone();
         }
     }
 
@@ -1200,6 +1215,21 @@ impl RulesDocument {
                     }
                 }
             }
+            // The origin module's corpus citation path is reattached by name
+            // the same way, so every parameter and derived rule carries the
+            // join key to its legal source in the corpus.
+            if let Some(citation_path) = rule.origin_citation_path.as_ref() {
+                for parameter in &mut program.parameters {
+                    if parameter.name == rule.name {
+                        parameter.corpus_citation_path = Some(citation_path.clone());
+                    }
+                }
+                for derived in &mut program.derived {
+                    if derived.name == rule.name {
+                        derived.corpus_citation_path = Some(citation_path.clone());
+                    }
+                }
+            }
             let Some(rule_id) = rule.canonical_rule_id() else {
                 continue;
             };
@@ -1328,11 +1358,17 @@ impl RuleDefinition {
                 name: self.name.clone(),
             });
         }
+        let (source, source_url) = self.effective_source();
         Ok(IndexedParameterSpec {
             id: self.canonical_rule_id(),
             name: self.name.clone(),
             unit: self.unit.clone(),
             indexed_by: Some(indexed_by),
+            source,
+            source_url,
+            // Reattached by name in `apply_rule_ids`, like the scalar
+            // parameters lowered through the formula layer.
+            corpus_citation_path: None,
             versions,
         })
     }

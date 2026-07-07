@@ -61,6 +61,15 @@ pub enum CompileError {
         found: u32,
         supported: u32,
     },
+    #[cfg(feature = "fs")]
+    #[error("failed to read corpus provisions `{path}`: {error}")]
+    ReadProvisionsFile { path: String, error: std::io::Error },
+    #[error("failed to parse corpus provision record at `{path}` line {line}: {error}")]
+    ParseProvisionRecord {
+        path: String,
+        line: usize,
+        error: serde_json::Error,
+    },
 }
 
 /// Format version stamped into every artifact this engine compiles.
@@ -222,6 +231,148 @@ impl CompiledProgramArtifact {
             error,
         })
     }
+
+    /// Resolve each rule's and parameter's `corpus_citation_path` to a
+    /// `source_url` through a corpus provision index, filling only entries
+    /// whose `source_url` is not already set (an inline URL always wins).
+    /// Returns how many URLs were filled. Purely a lookup over the given
+    /// index — no network, no clock — so the same artifact plus the same
+    /// provisions always produce byte-identical output.
+    pub fn resolve_source_urls(&mut self, provisions: &CorpusProvisionIndex) -> usize {
+        let mut resolved = 0;
+        let mut fill = |citation_path: &Option<String>, source_url: &mut Option<String>| {
+            if source_url.is_some() {
+                return;
+            }
+            let Some(url) = citation_path
+                .as_deref()
+                .and_then(|citation_path| provisions.source_url(citation_path))
+            else {
+                return;
+            };
+            *source_url = Some(url.to_string());
+            resolved += 1;
+        };
+        for parameter in &mut self.program.parameters {
+            fill(&parameter.corpus_citation_path, &mut parameter.source_url);
+        }
+        for derived in &mut self.program.derived {
+            fill(&derived.corpus_citation_path, &mut derived.source_url);
+        }
+        resolved
+    }
+}
+
+/// An index of corpus provision records, mapping a `citation_path` (the join
+/// key modules declare as `source_verification.corpus_citation_path`) to the
+/// provision's `source_url`. Built from the JSONL provision files published
+/// in axiom-corpus (`data/corpus/provisions/**/*.jsonl`); records without a
+/// `citation_path` or `source_url` are skipped. When the same citation path
+/// appears more than once, the record loaded later wins, so loading dated
+/// snapshot files in sorted order keeps the newest snapshot's URL —
+/// deterministically, since the input order alone decides.
+#[derive(Clone, Debug, Default)]
+pub struct CorpusProvisionIndex {
+    urls: BTreeMap<String, String>,
+}
+
+/// The subset of a corpus provision record the join reads. Every other field
+/// in the JSONL record is ignored.
+#[derive(Deserialize)]
+struct ProvisionRecord {
+    #[serde(default)]
+    citation_path: Option<String>,
+    #[serde(default)]
+    source_url: Option<String>,
+}
+
+impl CorpusProvisionIndex {
+    /// The `source_url` recorded for `citation_path`, if any.
+    pub fn source_url(&self, citation_path: &str) -> Option<&str> {
+        self.urls.get(citation_path).map(String::as_str)
+    }
+
+    /// Number of citation paths with a resolvable URL.
+    pub fn len(&self) -> usize {
+        self.urls.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.urls.is_empty()
+    }
+
+    /// Add every record in a JSONL provisions document. `path` names the
+    /// document for error reporting only. Blank lines are skipped; a line
+    /// that is not a JSON object is an error.
+    pub fn add_jsonl_str(&mut self, text: &str, path: &str) -> Result<(), CompileError> {
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: ProvisionRecord = serde_json::from_str(line).map_err(|error| {
+                CompileError::ParseProvisionRecord {
+                    path: path.to_string(),
+                    line: index + 1,
+                    error,
+                }
+            })?;
+            let (Some(citation_path), Some(source_url)) = (record.citation_path, record.source_url)
+            else {
+                continue;
+            };
+            self.urls.insert(citation_path, source_url);
+        }
+        Ok(())
+    }
+
+    /// Add provision records from `path`: a JSONL file, or a directory
+    /// scanned recursively for `*.jsonl` files in sorted path order (so a
+    /// directory of dated snapshots loads deterministically, newest last).
+    #[cfg(feature = "fs")]
+    pub fn add_path(&mut self, path: impl AsRef<Path>) -> Result<(), CompileError> {
+        let path = path.as_ref();
+        let read_error = |error: std::io::Error| CompileError::ReadProvisionsFile {
+            path: path.display().to_string(),
+            error,
+        };
+        if path.is_dir() {
+            let mut files = Vec::new();
+            collect_jsonl_files(path, &mut files).map_err(read_error)?;
+            files.sort();
+            for file in files {
+                self.add_path(&file)?;
+            }
+            return Ok(());
+        }
+        let text = fs::read_to_string(path).map_err(read_error)?;
+        self.add_jsonl_str(&text, &path.display().to_string())
+    }
+
+    /// Build an index from `paths`, each a JSONL file or a directory of
+    /// them, loaded in the order given.
+    #[cfg(feature = "fs")]
+    pub fn from_paths(
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<Self, CompileError> {
+        let mut index = Self::default();
+        for path in paths {
+            index.add_path(path)?;
+        }
+        Ok(index)
+    }
+}
+
+#[cfg(feature = "fs")]
+fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_jsonl_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "jsonl") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> {

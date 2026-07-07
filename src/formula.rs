@@ -1156,6 +1156,11 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             name: v.path.clone(),
             unit: v.unit.clone(),
             indexed_by: v.indexed_by.clone(),
+            source: v.source.clone(),
+            source_url: v.source_url.clone(),
+            // The formula-source layer doesn't carry the origin module's
+            // citation path; it is reattached by name in `apply_rule_ids`.
+            corpus_citation_path: None,
             versions,
         });
     }
@@ -1223,6 +1228,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             rounding: None,
             source: v.source.clone(),
             source_url: v.source_url.clone(),
+            // As with rounding, the origin module's citation path is
+            // reattached by name in `apply_rule_ids`.
+            corpus_citation_path: None,
             semantics,
             versions,
         });
