@@ -89,6 +89,13 @@
         }
       ],
       "properties": {
+        "corpus_citation_path": {
+          "description": "Corpus provision path of the rule's origin module\n(`module.source_verification.corpus_citation_path`), carried per rule\nso artifact consumers can join the rule to its legal source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dtype": {
           "$ref": "#/$defs/DTypeSpec"
         },
@@ -257,6 +264,13 @@
     },
     "IndexedParameterSpec": {
       "properties": {
+        "corpus_citation_path": {
+          "description": "Corpus provision path of the rule's origin module\n(`module.source_verification.corpus_citation_path`), carried per rule\nso artifact consumers can join the parameter to its legal source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "type": [
             "string",
@@ -272,6 +286,20 @@
         },
         "name": {
           "type": "string"
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_url": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "unit": {
           "type": [

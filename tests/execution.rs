@@ -165,6 +165,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
             source: None,
             period: None,
             source_url: None,
+            corpus_citation_path: None,
             semantics: DerivedSemanticsSpec::Scalar {
                 expr: ScalarExprSpec::If {
                     condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
@@ -281,6 +282,7 @@ fn derived_formula_versions_select_by_query_period() {
             source: None,
             period: None,
             source_url: None,
+            corpus_citation_path: None,
             semantics: true_semantics.clone(),
             versions: vec![
                 DerivedVersionSpec {
@@ -383,6 +385,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
                 source: None,
                 period: None,
                 source_url: None,
+                corpus_citation_path: None,
                 semantics: DerivedSemanticsSpec::Scalar {
                     expr: ScalarExprSpec::Input {
                         name: "income".to_string(),
@@ -400,6 +403,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
                 source: None,
                 period: None,
                 source_url: None,
+                corpus_citation_path: None,
                 semantics: DerivedSemanticsSpec::Scalar {
                     expr: ScalarExprSpec::SumRelated {
                         relation: "member_of_household".to_string(),
@@ -512,6 +516,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
             source: None,
             period: None,
             source_url: None,
+            corpus_citation_path: None,
             semantics: DerivedSemanticsSpec::Judgment {
                 expr: axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
                     left: Box::new(ScalarExprSpec::CountRelated {

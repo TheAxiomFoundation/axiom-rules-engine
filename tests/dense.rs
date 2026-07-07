@@ -2707,6 +2707,7 @@ fn dense_date_add_days_matches_explain_mode() {
         source: None,
         period: None,
         source_url: None,
+        corpus_citation_path: None,
         semantics: DerivedSemanticsSpec::Scalar {
             expr: ScalarExprSpec::DateAddDays {
                 date: Box::new(ScalarExprSpec::Input {
@@ -2729,6 +2730,7 @@ fn dense_date_add_days_matches_explain_mode() {
         source: None,
         period: None,
         source_url: None,
+        corpus_citation_path: None,
         semantics: DerivedSemanticsSpec::Judgment {
             expr: JudgmentExprSpec::Comparison {
                 left: Box::new(ScalarExprSpec::Derived {

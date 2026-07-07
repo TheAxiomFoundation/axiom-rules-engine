@@ -290,6 +290,15 @@ pub struct IndexedParameterSpec {
     #[serde(default)]
     pub indexed_by: Option<String>,
     #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// Corpus provision path of the rule's origin module
+    /// (`module.source_verification.corpus_citation_path`), carried per rule
+    /// so artifact consumers can join the parameter to its legal source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_citation_path: Option<String>,
+    #[serde(default)]
     pub versions: Vec<ParameterVersionSpec>,
 }
 
@@ -300,6 +309,9 @@ impl IndexedParameterSpec {
             name: self.name.clone(),
             unit: self.unit.clone(),
             indexed_by: self.indexed_by.clone(),
+            source: self.source.clone(),
+            source_url: self.source_url.clone(),
+            corpus_citation_path: self.corpus_citation_path.clone(),
             versions: self
                 .versions
                 .iter()
@@ -353,6 +365,11 @@ pub struct DerivedSpec {
     pub source: Option<String>,
     #[serde(default)]
     pub source_url: Option<String>,
+    /// Corpus provision path of the rule's origin module
+    /// (`module.source_verification.corpus_citation_path`), carried per rule
+    /// so artifact consumers can join the rule to its legal source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_citation_path: Option<String>,
     #[serde(flatten)]
     pub semantics: DerivedSemanticsSpec,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -372,6 +389,7 @@ impl DerivedSpec {
             rounding: None,
             source: self.source.clone(),
             source_url: self.source_url.clone(),
+            corpus_citation_path: self.corpus_citation_path.clone(),
             semantics: self.semantics.to_model()?,
             versions: self
                 .versions

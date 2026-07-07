@@ -6,7 +6,7 @@ use axiom_rules_engine::api::{
     CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::{
-    CompiledProgramArtifact, compile_program_file_to_json, compile_summary_lines,
+    CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
 
 fn main() {
@@ -36,9 +36,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+const COMPILE_USAGE: &str = "\
+usage: axiom-rules-engine compile --program <rules.yaml> --output <compiled.json> [--corpus-provisions <path>]...
+
+  --program <path>            RuleSpec module or program YAML to compile.
+  --output <path>             Where to write the compiled artifact JSON.
+  --corpus-provisions <path>  Optional, repeatable. A corpus provisions JSONL
+                              file, or a directory scanned recursively for
+                              *.jsonl files in sorted path order. Each record's
+                              citation_path -> source_url mapping resolves the
+                              source_url of every rule/parameter whose origin
+                              module declares that corpus_citation_path and
+                              that has no inline source_url. When the same
+                              citation path appears more than once, the record
+                              loaded later wins. Purely a compile-time lookup:
+                              same inputs always produce a byte-identical
+                              artifact.";
+
 fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut program_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut provisions_paths: Vec<PathBuf> = Vec::new();
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -49,8 +67,19 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             "--output" => {
                 output_path = iter.next().map(PathBuf::from);
             }
+            "--corpus-provisions" => {
+                provisions_paths.push(
+                    iter.next()
+                        .map(PathBuf::from)
+                        .ok_or("`--corpus-provisions` requires a path argument")?,
+                );
+            }
+            "--help" | "-h" => {
+                println!("{COMPILE_USAGE}");
+                return Ok(());
+            }
             _ => {
-                return Err(format!("unknown compile argument `{arg}`").into());
+                return Err(format!("unknown compile argument `{arg}`\n{COMPILE_USAGE}").into());
             }
         }
     }
@@ -60,7 +89,14 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let output_path =
         output_path.ok_or("missing required `--output /path/to/compiled.json` argument")?;
 
-    let artifact = compile_program_file_to_json(&program_path, &output_path)?;
+    let mut artifact = CompiledProgramArtifact::from_rulespec_file(&program_path)?;
+    if !provisions_paths.is_empty() {
+        let provisions = CorpusProvisionIndex::from_paths(&provisions_paths)?;
+        let resolved = artifact.resolve_source_urls(&provisions);
+        println!("corpus_provisions_indexed: {}", provisions.len());
+        println!("corpus_source_urls_resolved: {resolved}");
+    }
+    artifact.write_json_file(&output_path)?;
     println!("compiled_program: {}", output_path.display());
     for (key, value) in compile_summary_lines(&artifact) {
         println!("{key}: {value}");
