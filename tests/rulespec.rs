@@ -197,6 +197,37 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_ghana_pesewa_money_parameter() {
+    // Ghana pesewas (GHp, 100 GHp = 1 GHS) must be a seeded currency unit:
+    // the Energy Sector Levies Act, 2025 schedule states its per-litre and
+    // per-kilogramme fuel-levy rates in GHp, and rulespec-gh grounds those
+    // amounts in the schedule's own unit.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: gh:statutes/act-1141/energy-sector-levies-amendment-2025/schedule
+  title: Energy Sector Levies 2025 schedule (GHp unit check)
+rules:
+  - name: petrol_shortfall_debt_repayment_levy_rate_per_litre
+    kind: parameter
+    dtype: Money
+    unit: GHp
+    source: "Energy Sector Levies (Amendment) Act, 2025, Schedule second row"
+    versions:
+      - effective_from: 2025-06-04
+        formula: "195"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("GHp RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "GHp"),
+        "GHp should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_source_metadata_allows_quoted_phrases() {
     let rulespec = r#"
 format: rulespec/v1
