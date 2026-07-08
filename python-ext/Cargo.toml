@@ -13,3 +13,10 @@ numpy = "0.27.0"
 pyo3 = { version = "0.27.0", features = ["chrono", "extension-module"] }
 axiom-rules-engine = { path = ".." }
 rust_decimal = "1.38.0"
+
+# Used by build.rs to emit the macOS `-undefined dynamic_lookup` cdylib link
+# args so `cargo build`/`cargo rustc` can link the extension-module outside
+# maturin (pyo3 0.27 no longer auto-emits them). See build.rs for the full
+# rationale. Version-matched to `pyo3` above; a no-op on Linux/Windows.
+[build-dependencies]
+pyo3-build-config = "0.27"

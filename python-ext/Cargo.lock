@@ -55,6 +55,7 @@ dependencies = [
  "chrono",
  "numpy",
  "pyo3",
+ "pyo3-build-config",
  "rust_decimal",
 ]
 
