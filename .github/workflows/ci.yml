@@ -39,9 +39,40 @@ jobs:
 
       # The PyO3 extension is a separate crate that CI otherwise never
       # compiles — a core enum change once broke it silently (the
-      # DenseColumn::Float arm). Type-check it on every run.
+      # DenseColumn::Float arm). Type-check it on every run. `cargo check`
+      # never links, so the macOS extension-module link is guarded separately
+      # by the `python-ext-macos` job below.
       - name: cargo check (python-ext)
         run: cargo check --manifest-path python-ext/Cargo.toml --verbose
+
+  python-ext-macos:
+    name: PyO3 extension build (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: python-ext
+
+      # Guards issue #92. The `extension-module` cdylib leaves the Python
+      # C-API symbols undefined at link time; on macOS the linker rejects them
+      # unless it gets `-undefined dynamic_lookup`, which python-ext/build.rs
+      # emits (pyo3 0.27 no longer auto-emits them). Unlike the Linux
+      # `cargo check` above, `cargo build` actually links the cdylib, so a
+      # regression in that link setup fails CI here instead of only surfacing
+      # in a developer's local `cargo build` / `maturin develop`.
+      - name: cargo build (python-ext extension-module cdylib)
+        run: cargo build --manifest-path python-ext/Cargo.toml --verbose
 
   wasm:
     name: wasm32 core check
