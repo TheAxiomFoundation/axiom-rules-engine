@@ -1109,6 +1109,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Uganda Shilling: ISO 4217 lists no minor unit in circulation
         // (exponent 0); Ugandan statutes state amounts in whole shillings.
         ("UGX", UnitKindSpec::Currency { minor_units: 0 }),
+        // Zambian Kwacha (rebased 2013): ISO 4217 exponent 2 (100 ngwee
+        // = 1 kwacha); Zambian statutes state amounts in kwacha and ngwee.
+        ("ZMW", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
