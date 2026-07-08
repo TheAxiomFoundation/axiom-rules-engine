@@ -198,6 +198,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_zambian_kwacha_money_parameter() {
+    // Zambian Kwacha (ZMW, ISO 4217, 2 minor units = ngwee) must be a
+    // seeded currency so rulespec-zm modules can declare `unit: ZMW`
+    // without a repo inline unit declaration, exactly like USD/GHS/UGX.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: zm:statutes/cap-323/income-tax/charging-schedule
+  title: Zambia income tax charging schedule (ZMW unit check)
+rules:
+  - name: paye_exempt_threshold
+    kind: parameter
+    dtype: Money
+    unit: ZMW
+    source: "Income Tax Act (Cap 323), Charging Schedule"
+    versions:
+      - effective_from: 2025-01-01
+        formula: "61200"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("ZMW RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "ZMW"),
+        "ZMW should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_nigerian_naira_money_parameter() {
     // Nigerian Naira (NGN, ISO 4217, 2 minor units = kobo) must be a seeded
     // currency so rulespec-ng modules can declare `unit: NGN` without a repo
