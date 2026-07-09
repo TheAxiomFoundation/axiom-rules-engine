@@ -1118,6 +1118,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Rwandan Franc: ISO 4217 lists no minor unit in circulation
         // (exponent 0); Rwandan laws state amounts in whole francs.
         ("RWF", UnitKindSpec::Currency { minor_units: 0 }),
+        // Tanzanian Shilling: ISO 4217 exponent 2 (100 senti = 1
+        // shilingi); Tanzanian statutes state amounts in shillings.
+        ("TZS", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),

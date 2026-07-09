@@ -228,6 +228,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_tanzanian_shilling_money_parameter() {
+    // Tanzanian Shilling (TZS, ISO 4217, 2 minor units = senti) must be
+    // a seeded currency so rulespec-tz modules can declare `unit: TZS`
+    // without a repo inline unit declaration, exactly like ZMW/ETB.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: tz:statutes/cap-332/income-tax-act
+  title: Tanzania income tax schedule (TZS unit check)
+rules:
+  - name: resident_individual_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: TZS
+    source: "Income Tax Act (Cap 332), First Schedule paragraph 1(1)"
+    versions:
+      - effective_from: 2020-07-01
+        formula: "3240000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("TZS RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "TZS"),
+        "TZS should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_rwandan_franc_money_parameter() {
     // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
     // circulation) must be a seeded currency so rulespec-rw modules can
