@@ -198,6 +198,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_ethiopian_birr_money_parameter() {
+    // Ethiopian Birr (ETB, ISO 4217, 2 minor units = santim) must be a
+    // seeded currency so rulespec-et modules can declare `unit: ETB`
+    // without a repo inline unit declaration, exactly like USD/GHS/ZMW.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: et:proclamations/proc-2025-1395/income-tax-amendment
+  title: Ethiopia income tax amendment schedule (ETB unit check)
+rules:
+  - name: employment_income_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: ETB
+    source: "Income Tax (Amendment) Proclamation No. 1395/2025, Schedule A"
+    versions:
+      - effective_from: 2025-07-01
+        formula: "2000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("ETB RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "ETB"),
+        "ETB should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_zambian_kwacha_money_parameter() {
     // Zambian Kwacha (ZMW, ISO 4217, 2 minor units = ngwee) must be a
     // seeded currency so rulespec-zm modules can declare `unit: ZMW`
