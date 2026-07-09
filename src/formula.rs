@@ -1115,6 +1115,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Ethiopian Birr: ISO 4217 exponent 2 (100 santim = 1 birr);
         // Ethiopian proclamations state amounts in birr.
         ("ETB", UnitKindSpec::Currency { minor_units: 2 }),
+        // Rwandan Franc: ISO 4217 lists no minor unit in circulation
+        // (exponent 0); Rwandan laws state amounts in whole francs.
+        ("RWF", UnitKindSpec::Currency { minor_units: 0 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),

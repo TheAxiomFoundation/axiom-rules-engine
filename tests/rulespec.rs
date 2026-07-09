@@ -228,6 +228,37 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_rwandan_franc_money_parameter() {
+    // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
+    // circulation) must be a seeded currency so rulespec-rw modules can
+    // declare `unit: RWF` without a repo inline unit declaration,
+    // exactly like UGX (the other exponent-0 seed).
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: rw:laws/law-2022-027/taxes-on-income
+  title: Rwanda income tax schedule (RWF unit check)
+rules:
+  - name: employment_income_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: RWF
+    source: "Law No 027/2022 of 20/10/2022 establishing taxes on income, Article 56"
+    versions:
+      - effective_from: 2022-10-28
+        formula: "60000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RWF RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "RWF"),
+        "RWF should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_zambian_kwacha_money_parameter() {
     // Zambian Kwacha (ZMW, ISO 4217, 2 minor units = ngwee) must be a
     // seeded currency so rulespec-zm modules can declare `unit: ZMW`
