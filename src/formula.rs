@@ -1112,6 +1112,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Zambian Kwacha (rebased 2013): ISO 4217 exponent 2 (100 ngwee
         // = 1 kwacha); Zambian statutes state amounts in kwacha and ngwee.
         ("ZMW", UnitKindSpec::Currency { minor_units: 2 }),
+        // Ethiopian Birr: ISO 4217 exponent 2 (100 santim = 1 birr);
+        // Ethiopian proclamations state amounts in birr.
+        ("ETB", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
