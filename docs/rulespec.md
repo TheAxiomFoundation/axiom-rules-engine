@@ -166,6 +166,18 @@ The loader searches sibling checkouts and any roots listed in
 `AXIOM_RULESPEC_REPO_ROOTS` (each entry may be a jurisdiction repo, a
 country monorepo, or a directory containing either).
 
+To restrict canonical-import lookup to configured roots, pass
+`--exclusive-rulespec-roots` to the `compile` command, or set
+`AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE=1` when using the filesystem API.
+Exclusive mode requires `AXIOM_RULESPEC_REPO_ROOTS` to contain at least one
+path and no empty entries, and searches only canonical-import candidates
+derived from those configured roots. It never falls through to importer
+ancestors, the current working directory, or sibling checkouts for a canonical
+import. This setting is not a general filesystem sandbox for relative or
+absolute imports or `extends`. The command-line flag is also a capability
+handshake: engines that predate exclusive resolution reject it. The same
+canonical-import policy applies to `FsModuleSource`.
+
 Filesystem search is one host strategy, not part of the core. A host can
 instead supply module text directly through the `source::ModuleSource` trait
 and the `load_rulespec_with_source` /
