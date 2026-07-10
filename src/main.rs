@@ -8,6 +8,7 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
+use axiom_rules_engine::rulespec::AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV;
 
 fn main() {
     if let Err(error) = run() {
@@ -37,10 +38,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 const COMPILE_USAGE: &str = "\
-usage: axiom-rules-engine compile --program <rules.yaml> --output <compiled.json> [--corpus-provisions <path>]...
+usage: axiom-rules-engine compile --program <rules.yaml> --output <compiled.json> [--exclusive-rulespec-roots] [--corpus-provisions <path>]...
 
   --program <path>            RuleSpec module or program YAML to compile.
   --output <path>             Where to write the compiled artifact JSON.
+  --exclusive-rulespec-roots  Resolve canonical imports only through non-empty
+                              AXIOM_RULESPEC_REPO_ROOTS entries. Never fall back
+                              to importer ancestors, cwd, or sibling checkouts.
   --corpus-provisions <path>  Optional, repeatable. A corpus provisions JSONL
                               file, or a directory scanned recursively for
                               *.jsonl files in sorted path order. Each record's
@@ -57,6 +61,7 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut program_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut provisions_paths: Vec<PathBuf> = Vec::new();
+    let mut exclusive_rulespec_roots = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -74,6 +79,9 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or("`--corpus-provisions` requires a path argument")?,
                 );
             }
+            "--exclusive-rulespec-roots" => {
+                exclusive_rulespec_roots = true;
+            }
             "--help" | "-h" => {
                 println!("{COMPILE_USAGE}");
                 return Ok(());
@@ -88,6 +96,12 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         program_path.ok_or("missing required `--program /path/to/rules` argument")?;
     let output_path =
         output_path.ok_or("missing required `--output /path/to/compiled.json` argument")?;
+
+    if exclusive_rulespec_roots {
+        // SAFETY: the single-threaded CLI has not spawned any worker threads;
+        // compilation reads this process-local setting synchronously below.
+        unsafe { env::set_var(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1") };
+    }
 
     let mut artifact = CompiledProgramArtifact::from_rulespec_file(&program_path)?;
     if !provisions_paths.is_empty() {

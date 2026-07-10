@@ -42,7 +42,10 @@ rules: []
 Import targets follow the same path identity scheme as rule IDs, without the
 optional `#rule_name` suffix. The runtime resolves `us:` to `rulespec-us`,
 `us-tn:` to `rulespec-us-tn`, etc., using sibling checkouts and
-`AXIOM_RULESPEC_REPO_ROOTS`.
+`AXIOM_RULESPEC_REPO_ROOTS`. To restrict canonical-import lookup to configured
+roots, pass `axiom-rules-engine compile --exclusive-rulespec-roots` with one or
+more non-empty `AXIOM_RULESPEC_REPO_ROOTS` entries; this disables ambient
+ancestor, cwd, and sibling-checkout fallback for canonical imports.
 
 Rule files are named by the legal or policy unit they encode. Companion tests use
 the same stem:

@@ -55,7 +55,8 @@ pub trait ModuleSource {
 ///
 /// Candidate repo roots are discovered from the anchor's ancestors plus the
 /// environment, exactly like `load_rulespec_file` discovers them from an
-/// importing file's path.
+/// importing file's path. When `AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE=1`, only
+/// the non-empty roots configured by `AXIOM_RULESPEC_REPO_ROOTS` are searched.
 #[cfg(feature = "fs")]
 pub struct FsModuleSource {
     anchor: std::path::PathBuf,
@@ -64,8 +65,8 @@ pub struct FsModuleSource {
 #[cfg(feature = "fs")]
 impl FsModuleSource {
     /// Create a source anchored at `anchor` — typically the root module file
-    /// or the directory the host is working in. Repo-root discovery walks the
-    /// anchor's ancestors.
+    /// or the directory the host is working in. Additive repo-root discovery
+    /// walks the anchor's ancestors; exclusive mode deliberately ignores it.
     pub fn new(anchor: impl Into<std::path::PathBuf>) -> Self {
         Self {
             anchor: anchor.into(),
@@ -91,7 +92,9 @@ impl ModuleSource for FsModuleSource {
         {
             return Ok(None);
         }
-        for root in crate::rulespec::candidate_rule_repo_roots(&self.anchor, prefix) {
+        let roots = crate::rulespec::candidate_rule_repo_roots(&self.anchor, prefix)
+            .map_err(|message| SourceError::new(target, message))?;
+        for root in roots {
             let candidate = root.join(&relative_path);
             if candidate.exists() {
                 return std::fs::read_to_string(&candidate)

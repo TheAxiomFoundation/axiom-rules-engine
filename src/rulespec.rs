@@ -18,6 +18,13 @@ use crate::spec::{
     ScalarValueSpec, UnitSpec,
 };
 
+#[cfg(feature = "fs")]
+/// Search roots for filesystem-backed canonical RuleSpec imports.
+pub const AXIOM_RULESPEC_REPO_ROOTS_ENV: &str = "AXIOM_RULESPEC_REPO_ROOTS";
+#[cfg(feature = "fs")]
+/// Enables fail-closed, configured-root-only canonical import resolution.
+pub const AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV: &str = "AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE";
+
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
     #[error("yaml parse error: {0}")]
@@ -27,6 +34,9 @@ pub enum RuleSpecError {
     #[cfg(feature = "fs")]
     #[error("failed to read RuleSpec file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
+    #[cfg(feature = "fs")]
+    #[error("invalid RuleSpec repository root configuration: {message}")]
+    RepositoryRootConfiguration { message: String },
     #[error("RuleSpec import `{target}` in `{path}` could not be resolved")]
     UnresolvedImport { path: String, target: String },
     #[error("RuleSpec import cycle detected at `{path}`")]
@@ -575,6 +585,7 @@ pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
 #[cfg(feature = "fs")]
 pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpecError> {
     let path = path.as_ref();
+    validate_rule_repo_root_configuration()?;
     let mut context = RuleSpecLoadContext::default();
     let document = load_rulespec_document_inner(path, &mut context)?;
     document.to_program_spec()
@@ -882,7 +893,9 @@ fn resolve_canonical_rulespec_import(
         });
     }
 
-    for root in candidate_rule_repo_roots(importer_path, prefix) {
+    let roots = candidate_rule_repo_roots(importer_path, prefix)
+        .map_err(|message| RuleSpecError::RepositoryRootConfiguration { message })?;
+    for root in roots {
         let target_path = root.join(&relative_path);
         if target_path.exists() {
             return Ok(target_path);
@@ -989,7 +1002,55 @@ fn is_absolute_rulespec_ref(value: &str) -> bool {
 }
 
 #[cfg(feature = "fs")]
-pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> Vec<PathBuf> {
+#[derive(Debug)]
+struct RuleRepoRootConfiguration {
+    configured_roots: Vec<PathBuf>,
+    exclusive: bool,
+}
+
+#[cfg(feature = "fs")]
+fn rule_repo_root_configuration() -> Result<RuleRepoRootConfiguration, String> {
+    let exclusive = match env::var_os(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV) {
+        None => false,
+        Some(value) if value == "1" => true,
+        Some(_) => {
+            return Err(format!(
+                "{AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV} must be exactly `1` when set"
+            ));
+        }
+    };
+    let configured_roots = env::var_os(AXIOM_RULESPEC_REPO_ROOTS_ENV)
+        .map(|roots| env::split_paths(&roots).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if exclusive
+        && (configured_roots.is_empty()
+            || configured_roots
+                .iter()
+                .any(|root| root.as_os_str().is_empty()))
+    {
+        return Err(format!(
+            "{AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV}=1 requires \
+             {AXIOM_RULESPEC_REPO_ROOTS_ENV} to contain at least one path and no empty entries"
+        ));
+    }
+    Ok(RuleRepoRootConfiguration {
+        configured_roots,
+        exclusive,
+    })
+}
+
+#[cfg(feature = "fs")]
+pub(crate) fn validate_rule_repo_root_configuration() -> Result<(), RuleSpecError> {
+    rule_repo_root_configuration()
+        .map(|_| ())
+        .map_err(|message| RuleSpecError::RepositoryRootConfiguration { message })
+}
+
+#[cfg(feature = "fs")]
+pub(crate) fn candidate_rule_repo_roots(
+    importer_path: &Path,
+    prefix: &str,
+) -> Result<Vec<PathBuf>, String> {
     // A jurisdiction's content root is either a legacy standalone repo
     // named rulespec-<prefix> (content at its root), or the <prefix>/
     // directory inside a country monorepo named rulespec-<country>
@@ -1007,22 +1068,24 @@ pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> V
         }
     };
 
-    if let Some(env_roots) = env::var_os("AXIOM_RULESPEC_REPO_ROOTS") {
-        for raw_root in env::split_paths(&env_roots) {
-            if raw_root
-                .file_name()
-                .is_some_and(|name| name == repo_name.as_str())
-            {
-                add(raw_root.clone());
-            } else {
-                add(raw_root.join(&repo_name));
-            }
-            if is_country_monorepo_root(&raw_root, country) {
-                add(raw_root.join(prefix));
-            } else {
-                add(raw_root.join(&monorepo_name).join(prefix));
-            }
+    let configuration = rule_repo_root_configuration()?;
+    for raw_root in configuration.configured_roots {
+        if raw_root
+            .file_name()
+            .is_some_and(|name| name == repo_name.as_str())
+        {
+            add(raw_root.clone());
+        } else {
+            add(raw_root.join(&repo_name));
         }
+        if is_country_monorepo_root(&raw_root, country) {
+            add(raw_root.join(prefix));
+        } else {
+            add(raw_root.join(&monorepo_name).join(prefix));
+        }
+    }
+    if configuration.exclusive {
+        return Ok(candidates);
     }
 
     for ancestor in importer_path.ancestors() {
@@ -1049,7 +1112,7 @@ pub(crate) fn candidate_rule_repo_roots(importer_path: &Path, prefix: &str) -> V
         add(cwd.join("_axiom").join(&repo_name));
         add(cwd.join("_axiom").join(&monorepo_name).join(prefix));
     }
-    candidates
+    Ok(candidates)
 }
 
 impl RulesDocument {
