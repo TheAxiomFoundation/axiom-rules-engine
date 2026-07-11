@@ -15,12 +15,24 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2.9.1
 
       - name: cargo build
         run: cargo build --verbose
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: explicit RuleSpec root adversarial tests
+        run: >-
+          cargo test
+          --test exclusive_root_resolution
+          --test composed_compile
+          --verbose
 
       - name: cargo test
         run: cargo test --verbose
@@ -136,11 +148,20 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install Python deps
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.3.2
+
+      - name: Create Python environment and install package
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e python/
-          python -m pip install pytest pyyaml pydantic rich
+          uv venv --python 3.14 .venv
+          uv pip install --python .venv/bin/python -e python/
+          uv pip install --python .venv/bin/python pytest maturin==1.14.1
+
+      - name: Build and install native dense extension
+        run: .venv/bin/maturin develop --manifest-path python-ext/Cargo.toml
+
+      - name: Verify native dense extension import
+        run: .venv/bin/python -c "import axiom_rules_engine_dense"
 
       - name: Run Python tests
-        run: python -m pytest -q python/tests
+        run: .venv/bin/python -m pytest -q python/tests

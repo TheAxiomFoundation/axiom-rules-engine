@@ -1,20 +1,19 @@
 //! Conformance of the published schemas against the real `rulespec-us`
 //! corpus.
 //!
-//! For every RuleSpec module (`*.yaml` with a `format: rulespec/v1` /
-//! `schema: axiom.rules*` discriminator) and every companion test
+//! For every RuleSpec module (`*.yaml` with exact `format: rulespec/v1`) and
+//! every companion test
 //! (`*.test.yaml`) under a `rulespec-us` checkout, this validates the file
 //! against the matching published schema and tallies pass/fail counts,
 //! grouping failures by cause.
 //!
-//! Program-spec files under `programs/**` (keyed by `program:` / `scope:` /
-//! `transformations:`) are a DIFFERENT format — a compose spec, not a rule
-//! module — and are excluded from module-schema validation and counted
-//! separately.
+//! Discovery starts only at the four atomic content roots. Every non-companion
+//! YAML file there is a module and malformed YAML, extension aliases, or a
+//! missing/wrong discriminator are failures rather than exclusions.
 //!
-//! The test is skipped when no checkout is found, so CI in this repo (which
-//! has no `rulespec-us`) stays green while local runs produce the real
-//! numbers. When the checkout is present, the tally is compared against a
+//! The test is skipped when no explicit checkout is configured, so CI in this
+//! repo stays green while local runs produce the real numbers. When the
+//! checkout is configured, the tally is compared against a
 //! checked-in ratchet [`MAX_KNOWN_FAILURES`]: the count may fall (tighten the
 //! constant) but not rise. Set `AXIOM_SCHEMA_CONFORMANCE_REPORT=1` to print
 //! the full per-cause breakdown and example files.
@@ -40,23 +39,9 @@ use serde_json::Value;
 /// files that are genuinely malformed at the deserialization layer.
 const MAX_KNOWN_FAILURES: usize = 0;
 
-/// Candidate locations for a `rulespec-us` checkout, relative to this repo.
+/// Explicit optional location for the `rulespec-us` conformance checkout.
 fn rulespec_us_root() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("AXIOM_RULESPEC_US_ROOT") {
-        let path = PathBuf::from(explicit);
-        return path.is_dir().then_some(path);
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        // Sibling checkout: .../TheAxiomFoundation/{axiom-rules-engine, rulespec-us}
-        manifest.parent().map(|p| p.join("rulespec-us")),
-        // Worktree layout: .../TheAxiomFoundation/_worktrees/<wt>/  →  ../../rulespec-us
-        manifest
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("rulespec-us")),
-    ];
-    candidates.into_iter().flatten().find(|path| path.is_dir())
+    std::env::var_os("AXIOM_RULESPEC_US_ROOT").map(PathBuf::from)
 }
 
 fn load_schema(file_name: &str) -> Validator {
@@ -76,29 +61,33 @@ fn parse_yaml(path: &Path) -> Result<Value, String> {
 }
 
 fn looks_like_rulespec(doc: &Value) -> bool {
-    let format_ok = doc
-        .get("format")
+    doc.get("format")
         .and_then(Value::as_str)
-        .is_some_and(|f| f == "rulespec/v1");
-    let schema_ok = doc
-        .get("schema")
-        .and_then(Value::as_str)
-        .is_some_and(|s| s.starts_with("axiom.rules"));
-    format_ok || schema_ok
+        .is_some_and(|format| format == "rulespec/v1")
 }
 
-/// A compose/program spec (a different format), recognized by its keys.
-fn is_program_spec(path: &Path, doc: &Value) -> bool {
-    let under_programs = path.components().any(|c| c.as_os_str() == "programs");
-    let has_program_keys = doc.get("program").is_some()
-        || doc.get("scope").is_some()
-        || doc.get("transformations").is_some();
-    under_programs && has_program_keys
-}
-
-fn walk_yaml(root: &Path) -> Vec<PathBuf> {
+fn walk_atomic_yaml(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = Vec::new();
+    let Ok(jurisdictions) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for jurisdiction in jurisdictions.flatten() {
+        let path = jurisdiction.path();
+        let name = jurisdiction.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !path.is_dir() || !is_us_jurisdiction(name) {
+            continue;
+        }
+        for content_root in axiom_rules_engine::rulespec::RULESPEC_ATOMIC_ROOTS {
+            let content = path.join(content_root);
+            if content.is_dir() {
+                stack.push(content);
+            }
+        }
+    }
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -112,13 +101,54 @@ fn walk_yaml(root: &Path) -> Vec<PathBuf> {
                     continue;
                 }
                 stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+            } else if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(extension.to_ascii_lowercase().as_str(), "yaml" | "yml")
+                })
+            {
                 out.push(path);
             }
         }
     }
     out.sort();
     out
+}
+
+fn is_us_jurisdiction(value: &str) -> bool {
+    value == "us"
+        || value.strip_prefix("us-").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.split('-').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                })
+        })
+}
+
+#[test]
+fn atomic_discovery_includes_malformed_modules_and_excludes_programs() {
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .expect("exact temp directory")
+        .join(format!(
+            "axiom-schema-conformance-discovery-{}",
+            std::process::id()
+        ));
+    std::fs::remove_dir_all(&temp).ok();
+    let atomic = temp.join("us/policies/broken.yaml");
+    let program = temp.join("us/programs/compose.yaml");
+    std::fs::create_dir_all(atomic.parent().expect("atomic parent")).expect("atomic dir");
+    std::fs::create_dir_all(program.parent().expect("program parent")).expect("program dir");
+    std::fs::write(&atomic, "format: [").expect("malformed atomic YAML");
+    std::fs::write(&program, "program: test\n").expect("program YAML");
+
+    let discovered = walk_atomic_yaml(&temp);
+    assert_eq!(discovered, vec![atomic]);
+    std::fs::remove_dir_all(temp).ok();
 }
 
 /// A short, stable cause key for grouping failures: the first validation
@@ -141,8 +171,6 @@ struct Tally {
     module_fail: usize,
     test_pass: usize,
     test_fail: usize,
-    program_specs: usize,
-    non_rulespec: usize,
     yaml_errors: usize,
     causes: BTreeMap<String, usize>,
     examples: BTreeMap<String, PathBuf>,
@@ -158,11 +186,14 @@ struct Tally {
 fn rulespec_us_conforms_to_published_schemas() {
     let Some(root) = rulespec_us_root() else {
         eprintln!(
-            "skipping: no rulespec-us checkout found \
+            "skipping: no rulespec-us checkout configured \
              (set AXIOM_RULESPEC_US_ROOT to run this conformance check)"
         );
         return;
     };
+    axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new([&root]).unwrap_or_else(|error| {
+        panic!("AXIOM_RULESPEC_US_ROOT must be one exact canonical rulespec-us checkout: {error}")
+    });
 
     let module_schema = load_schema("rulespec-module.v1.schema.json");
     let test_schema = load_schema("rulespec-test.v1.schema.json");
@@ -172,26 +203,45 @@ fn rulespec_us_conforms_to_published_schemas() {
         module_fail: 0,
         test_pass: 0,
         test_fail: 0,
-        program_specs: 0,
-        non_rulespec: 0,
         yaml_errors: 0,
         causes: BTreeMap::new(),
         examples: BTreeMap::new(),
     };
 
-    for path in walk_yaml(&root) {
+    for path in walk_atomic_yaml(&root) {
         let is_test = path
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.ends_with(".test.yaml"));
 
+        let exact_yaml = path.extension().and_then(|extension| extension.to_str()) == Some("yaml");
         let doc = match parse_yaml(&path) {
             Ok(doc) => doc,
-            Err(_) => {
+            Err(error) => {
                 tally.yaml_errors += 1;
+                if is_test {
+                    tally.test_fail += 1;
+                } else {
+                    tally.module_fail += 1;
+                }
+                let key = if is_test {
+                    format!("[test] {error}")
+                } else {
+                    format!("[module] {error}")
+                };
+                *tally.causes.entry(key.clone()).or_insert(0) += 1;
+                tally.examples.entry(key).or_insert_with(|| path.clone());
                 continue;
             }
         };
+
+        if !exact_yaml {
+            tally.module_fail += 1;
+            let key = "[module] YAML extension must be exact .yaml".to_string();
+            *tally.causes.entry(key.clone()).or_insert(0) += 1;
+            tally.examples.entry(key).or_insert_with(|| path.clone());
+            continue;
+        }
 
         if is_test {
             if test_schema.is_valid(&doc) {
@@ -205,14 +255,11 @@ fn rulespec_us_conforms_to_published_schemas() {
             continue;
         }
 
-        if is_program_spec(&path, &doc) {
-            tally.program_specs += 1;
-            continue;
-        }
         if !looks_like_rulespec(&doc) {
-            // sources/ registry files, known-*.yaml ledgers, and other
-            // non-module YAML: out of scope for the module schema.
-            tally.non_rulespec += 1;
+            tally.module_fail += 1;
+            let key = "[module] missing exact format: rulespec/v1".to_string();
+            *tally.causes.entry(key.clone()).or_insert(0) += 1;
+            tally.examples.entry(key).or_insert_with(|| path.clone());
             continue;
         }
 
@@ -243,10 +290,7 @@ fn rulespec_us_conforms_to_published_schemas() {
             "tests:   {} pass, {} fail",
             tally.test_pass, tally.test_fail
         );
-        eprintln!(
-            "excluded: {} program specs, {} non-rulespec yaml, {} yaml parse errors",
-            tally.program_specs, tally.non_rulespec, tally.yaml_errors
-        );
+        eprintln!("yaml parse errors: {}", tally.yaml_errors);
         eprintln!(
             "validated {total_validated} files; {total_fail} failures across {} causes:",
             tally.causes.len()

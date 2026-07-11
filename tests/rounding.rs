@@ -679,8 +679,9 @@ rules:
 fn golden_fixture_rounds_in_explain_and_dense() {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/rulespec/rounding/snap_allotment.yaml");
+    let source = std::fs::read_to_string(&fixture).expect("golden fixture is readable");
     let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&fixture).expect("golden fixture compiles");
+        CompiledProgramArtifact::from_rulespec_str(&source).expect("golden fixture compiles");
 
     // net_income = earned_income - 100 (standard deduction), rounded half-up to
     // whole dollars; allotment = max(0, 200 - net_income * 0.3), also rounded.

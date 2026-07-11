@@ -73,9 +73,60 @@ rules:
 
 @pytest.fixture(scope="module")
 def program(tmp_path_factory) -> CompiledDenseProgram:
-    path = tmp_path_factory.mktemp("dense") / "dense_flat_tax.yaml"
+    root = tmp_path_factory.mktemp("dense") / "rulespec-us"
+    path = root / "us/policies/tests/dense_flat_tax.yaml"
+    path.parent.mkdir(parents=True)
+    root = root.resolve()
+    path = path.resolve()
     path.write_text(MODULE_SOURCE, encoding="utf-8")
-    return CompiledDenseProgram.from_file(path, entity="Person")
+    return CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Person"
+    )
+
+
+def test_dense_composed_file_uses_explicit_composition_surface(tmp_path) -> None:
+    root = (tmp_path / "rulespec-us").resolve()
+    atomic = root / "us/policies/tests/dense_flat_tax.yaml"
+    atomic.parent.mkdir(parents=True)
+    atomic.write_text(MODULE_SOURCE, encoding="utf-8")
+    composition = (tmp_path / "dense-composition.yaml").resolve()
+    composition.write_text(
+        """\
+format: rulespec/v1
+module:
+  kind: composition
+imports:
+  - us:policies/tests/dense_flat_tax
+rules:
+  - name: dense_composed_tax
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    unit: EUR
+    versions:
+      - effective_from: '2025-01-01'
+        formula: dense_test_tax + adjustment
+""",
+        encoding="utf-8",
+    )
+
+    compiled = CompiledDenseProgram.from_composed_file(
+        composition,
+        rulespec_roots=[root],
+        entity="Person",
+    )
+    assert "dense_test_tax" in compiled.output_names
+    assert "dense_composed_tax" in compiled.output_names
+    assert any(item.name == "dense_test_tax" for item in compiled.derived_metadata)
+    assert compiled.input_catalog["adjustment"] == "adjustment"
+    assert (
+        compiled.input_catalog["dense_test_income"]
+        == "us:policies/tests/dense_flat_tax#input.dense_test_income"
+    )
+    assert compiled.input_request_names["dense_test_income"] == (
+        "us:policies/tests/dense_flat_tax#input.dense_test_income",
+    )
 
 
 class TestDerivedMetadata:
@@ -87,9 +138,7 @@ class TestDerivedMetadata:
         assert tax.period == "Year"
         assert tax.unit == "EUR"
         assert tax.source == "dense-surface test fixture"
-        # Durable ids derive from the country-repo logical path (e.g.
-        # `be:statutes/...#rule`); a bare fixture outside that layout has none.
-        assert tax.id is None
+        assert tax.id == "us:policies/tests/dense_flat_tax#dense_test_tax"
 
 
 class TestExecutionModes:

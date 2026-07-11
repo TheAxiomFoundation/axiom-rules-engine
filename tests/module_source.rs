@@ -513,15 +513,15 @@ fn source_relation_sets_reject_indexed_by_mismatch() {
 }
 
 #[test]
-fn relative_imports_resolve_against_the_importers_canonical_target() {
+fn absolute_canonical_imports_resolve_through_the_source() {
     let source = InMemoryModuleSource::new(&[
         (
             "us:statutes/7/2015/e",
             r#"
 format: rulespec/v1
 imports:
-  - ../2014/base
-  - ./peer.yaml
+  - us:statutes/7/2014/base
+  - us:statutes/7/2015/peer
 rules:
   - name: total_amount
     kind: derived
@@ -564,7 +564,7 @@ rules:
     ]);
 
     let program = load_rulespec_with_source("us:statutes/7/2015/e", &source)
-        .expect("relative imports resolve through the importer's canonical target");
+        .expect("absolute canonical imports resolve through the source");
     assert!(program.parameters.iter().any(|parameter| {
         parameter.id.as_deref() == Some("us:statutes/7/2014/base#base_amount")
     }));
@@ -751,10 +751,13 @@ rules:
 fn fs_module_source_matches_file_loading_on_a_monorepo_checkout() {
     use axiom_rules_engine::source::FsModuleSource;
 
-    let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-engine-fs-module-source-{}",
-        std::process::id()
-    ));
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+        .join(format!(
+            "axiom-rules-engine-fs-module-source-{}",
+            std::process::id()
+        ));
     let us_path = temp_root
         .join("rulespec-us")
         .join("us/policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
@@ -766,11 +769,14 @@ fn fs_module_source_matches_file_loading_on_a_monorepo_checkout() {
     std::fs::write(&us_path, FEDERAL_MODULE).expect("federal module is written");
     std::fs::write(&co_path, STATE_MODULE).expect("state module is written");
 
-    let source = FsModuleSource::new(&co_path);
+    let monorepo = temp_root.join("rulespec-us");
+    let roots = axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new([&monorepo])
+        .expect("canonical RuleSpec root");
+    let source = FsModuleSource::new([&monorepo]).expect("filesystem module source");
     let from_source =
         load_rulespec_with_source("us-co:policies/cdhs/snap/fy-2026-benefit", &source)
             .expect("FsModuleSource resolves the monorepo checkout");
-    let from_file = axiom_rules_engine::rulespec::load_rulespec_file(&co_path)
+    let from_file = axiom_rules_engine::rulespec::load_rulespec_file(&co_path, &roots)
         .expect("path-based loading resolves the monorepo checkout");
 
     assert_eq!(
@@ -783,25 +789,42 @@ fn fs_module_source_matches_file_loading_on_a_monorepo_checkout() {
 
 #[test]
 fn import_targets_resolve_as_pure_string_logic() {
-    // Canonical imports pass through normalized: fragments and extensions drop.
+    // One exact symbol fragment is allowed and removed for module lookup.
     assert_eq!(
-        resolve_import_target("us:statutes/7/2015/e", "us-co:policy/x.yaml#fragment")
+        resolve_import_target("us:statutes/7/2015/e", "us-co:policies/x#fragment")
             .expect("canonical import resolves"),
-        "us-co:policy/x"
+        "us-co:policies/x"
     );
-    // Relative imports resolve against the importer's directory.
     assert_eq!(
-        resolve_import_target("us:statutes/7/2015/e", "../2014/base")
-            .expect("parent-relative import resolves"),
+        resolve_import_target("us:statutes/7/2015/e", "us:statutes/7/2014/base")
+            .expect("fragmentless canonical import resolves"),
         "us:statutes/7/2014/base"
     );
-    assert_eq!(
-        resolve_import_target("us:statutes/7/2015/e", "./6/A.yaml")
-            .expect("dot-relative import resolves"),
-        "us:statutes/7/2015/6/A"
-    );
-    // Escaping above the jurisdiction root is rejected.
-    assert!(resolve_import_target("us:statutes/e", "../../escape").is_err());
-    // Absolute filesystem paths have no meaning without a filesystem.
-    assert!(resolve_import_target("us:statutes/e", "/etc/passwd").is_err());
+    for alias in [
+        "../../escape",
+        "../2014/base",
+        "./peer",
+        "/etc/passwd",
+        "us:programs/snap",
+        "us:policies/snap.yaml",
+        "us:policies/snap.yml",
+        "us:policies/snap.YAML",
+        "us:policies/snap.test",
+        " us:policies/snap",
+        "us:policies/snap ",
+        "'us:policies/snap'",
+        "us:/policies/snap",
+        "us:policies//snap",
+        "us:policies/./snap",
+        "us:policies/foo/../snap",
+        r"us:policies\snap",
+        "us:policies/snap#",
+        "us:policies/snap#bad fragment",
+        "us:policies/snap#one#two",
+    ] {
+        assert!(
+            resolve_import_target("us:statutes/e", alias).is_err(),
+            "alias must fail: {alias}"
+        );
+    }
 }

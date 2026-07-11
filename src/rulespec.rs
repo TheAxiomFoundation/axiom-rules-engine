@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(feature = "fs")]
-use std::env;
-#[cfg(feature = "fs")]
 use std::fs;
 #[cfg(feature = "fs")]
 use std::path::{Path, PathBuf};
@@ -18,25 +16,55 @@ use crate::spec::{
     ScalarValueSpec, UnitSpec,
 };
 
-#[cfg(feature = "fs")]
-/// Search roots for filesystem-backed canonical RuleSpec imports.
-pub const AXIOM_RULESPEC_REPO_ROOTS_ENV: &str = "AXIOM_RULESPEC_REPO_ROOTS";
-#[cfg(feature = "fs")]
-/// Enables fail-closed, configured-root-only canonical import resolution.
-pub const AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV: &str = "AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE";
+/// The only content roots admitted directly below a jurisdiction directory.
+pub const RULESPEC_FILESYSTEM_ROOTS: [&str; 5] = [
+    "legislation",
+    "policies",
+    "programs",
+    "regulations",
+    "statutes",
+];
+
+/// Filesystem roots that contain atomic `rulespec/v1` modules.
+///
+/// `programs/` is deliberately absent: it contains declarative ProgramSpecs
+/// consumed by `axiom-compose`, not atomic RuleSpec modules consumed here.
+pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regulations", "statutes"];
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
-    #[error("RuleSpec requires `format: rulespec/v1` or `schema: axiom.rules.*`")]
+    #[error("RuleSpec requires exact `format: rulespec/v1`")]
     MissingDiscriminator,
+    #[error(
+        "RuleSpec module `{path}` declares removed top-level `extends`; use `imports` for atomic dependencies and axiom-compose for program composition"
+    )]
+    ExtendsUnsupported { path: String },
+    #[error(
+        "RuleSpec module `{path}` declares removed top-level `schema`; use only exact `format: rulespec/v1`"
+    )]
+    SchemaDiscriminatorUnsupported { path: String },
     #[cfg(feature = "fs")]
     #[error("failed to read RuleSpec file `{path}`: {error}")]
     ReadFile { path: String, error: std::io::Error },
     #[cfg(feature = "fs")]
     #[error("invalid RuleSpec repository root configuration: {message}")]
     RepositoryRootConfiguration { message: String },
+    #[cfg(feature = "fs")]
+    #[error("invalid filesystem RuleSpec path `{path}`: {message}")]
+    InvalidFilesystemPath { path: String, message: String },
+    #[cfg(feature = "fs")]
+    #[error("invalid composed RuleSpec program `{path}`: {message}")]
+    InvalidComposedProgram { path: String, message: String },
+    #[error(
+        "atomic RuleSpec module `{path}` must not declare module.kind; `composition` is accepted only by the composed-program surface"
+    )]
+    ModuleKindOnAtomicSurface { path: String },
+    #[error(
+        "atomic RuleSpec module `{path}` declares removed module.id; canonical path/ModuleSource target is the sole module identity"
+    )]
+    ModuleIdUnsupported { path: String },
     #[error("RuleSpec import `{target}` in `{path}` could not be resolved")]
     UnresolvedImport { path: String, target: String },
     #[error("RuleSpec import cycle detected at `{path}`")]
@@ -189,18 +217,18 @@ pub enum RuleSpecError {
         "RuleSpec module `{path}` declares source_verification.source_sha256 `{value}`, which is not a 64-character hexadecimal SHA-256 digest"
     )]
     InvalidSourceSha256 { path: String, value: String },
-    #[error("failed to load extended RuleSpec module: {0}")]
-    Extended(#[from] crate::spec::SpecError),
+    #[error("RuleSpec module `{path}` declares non-canonical corpus_citation_path `{value}`")]
+    InvalidCorpusCitationPath { path: String, value: String },
+    #[error(
+        "RuleSpec module `{path}` declares removed plural `corpus_citation_paths`; every source/proof node must declare exactly one singular `corpus_citation_path`"
+    )]
+    PluralCorpusCitationPaths { path: String },
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
     #[serde(default)]
     pub format: Option<String>,
-    #[serde(default)]
-    pub schema: Option<String>,
-    #[serde(default)]
-    pub extends: Option<String>,
     #[serde(default)]
     pub imports: Vec<String>,
     #[serde(default)]
@@ -222,7 +250,7 @@ pub struct RulesDocument {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModuleMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,17 +271,24 @@ impl ModuleMetadata {
     /// target for source-backed loads, or the module id / `<memory>` for
     /// in-memory strings.
     fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+        if let Some(verification) = self.source_verification.as_ref()
+            && !is_canonical_corpus_citation_path(&verification.corpus_citation_path)
+        {
+            return Err(RuleSpecError::InvalidCorpusCitationPath {
+                path: path.to_string(),
+                value: verification.corpus_citation_path.clone(),
+            });
+        }
         if let Some(sha) = self
             .source_verification
             .as_ref()
             .and_then(|verification| verification.source_sha256.as_deref())
+            && (sha.len() != 64 || !sha.chars().all(|ch| ch.is_ascii_hexdigit()))
         {
-            if sha.len() != 64 || !sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                return Err(RuleSpecError::InvalidSourceSha256 {
-                    path: path.to_string(),
-                    value: sha.to_string(),
-                });
-            }
+            return Err(RuleSpecError::InvalidSourceSha256 {
+                path: path.to_string(),
+                value: sha.to_string(),
+            });
         }
         Ok(())
     }
@@ -263,25 +298,15 @@ impl ModuleMetadata {
 /// addresses the provision in the Axiom corpus; `source_sha256` pins the
 /// SHA-256 hex digest of the exact provision text the module was encoded
 /// from, so tooling can detect mechanically when the published source has
-/// changed out from under the encoding. Additional subfields (for example
-/// `corpus_citation_paths`) are preserved verbatim.
+/// changed out from under the encoding. The mapping is exact: the singular
+/// citation path is required and unknown/plural fields are rejected.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SourceVerification {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub corpus_citation_path: Option<String>,
+    pub corpus_citation_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
-    // `serde(flatten)` collects every unmodeled subfield here, so the schema
-    // this generates carries `additionalProperties: true`. `serde_yaml::Value`
-    // has no `JsonSchema` impl, so the field's value type is described as an
-    // arbitrary JSON value.
-    #[cfg_attr(
-        feature = "schema",
-        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
-    )]
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 /// Who and what produced the encoding: tool (`encoder`, for example
@@ -539,56 +564,236 @@ pub fn looks_like_rulespec_yaml(source: &str) -> bool {
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    let format_key = serde_yaml::Value::String("format".to_string());
-    if mapping
-        .get(&format_key)
+    mapping
+        .get(serde_yaml::Value::String("format".to_string()))
         .and_then(serde_yaml::Value::as_str)
-        .is_some_and(|format| format == "rulespec/v1")
-    {
-        return true;
-    }
-    let schema_key = serde_yaml::Value::String("schema".to_string());
-    if mapping
-        .get(&schema_key)
-        .and_then(serde_yaml::Value::as_str)
-        .is_some_and(|schema| schema.starts_with("axiom.rules"))
-    {
-        return true;
-    }
-    false
+        == Some("rulespec/v1")
 }
 
 pub fn has_top_level_rules_key(source: &str) -> bool {
+    has_top_level_key(source, "rules")
+}
+
+fn has_top_level_key(source: &str, key: &str) -> bool {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(source) else {
         return false;
     };
     let Some(mapping) = value.as_mapping() else {
         return false;
     };
-    mapping.contains_key(&serde_yaml::Value::String("rules".to_string()))
+    mapping.contains_key(serde_yaml::Value::String(key.to_string()))
+}
+
+fn reject_removed_extends(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    if has_top_level_key(source, "extends") {
+        return Err(RuleSpecError::ExtendsUnsupported {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_removed_schema_discriminator(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    if has_top_level_key(source, "schema") {
+        return Err(RuleSpecError::SchemaDiscriminatorUnsupported {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_atomic_metadata_declarations(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let Some(module) = value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("module".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+    if module.contains_key(serde_yaml::Value::String("kind".to_string())) {
+        return Err(RuleSpecError::ModuleKindOnAtomicSurface {
+            path: path.to_string(),
+        });
+    }
+    if module.contains_key(serde_yaml::Value::String("id".to_string())) {
+        return Err(RuleSpecError::ModuleIdUnsupported {
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    validate_recursive_corpus_value(&value, path)
+}
+
+fn validate_recursive_corpus_value(
+    value: &serde_yaml::Value,
+    path: &str,
+) -> Result<(), RuleSpecError> {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, nested) in mapping {
+                if key.as_str() == Some("corpus_citation_paths") {
+                    return Err(RuleSpecError::PluralCorpusCitationPaths {
+                        path: path.to_string(),
+                    });
+                }
+                if key.as_str() == Some("corpus_citation_path") {
+                    let Some(citation_path) = nested.as_str() else {
+                        return Err(RuleSpecError::InvalidCorpusCitationPath {
+                            path: path.to_string(),
+                            value: format!("{nested:?}"),
+                        });
+                    };
+                    if !is_canonical_corpus_citation_path(citation_path) {
+                        return Err(RuleSpecError::InvalidCorpusCitationPath {
+                            path: path.to_string(),
+                            value: citation_path.to_string(),
+                        });
+                    }
+                }
+                if key.as_str() == Some("source_sha256") {
+                    let Some(digest) = nested.as_str() else {
+                        return Err(RuleSpecError::InvalidSourceSha256 {
+                            path: path.to_string(),
+                            value: format!("{nested:?}"),
+                        });
+                    };
+                    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err(RuleSpecError::InvalidSourceSha256 {
+                            path: path.to_string(),
+                            value: digest.to_string(),
+                        });
+                    }
+                }
+                validate_recursive_corpus_value(nested, path)?;
+            }
+        }
+        serde_yaml::Value::Sequence(sequence) => {
+            for nested in sequence {
+                validate_recursive_corpus_value(nested, path)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn is_canonical_corpus_citation_path(value: &str) -> bool {
+    if value.is_empty() || value != value.trim() || value.contains(['\\', '#', '"', '\'']) {
+        return false;
+    }
+    let segments = value.split('/').collect::<Vec<_>>();
+    if segments.len() < 3
+        || !is_canonical_corpus_jurisdiction(segments[0])
+        || !is_canonical_corpus_document_class(segments[1])
+    {
+        return false;
+    }
+    segments[2..].iter().all(|segment| {
+        *segment == segment.trim()
+            && segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && segment.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '-' | ':' | '\u{2013}')
+            })
+    })
+}
+
+fn is_canonical_corpus_document_class(value: &str) -> bool {
+    value
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let country = parts.next().unwrap_or_default();
+    if !(2..=3).contains(&country.len()) || !country.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return false;
+    }
+    parts.all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
 }
 
 pub fn lower_rulespec_str(source: &str) -> Result<ProgramSpec, RuleSpecError> {
     if !looks_like_rulespec_yaml(source) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
+    reject_removed_extends(source, "<memory>")?;
+    reject_removed_schema_discriminator(source, "<memory>")?;
+    reject_atomic_metadata_declarations(source, "<memory>")?;
+    validate_recursive_corpus_contract(source, "<memory>")?;
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
-    let origin_target = document
-        .module
-        .as_ref()
-        .and_then(|module| module.id.clone());
-    document.validate_module_metadata(origin_target.as_deref().unwrap_or("<memory>"))?;
-    document.assign_origin_target(origin_target);
+    document.validate_atomic_module_metadata("<memory>")?;
+    document.assign_origin_target(None);
     document.to_program_spec()
 }
 
 #[cfg(feature = "fs")]
-pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpecError> {
+pub fn load_rulespec_file(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+) -> Result<ProgramSpec, RuleSpecError> {
+    let target = roots.target_for_path(path.as_ref())?;
+    let source = crate::source::FsModuleSource::from_validated_roots(roots.clone());
+    load_rulespec_with_source(&target, &source)
+}
+
+/// Load an ephemeral RuleSpec program emitted by `axiom-compose`.
+///
+/// Unlike an atomic module, the root document is deliberately originless and
+/// may live outside the RuleSpec checkout. It must be an exact composition
+/// document and every dependency directive must already be a canonical atomic
+/// target resolved exclusively through `roots`.
+#[cfg(feature = "fs")]
+pub fn load_composed_rulespec_file(
+    path: impl AsRef<Path>,
+    roots: &CanonicalRuleSpecRoots,
+) -> Result<ProgramSpec, RuleSpecError> {
     let path = path.as_ref();
-    validate_rule_repo_root_configuration()?;
-    let mut context = RuleSpecLoadContext::default();
-    let document = load_rulespec_document_inner(path, &mut context)?;
-    document.to_program_spec()
+    validate_exact_regular_yaml(path)?;
+    if roots.contains_path(path) {
+        return Err(invalid_composed_program(
+            path,
+            "composed output must be outside every canonical RuleSpec checkout",
+        ));
+    }
+    let source = fs::read_to_string(path).map_err(|error| RuleSpecError::ReadFile {
+        path: path.display().to_string(),
+        error,
+    })?;
+    validate_composed_program_discriminator(path, &source)?;
+    validate_recursive_corpus_contract(&source, &path.display().to_string())?;
+
+    let mut document: RulesDocument = serde_yaml::from_str(&source)?;
+    document.validate_module_metadata(&path.display().to_string())?;
+    document.assign_origin_target(None);
+
+    let module_source = crate::source::FsModuleSource::from_validated_roots(roots.clone());
+    let mut context = SourceLoadContext::default();
+    let mut combined = RulesDocument::default();
+
+    for import in &document.imports {
+        let target = canonical_composed_dependency(path, import, "import")?;
+        let imported = load_rulespec_document_from_source(&target, &module_source, &mut context)?;
+        combined = merge_rules_documents(combined, imported);
+    }
+    combined = merge_rules_documents(combined, document.without_imports());
+    combined.to_program_spec()
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -597,15 +802,14 @@ pub fn load_rulespec_file(path: impl AsRef<Path>) -> Result<ProgramSpec, RuleSpe
 /// core treats the program as a pure function over (modules, dataset), and
 /// where module text comes from is the host's concern.
 ///
-/// Imports are resolved to canonical targets with [`resolve_import_target`]
-/// (relative imports resolve against the importing module's canonical
-/// target), then fetched from `source`. Module identity, deduplication,
-/// cycle detection, and durable rule ids all use the canonical target.
+/// Exact absolute imports are validated with [`resolve_import_target`], then
+/// fetched from `source`. Module identity, deduplication, cycle detection, and
+/// durable rule ids all use the canonical target.
 pub fn load_rulespec_with_source(
     root_target: &str,
     source: &dyn ModuleSource,
 ) -> Result<ProgramSpec, RuleSpecError> {
-    let root_target = normalize_module_target(root_target)?;
+    let root_target = validate_module_target(root_target)?;
     let mut context = SourceLoadContext::default();
     let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
     document.to_program_spec()
@@ -638,17 +842,15 @@ fn load_rulespec_document_from_source(
     if !looks_like_rulespec_yaml(&text) {
         return Err(RuleSpecError::MissingDiscriminator);
     }
+    reject_removed_extends(&text, target)?;
+    reject_removed_schema_discriminator(&text, target)?;
+    reject_atomic_metadata_declarations(&text, target)?;
+    validate_recursive_corpus_contract(&text, target)?;
     context.stack.push(target.to_string());
     let mut document: RulesDocument = serde_yaml::from_str(&text)?;
-    document.validate_module_metadata(target)?;
+    document.validate_atomic_module_metadata(target)?;
     document.assign_origin_target(Some(target.to_string()));
     let mut combined = RulesDocument::default();
-
-    if let Some(extends) = document.extends.as_deref() {
-        let base_target = resolve_import_target(target, extends)?;
-        let base = load_rulespec_document_from_source(&base_target, source, context)?;
-        combined = merge_rules_documents(combined, base);
-    }
 
     for import in &document.imports {
         let import_target = resolve_import_target(target, import)?;
@@ -656,182 +858,88 @@ fn load_rulespec_document_from_source(
         combined = merge_rules_documents(combined, imported);
     }
 
-    combined = merge_rules_documents(combined, document.without_dependency_directives());
+    combined = merge_rules_documents(combined, document.without_imports());
     context.loaded.insert(target.to_string());
     context.stack.pop();
     Ok(combined)
 }
 
-/// Normalize a canonical module target: strip surrounding quotes, a
-/// `#fragment`, and a `.yaml`/`.yml` extension, and validate the
-/// `<jurisdiction>:<relative path>` shape. Pure string logic.
-pub fn normalize_module_target(target: &str) -> Result<String, RuleSpecError> {
-    let trimmed = target.trim().trim_matches(['"', '\'']);
-    let without_fragment = trimmed
-        .split_once('#')
-        .map(|(base, _)| base)
-        .unwrap_or(trimmed)
-        .trim();
-    let Some((prefix, relative)) = without_fragment.split_once(':') else {
-        return Err(RuleSpecError::InvalidModuleTarget {
-            target: target.to_string(),
-        });
+/// Validate an exact canonical atomic module target.
+///
+/// Canonical targets have the form `<jurisdiction>:<atomic-root>/<path>` with
+/// no extension, fragment, whitespace, quotes, backslashes, empty/dot
+/// segments, or redundant separators. Its successful return is byte-for-byte
+/// equal to `target`.
+pub fn validate_module_target(target: &str) -> Result<String, RuleSpecError> {
+    let invalid = || RuleSpecError::InvalidModuleTarget {
+        target: target.to_string(),
     };
-    if !is_canonical_repo_prefix(prefix) {
-        return Err(RuleSpecError::InvalidModuleTarget {
-            target: target.to_string(),
-        });
+    if target.is_empty()
+        || target.chars().any(char::is_whitespace)
+        || target.contains(['"', '\'', '\\', '#'])
+    {
+        return Err(invalid());
     }
-    let relative = strip_module_extension(relative.trim().trim_matches('/'));
-    let mut segments = Vec::new();
-    for segment in relative.split('/') {
-        match segment {
-            "" | "." => continue,
-            ".." => {
-                return Err(RuleSpecError::InvalidModuleTarget {
-                    target: target.to_string(),
-                });
-            }
-            segment => segments.push(segment),
-        }
+    let Some((prefix, relative)) = target.split_once(':') else {
+        return Err(invalid());
+    };
+    if !is_canonical_repo_prefix(prefix) || relative.contains(':') {
+        return Err(invalid());
     }
-    if segments.is_empty() {
-        return Err(RuleSpecError::InvalidModuleTarget {
-            target: target.to_string(),
-        });
+    let segments = relative.split('/').collect::<Vec<_>>();
+    if segments.len() < 2
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || matches!(*segment, "." | "..")
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'~')
+                })
+        })
+        || !RULESPEC_ATOMIC_ROOTS.contains(&segments[0])
+    {
+        return Err(invalid());
     }
-    Ok(format!("{prefix}:{}", segments.join("/")))
+    let filename = segments.last().expect("validated target has path segments");
+    let filename_lower = filename.to_ascii_lowercase();
+    if filename_lower.ends_with(".yaml")
+        || filename_lower.ends_with(".yml")
+        || filename_lower.ends_with(".test")
+    {
+        return Err(invalid());
+    }
+    Ok(target.to_string())
 }
 
-/// Resolve an import string to a canonical module target, given the
-/// IMPORTING module's canonical target. Canonical imports
-/// (`us:statutes/7/2015/e`) pass through normalized; relative imports
-/// (`../d`, `e/6/A`, `./sibling.yaml`) resolve against the importer's
-/// directory within the same jurisdiction, mirroring how filesystem loading
-/// resolves relative imports from the importing file's directory. Pure
-/// string logic — no filesystem.
+/// Validate an exact absolute atomic import and return its module target.
+///
+/// Imports may append one exact `#fragment` for symbol-level dependency
+/// resolution. The fragment is validated and removed only for module lookup.
+/// Relative paths and every compatibility spelling are rejected.
 pub fn resolve_import_target(importer_target: &str, import: &str) -> Result<String, RuleSpecError> {
     let unresolved = || RuleSpecError::UnresolvedImport {
         path: importer_target.to_string(),
         target: import.to_string(),
     };
-    let trimmed = import.trim().trim_matches(['"', '\'']);
-    let without_fragment = trimmed
-        .split_once('#')
-        .map(|(base, _)| base)
-        .unwrap_or(trimmed)
-        .trim();
-    if without_fragment.is_empty() {
+    validate_module_target(importer_target)?;
+    let mut parts = import.split('#');
+    let module_target = parts.next().expect("split always yields one part");
+    if let Some(fragment) = parts.next()
+        && (fragment.is_empty()
+            || !fragment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+    {
         return Err(unresolved());
     }
-    if let Some((prefix, _)) = without_fragment.split_once(':') {
-        if is_canonical_repo_prefix(prefix) {
-            return normalize_module_target(without_fragment).map_err(|_| unresolved());
-        }
-    }
-    // Relative import: resolve against the importer's directory. Absolute
-    // filesystem paths have no meaning without a filesystem.
-    if without_fragment.starts_with('/') {
+    if parts.next().is_some() {
         return Err(unresolved());
     }
-    let importer = normalize_module_target(importer_target)?;
-    let (prefix, importer_path) = importer
-        .split_once(':')
-        .expect("normalized targets contain a prefix");
-    let mut segments = importer_path.split('/').collect::<Vec<&str>>();
-    segments.pop(); // The importer module itself; imports resolve from its directory.
-    let relative = strip_module_extension(without_fragment);
-    for segment in relative.split('/') {
-        match segment {
-            "" | "." => continue,
-            ".." => {
-                if segments.pop().is_none() {
-                    return Err(unresolved());
-                }
-            }
-            segment => segments.push(segment),
-        }
-    }
-    if segments.is_empty() {
-        return Err(unresolved());
-    }
-    Ok(format!("{prefix}:{}", segments.join("/")))
-}
-
-fn strip_module_extension(target: &str) -> &str {
-    target
-        .strip_suffix(".yaml")
-        .or_else(|| target.strip_suffix(".yml"))
-        .unwrap_or(target)
-}
-
-#[cfg(feature = "fs")]
-#[derive(Default)]
-struct RuleSpecLoadContext {
-    stack: Vec<PathBuf>,
-    loaded: HashSet<PathBuf>,
-}
-
-#[cfg(feature = "fs")]
-fn load_rulespec_document_inner(
-    path: &Path,
-    context: &mut RuleSpecLoadContext,
-) -> Result<RulesDocument, RuleSpecError> {
-    let source = fs::read_to_string(path).map_err(|error| RuleSpecError::ReadFile {
-        path: path.display().to_string(),
-        error,
-    })?;
-    let resolved_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if context.stack.contains(&resolved_path) {
-        return Err(RuleSpecError::ImportCycle {
-            path: resolved_path.display().to_string(),
-        });
-    }
-    if context.loaded.contains(&resolved_path) {
-        return Ok(RulesDocument::default());
-    }
-
-    if !looks_like_rulespec_yaml(&source) {
-        return Err(RuleSpecError::MissingDiscriminator);
-    }
-    context.stack.push(resolved_path.clone());
-    let mut document: RulesDocument = serde_yaml::from_str(&source)?;
-    document.validate_module_metadata(&path.display().to_string())?;
-    document.assign_origin_target(canonical_rulespec_target(path));
-    let mut combined = RulesDocument::default();
-
-    if let Some(extends) = document.extends.as_deref() {
-        let base_path = path.parent().unwrap_or_else(|| Path::new("")).join(extends);
-        let base = load_extended_document(&base_path, context)?;
-        combined = merge_rules_documents(combined, base);
-    }
-
-    for import in &document.imports {
-        let import_path = resolve_rulespec_import(path, import)?;
-        let imported = load_rulespec_document_inner(&import_path, context)?;
-        combined = merge_rules_documents(combined, imported);
-    }
-
-    combined = merge_rules_documents(combined, document.without_dependency_directives());
-    context.loaded.insert(resolved_path);
-    context.stack.pop();
-    Ok(combined)
-}
-
-#[cfg(feature = "fs")]
-fn load_extended_document(
-    path: &Path,
-    context: &mut RuleSpecLoadContext,
-) -> Result<RulesDocument, RuleSpecError> {
-    load_rulespec_document_inner(path, context)
+    validate_module_target(module_target).map_err(|_| unresolved())
 }
 
 fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> RulesDocument {
     if extension.format.is_some() {
         base.format = extension.format;
-    }
-    if extension.schema.is_some() {
-        base.schema = extension.schema;
     }
     if extension.module.is_some() {
         base.module = extension.module;
@@ -842,153 +950,20 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     base
 }
 
-#[cfg(feature = "fs")]
-fn resolve_rulespec_import(importer_path: &Path, import: &str) -> Result<PathBuf, RuleSpecError> {
-    let target = import.trim().trim_matches(['"', '\'']);
-    let target_without_fragment = target
-        .split_once('#')
-        .map(|(base, _)| base)
-        .unwrap_or(target)
-        .trim();
-    if let Some((prefix, relative)) = target_without_fragment.split_once(':') {
-        if is_canonical_repo_prefix(prefix) {
-            return resolve_canonical_rulespec_import(importer_path, prefix, relative, import);
-        }
-    }
-
-    let relative = import_target_to_rulespec_path(target_without_fragment);
-    let target_path = if relative.is_absolute() {
-        relative
-    } else {
-        importer_path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(relative)
-    };
-    if target_path.exists() {
-        return Ok(target_path);
-    }
-    Err(RuleSpecError::UnresolvedImport {
-        path: importer_path.display().to_string(),
-        target: import.to_string(),
-    })
-}
-
-#[cfg(feature = "fs")]
-fn resolve_canonical_rulespec_import(
-    importer_path: &Path,
-    prefix: &str,
-    relative: &str,
-    import: &str,
-) -> Result<PathBuf, RuleSpecError> {
-    let relative_path = import_target_to_rulespec_path(relative.trim().trim_matches('/'));
-    if relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(RuleSpecError::UnresolvedImport {
-            path: importer_path.display().to_string(),
-            target: import.to_string(),
-        });
-    }
-
-    let roots = candidate_rule_repo_roots(importer_path, prefix)
-        .map_err(|message| RuleSpecError::RepositoryRootConfiguration { message })?;
-    for root in roots {
-        let target_path = root.join(&relative_path);
-        if target_path.exists() {
-            return Ok(target_path);
-        }
-    }
-    Err(RuleSpecError::UnresolvedImport {
-        path: importer_path.display().to_string(),
-        target: import.to_string(),
-    })
-}
-
-#[cfg(feature = "fs")]
-fn canonical_rulespec_target(path: &Path) -> Option<String> {
-    let components = path
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().to_string())
-        .collect::<Vec<String>>();
-    let repo_index = components
-        .iter()
-        .rposition(|component| component.starts_with("rulespec-"))?;
-    let repo_tail = components[repo_index].strip_prefix("rulespec-")?;
-    if repo_tail.is_empty() || repo_index + 1 >= components.len() {
-        return None;
-    }
-    // Country-monorepo layout: a repo named rulespec-<country> holds one
-    // directory per jurisdiction (rulespec-us/us/…, rulespec-us/us-ca/…).
-    // Worktrees often append a branch slug to the repo directory
-    // (rulespec-us-medicaid-fix/us/...). Treat those like the country
-    // monorepo when the first content component is a jurisdiction for the
-    // same country; anything else is legacy layout where content sits at the
-    // repo root.
-    let next = components[repo_index + 1].as_str();
-    let country = repo_tail.split('-').next().unwrap_or(repo_tail);
-    let is_jurisdiction_dir = (next == country
-        || (next.starts_with(country) && next.as_bytes().get(country.len()) == Some(&b'-')))
-        && (repo_tail == country
-            || repo_tail
-                .as_bytes()
-                .get(country.len())
-                .is_some_and(|byte| *byte == b'-'));
-    let (prefix, content_start) = if is_jurisdiction_dir {
-        (next.to_string(), repo_index + 2)
-    } else {
-        (repo_tail.to_string(), repo_index + 1)
-    };
-    if content_start >= components.len() {
-        return None;
-    }
-    let mut relative = PathBuf::new();
-    for component in &components[content_start..] {
-        relative.push(component);
-    }
-    let mut relative = relative.to_string_lossy().replace('\\', "/");
-    if relative.ends_with(".yaml") || relative.ends_with(".yml") {
-        if let Some(stem) = Path::new(&relative).with_extension("").to_str() {
-            relative = stem.replace('\\', "/");
-        }
-    }
-    if relative.is_empty() {
-        None
-    } else {
-        Some(format!("{prefix}:{relative}"))
-    }
-}
-
-#[cfg(feature = "fs")]
-fn import_target_to_rulespec_path(target: &str) -> PathBuf {
-    let normalized = target.trim().trim_matches(['"', '\'']);
-    let path = PathBuf::from(normalized);
-    if normalized.ends_with(".yaml") || normalized.ends_with(".yml") {
-        path
-    } else {
-        PathBuf::from(format!("{normalized}.yaml"))
-    }
-}
-
 pub(crate) fn is_canonical_repo_prefix(prefix: &str) -> bool {
-    !prefix.is_empty()
-        && prefix
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
-}
-
-#[cfg(feature = "fs")]
-fn is_country_monorepo_root(path: &Path, country: &str) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    let mut parts = prefix.split('-');
+    let Some(country) = parts.next() else {
         return false;
     };
-    let monorepo_name = format!("rulespec-{country}");
-    if name == monorepo_name {
-        return true;
+    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return false;
     }
-    name.strip_prefix(&format!("{monorepo_name}-")).is_some() && path.join(country).exists()
+    parts.all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
 }
 
 fn is_absolute_rulespec_ref(value: &str) -> bool {
@@ -1002,117 +977,627 @@ fn is_absolute_rulespec_ref(value: &str) -> bool {
 }
 
 #[cfg(feature = "fs")]
-#[derive(Debug)]
-struct RuleRepoRootConfiguration {
-    configured_roots: Vec<PathBuf>,
-    exclusive: bool,
+#[derive(Clone, Debug)]
+struct CanonicalCountryRoot {
+    path: PathBuf,
+    country: String,
+}
+
+/// Validated, explicit country-monorepo roots for filesystem module loading.
+///
+/// Every root is an absolute, real, unaliased directory named exactly
+/// `rulespec-<two-letter-country>`. There is no environment, cwd, ancestor,
+/// sibling-checkout, or legacy standalone-repository fallback.
+///
+/// Roots are a deterministic authority boundary, not a sandbox against a
+/// concurrently hostile filesystem. Callers must keep them trusted and
+/// quiescent for construction and compilation; validation followed by reads
+/// cannot exclude TOCTOU replacement or hard-link mutation.
+#[cfg(feature = "fs")]
+#[derive(Clone, Debug)]
+pub struct CanonicalRuleSpecRoots {
+    roots: Vec<CanonicalCountryRoot>,
 }
 
 #[cfg(feature = "fs")]
-fn rule_repo_root_configuration() -> Result<RuleRepoRootConfiguration, String> {
-    let exclusive = match env::var_os(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV) {
-        None => false,
-        Some(value) if value == "1" => true,
-        Some(_) => {
-            return Err(format!(
-                "{AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV} must be exactly `1` when set"
+impl CanonicalRuleSpecRoots {
+    pub fn new<I, P>(roots: I) -> Result<Self, RuleSpecError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let raw_roots = roots
+            .into_iter()
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>();
+        if raw_roots.is_empty() {
+            return Err(repository_root_error(
+                "at least one explicit rulespec-<country> root is required",
             ));
         }
-    };
-    let configured_roots = env::var_os(AXIOM_RULESPEC_REPO_ROOTS_ENV)
-        .map(|roots| env::split_paths(&roots).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if exclusive
-        && (configured_roots.is_empty()
-            || configured_roots
-                .iter()
-                .any(|root| root.as_os_str().is_empty()))
-    {
-        return Err(format!(
-            "{AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV}=1 requires \
-             {AXIOM_RULESPEC_REPO_ROOTS_ENV} to contain at least one path and no empty entries"
+
+        let mut validated = Vec::with_capacity(raw_roots.len());
+        let mut seen_paths = HashSet::new();
+        let mut seen_countries = HashSet::new();
+        for root in raw_roots {
+            let country = validate_country_root(&root)?;
+            if !seen_paths.insert(root.clone()) {
+                return Err(repository_root_error(format!(
+                    "duplicate root `{}`",
+                    root.display()
+                )));
+            }
+            if let Some(existing) = validated.iter().find(|existing: &&CanonicalCountryRoot| {
+                root.starts_with(&existing.path) || existing.path.starts_with(&root)
+            }) {
+                return Err(repository_root_error(format!(
+                    "overlapping roots `{}` and `{}` are forbidden",
+                    existing.path.display(),
+                    root.display()
+                )));
+            }
+            if !seen_countries.insert(country.clone()) {
+                return Err(repository_root_error(format!(
+                    "duplicate country `{country}`; configure exactly one rulespec-{country} root"
+                )));
+            }
+            validated.push(CanonicalCountryRoot {
+                path: root,
+                country,
+            });
+        }
+        Ok(Self { roots: validated })
+    }
+
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.roots.iter().map(|root| root.path.as_path())
+    }
+
+    fn contains_path(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| path.starts_with(&root.path))
+    }
+
+    pub fn target_for_path(&self, path: &Path) -> Result<String, RuleSpecError> {
+        validate_exact_regular_yaml(path)?;
+        for root in &self.roots {
+            let Ok(relative) = path.strip_prefix(&root.path) else {
+                continue;
+            };
+            let components = relative
+                .components()
+                .map(|component| component.as_os_str().to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| invalid_path(path, "path components must be UTF-8"))?;
+            if components.len() < 3 {
+                return Err(invalid_path(
+                    path,
+                    "module must be below <jurisdiction>/<atomic-root>/",
+                ));
+            }
+            let jurisdiction = components[0];
+            if !jurisdiction_matches_country(jurisdiction, &root.country) {
+                return Err(invalid_path(
+                    path,
+                    format!(
+                        "jurisdiction `{jurisdiction}` does not match country `{}`",
+                        root.country
+                    ),
+                ));
+            }
+            if !RULESPEC_ATOMIC_ROOTS.contains(&components[1]) {
+                return Err(invalid_path(
+                    path,
+                    format!(
+                        "`{}` is not an atomic RuleSpec root; expected one of {}",
+                        components[1],
+                        RULESPEC_ATOMIC_ROOTS.join(", ")
+                    ),
+                ));
+            }
+            let relative = relative.with_extension("");
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| invalid_path(path, "path components must be UTF-8"))?
+                .replace('\\', "/");
+            let target = format!(
+                "{jurisdiction}:{}",
+                relative_without_jurisdiction(&relative)
+            );
+            let normalized = validate_module_target(&target).map_err(|_| {
+                invalid_path(
+                    path,
+                    "path does not map injectively to an exact canonical module target",
+                )
+            })?;
+            if normalized != target {
+                return Err(invalid_path(
+                    path,
+                    format!(
+                        "path maps to non-canonical target `{target}` instead of exact `{normalized}`"
+                    ),
+                ));
+            }
+            return Ok(target);
+        }
+        Err(invalid_path(
+            path,
+            "path is outside every explicitly configured RuleSpec root",
+        ))
+    }
+
+    pub(crate) fn read_target(&self, target: &str) -> Result<Option<String>, RuleSpecError> {
+        let target = validate_module_target(target)?;
+        let (jurisdiction, relative) = target
+            .split_once(':')
+            .expect("normalized targets contain a jurisdiction");
+        let country = jurisdiction
+            .split_once('-')
+            .map(|(country, _)| country)
+            .unwrap_or(jurisdiction);
+        let Some(root) = self.roots.iter().find(|root| root.country == country) else {
+            return Ok(None);
+        };
+        let path = root
+            .path
+            .join(jurisdiction)
+            .join(format!("{relative}.yaml"));
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(RuleSpecError::ReadFile {
+                    path: path.display().to_string(),
+                    error,
+                });
+            }
+        }
+        validate_exact_regular_yaml(&path)?;
+        fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|error| RuleSpecError::ReadFile {
+                path: path.display().to_string(),
+                error,
+            })
+    }
+}
+
+#[cfg(feature = "fs")]
+fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
+    if !root.is_absolute() {
+        return Err(repository_root_error(format!(
+            "root `{}` must be absolute",
+            root.display()
+        )));
+    }
+    validate_exact_component_spelling(root).map_err(repository_root_error)?;
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        repository_root_error(format!("cannot inspect root `{}`: {error}", root.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(repository_root_error(format!(
+            "root `{}` must be a real directory, not a symlink or special path",
+            root.display()
+        )));
+    }
+    let resolved = root.canonicalize().map_err(|error| {
+        repository_root_error(format!("cannot resolve root `{}`: {error}", root.display()))
+    })?;
+    if resolved.as_os_str() != root.as_os_str() {
+        return Err(repository_root_error(format!(
+            "root `{}` is an alias; pass its exact canonical path `{}`",
+            root.display(),
+            resolved.display()
+        )));
+    }
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| repository_root_error("root name must be UTF-8"))?;
+    let country = name.strip_prefix("rulespec-").ok_or_else(|| {
+        repository_root_error(format!(
+            "root `{}` must be named exactly rulespec-<country>",
+            root.display()
+        ))
+    })?;
+    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        return Err(repository_root_error(format!(
+            "root `{}` must use a two-letter lowercase country code",
+            root.display()
+        )));
+    }
+    for content_root in RULESPEC_FILESYSTEM_ROOTS {
+        if root.join(content_root).exists() {
+            return Err(repository_root_error(format!(
+                "root-level `{content_root}/` is forbidden in `{}`; content belongs below a direct jurisdiction directory",
+                root.display()
+            )));
+        }
+    }
+
+    let mut jurisdiction_count = 0usize;
+    let mut content_root_count = 0usize;
+    for entry in fs::read_dir(root).map_err(|error| {
+        repository_root_error(format!("cannot read root `{}`: {error}", root.display()))
+    })? {
+        let entry = entry.map_err(|error| {
+            repository_root_error(format!("cannot read root `{}`: {error}", root.display()))
+        })?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                repository_root_error(format!("non-UTF-8 path `{}` is forbidden", path.display()))
+            })?;
+        let lowercase_name = name.to_ascii_lowercase();
+        if name != lowercase_name
+            && (RULESPEC_FILESYSTEM_ROOTS.contains(&lowercase_name.as_str())
+                || is_canonical_repo_prefix(&lowercase_name))
+        {
+            return Err(repository_root_error(format!(
+                "case-aliased reserved path `{name}` is forbidden in `{}`",
+                root.display()
+            )));
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))
+        })?;
+        if file_type.is_symlink() {
+            return Err(repository_root_error(format!(
+                "symlink `{}` is forbidden",
+                path.display()
+            )));
+        }
+        if !file_type.is_dir() {
+            continue;
+        }
+        if !is_canonical_repo_prefix(&name) {
+            continue;
+        }
+        if !jurisdiction_matches_country(&name, country) {
+            return Err(repository_root_error(format!(
+                "jurisdiction `{name}` does not match country `{country}` in `{}`",
+                root.display()
+            )));
+        }
+        jurisdiction_count += 1;
+        for content_entry in fs::read_dir(&path).map_err(|error| {
+            repository_root_error(format!("cannot read `{}`: {error}", path.display()))
+        })? {
+            let content_entry = content_entry.map_err(|error| {
+                repository_root_error(format!("cannot read `{}`: {error}", path.display()))
+            })?;
+            let content_name = content_entry.file_name();
+            let content_name = content_name.to_str().ok_or_else(|| {
+                repository_root_error(format!(
+                    "non-UTF-8 path `{}` is forbidden",
+                    content_entry.path().display()
+                ))
+            })?;
+            let lowercase_content_name = content_name.to_ascii_lowercase();
+            if content_name != lowercase_content_name
+                && RULESPEC_FILESYSTEM_ROOTS.contains(&lowercase_content_name.as_str())
+            {
+                return Err(repository_root_error(format!(
+                    "case-aliased content root `{}` is forbidden",
+                    content_entry.path().display()
+                )));
+            }
+        }
+        for content_root in RULESPEC_FILESYSTEM_ROOTS {
+            let content_path = path.join(content_root);
+            let content_metadata = match fs::symlink_metadata(&content_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(repository_root_error(format!(
+                        "cannot inspect `{}`: {error}",
+                        content_path.display()
+                    )));
+                }
+            };
+            if content_metadata.file_type().is_symlink() || !content_metadata.is_dir() {
+                return Err(repository_root_error(format!(
+                    "content root `{}` must be a real directory",
+                    content_path.display()
+                )));
+            }
+            validate_exact_component_spelling(&content_path).map_err(repository_root_error)?;
+            content_root_count += 1;
+            validate_content_tree(&content_path)?;
+        }
+    }
+    if jurisdiction_count == 0 || content_root_count == 0 {
+        return Err(repository_root_error(format!(
+            "root `{}` is empty: it must contain a direct matching jurisdiction with at least one canonical content root",
+            root.display()
+        )));
+    }
+    Ok(country.to_string())
+}
+
+#[cfg(feature = "fs")]
+fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(|error| {
+            repository_root_error(format!("cannot read `{}`: {error}", directory.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                repository_root_error(format!("cannot read `{}`: {error}", directory.display()))
+            })?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                repository_root_error(format!(
+                    "non-UTF-8 path component `{}` is forbidden",
+                    path.display()
+                ))
+            })?;
+            if name.chars().any(char::is_whitespace)
+                || name
+                    .chars()
+                    .any(|ch| matches!(ch, '#' | ':' | '"' | '\'' | '\\'))
+                || !name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'~')
+                })
+            {
+                return Err(repository_root_error(format!(
+                    "non-canonical path component `{name}` in `{}`",
+                    path.display()
+                )));
+            }
+            let file_type = entry.file_type().map_err(|error| {
+                repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))
+            })?;
+            if file_type.is_symlink() {
+                return Err(repository_root_error(format!(
+                    "symlink `{}` is forbidden",
+                    path.display()
+                )));
+            }
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if !file_type.is_file() {
+                return Err(repository_root_error(format!(
+                    "special path `{}` is forbidden",
+                    path.display()
+                )));
+            } else if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+                let extension_lower = extension.to_ascii_lowercase();
+                if matches!(extension_lower.as_str(), "yaml" | "yml") && extension != "yaml" {
+                    return Err(repository_root_error(format!(
+                        "YAML file `{}` must use the exact `.yaml` extension",
+                        path.display()
+                    )));
+                }
+                if extension == "yaml" && has_yaml_like_stem(&path) {
+                    return Err(repository_root_error(format!(
+                        "YAML file `{}` has an ambiguous YAML-like double extension",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fs")]
+fn validate_exact_regular_yaml(path: &Path) -> Result<(), RuleSpecError> {
+    if !path.is_absolute() {
+        return Err(invalid_path(path, "path must be absolute"));
+    }
+    validate_exact_component_spelling(path).map_err(|message| invalid_path(path, message))?;
+    if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
+        return Err(invalid_path(
+            path,
+            "module files must use the `.yaml` extension",
         ));
     }
-    Ok(RuleRepoRootConfiguration {
-        configured_roots,
-        exclusive,
-    })
+    if has_yaml_like_stem(path) {
+        return Err(invalid_path(
+            path,
+            "module files must not use a YAML-like double extension",
+        ));
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid_path(path, "module filename must be valid UTF-8"))?;
+    if file_name.chars().any(char::is_whitespace)
+        || file_name
+            .chars()
+            .any(|ch| matches!(ch, '#' | ':' | '"' | '\'' | '\\'))
+    {
+        return Err(invalid_path(path, "module filename is not canonical"));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| invalid_path(path, format!("cannot inspect path: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(invalid_path(
+            path,
+            "module must be a real regular file, not a symlink or special path",
+        ));
+    }
+    let resolved = path
+        .canonicalize()
+        .map_err(|error| invalid_path(path, format!("cannot resolve path: {error}")))?;
+    if resolved.as_os_str() != path.as_os_str() {
+        return Err(invalid_path(
+            path,
+            format!(
+                "path is an alias; pass its exact canonical path `{}`",
+                resolved.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "fs")]
-pub(crate) fn validate_rule_repo_root_configuration() -> Result<(), RuleSpecError> {
-    rule_repo_root_configuration()
-        .map(|_| ())
-        .map_err(|message| RuleSpecError::RepositoryRootConfiguration { message })
+fn has_yaml_like_stem(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            stem.ends_with(".yaml") || stem.ends_with(".yml")
+        })
 }
 
 #[cfg(feature = "fs")]
-pub(crate) fn candidate_rule_repo_roots(
-    importer_path: &Path,
-    prefix: &str,
-) -> Result<Vec<PathBuf>, String> {
-    // A jurisdiction's content root is either a legacy standalone repo
-    // named rulespec-<prefix> (content at its root), or the <prefix>/
-    // directory inside a country monorepo named rulespec-<country>
-    // (rulespec-us containing us/, us-ca/, …). Legacy candidates come
-    // first so existing sibling checkouts keep their precedence.
-    let repo_name = format!("rulespec-{prefix}");
-    let country = prefix.split('-').next().unwrap_or(prefix);
-    let monorepo_name = format!("rulespec-{country}");
+fn validate_exact_component_spelling(path: &Path) -> Result<(), String> {
+    use std::path::Component;
 
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    let mut add = |candidate: PathBuf| {
-        if seen.insert(candidate.clone()) {
-            candidates.push(candidate);
-        }
-    };
-
-    let configuration = rule_repo_root_configuration()?;
-    for raw_root in configuration.configured_roots {
-        if raw_root
-            .file_name()
-            .is_some_and(|name| name == repo_name.as_str())
-        {
-            add(raw_root.clone());
-        } else {
-            add(raw_root.join(&repo_name));
-        }
-        if is_country_monorepo_root(&raw_root, country) {
-            add(raw_root.join(prefix));
-        } else {
-            add(raw_root.join(&monorepo_name).join(prefix));
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => cursor.push(component.as_os_str()),
+            Component::Normal(expected) => {
+                let entries = fs::read_dir(&cursor).map_err(|error| {
+                    format!(
+                        "cannot inspect parent `{}` for exact path spelling: {error}",
+                        cursor.display()
+                    )
+                })?;
+                let mut exact = false;
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        format!(
+                            "cannot inspect parent `{}` for exact path spelling: {error}",
+                            cursor.display()
+                        )
+                    })?;
+                    if entry.file_name() == expected {
+                        exact = true;
+                        break;
+                    }
+                }
+                if !exact {
+                    return Err(format!(
+                        "path component `{}` is a spelling alias under `{}`",
+                        expected.to_string_lossy(),
+                        cursor.display()
+                    ));
+                }
+                cursor.push(expected);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(format!(
+                    "path `{}` contains a dot alias component",
+                    path.display()
+                ));
+            }
         }
     }
-    if configuration.exclusive {
-        return Ok(candidates);
-    }
+    Ok(())
+}
 
-    for ancestor in importer_path.ancestors() {
-        if ancestor
-            .file_name()
-            .is_some_and(|name| name == repo_name.as_str())
-        {
-            add(ancestor.to_path_buf());
-        }
-        if is_country_monorepo_root(ancestor, country) {
-            add(ancestor.join(prefix));
-        }
-        if let Some(parent) = ancestor.parent() {
-            add(parent.join(&repo_name));
-            add(parent.join(&monorepo_name).join(prefix));
-        }
-        add(ancestor.join("_axiom").join(&repo_name));
-        add(ancestor.join("_axiom").join(&monorepo_name).join(prefix));
-    }
+#[cfg(feature = "fs")]
+fn jurisdiction_matches_country(jurisdiction: &str, country: &str) -> bool {
+    jurisdiction == country
+        || jurisdiction
+            .strip_prefix(country)
+            .is_some_and(|suffix| suffix.starts_with('-') && is_canonical_repo_prefix(jurisdiction))
+}
 
-    if let Ok(cwd) = env::current_dir() {
-        add(cwd.join(&repo_name));
-        add(cwd.join(&monorepo_name).join(prefix));
-        add(cwd.join("_axiom").join(&repo_name));
-        add(cwd.join("_axiom").join(&monorepo_name).join(prefix));
+#[cfg(feature = "fs")]
+fn relative_without_jurisdiction(relative: &str) -> &str {
+    relative
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .expect("validated paths include a jurisdiction and content root")
+}
+
+#[cfg(feature = "fs")]
+fn repository_root_error(message: impl Into<String>) -> RuleSpecError {
+    RuleSpecError::RepositoryRootConfiguration {
+        message: message.into(),
     }
-    Ok(candidates)
+}
+
+#[cfg(feature = "fs")]
+fn invalid_path(path: &Path, message: impl Into<String>) -> RuleSpecError {
+    RuleSpecError::InvalidFilesystemPath {
+        path: path.display().to_string(),
+        message: message.into(),
+    }
+}
+
+#[cfg(feature = "fs")]
+fn invalid_composed_program(path: &Path, message: impl Into<String>) -> RuleSpecError {
+    RuleSpecError::InvalidComposedProgram {
+        path: path.display().to_string(),
+        message: message.into(),
+    }
+}
+
+#[cfg(feature = "fs")]
+fn validate_composed_program_discriminator(path: &Path, source: &str) -> Result<(), RuleSpecError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let mapping = value
+        .as_mapping()
+        .ok_or_else(|| invalid_composed_program(path, "root must be a mapping"))?;
+    let field = |name: &str| mapping.get(serde_yaml::Value::String(name.to_string()));
+    if field("format").and_then(serde_yaml::Value::as_str) != Some("rulespec/v1") {
+        return Err(invalid_composed_program(
+            path,
+            "format must be exactly `rulespec/v1`",
+        ));
+    }
+    if field("extends").is_some() {
+        return Err(invalid_composed_program(
+            path,
+            "top-level `extends` was removed; use `imports` for atomic dependencies",
+        ));
+    }
+    if field("schema").is_some() {
+        return Err(invalid_composed_program(
+            path,
+            "top-level `schema` was removed; use only exact `format: rulespec/v1`",
+        ));
+    }
+    let module = field("module")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| invalid_composed_program(path, "module must be a mapping"))?;
+    let module_field = |name: &str| module.get(serde_yaml::Value::String(name.to_string()));
+    if module_field("kind").and_then(serde_yaml::Value::as_str) != Some("composition") {
+        return Err(invalid_composed_program(
+            path,
+            "module.kind must be exactly `composition`",
+        ));
+    }
+    if module_field("id").is_some() {
+        return Err(invalid_composed_program(
+            path,
+            "module.id is forbidden because composed root rules are originless",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fs")]
+fn canonical_composed_dependency(
+    path: &Path,
+    dependency: &str,
+    field: &str,
+) -> Result<String, RuleSpecError> {
+    let normalized = validate_module_target(dependency).map_err(|_| {
+        invalid_composed_program(
+            path,
+            format!(
+                "{field} `{dependency}` must be a canonical atomic module target; relative and programs/ targets are forbidden"
+            ),
+        )
+    })?;
+    if dependency != normalized {
+        return Err(invalid_composed_program(
+            path,
+            format!("{field} `{dependency}` is not exact canonical form `{normalized}`"),
+        ));
+    }
+    Ok(normalized)
 }
 
 impl RulesDocument {
@@ -1121,6 +1606,19 @@ impl RulesDocument {
             Some(module) => module.validate(path),
             None => Ok(()),
         }
+    }
+
+    fn validate_atomic_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
+        self.validate_module_metadata(path)?;
+        let Some(module) = self.module.as_ref() else {
+            return Ok(());
+        };
+        if module.kind.is_some() {
+            return Err(RuleSpecError::ModuleKindOnAtomicSurface {
+                path: path.to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
@@ -1132,15 +1630,14 @@ impl RulesDocument {
             .module
             .as_ref()
             .and_then(|module| module.source_verification.as_ref())
-            .and_then(|verification| verification.corpus_citation_path.clone());
+            .map(|verification| verification.corpus_citation_path.clone());
         for rule in &mut self.rules {
             rule.origin_target = origin_target.clone();
             rule.origin_citation_path = citation_path.clone();
         }
     }
 
-    fn without_dependency_directives(mut self) -> Self {
-        self.extends = None;
+    fn without_imports(mut self) -> Self {
         self.imports.clear();
         self
     }
@@ -1313,11 +1810,6 @@ impl RulesDocument {
         let Some(module) = &self.module else {
             return;
         };
-        if let Some(id) = &module.id {
-            out.push_str("# module: ");
-            out.push_str(id);
-            out.push('\n');
-        }
         if let Some(title) = &module.title {
             out.push_str("# title: ");
             out.push_str(title);

@@ -6,24 +6,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import yaml
-
 from .models import Program
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _looks_like_rulespec(spec: dict) -> bool:
-    return spec.get("format") == "rulespec/v1" or str(spec.get("schema", "")).startswith(
-        "axiom.rules"
-    )
-
 
 DEFAULT_TIMEOUT_SECONDS = 600.0
 
 
 def _compile_program(
     path: Path,
+    rulespec_roots: tuple[Path, ...],
+    command: str,
     binary_path: str | Path | None = None,
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
 ) -> Program:
@@ -34,15 +27,18 @@ def _compile_program(
     )
     with tempfile.TemporaryDirectory(prefix="axiom-rules-engine-program-") as temp_dir:
         artifact_path = Path(temp_dir) / "program.compiled.json"
+        command = [
+            str(binary),
+            command,
+            "--program",
+            str(path),
+            "--output",
+            str(artifact_path),
+        ]
+        for root in rulespec_roots:
+            command.extend(["--rulespec-root", str(root)])
         process = subprocess.run(
-            [
-                str(binary),
-                "compile",
-                "--program",
-                str(path),
-                "--output",
-                str(artifact_path),
-            ],
+            command,
             text=True,
             capture_output=True,
             check=False,
@@ -58,19 +54,41 @@ def _compile_program(
 def load_program(
     path: str | Path,
     *,
+    rulespec_roots: tuple[str | Path, ...],
     binary_path: str | Path | None = None,
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
 ) -> Program:
     """Load a RuleSpec module from RuleSpec YAML.
 
-    ``timeout`` bounds the compile subprocess in seconds; ``None`` disables
-    the bound. On expiry ``subprocess.TimeoutExpired`` is raised.
+    ``rulespec_roots`` is the non-empty explicit set of canonical country
+    checkouts passed to the engine. ``timeout`` bounds the compile subprocess
+    in seconds; ``None`` disables the bound. On expiry
+    ``subprocess.TimeoutExpired`` is raised.
     """
     path = Path(path)
-    spec: dict = yaml.safe_load(path.read_text()) or {}
-    if not _looks_like_rulespec(spec):
-        raise ValueError(
-            f"{path} is not RuleSpec YAML; expected format: rulespec/v1 "
-            "or schema: axiom.rules.*"
-        )
-    return _compile_program(path, binary_path=binary_path, timeout=timeout)
+    roots = tuple(Path(root) for root in rulespec_roots)
+    if not roots:
+        raise ValueError("at least one explicit rulespec-<country> root is required")
+    return _compile_program(
+        path, roots, "compile", binary_path=binary_path, timeout=timeout
+    )
+
+
+def load_composed_program(
+    path: str | Path,
+    *,
+    rulespec_roots: tuple[str | Path, ...],
+    binary_path: str | Path | None = None,
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
+) -> Program:
+    """Compile exact ``axiom-compose`` output through ``compile-composed``."""
+    roots = tuple(Path(root) for root in rulespec_roots)
+    if not roots:
+        raise ValueError("at least one explicit rulespec-<country> root is required")
+    return _compile_program(
+        Path(path),
+        roots,
+        "compile-composed",
+        binary_path=binary_path,
+        timeout=timeout,
+    )

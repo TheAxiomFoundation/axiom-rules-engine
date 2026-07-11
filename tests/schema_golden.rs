@@ -62,7 +62,8 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
     // derived schema.
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
-    let artifact = CompiledProgramArtifact::from_rulespec_file(&fixture)
+    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
         .expect("fixture compiles to an artifact");
     let artifact_json = serde_json::to_value(&artifact).expect("artifact serializes to JSON");
 
@@ -89,19 +90,17 @@ fn artifact_schema_accepts_the_annotated_divergences() {
     // Exercise the manually-annotated spots in the derived artifact schema
     // that a plain schemars derive would get wrong or narrow: `dtype` aliases
     // (`money` for decimal), decimal values as both a bare integer and a
-    // string, a date value, module metadata with a flattened
-    // `source_verification.extra` field, and a judgment/comparison expression.
+    // string, a date value, exact module source metadata, and a
+    // judgment/comparison expression.
     // If any of these regress, this artifact stops validating.
     let artifact = serde_json::json!({
         "artifact_format_version": 1,
         "engine_version": "0.1.0",
         "program": {
             "module": {
-                "id": "us:statutes/7/2017/a",
                 "source_verification": {
                     "corpus_citation_path": "us/statute/7/2017/a",
-                    "source_sha256": "a".repeat(64),
-                    "corpus_citation_paths": ["us/statute/7/2017/a"]
+                    "source_sha256": "a".repeat(64)
                 },
                 "encoding_provenance": {"encoder": "axiom-encode/0.2"},
                 "validation": [{"oracle": "taxsim", "status": "matches", "last_run": "2026-06-01"}]
@@ -137,7 +136,8 @@ fn artifact_schema_accepts_the_annotated_divergences() {
             }]
         },
         "metadata": {"evaluation_order": ["d"],
-            "fast_path": {"strategy": "s", "compatible": true, "blockers": []}}
+            "fast_path": {"strategy": "s", "compatible": true, "blockers": []},
+            "input_catalog": []}
     });
 
     let schema_value = all_schemas()
@@ -166,5 +166,61 @@ fn artifact_schema_accepts_the_annotated_divergences() {
         serde_json::from_value::<axiom_rules_engine::spec::DTypeSpec>(json).unwrap_or_else(|e| {
             panic!("schema advertises dtype `{dtype}` but serde rejects it: {e}")
         });
+    }
+}
+
+#[test]
+fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
+    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect("fixture compiles to an artifact");
+    let base = serde_json::to_value(&artifact).expect("artifact serializes");
+    let schema = all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == "compiled-artifact.v1.schema.json")
+        .expect("artifact schema is published")
+        .schema;
+    let validator = jsonschema::draft7::new(&schema).expect("artifact schema compiles");
+
+    let mut cases = Vec::new();
+    let mut v0 = base.clone();
+    v0["artifact_format_version"] = serde_json::json!(0);
+    cases.push(v0);
+
+    for verification in [
+        serde_json::json!({"corpus_citation_path": ""}),
+        serde_json::json!({"corpus_citation_path": "us/statute"}),
+        serde_json::json!({"corpus_citation_path": "us/statute/26/62", "source_sha256": "bad"}),
+        serde_json::json!({"corpus_citation_paths": ["us/statute/26/62"]}),
+    ] {
+        let mut value = base.clone();
+        value["program"]["module"] = serde_json::json!({"source_verification": verification});
+        cases.push(value);
+    }
+
+    let mut bad_rule = base.clone();
+    bad_rule["program"]["parameters"][0]["corpus_citation_path"] = serde_json::json!("us/statute");
+    cases.push(bad_rule);
+
+    let mut plural_rule = base.clone();
+    plural_rule["program"]["parameters"][0]["corpus_citation_paths"] =
+        serde_json::json!(["us/statute/26/62"]);
+    cases.push(plural_rule);
+
+    let mut removed_id = base.clone();
+    removed_id["program"]["module"] = serde_json::json!({"id": "us:policies/base"});
+    cases.push(removed_id);
+
+    let mut removed_extends = base;
+    removed_extends["program"]["extends"] = serde_json::json!("us:policies/base");
+    cases.push(removed_extends);
+
+    for case in cases {
+        assert!(
+            !validator.is_valid(&case),
+            "invalid v1 artifact must fail schema: {case}"
+        );
     }
 }

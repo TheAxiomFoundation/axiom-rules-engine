@@ -1,16 +1,16 @@
-//! Exclusive RuleSpec root resolution must never fall through to ambient
-//! ancestor/cwd/sibling repositories. Kept in one integration-test binary
-//! because the direct `FsModuleSource` checks mutate process environment.
+//! Adversarial coverage for the unconditional explicit-root filesystem contract.
 
-use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::rulespec::{
-    AXIOM_RULESPEC_REPO_ROOTS_ENV, AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, RuleSpecError,
-    load_rulespec_with_source,
+    CanonicalRuleSpecRoots, RuleSpecError, load_rulespec_file, load_rulespec_with_source,
 };
 use axiom_rules_engine::source::FsModuleSource;
+
+static NONCE: AtomicU64 = AtomicU64::new(0);
 
 const BASE_MODULE: &str = r#"
 format: rulespec/v1
@@ -22,6 +22,15 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: "10"
+  - name: base_adjusted_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: amount
 "#;
 
 const PROGRAM_MODULE: &str = r#"
@@ -40,6 +49,29 @@ rules:
         formula: base_amount + amount
 "#;
 
+fn temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+        .join(format!(
+            "axiom-rules-engine-{label}-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ))
+}
+
+fn canonical_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let temp = temp_dir(label);
+    let root = temp.join("rulespec-us");
+    let base = root.join("us/policies/base.yaml");
+    let program = root.join("us-co/policies/program.yaml");
+    std::fs::create_dir_all(base.parent().expect("base parent")).expect("base dir");
+    std::fs::create_dir_all(program.parent().expect("program parent")).expect("program dir");
+    std::fs::write(base, BASE_MODULE).expect("base module");
+    std::fs::write(&program, PROGRAM_MODULE).expect("program module");
+    (temp, root, program)
+}
+
 fn compile_command(program: &Path, artifact: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"));
     command.args([
@@ -56,197 +88,301 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-fn restore_env(name: &str, previous: Option<OsString>) {
-    // SAFETY: this integration-test binary contains one test and does not
-    // spawn threads while mutating its process environment.
-    unsafe {
-        if let Some(value) = previous {
-            std::env::set_var(name, value);
-        } else {
-            std::env::remove_var(name);
-        }
+#[test]
+fn cli_requires_explicit_repeatable_roots_and_ignores_legacy_environment() {
+    let (temp, root, program) = canonical_fixture("cli-explicit-roots");
+    let output = temp.join("program.compiled.json");
+
+    let missing = compile_command(&program, &output)
+        .env("AXIOM_RULESPEC_REPO_ROOTS", &root)
+        .env("AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE", "1")
+        .output()
+        .expect("missing-root command");
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("at least one explicit rulespec-<country> root is required"),
+        "{}",
+        stderr(&missing)
+    );
+    assert!(!output.exists());
+
+    let success = compile_command(&program, &output)
+        .args(["--rulespec-root", root.to_str().expect("utf8 root")])
+        .output()
+        .expect("explicit-root command");
+    assert!(success.status.success(), "{}", stderr(&success));
+    assert!(output.exists());
+
+    let duplicate = compile_command(&program, &temp.join("duplicate.json"))
+        .args(["--rulespec-root", root.to_str().expect("utf8 root")])
+        .args(["--rulespec-root", root.to_str().expect("utf8 root")])
+        .output()
+        .expect("duplicate-root command");
+    assert!(!duplicate.status.success());
+    assert!(stderr(&duplicate).contains("duplicate root"));
+
+    let removed_flag = compile_command(&program, &temp.join("removed.json"))
+        .arg("--exclusive-rulespec-roots")
+        .output()
+        .expect("removed-flag command");
+    assert!(!removed_flag.status.success());
+    assert!(stderr(&removed_flag).contains("unknown compile argument"));
+
+    let help = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+        .args(["compile", "--help"])
+        .output()
+        .expect("help command");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--rulespec-root"));
+    assert!(!help.contains("--exclusive-rulespec-roots"));
+    assert!(!help.contains("AXIOM_RULESPEC_REPO_ROOTS"));
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn filesystem_source_and_file_loader_share_the_exact_root_set() {
+    let (temp, root, program) = canonical_fixture("source-root-set");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical roots");
+    let source = FsModuleSource::new([&root]).expect("filesystem source");
+
+    let from_source = load_rulespec_with_source("us-co:policies/program", &source)
+        .expect("source loader compiles");
+    let from_file = load_rulespec_file(&program, &roots).expect("file loader compiles");
+    assert_eq!(
+        serde_json::to_value(from_source).expect("source program JSON"),
+        serde_json::to_value(from_file).expect("file program JSON")
+    );
+
+    let artifact = CompiledProgramArtifact::from_rulespec_file(&program, &roots)
+        .expect("atomic artifact compiles");
+    let entry = artifact
+        .metadata
+        .input_catalog
+        .iter()
+        .find(|entry| entry.slot == "amount")
+        .expect("amount input catalog entry");
+    assert_eq!(
+        entry.canonical_request_name,
+        "us-co:policies/program#input.amount"
+    );
+    assert_eq!(
+        entry.request_names,
+        [
+            "us-co:policies/program#input.amount",
+            "us:policies/base#input.amount"
+        ]
+    );
+    let runtime = artifact.program.to_program().expect("runtime program");
+    assert_eq!(runtime.resolve_input_name("amount"), None);
+    assert_eq!(
+        runtime
+            .resolve_input_name("us-co:policies/program#input.amount")
+            .as_deref(),
+        Some("amount")
+    );
+    assert_eq!(
+        runtime
+            .resolve_input_name("us:policies/base#input.amount")
+            .as_deref(),
+        Some("amount"),
+        "every actual owner remains an accepted request name"
+    );
+    assert_eq!(
+        runtime.resolve_input_name("us:policies/fake#input.amount"),
+        None,
+        "an exact but non-owning module prefix must not alias the slot"
+    );
+
+    let outside = temp.join("outside.yaml");
+    std::fs::write(&outside, PROGRAM_MODULE).expect("outside module");
+    assert!(CompiledProgramArtifact::from_rulespec_file(&outside, &roots).is_err());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn roots_reject_empty_duplicate_relative_aliased_and_noncanonical_checkouts() {
+    assert!(CanonicalRuleSpecRoots::new(std::iter::empty::<&Path>()).is_err());
+
+    let (temp, root, _) = canonical_fixture("invalid-root-shapes");
+    assert!(CanonicalRuleSpecRoots::new([&root, &root]).is_err());
+    let second_us = temp.join("second/rulespec-us");
+    std::fs::create_dir_all(second_us.join("us/policies")).expect("second US checkout");
+    assert!(CanonicalRuleSpecRoots::new([&root, &second_us]).is_err());
+
+    let nested_uk = root.join("rulespec-uk");
+    std::fs::create_dir_all(nested_uk.join("uk/policies")).expect("nested UK checkout");
+    let overlap = CanonicalRuleSpecRoots::new([&root, &nested_uk])
+        .expect_err("nested configured roots must fail");
+    assert!(overlap.to_string().contains("overlapping roots"));
+    assert!(CanonicalRuleSpecRoots::new([Path::new("rulespec-us")]).is_err());
+    assert!(CanonicalRuleSpecRoots::new([root.join(".")]).is_err());
+
+    let suffixed = temp.join("rulespec-us-feature-branch");
+    std::fs::create_dir_all(suffixed.join("us/policies")).expect("suffixed checkout");
+    assert!(CanonicalRuleSpecRoots::new([&suffixed]).is_err());
+
+    let standalone = temp.join("rulespec-us-co");
+    std::fs::create_dir_all(standalone.join("policies")).expect("standalone checkout");
+    assert!(CanonicalRuleSpecRoots::new([&standalone]).is_err());
+
+    let empty = temp.join("rulespec-uk");
+    std::fs::create_dir_all(&empty).expect("empty checkout");
+    assert!(CanonicalRuleSpecRoots::new([&empty]).is_err());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn roots_reject_root_level_and_wrong_country_content() {
+    let temp = temp_dir("invalid-content-shapes");
+    let root_level = temp.join("root-level/rulespec-us");
+    std::fs::create_dir_all(root_level.join("policies")).expect("root-level policies");
+    assert!(CanonicalRuleSpecRoots::new([&root_level]).is_err());
+
+    let wrong_country = temp.join("wrong-country/rulespec-us");
+    std::fs::create_dir_all(wrong_country.join("uk/policies")).expect("wrong jurisdiction");
+    assert!(CanonicalRuleSpecRoots::new([&wrong_country]).is_err());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn programs_and_yml_are_never_atomic_modules() {
+    let temp = temp_dir("programs-non-atomic");
+    let root = temp.join("rulespec-us");
+    let atomic = root.join("us/policies/base.yaml");
+    let program = root.join("us/programs/snap.yaml");
+    std::fs::create_dir_all(atomic.parent().expect("atomic parent")).expect("atomic dir");
+    std::fs::create_dir_all(program.parent().expect("program parent")).expect("program dir");
+    std::fs::write(&atomic, BASE_MODULE).expect("atomic module");
+    std::fs::write(
+        &program,
+        "format: axiom-compose/program/v1\nprogram: snap\nmodules: []\n",
+    )
+    .expect("ProgramSpec");
+
+    let roots =
+        CanonicalRuleSpecRoots::new([&root]).expect("programs are valid filesystem content");
+    assert!(matches!(
+        load_rulespec_file(&program, &roots),
+        Err(RuleSpecError::InvalidFilesystemPath { .. })
+    ));
+    let source = FsModuleSource::new([&root]).expect("filesystem source");
+    assert!(matches!(
+        load_rulespec_with_source("us:programs/snap", &source),
+        Err(RuleSpecError::InvalidModuleTarget { .. })
+    ));
+
+    let companion = root.join("us/policies/base.test.yaml");
+    std::fs::write(&companion, BASE_MODULE).expect("companion test file");
+    assert!(matches!(
+        load_rulespec_file(&companion, &roots),
+        Err(RuleSpecError::InvalidFilesystemPath { .. })
+    ));
+    assert!(matches!(
+        load_rulespec_with_source("us:policies/base.test", &source),
+        Err(RuleSpecError::InvalidModuleTarget { .. })
+    ));
+
+    let yml = root.join("us/policies/legacy.yml");
+    std::fs::write(&yml, BASE_MODULE).expect("legacy yml");
+    assert!(CanonicalRuleSpecRoots::new([&root]).is_err());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
+    for (label, relative) in [
+        ("double-yaml", "us/policies/foo.yaml.yaml"),
+        ("double-yml", "us/policies/foo.yml.yaml"),
+        ("uppercase-extension", "us/policies/foo.YAML"),
+        ("mixed-extension", "us/policies/foo.Yml"),
+        ("fragment-name", "us/policies/foo#bar.yaml"),
+        ("space-name", "us/policies/foo bar.yaml"),
+        ("quote-name", "us/policies/foo'.yaml"),
+        ("colon-name", "us/policies/foo:bar.yaml"),
+        ("at-name", "us/policies/foo@bar.yaml"),
+        ("unicode-name", "us/policies/fóo.yaml"),
+    ] {
+        let temp = temp_dir(label);
+        let root = temp.join("rulespec-us");
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
+        std::fs::write(&path, BASE_MODULE).expect("invalid fixture");
+        assert!(
+            CanonicalRuleSpecRoots::new([&root]).is_err(),
+            "non-canonical path must fail: {relative}"
+        );
+        std::fs::remove_dir_all(temp).ok();
     }
 }
 
 #[test]
-fn exclusive_roots_block_ambient_fallback_and_form_a_cli_capability_handshake() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-engine-exclusive-roots-{}",
-        std::process::id()
-    ));
-    std::fs::remove_dir_all(&temp_root).ok();
-
-    // The importer lives under `temp_root/work`, so ordinary ancestor
-    // discovery sees `temp_root/rulespec-us`. The configured monorepo starts
-    // empty and therefore proves whether resolution falls through to ambient.
-    let program_path = temp_root.join("work/program.yaml");
-    let ambient_module = temp_root.join("rulespec-us/us/policies/base.yaml");
-    let configured_monorepo = temp_root.join("work/configured/rulespec-us");
-    std::fs::create_dir_all(program_path.parent().expect("program parent"))
-        .expect("program directory");
-    std::fs::create_dir_all(ambient_module.parent().expect("ambient parent"))
-        .expect("ambient module directory");
-    std::fs::create_dir_all(&configured_monorepo).expect("configured monorepo directory");
-    std::fs::write(&program_path, PROGRAM_MODULE).expect("program module is written");
-    std::fs::write(&ambient_module, BASE_MODULE).expect("ambient module is written");
-
-    // FsModuleSource uses the same candidate-root policy as path-based
-    // compilation: additive mode finds the ambient ancestor, exclusive mode
-    // refuses it when the configured root lacks the module.
-    let previous_roots = std::env::var_os(AXIOM_RULESPEC_REPO_ROOTS_ENV);
-    let previous_exclusive = std::env::var_os(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV);
-    // SAFETY: this integration-test binary contains one test and does not
-    // spawn threads while mutating its process environment.
-    unsafe {
-        std::env::set_var(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_monorepo);
-        std::env::remove_var(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV);
+fn roots_reject_case_variant_reserved_directories_on_case_sensitive_filesystems() {
+    for (label, relative) in [
+        ("case-jurisdiction", "US/policies"),
+        ("case-content-root", "us/Policies"),
+    ] {
+        let temp = temp_dir(label);
+        let root = temp.join("rulespec-us");
+        std::fs::create_dir_all(root.join(relative)).expect("case-variant fixture");
+        assert!(
+            CanonicalRuleSpecRoots::new([&root]).is_err(),
+            "case-variant reserved path must fail: {relative}"
+        );
+        std::fs::remove_dir_all(temp).ok();
     }
-    let source = FsModuleSource::new(&program_path);
-    let additive_source_result = load_rulespec_with_source("us:policies/base", &source);
-    // SAFETY: same single-threaded environment mutation described above.
-    unsafe { std::env::set_var(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1") };
-    let exclusive_source_result = load_rulespec_with_source("us:policies/base", &source);
-    restore_env(AXIOM_RULESPEC_REPO_ROOTS_ENV, previous_roots);
-    restore_env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, previous_exclusive);
+}
 
-    assert!(
-        additive_source_result.is_ok(),
-        "ordinary source resolution should retain ambient fallback: {additive_source_result:?}"
-    );
-    assert!(
-        matches!(
-            exclusive_source_result,
-            Err(RuleSpecError::ModuleNotFound { ref target }) if target == "us:policies/base"
-        ),
-        "exclusive FsModuleSource must not load the ambient module: {exclusive_source_result:?}"
-    );
+#[cfg(target_os = "macos")]
+#[test]
+fn case_aliased_roots_and_module_paths_are_rejected_on_case_insensitive_filesystems() {
+    let temp = temp_dir("case-alias-rejection");
+    let actual_root = temp.join("RULESPEC-US");
+    let actual_module = actual_root.join("us/policies/Base.yaml");
+    std::fs::create_dir_all(actual_module.parent().expect("module parent")).expect("module dir");
+    std::fs::write(&actual_module, BASE_MODULE).expect("module");
 
-    let additive_artifact = temp_root.join("additive.compiled.json");
-    let additive_output = compile_command(&program_path, &additive_artifact)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_monorepo)
-        .env_remove(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV)
-        .output()
-        .expect("additive compile command runs");
-    assert!(
-        additive_output.status.success(),
-        "ordinary resolution should preserve ambient fallback: {}",
-        stderr(&additive_output)
-    );
-
-    let exclusive_artifact = temp_root.join("exclusive.compiled.json");
-    let exclusive_output = compile_command(&program_path, &exclusive_artifact)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_monorepo)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1")
-        .output()
-        .expect("exclusive env compile command runs");
-    assert!(!exclusive_output.status.success());
-    assert!(
-        stderr(&exclusive_output).contains("could not be resolved"),
-        "exclusive env mode should report the blocked import: {}",
-        stderr(&exclusive_output)
-    );
-    assert!(!exclusive_artifact.exists());
-
-    let invalid_mode_artifact = temp_root.join("invalid-mode.compiled.json");
-    let invalid_mode_output = compile_command(&program_path, &invalid_mode_artifact)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_monorepo)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "true")
-        .output()
-        .expect("invalid-exclusive-mode compile command runs");
-    assert!(!invalid_mode_output.status.success());
-    assert!(
-        stderr(&invalid_mode_output)
-            .contains("AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE must be exactly `1` when set"),
-        "invalid exclusive mode must fail closed: {}",
-        stderr(&invalid_mode_output)
-    );
-    assert!(!invalid_mode_artifact.exists());
-
-    let no_roots_artifact = temp_root.join("no-roots.compiled.json");
-    let no_roots_output = compile_command(&program_path, &no_roots_artifact)
-        .env_remove(AXIOM_RULESPEC_REPO_ROOTS_ENV)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1")
-        .output()
-        .expect("missing-roots compile command runs");
-    assert!(!no_roots_output.status.success());
-    assert!(
-        stderr(&no_roots_output).contains(
-            "AXIOM_RULESPEC_REPO_ROOTS to contain at least one path and no empty entries"
-        ),
-        "exclusive mode must fail closed without configured roots: {}",
-        stderr(&no_roots_output)
-    );
-    assert!(!no_roots_artifact.exists());
-
-    let roots_with_empty_entry =
-        std::env::join_paths([configured_monorepo.as_path(), Path::new("")])
-            .expect("root list with empty entry");
-    let empty_entry_artifact = temp_root.join("empty-entry.compiled.json");
-    let empty_entry_output = compile_command(&program_path, &empty_entry_artifact)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_ENV, roots_with_empty_entry)
-        .env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1")
-        .output()
-        .expect("empty-entry compile command runs");
-    assert!(!empty_entry_output.status.success());
-    assert!(
-        stderr(&empty_entry_output).contains("at least one path and no empty entries"),
-        "exclusive mode must reject empty configured-root entries: {}",
-        stderr(&empty_entry_output)
-    );
-    assert!(!empty_entry_artifact.exists());
-
-    // Once the module exists under the configured root, the CLI flag both
-    // enables exclusive mode and compiles successfully. Passing the flag is a
-    // capability handshake: older engines reject it as an unknown argument.
-    let configured_module = configured_monorepo.join("us/policies/base.yaml");
-    let decoy_monorepo = temp_root.join("work/decoy/rulespec-us");
-    std::fs::create_dir_all(configured_module.parent().expect("configured parent"))
-        .expect("configured module directory");
-    std::fs::create_dir_all(&decoy_monorepo).expect("decoy monorepo directory");
-    std::fs::write(&configured_module, BASE_MODULE).expect("configured module is written");
-    let configured_roots =
-        std::env::join_paths([decoy_monorepo.as_path(), configured_monorepo.as_path()])
-            .expect("two configured RuleSpec roots");
-
-    let previous_roots = std::env::var_os(AXIOM_RULESPEC_REPO_ROOTS_ENV);
-    let previous_exclusive = std::env::var_os(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV);
-    // SAFETY: same single-threaded environment mutation described above.
-    unsafe {
-        std::env::set_var(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_roots);
-        std::env::set_var(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1");
+    let root_alias = temp.join("rulespec-us");
+    if !root_alias.exists() {
+        std::fs::remove_dir_all(temp).ok();
+        return;
     }
-    let configured_source_result = load_rulespec_with_source("us:policies/base", &source);
-    restore_env(AXIOM_RULESPEC_REPO_ROOTS_ENV, previous_roots);
-    restore_env(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, previous_exclusive);
-    assert!(
-        configured_source_result.is_ok(),
-        "exclusive FsModuleSource should load configured modules: {configured_source_result:?}"
-    );
+    assert!(CanonicalRuleSpecRoots::new([&root_alias]).is_err());
 
-    let flag_artifact = temp_root.join("flag.compiled.json");
-    let flag_output = compile_command(&program_path, &flag_artifact)
-        .arg("--exclusive-rulespec-roots")
-        .env(AXIOM_RULESPEC_REPO_ROOTS_ENV, &configured_roots)
-        .env_remove(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV)
-        .output()
-        .expect("exclusive flag compile command runs");
-    assert!(
-        flag_output.status.success(),
-        "configured-root import should compile in exclusive flag mode: {}",
-        stderr(&flag_output)
-    );
-    assert!(
-        std::fs::read_to_string(&flag_artifact)
-            .expect("flag artifact is readable")
-            .contains("us:policies/base#base_amount")
-    );
+    let intermediate = temp.join("root-spelling-transition");
+    std::fs::rename(&actual_root, &intermediate).expect("move aliased root aside");
+    std::fs::rename(&intermediate, &root_alias).expect("install canonical root spelling");
+    let roots = CanonicalRuleSpecRoots::new([&root_alias]).expect("canonical root spelling");
+    let module_alias = root_alias.join("us/policies/base.yaml");
+    assert!(load_rulespec_file(&module_alias, &roots).is_err());
+    let source = FsModuleSource::new([&root_alias]).expect("filesystem source");
+    assert!(load_rulespec_with_source("us:policies/base", &source).is_err());
 
-    let help_output = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
-        .args(["compile", "--help"])
-        .output()
-        .expect("compile help command runs");
-    assert!(help_output.status.success());
-    assert!(String::from_utf8_lossy(&help_output.stdout).contains("--exclusive-rulespec-roots"));
+    let mis_cased_root = temp.join("mis-cased/rulespec-us");
+    let mis_cased_content = mis_cased_root.join("us/Policies/base.yaml");
+    std::fs::create_dir_all(mis_cased_content.parent().expect("content parent"))
+        .expect("mis-cased content dir");
+    std::fs::write(&mis_cased_content, BASE_MODULE).expect("mis-cased module");
+    if mis_cased_root.join("us/policies").exists() {
+        assert!(CanonicalRuleSpecRoots::new([&mis_cased_root]).is_err());
+    }
+    std::fs::remove_dir_all(temp).ok();
+}
 
-    std::fs::remove_dir_all(&temp_root).ok();
+#[cfg(unix)]
+#[test]
+fn symlinked_roots_and_content_are_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, root, _) = canonical_fixture("symlink-rejection");
+    let alias_parent = temp.join("aliases");
+    std::fs::create_dir_all(&alias_parent).expect("alias parent");
+    let alias = alias_parent.join("rulespec-us");
+    symlink(&root, &alias).expect("root symlink");
+    assert!(CanonicalRuleSpecRoots::new([&alias]).is_err());
+
+    let external = temp.join("external.yaml");
+    std::fs::write(&external, BASE_MODULE).expect("external module");
+    symlink(&external, root.join("us/policies/symlink.yaml")).expect("content symlink");
+    assert!(CanonicalRuleSpecRoots::new([&root]).is_err());
+    std::fs::remove_dir_all(temp).ok();
 }

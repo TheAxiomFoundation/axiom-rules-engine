@@ -3,9 +3,9 @@
 Rust runtime and Python bindings for executing Axiom RuleSpec.
 
 `axiom-rules-engine` is engine infrastructure only. Production policy content belongs
-in jurisdiction repositories such as `rulespec-us` and `rulespec-us-co`, where the file
-path supplies the legal ID. This repo keeps RuleSpec YAML only as test fixtures
-under `tests/fixtures/rulespec/`.
+in exact country checkouts such as `rulespec-us`, with direct jurisdiction directories
+such as `us/` and `us-co/`; the file path supplies the legal ID. This repo keeps
+RuleSpec YAML only as test fixtures under `tests/fixtures/rulespec/`.
 
 ## What Is Implemented
 
@@ -28,8 +28,8 @@ RuleSpec in jurisdiction repos.
 
 ## RuleSpec
 
-RuleSpec files must declare `format: rulespec/v1` or a schema starting with
-`axiom.rules`. YAML with a top-level `rules:` key but no discriminator is
+RuleSpec files must declare exact `format: rulespec/v1`. The removed `schema:`
+discriminator and YAML with a top-level `rules:` key but no exact format are
 rejected.
 
 Rule names are public concept fragments. Use
@@ -56,9 +56,42 @@ Compile a RuleSpec file:
 
 ```bash
 cargo run -- compile \
-  --program /path/to/rulespec-us-co/policies/cdhs/snap/fy-2026-benefit-calculation.yaml \
+  --program /path/to/rulespec-us/us/policies/usda/snap/fy-2026-cola/maximum-allotments.yaml \
+  --rulespec-root /path/to/rulespec-us \
   --output /tmp/snap.compiled.json
 ```
+
+`--rulespec-root` is required and repeatable. Each value must be an absolute,
+real, unaliased checkout named exactly `rulespec-<two-letter-country>`. The
+engine never discovers roots from environment variables, cwd, ancestors, or
+sibling checkouts.
+Configured checkouts must remain trusted and quiescent for the compile. The
+path validator provides deterministic authority selection, not a sandbox
+against concurrent filesystem replacement or hard-link mutation.
+
+Compile an ephemeral RuleSpec composition emitted by `axiom-compose`:
+
+```bash
+cargo run -- compile-composed \
+  --program /tmp/snap-composition.yaml \
+  --rulespec-root /path/to/rulespec-us \
+  --output /tmp/snap.compiled.json
+```
+
+`compile-composed` requires exact `format: rulespec/v1` and
+`module.kind: composition`, keeps the composition's synthesized root rules
+originless, and permits only canonical atomic imports resolved through the
+explicit roots. Atomic files, declarative ProgramSpecs, relative dependencies,
+and composition files inside a RuleSpec checkout are rejected.
+
+Every compiled artifact publishes `metadata.input_catalog`. Each entry records
+the internal runtime `slot`, one deterministic `canonical_request_name`, and all
+accepted `request_names`. An originless synthesized owner makes the bare slot
+canonical; otherwise the lexicographically first exact
+`<module>#input.<slot>` owner is canonical. All listed names feed the same slot.
+Invented module prefixes and `<target>#<slot>` aliases are rejected. Artifact
+loading recomputes the catalog, evaluation order, and fast-path metadata from
+the embedded program and rejects tampering.
 
 Run a compiled artifact:
 
@@ -66,7 +99,9 @@ Run a compiled artifact:
 cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
 ```
 
-`request.json` must key every public reference by the legal RuleSpec ID:
+`request.json` must key atomic inputs by one of the exact owners published in
+`metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
+name. Queried atomic outputs and relations still use their legal RuleSpec IDs:
 
 ```json
 {
@@ -81,7 +116,7 @@ cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
         "value": { "kind": "integer", "value": 1 }
       },
       {
-        "name": "us:statutes/7/2014/e/6/A#snap_net_income",
+        "name": "us:statutes/7/2014/e/6/A#input.snap_net_income",
         "entity": "Household",
         "entity_id": "household:1",
         "interval": { "start": "2026-01-01", "end": "2026-02-01" },
@@ -109,16 +144,6 @@ cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
   ]
 }
 ```
-
-Validate jurisdiction-repo source registry files:
-
-```bash
-PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/rulespec-us-co
-```
-
-Add `--verify-r2` with `AXIOM_R2_ACCOUNT_ID`,
-`AXIOM_R2_ACCESS_KEY_ID`, and `AXIOM_R2_SECRET_ACCESS_KEY` set to verify object
-existence and SHA-256 hashes against R2.
 
 Search and validate public concept IDs discovered from jurisdiction RuleSpec
 repos:
@@ -161,15 +186,15 @@ cargo run --features schema -- emit-schemas --out schemas
 
 A golden-file test (`cargo test --features schema`) fails if the checked-in
 schemas drift from the types. `schema_conformance` validates every module and
-companion test under a `rulespec-us` checkout (set `AXIOM_RULESPEC_US_ROOT` or
-place the checkout as a sibling) and self-skips when none is present.
+companion test under the explicit `AXIOM_RULESPEC_US_ROOT` checkout and
+self-skips when none is configured.
 
 ## Python Package
 
-The Python wrapper lives under `python/axiom_rules_engine/`. It exposes `Program`,
-`Dataset`, `AxiomRulesEngine`, dense execution bindings, source registry checks,
-and concept discovery helpers. It shells out to the compiled `axiom-rules-engine`
-binary for reference and compiled-artifact flows.
+The Python wrapper lives under `python/axiom_rules_engine/`. It exposes
+`Program`, `Dataset`, `AxiomRulesEngine`, atomic and composed dense execution
+bindings, and concept discovery helpers. It shells out to the compiled
+`axiom-rules-engine` binary for reference and compiled-artifact flows.
 
 ## Tests
 

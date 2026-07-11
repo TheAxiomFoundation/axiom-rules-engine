@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -52,14 +52,40 @@ class CompiledDenseProgram:
 
     @classmethod
     def from_file(
-        cls, path: str | Path, *, entity: str | None = None
+        cls,
+        path: str | Path,
+        *,
+        rulespec_roots: Iterable[str | Path],
+        entity: str | None = None,
     ) -> "CompiledDenseProgram":
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(
                 "axiom_rules_engine_dense is not installed. Build it with "
                 "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
             )
-        return cls(NativeCompiledDenseProgram.from_file(str(Path(path)), entity))
+        roots = [str(Path(root)) for root in rulespec_roots]
+        return cls(NativeCompiledDenseProgram.from_file(str(Path(path)), roots, entity))
+
+    @classmethod
+    def from_composed_file(
+        cls,
+        path: str | Path,
+        *,
+        rulespec_roots: Iterable[str | Path],
+        entity: str | None = None,
+    ) -> "CompiledDenseProgram":
+        """Compile an originless composition emitted by axiom-compose."""
+        if NativeCompiledDenseProgram is None:
+            raise RuntimeError(
+                "axiom_rules_engine_dense is not installed. Build it with "
+                "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
+            )
+        roots = [str(Path(root)) for root in rulespec_roots]
+        return cls(
+            NativeCompiledDenseProgram.from_composed_file(
+                str(Path(path)), roots, entity
+            )
+        )
 
     @property
     def root_entity(self) -> str:
@@ -72,6 +98,19 @@ class CompiledDenseProgram:
     @property
     def output_names(self) -> list[str]:
         return list(self._native.output_names())
+
+    @property
+    def input_catalog(self) -> dict[str, str]:
+        """Preferred canonical request name keyed by runtime slot."""
+        return dict(self._native.input_catalog())
+
+    @property
+    def input_request_names(self) -> dict[str, tuple[str, ...]]:
+        """Every accepted owner name keyed by runtime slot."""
+        return {
+            slot: tuple(request_names)
+            for slot, request_names in self._native.input_request_names().items()
+        }
 
     @property
     def relations(self) -> list[DenseRelationSchema]:

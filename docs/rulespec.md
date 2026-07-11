@@ -40,9 +40,8 @@ rules:
           else: 0
 ```
 
-`schema: axiom.rules.*` is also accepted as a discriminator. YAML with a
-top-level `rules:` key and no discriminator is rejected, because RuleSpec module files
-must identify their schema explicitly.
+The removed `schema:` discriminator is rejected even when `format` is also
+present. YAML with a top-level `rules:` key and no exact format is rejected.
 
 ## Semantics
 
@@ -142,8 +141,8 @@ still reject membership predicates that aggregate another relation from inside a
 current/root predicate.
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
-before the current file is lowered. Relative imports resolve from the current
-file. Canonical imports use jurisdiction repo paths:
+before the current file is lowered. Every import is an exact absolute canonical
+target, optionally followed by one `#rule_fragment`:
 
 ```yaml
 imports:
@@ -151,42 +150,63 @@ imports:
   - us-co:regulations/10-ccr-2506-1/4.207.3
 ```
 
-The canonical form is `<jurisdiction>:<relative path without extension>`.
-A jurisdiction prefix resolves against either layout, with the same durable
-ids in both:
+The canonical form is `<jurisdiction>:<atomic-root>/<relative path without
+extension>`. Filesystem loading admits one layout only: an exact country
+checkout named `rulespec-<country>` with direct matching jurisdiction
+directories. For example, `us:` resolves below `rulespec-us/us/` and `us-co:`
+below `rulespec-us/us-co/`.
 
-- **Country monorepo** — a repo named `rulespec-<country>` holding one
-  directory per jurisdiction: `us:` → `rulespec-us/us/…`, `us-co:` →
-  `rulespec-us/us-co/…`.
-- **Legacy standalone repo** — `us-co:` → a sibling checkout named
-  `rulespec-us-co` with content at its root. Legacy candidates are tried
-  first, so existing sibling checkouts keep their precedence.
+Callers must supply at least one absolute, real, unaliased country checkout.
+The CLI uses required repeatable `--rulespec-root` arguments; Rust callers pass
+a validated `CanonicalRuleSpecRoots` to `load_rulespec_file`,
+`CompiledProgramArtifact::from_rulespec_file`, or `FsModuleSource`. There is no
+environment, cwd, ancestor, sibling-checkout, suffixed-worktree, or standalone
+jurisdiction-repository fallback.
 
-The loader searches sibling checkouts and any roots listed in
-`AXIOM_RULESPEC_REPO_ROOTS` (each entry may be a jurisdiction repo, a
-country monorepo, or a directory containing either).
+Configured roots must remain trusted and quiescent throughout validation and
+compilation. This is a deterministic authority boundary, not a sandbox against
+concurrent pathname replacement or hard-link mutation; CI satisfies the
+assumption with fresh independent Git checkouts and integrity gates.
 
-To restrict canonical-import lookup to configured roots, pass
-`--exclusive-rulespec-roots` to the `compile` command, or set
-`AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE=1` when using the filesystem API.
-Exclusive mode requires `AXIOM_RULESPEC_REPO_ROOTS` to contain at least one
-path and no empty entries, and searches only canonical-import candidates
-derived from those configured roots. It never falls through to importer
-ancestors, the current working directory, or sibling checkouts for a canonical
-import. This setting is not a general filesystem sandbox for relative or
-absolute imports or `extends`. The command-line flag is also a capability
-handshake: engines that predate exclusive resolution reject it. The same
-canonical-import policy applies to `FsModuleSource`.
+The five filesystem content roots are `legislation/`, `policies/`, `programs/`,
+`regulations/`, and `statutes/`. Only four are atomic RuleSpec roots:
+`legislation/`, `policies/`, `regulations/`, and `statutes/`. `programs/`
+contains declarative ProgramSpecs for `axiom-compose`; the engine rejects it as
+an atomic module target. Module files use `.yaml` only; companion
+`*.test.yaml` files are validation cases and never module targets. Root-level content,
+wrong-country jurisdictions, duplicate roots or countries, aliases, symlinks,
+special paths, `.yml`/case-variant/double extensions, relative imports, and
+reserved or whitespace path components fail closed before compilation.
+
+`axiom-compose` emits an ephemeral import-bearing `rulespec/v1` composition,
+not an atomic module. Compile that output with the separate
+`compile-composed` command. Its input must be an absolute, real, unaliased
+`.yaml` outside every RuleSpec checkout with exact
+`module.kind: composition`; it still requires one or more explicit
+`--rulespec-root` arguments. Only fragmentless canonical atomic imports are
+allowed, and synthesized root rules remain originless. The removed top-level
+`extends` directive is rejected on both surfaces. The ordinary `compile` command
+rejects the ephemeral file, while `compile-composed` rejects atomic modules and
+declarative ProgramSpecs.
+
+Compiled artifacts make the input boundary explicit in
+`metadata.input_catalog`. Each runtime slot has a deterministic
+`canonical_request_name` plus the complete sorted `request_names` set. A bare
+name is published only when an originless synthesized rule actually owns that
+slot, and it is then canonical. Otherwise the lexicographically first exact
+atomic `<module>#input.<slot>` owner is canonical. Multiple owner names are
+equivalent inputs to one slot; arbitrary prefixes and `<target>#<slot>` aliases
+are not accepted.
 
 Filesystem search is one host strategy, not part of the core. A host can
 instead supply module text directly through the `source::ModuleSource` trait
 and the `load_rulespec_with_source` /
 `CompiledProgramArtifact::from_rulespec_with_source` entry points — for
 example a browser (wasm) bundle, a server holding modules in memory, or a
-registry client. Relative imports still resolve against the importing
-module's canonical target (pure string logic in the core), the host only
+registry client. Imports remain exact absolute canonical targets; the host only
 answers "what is the YAML text for `us:statutes/7/2015/e`?", and durable ids
-come out identical to the filesystem layouts. The filesystem behavior above
+come out identical to the filesystem layout. Canonical targets supplied to any
+host still require one of the four atomic roots. The filesystem behavior above
 is packaged as `FsModuleSource` behind the default-on `fs` cargo feature.
 
 Executable rules loaded from jurisdiction repos receive a durable id of
@@ -395,17 +415,19 @@ is auditable.
 
 ## Source pinning and provenance
 
-The `module:` block can carry optional metadata that grounds the module in
-source text and records how the encoding was produced and checked. Every
-field is optional and inert: absent fields mean exactly today's behavior,
-and nothing in lowering, compilation, or execution reads them. The lowered
-`ProgramSpec` keeps the (merged) root module's metadata on `program.module`,
-and compiled artifacts pass it through their JSON, so tooling can read it
-from a loaded module or artifact without re-parsing the YAML.
+The `module:` block can carry inert metadata that grounds the module in source
+text and records how the encoding was produced and checked. The block itself
+is optional. When `source_verification` is present it is an exact mapping with
+one required singular `corpus_citation_path` and an optional `source_sha256`;
+unknown fields and the removed plural spelling are rejected recursively.
+The loader and artifact boundary validate this metadata, but it never changes
+formula semantics or execution results. The lowered `ProgramSpec` keeps the
+(merged) root module's metadata on `program.module`, and compiled artifacts pass
+it through their JSON, so tooling can read it from a loaded module or artifact
+without re-parsing the YAML.
 
 ```yaml
 module:
-  id: us:statutes/7/2017/a
   source_verification:
     corpus_citation_path: us/statute/7/2017/a
     source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
@@ -420,14 +442,17 @@ module:
       last_run: 2026-06-09
 ```
 
-- `source_verification.source_sha256` pins the SHA-256 hex digest of the
+- `source_verification.corpus_citation_path` is one non-empty canonical
+  provision identity in the pinned Axiom corpus release. Proof/source nodes
+  use the same singular field; plural source lists are composed before they
+  reach the engine.
+- Optional `source_verification.source_sha256` pins the SHA-256 hex digest of the
   exact corpus provision text the module was encoded from. When the source
   republishes (for example an eCFR update), recomputing the hash gives a
   mechanical "this module is stale" signal; `axiom-encode
   check-source-staleness` does exactly that. The value must be 64
   hexadecimal characters — anything else is rejected at load with an error
-  naming the module file. Other `source_verification` subfields (such as
-  `corpus_citation_path`) are preserved verbatim.
+  naming the module file. No other `source_verification` subfields are allowed.
 - `encoding_provenance` records the encoding tool (`encoder`, for example
   `axiom-encode/0.2.645`), `model`, `run_id`, and human `reviewed_by` — all
   optional strings. Unknown subfields are rejected so typos cannot pass for
@@ -447,14 +472,14 @@ Known hard gaps:
 
 ## Why This Instead Of Direct `ProgramSpec` YAML
 
-Direct `ProgramSpec` YAML is useful as an engine IR/debug format, but it is not
-the right authoring target. RuleSpec keeps metadata and provenance structured
-while leaving formulas concise enough for generation and review. The Axiom app
-should provide the human-readable visualisation layer; raw source readability is
-secondary to schema validity, provenance fidelity, and avoiding silent lossy
-translation.
+`ProgramSpec` is the engine's typed IR inside compiled artifacts, not a
+filesystem authoring format or alternate loader surface. RuleSpec keeps
+metadata and provenance structured while leaving formulas concise enough for
+generation and review. The Axiom app should provide the human-readable
+visualisation layer; raw source readability is secondary to schema validity,
+provenance fidelity, and avoiding silent lossy translation.
 
 Canonical jurisdiction repos use the filepath as the rule ID. Source artifacts
-are tracked in parallel `sources/` registry files, with expected hashes stored in
-Git and R2 object paths derived from repo + path. See
-[`jurisdiction-repos.md`](jurisdiction-repos.md).
+live in immutable named `axiom-corpus` releases, joined through the singular
+`corpus_citation_path`; RuleSpec checkouts do not maintain parallel `sources/`
+registries. See [`jurisdiction-repos.md`](jurisdiction-repos.md).

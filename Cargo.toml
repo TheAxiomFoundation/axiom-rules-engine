@@ -7,9 +7,9 @@ description = "Prototype temporal-relational Axiom Rules Engine in Rust"
 
 [features]
 default = ["fs"]
-# Filesystem-backed module resolution (FsModuleSource, the *_file loading and
-# artifact APIs, AXIOM_RULESPEC_REPO_ROOTS, exclusive-root mode) and the CLI
-# binary. With this feature off, the core has no std::fs / std::env usage and
+# Filesystem-backed module resolution (CanonicalRuleSpecRoots, FsModuleSource,
+# the *_file loading and artifact APIs) and the CLI binary. With this feature
+# off, the core has no std::fs / std::env usage and
 # checks cleanly for wasm32-unknown-unknown; hosts supply modules through
 # source::ModuleSource.
 fs = []

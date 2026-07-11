@@ -36,7 +36,6 @@ impl ModuleSource for InMemoryModuleSource {
 const CITED_MODULE: &str = r#"
 format: rulespec/v1
 module:
-  id: us-co:regulations/10-ccr-2506-1/4.402.2
   source_verification:
     corpus_citation_path: us-co/regulation/10-ccr-2506-1/4.402.2
 rules:
@@ -134,7 +133,6 @@ fn imported_rules_keep_their_own_module_citation_path() {
     let federal = r#"
 format: rulespec/v1
 module:
-  id: us:policies/usda/snap/fy-2026-cola/maximum-allotments
   source_verification:
     corpus_citation_path: us/guidance/usda/fns/snap-fy2026-cola/page-1
 rules:
@@ -149,7 +147,6 @@ rules:
     let state = r#"
 format: rulespec/v1
 module:
-  id: us-co:regulations/10-ccr-2506-1/4.602
   source_verification:
     corpus_citation_path: us-co/regulation/10-ccr-2506-1/4.602
 imports:

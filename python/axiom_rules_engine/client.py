@@ -71,17 +71,55 @@ class AxiomRulesEngine:
         return ExecutionResponse.model_validate_json(process.stdout)
 
     def compile(
-        self, *, program_path: str | Path, output_path: str | Path
+        self,
+        *,
+        program_path: str | Path,
+        rulespec_roots: tuple[str | Path, ...],
+        output_path: str | Path,
     ) -> CompiledProgram:
+        return self._compile_file(
+            command="compile",
+            program_path=program_path,
+            rulespec_roots=rulespec_roots,
+            output_path=output_path,
+        )
+
+    def compile_composed(
+        self,
+        *,
+        program_path: str | Path,
+        rulespec_roots: tuple[str | Path, ...],
+        output_path: str | Path,
+    ) -> CompiledProgram:
+        return self._compile_file(
+            command="compile-composed",
+            program_path=program_path,
+            rulespec_roots=rulespec_roots,
+            output_path=output_path,
+        )
+
+    def _compile_file(
+        self,
+        *,
+        command: str,
+        program_path: str | Path,
+        rulespec_roots: tuple[str | Path, ...],
+        output_path: str | Path,
+    ) -> CompiledProgram:
+        if not rulespec_roots:
+            raise ValueError("at least one explicit rulespec-<country> root is required")
+        argv = [
+            str(self.binary_path),
+            command,
+            "--program",
+            str(Path(program_path)),
+            "--output",
+            str(Path(output_path)),
+        ]
+        for root in rulespec_roots:
+            argv.extend(["--rulespec-root", str(Path(root))])
         process = subprocess.run(
-            [
-                str(self.binary_path),
-                "compile",
-                "--program",
-                str(Path(program_path)),
-                "--output",
-                str(Path(output_path)),
-            ],
+            argv,
             text=True,
             capture_output=True,
             check=False,

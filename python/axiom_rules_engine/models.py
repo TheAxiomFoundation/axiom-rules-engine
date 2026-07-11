@@ -79,13 +79,20 @@ class FastPathMetadata(BaseModel):
     blockers: list[str] = Field(default_factory=list)
 
 
+class CompiledInputCatalogEntry(BaseModel):
+    slot: str
+    canonical_request_name: str
+    request_names: list[str]
+
+
 class CompiledProgramMetadata(BaseModel):
     evaluation_order: list[str]
     fast_path: FastPathMetadata
+    input_catalog: list[CompiledInputCatalogEntry]
 
 
 class CompiledProgram(BaseModel):
-    artifact_format_version: int = 0
+    artifact_format_version: Literal[1]
     engine_version: str | None = None
     program: Program
     metadata: CompiledProgramMetadata

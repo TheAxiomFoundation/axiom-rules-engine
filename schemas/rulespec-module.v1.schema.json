@@ -2,30 +2,35 @@
   "$id": "https://schemas.axiom-foundation.org/rules-engine/rulespec-module.v1.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": true,
-  "anyOf": [
+  "allOf": [
     {
-      "required": [
-        "format"
-      ]
+      "not": {
+        "required": [
+          "extends"
+        ]
+      }
     },
     {
-      "required": [
-        "schema"
-      ]
+      "not": {
+        "required": [
+          "schema"
+        ]
+      }
     }
   ],
   "description": "A RuleSpec module: `format: rulespec/v1` metadata, imports, units, and effective-dated rules (parameters, derived outputs, data/derived relations, and source-relation provenance edges).",
   "properties": {
-    "extends": {
-      "description": "Relative or canonical target of a base module to merge before this one.",
-      "type": "string"
-    },
     "format": {
-      "description": "RuleSpec format discriminator. Canonically `rulespec/v1`.",
+      "const": "rulespec/v1",
+      "description": "Exact RuleSpec format discriminator.",
       "type": "string"
     },
     "imports": {
       "items": {
+        "not": {
+          "pattern": "\\.(?:[Yy][Aa][Mm][Ll]|[Yy][Mm][Ll])(?:#|$)"
+        },
+        "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+(?:#[A-Za-z0-9_.-]+)?$",
         "type": "string"
       },
       "type": [
@@ -36,6 +41,11 @@
     "module": {
       "additionalProperties": true,
       "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
+      "not": {
+        "required": [
+          "id"
+        ]
+      },
       "properties": {
         "encoding_provenance": {
           "additionalProperties": false,
@@ -59,14 +69,15 @@
             "null"
           ]
         },
-        "id": {
+        "kind": {
           "type": "string"
         },
         "source_verification": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "properties": {
             "corpus_citation_path": {
               "description": "Corpus provision path the module was encoded from.",
+              "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
               "type": "string"
             },
             "source_sha256": {
@@ -75,6 +86,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "corpus_citation_path"
+          ],
           "type": [
             "object",
             "null"
@@ -558,10 +572,6 @@
         "null"
       ]
     },
-    "schema": {
-      "description": "Alternative discriminator; recognized when it starts with `axiom.rules`.",
-      "type": "string"
-    },
     "units": {
       "items": {
         "allOf": [
@@ -631,6 +641,9 @@
       ]
     }
   },
+  "required": [
+    "format"
+  ],
   "title": "Axiom RuleSpec module",
   "type": "object"
 }

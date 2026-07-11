@@ -1,4 +1,4 @@
-use axiom_rules_engine::rulespec::load_rulespec_file;
+use axiom_rules_engine::rulespec::lower_rulespec_str;
 
 #[test]
 fn all_rulespec_files_parse_and_lower() {
@@ -20,7 +20,8 @@ fn all_rulespec_files_parse_and_lower() {
     rulespec_files.sort();
     let mut failures: Vec<String> = Vec::new();
     for p in &rulespec_files {
-        match load_rulespec_file(p) {
+        let source = std::fs::read_to_string(p).expect("fixture is readable");
+        match lower_rulespec_str(&source) {
             Ok(_) => {}
             Err(e) => failures.push(format!("{}: {}", p.display(), e)),
         }

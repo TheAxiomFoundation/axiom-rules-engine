@@ -6,10 +6,9 @@
 //! seam where a host supplies that text — from disk, from memory, from a
 //! registry, or from a browser bundle.
 //!
-//! Resolution of relative imports to canonical targets is pure string logic on
-//! the importer's canonical target and stays in `crate::rulespec`
-//! (`resolve_import_target`). Only "find and read the module text" lives
-//! behind this trait.
+//! Exact absolute imports are validated and their optional symbol fragments
+//! removed in `crate::rulespec` (`resolve_import_target`). Only "find and read
+//! the module text" lives behind this trait.
 
 use thiserror::Error;
 
@@ -40,68 +39,46 @@ impl SourceError {
 ///
 /// `target` is always the canonical form `<jurisdiction>:<relative path
 /// without extension>`, for example `us:statutes/7/2015/e`. The loader
-/// normalizes targets (quotes, fragments, `.yaml`/`.yml` extensions, relative
-/// imports) before calling `load`, so implementations only translate a
-/// canonical target into module text.
+/// validates targets and removes an import's optional symbol fragment before
+/// calling `load`, so implementations only translate an exact canonical target
+/// into module text.
 pub trait ModuleSource {
     /// Return the module YAML text for `target`, `Ok(None)` if this source
     /// has no module for it, or `Err` for a host-level failure.
     fn load(&self, target: &str) -> Result<Option<String>, SourceError>;
 }
 
-/// Filesystem-backed `ModuleSource`: the jurisdiction-repo resolution the
-/// engine has always used (legacy sibling checkouts, country monorepos,
-/// `AXIOM_RULESPEC_REPO_ROOTS`), anchored at a path.
-///
-/// Candidate repo roots are discovered from the anchor's ancestors plus the
-/// environment, exactly like `load_rulespec_file` discovers them from an
-/// importing file's path. When `AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE=1`, only
-/// the non-empty roots configured by `AXIOM_RULESPEC_REPO_ROOTS` are searched.
+/// Filesystem-backed `ModuleSource` over explicit, validated canonical country
+/// monorepos. It never consults environment variables, cwd, ancestors, sibling
+/// checkouts, or legacy standalone repositories.
 #[cfg(feature = "fs")]
 pub struct FsModuleSource {
-    anchor: std::path::PathBuf,
+    roots: crate::rulespec::CanonicalRuleSpecRoots,
 }
 
 #[cfg(feature = "fs")]
 impl FsModuleSource {
-    /// Create a source anchored at `anchor` — typically the root module file
-    /// or the directory the host is working in. Additive repo-root discovery
-    /// walks the anchor's ancestors; exclusive mode deliberately ignores it.
-    pub fn new(anchor: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            anchor: anchor.into(),
-        }
+    /// Validate and exclusively use the supplied canonical country roots.
+    pub fn new<I, P>(roots: I) -> Result<Self, crate::rulespec::RuleSpecError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<std::path::Path>,
+    {
+        Ok(Self {
+            roots: crate::rulespec::CanonicalRuleSpecRoots::new(roots)?,
+        })
+    }
+
+    pub(crate) fn from_validated_roots(roots: crate::rulespec::CanonicalRuleSpecRoots) -> Self {
+        Self { roots }
     }
 }
 
 #[cfg(feature = "fs")]
 impl ModuleSource for FsModuleSource {
     fn load(&self, target: &str) -> Result<Option<String>, SourceError> {
-        let Some((prefix, relative)) = target.split_once(':') else {
-            return Ok(None);
-        };
-        if !crate::rulespec::is_canonical_repo_prefix(prefix) {
-            return Ok(None);
-        }
-        let relative_path =
-            std::path::PathBuf::from(format!("{}.yaml", relative.trim().trim_matches('/')));
-        if relative_path.is_absolute()
-            || relative_path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            return Ok(None);
-        }
-        let roots = crate::rulespec::candidate_rule_repo_roots(&self.anchor, prefix)
-            .map_err(|message| SourceError::new(target, message))?;
-        for root in roots {
-            let candidate = root.join(&relative_path);
-            if candidate.exists() {
-                return std::fs::read_to_string(&candidate)
-                    .map(Some)
-                    .map_err(|error| SourceError::new(target, error.to_string()));
-            }
-        }
-        Ok(None)
+        self.roots
+            .read_target(target)
+            .map_err(|error| SourceError::new(target, error.to_string()))
     }
 }

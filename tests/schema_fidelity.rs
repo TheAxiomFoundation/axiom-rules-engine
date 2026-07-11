@@ -178,16 +178,42 @@ fn bad_source_sha256_is_rejected_by_pattern() {
     // the schema catches it too — a rare case where structural validation
     // covers a semantic engine check.
     let v = module_validator();
-    let yaml = "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: 'abc'\nrules: []\n";
+    let yaml = "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/7/2017/a\n    source_sha256: 'abc'\nrules: []\n";
     let value: Value = serde_yaml::from_str(yaml).expect("valid yaml");
     assert!(
         !v.is_valid(&value),
         "a non-64-hex source_sha256 must fail the schema pattern"
     );
     let good = format!(
-        "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: '{}'\nrules: []\n",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/7/2017/a\n    source_sha256: '{}'\nrules: []\n",
         "a".repeat(64)
     );
     let good_value: Value = serde_yaml::from_str(&good).expect("valid yaml");
     assert!(v.is_valid(&good_value), "a 64-hex source_sha256 must pass");
+
+    for invalid in [
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrules: []\n",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_paths: [us/statute/7/2017/a]\nrules: []\n",
+    ] {
+        let value: Value = serde_yaml::from_str(invalid).expect("valid yaml");
+        assert!(!v.is_valid(&value), "invalid source verification must fail");
+    }
+}
+
+#[test]
+fn schema_requires_exact_discriminator_and_rejects_removed_directives() {
+    let validator = module_validator();
+    for yaml in [
+        "schema: axiom.rules.module.v1\nrules: []\n",
+        "format: rulespec/v1\nschema: axiom.rules.module.v1\nrules: []\n",
+        "format: rulespec/v1\nextends: us:policies/base\nrules: []\n",
+        "format: wrong/v1\nrules: []\n",
+        "format: rulespec/v1\nimports: [us:policies/base.YAML]\nrules: []\n",
+    ] {
+        let value: Value = serde_yaml::from_str(yaml).expect("valid YAML fixture");
+        assert!(
+            !validator.is_valid(&value),
+            "removed alias must fail: {yaml}"
+        );
+    }
 }

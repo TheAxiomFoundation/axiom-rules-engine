@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -10,10 +11,24 @@ from typing import Any, Iterable
 
 import yaml
 
-TAXONOMY_ROOTS = ("statutes", "regulations", "policies")
+FILESYSTEM_ROOTS = (
+    "legislation",
+    "policies",
+    "programs",
+    "regulations",
+    "statutes",
+)
+ATOMIC_ROOTS = ("legislation", "policies", "regulations", "statutes")
+COUNTRY_ROOT_RE = re.compile(r"^rulespec-(?P<country>[a-z]{2})$")
+JURISDICTION_RE = re.compile(r"^(?P<country>[a-z]{2})(?:-[a-z0-9]+)*$")
 CONCEPT_ID_RE = re.compile(
-    r"^(?P<prefix>[a-z][a-z0-9_-]*):(?P<path>[A-Za-z0-9_.~/-]+)"
+    r"^(?P<prefix>[a-z]{2}(?:-[a-z0-9]+)*):(?P<path>[A-Za-z0-9_.~/-]+)"
     r"(?:#(?P<fragment>[A-Za-z0-9_.-]+))?$"
+)
+CORPUS_CITATION_PATH_RE = re.compile(
+    r"^[a-z]{2,3}(?:-[a-z0-9]+)*/"
+    r"[a-z][a-z0-9-]*"
+    r"(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\-–]*[A-Za-z0-9.:\-–])?)+$"
 )
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 FORMULA_KEYWORDS = {
@@ -89,11 +104,10 @@ class ConceptValidation:
 def discover_concepts(
     roots: Iterable[str | Path],
 ) -> list[ConceptRecord]:
-    """Discover public concept IDs from RuleSpec files under repo roots."""
+    """Discover concepts under explicit canonical country checkouts."""
     concepts: dict[str, ConceptRecord] = {}
-    for root in roots:
-        root_path = Path(root)
-        for path in _discover_rulespec_files(root_path):
+    for root_path, country in _canonical_country_roots(roots):
+        for path in _discover_rulespec_files(root_path, country):
             for concept in _concepts_from_rulespec_file(root_path, path):
                 concepts.setdefault(concept.concept_id, concept)
     return sorted(concepts.values(), key=lambda concept: concept.concept_id)
@@ -159,8 +173,10 @@ def validate_concept_id(
     concept_id: str,
 ) -> ConceptValidation:
     """Validate concept ID syntax and existence in configured RuleSpec repos."""
-    parsed = CONCEPT_ID_RE.match(concept_id)
-    if parsed is None:
+    parsed = CONCEPT_ID_RE.fullmatch(concept_id)
+    if parsed is None or not _is_canonical_import(
+        f"{parsed.group('prefix')}:{parsed.group('path')}"
+    ):
         return ConceptValidation(
             concept_id=concept_id,
             valid=False,
@@ -181,7 +197,7 @@ def validate_concept_id(
             concept=by_id[concept_id],
         )
 
-    base_id = f"{parsed.group('prefix')}:{parsed.group('path').strip('/')}"
+    base_id = f"{parsed.group('prefix')}:{parsed.group('path')}"
     if parsed.group("fragment") is not None and base_id not in by_id:
         suggestions = tuple(_same_base_or_nearby(concepts, base_id))
         return ConceptValidation(
@@ -234,16 +250,136 @@ def concepts_to_json(concepts: Iterable[ConceptRecord]) -> str:
     )
 
 
-def _discover_rulespec_files(root: Path) -> list[Path]:
-    if not root.exists():
-        return []
+def _canonical_country_roots(
+    roots: Iterable[str | Path],
+) -> list[tuple[Path, str]]:
+    raw_roots = [Path(root) for root in roots]
+    if not raw_roots:
+        raise ValueError("at least one explicit rulespec-<country> root is required")
+    validated: list[tuple[Path, str]] = []
+    seen_paths: set[Path] = set()
+    seen_countries: set[str] = set()
+    for root in raw_roots:
+        if not root.is_absolute():
+            raise ValueError(f"RuleSpec root must be absolute: {root}")
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError(f"RuleSpec root must be a real directory: {root}")
+        resolved = root.resolve(strict=True)
+        if str(resolved) != str(root):
+            raise ValueError(
+                f"RuleSpec root must be unaliased: {root}; use {resolved}"
+            )
+        _require_exact_component_spelling(root)
+        match = COUNTRY_ROOT_RE.fullmatch(root.name)
+        if match is None:
+            raise ValueError(
+                f"RuleSpec root must be named exactly rulespec-<country>: {root}"
+            )
+        country = match.group("country")
+        if root in seen_paths:
+            raise ValueError(f"duplicate RuleSpec root: {root}")
+        for existing, _ in validated:
+            if root.is_relative_to(existing) or existing.is_relative_to(root):
+                raise ValueError(
+                    f"overlapping RuleSpec roots are forbidden: {existing}, {root}"
+                )
+        if country in seen_countries:
+            raise ValueError(f"duplicate RuleSpec country: {country}")
+        seen_paths.add(root)
+        seen_countries.add(country)
+        validated.append((root, country))
+    return validated
+
+
+def _require_exact_component_spelling(path: Path) -> None:
+    """Reject case aliases even on case-insensitive filesystems."""
+    cursor = Path(path.anchor)
+    for component in path.parts[1:]:
+        try:
+            names = {entry.name for entry in os.scandir(cursor)}
+        except OSError as error:
+            raise ValueError(f"cannot inspect RuleSpec root component {cursor}: {error}") from error
+        if component not in names:
+            raise ValueError(
+                f"RuleSpec root component casing is aliased at {cursor / component}"
+            )
+        cursor /= component
+
+
+def _discover_rulespec_files(root: Path, country: str) -> list[Path]:
+    for content_root in FILESYSTEM_ROOTS:
+        root_level = root / content_root
+        if root_level.exists() or root_level.is_symlink():
+            raise ValueError(f"root-level content is forbidden: {root_level}")
+
     files: list[Path] = []
-    for taxonomy_root in TAXONOMY_ROOTS:
-        base = root / taxonomy_root
-        if not base.exists():
+    jurisdiction_count = 0
+    content_root_count = 0
+    for jurisdiction in sorted(root.iterdir()):
+        if jurisdiction.is_symlink():
+            raise ValueError(f"symlink is forbidden: {jurisdiction}")
+        lowercase_name = jurisdiction.name.lower()
+        if jurisdiction.name != lowercase_name and (
+            lowercase_name in FILESYSTEM_ROOTS
+            or JURISDICTION_RE.fullmatch(lowercase_name) is not None
+        ):
+            raise ValueError(f"case-aliased reserved path is forbidden: {jurisdiction}")
+        if not jurisdiction.is_dir():
             continue
-        files.extend(path for path in base.rglob("*.yaml") if _is_rulespec_file(path))
-        files.extend(path for path in base.rglob("*.yml") if _is_rulespec_file(path))
+        match = JURISDICTION_RE.fullmatch(jurisdiction.name)
+        if match is None:
+            continue
+        if match.group("country") != country:
+            raise ValueError(
+                f"jurisdiction {jurisdiction.name!r} does not match country {country!r}"
+            )
+        jurisdiction_count += 1
+        for entry in jurisdiction.iterdir():
+            lowercase_name = entry.name.lower()
+            if entry.name != lowercase_name and lowercase_name in FILESYSTEM_ROOTS:
+                raise ValueError(f"case-aliased content root is forbidden: {entry}")
+        for content_root in FILESYSTEM_ROOTS:
+            base = jurisdiction / content_root
+            if base.is_symlink():
+                raise ValueError(f"symlink is forbidden: {base}")
+            if not base.exists():
+                continue
+            if not base.is_dir():
+                raise ValueError(f"content root must be a directory: {base}")
+            _require_exact_component_spelling(base)
+            content_root_count += 1
+            for path in base.rglob("*"):
+                if path.is_symlink():
+                    raise ValueError(f"symlink is forbidden: {path}")
+                for component in path.relative_to(base).parts:
+                    if any(character.isspace() for character in component) or any(
+                        character in "#:\"'\\" for character in component
+                    ) or re.fullmatch(r"[A-Za-z0-9_.~-]+", component) is None:
+                        raise ValueError(
+                            f"non-canonical RuleSpec path component {component!r}: {path}"
+                        )
+                if path.is_dir():
+                    continue
+                if not path.is_file():
+                    raise ValueError(f"special path is forbidden: {path}")
+                if path.suffix.lower() in {".yaml", ".yml"} and path.suffix != ".yaml":
+                    raise ValueError(f"YAML files must use exact .yaml: {path}")
+                if path.suffix == ".yaml" and Path(path.stem).suffix.lower() in {
+                    ".yaml",
+                    ".yml",
+                }:
+                    raise ValueError(f"ambiguous YAML-like double extension: {path}")
+                if (
+                    content_root in ATOMIC_ROOTS
+                    and path.suffix == ".yaml"
+                    and _is_rulespec_file(path)
+                ):
+                    files.append(path)
+    if jurisdiction_count == 0 or content_root_count == 0:
+        raise ValueError(
+            f"empty RuleSpec root {root}: expected a matching jurisdiction "
+            "with a canonical content root"
+        )
     return sorted(files)
 
 
@@ -253,10 +389,8 @@ def _is_rulespec_file(path: Path) -> bool:
 
 def _concepts_from_rulespec_file(root: Path, path: Path) -> list[ConceptRecord]:
     document = _load_yaml_mapping(path)
-    if document is None or not _has_rulespec_discriminator(document):
-        return []
-
     base_id = _base_concept_id(root, path)
+    _validate_atomic_document(document, base_id, path)
     source_file = path.as_posix()
     module = document.get("module") if isinstance(document.get("module"), dict) else {}
     summary = str(module.get("summary") or "")
@@ -357,30 +491,200 @@ def _infer_input_names(
     return inputs
 
 
-def _load_yaml_mapping(path: Path) -> dict[str, Any] | None:
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     try:
         payload = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
-        return None
-    return payload if isinstance(payload, dict) else None
+    except (OSError, yaml.YAMLError) as error:
+        raise ValueError(f"invalid RuleSpec YAML {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"RuleSpec root must be a mapping: {path}")
+    return payload
 
 
 def _has_rulespec_discriminator(document: dict[str, Any]) -> bool:
-    return document.get("format") == "rulespec/v1" or str(
-        document.get("schema") or ""
-    ).startswith("axiom.rules")
+    return document.get("format") == "rulespec/v1"
+
+
+def _validate_atomic_document(
+    document: dict[str, Any], base_id: str, path: Path
+) -> None:
+    if not _has_rulespec_discriminator(document):
+        raise ValueError(f"RuleSpec requires exact format: rulespec/v1: {path}")
+    if "extends" in document:
+        raise ValueError(f"top-level extends was removed: {path}")
+    if "schema" in document:
+        raise ValueError(f"top-level schema discriminator was removed: {path}")
+    if document.get("relations") not in (None, []):
+        raise ValueError(f"top-level relations are forbidden: {path}")
+
+    imports = document.get("imports", [])
+    if imports is None:
+        imports = []
+    if not isinstance(imports, list) or not all(
+        isinstance(target, str) and _is_canonical_import(target)
+        for target in imports
+    ):
+        raise ValueError(f"imports must be exact absolute canonical atomic targets: {path}")
+
+    module_value = document.get("module")
+    if module_value is None:
+        module: dict[str, Any] = {}
+    elif isinstance(module_value, dict):
+        module = module_value
+    else:
+        raise ValueError(f"module must be a mapping: {path}")
+    if "kind" in module:
+        raise ValueError(f"atomic RuleSpec modules must not declare module.kind: {path}")
+    if "id" in module:
+        raise ValueError(f"module.id was removed; path identity is canonical: {path}")
+
+    verification = module.get("source_verification")
+    if verification is not None:
+        if not isinstance(verification, dict):
+            raise ValueError(f"source_verification must be an exact mapping: {path}")
+        if set(verification) - {"corpus_citation_path", "source_sha256"}:
+            raise ValueError(f"source_verification contains unknown fields: {path}")
+        citation = verification.get("corpus_citation_path")
+        if not isinstance(citation, str) or CORPUS_CITATION_PATH_RE.fullmatch(citation) is None:
+            raise ValueError(
+                f"source_verification requires one canonical corpus_citation_path: {path}"
+            )
+        digest = verification.get("source_sha256")
+        if digest is not None and (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9A-Fa-f]{64}", digest) is None
+        ):
+            raise ValueError(f"source_sha256 must be 64 hexadecimal characters: {path}")
+
+    _validate_recursive_citation_fields(document, path)
+    _validate_rule_shapes(document.get("rules"), path)
+
+
+def _validate_rule_shapes(rules: Any, path: Path) -> None:
+    if rules is None:
+        return
+    if not isinstance(rules, list):
+        raise ValueError(f"rules must be a list: {path}")
+    supported = {
+        "parameter",
+        "derived",
+        "data_relation",
+        "derived_relation",
+        "source_relation",
+    }
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f"rules[{index}] must be a mapping: {path}")
+        if not isinstance(rule.get("name"), str) or not rule["name"]:
+            raise ValueError(f"rules[{index}] requires a nonempty name: {path}")
+        kind = rule.get("kind")
+        if kind not in supported:
+            raise ValueError(f"rules[{index}] has missing or unsupported kind: {path}")
+        if kind == "data_relation":
+            relation = rule.get("data_relation")
+            if not isinstance(relation, dict) or not isinstance(
+                relation.get("arity"), int
+            ):
+                raise ValueError(
+                    f"data_relation rules require data_relation.arity: {path}"
+                )
+        elif kind == "derived_relation":
+            relation = rule.get("derived_relation")
+            if (
+                not isinstance(relation, dict)
+                or not isinstance(relation.get("arity"), int)
+                or not isinstance(relation.get("source_relation"), str)
+            ):
+                raise ValueError(
+                    "derived_relation rules require arity and source_relation: "
+                    f"{path}"
+                )
+            if not _has_executable_formula(rule):
+                raise ValueError(f"derived_relation rule has no formula: {path}")
+        elif kind == "source_relation":
+            relation = rule.get("source_relation")
+            if (
+                not isinstance(relation, dict)
+                or not isinstance(relation.get("type"), str)
+                or not isinstance(relation.get("target"), str)
+            ):
+                raise ValueError(
+                    f"source_relation rules require type and target: {path}"
+                )
+        elif not _has_executable_formula(rule):
+            raise ValueError(f"{kind} rule {rule['name']!r} has no formula: {path}")
+
+
+def _has_executable_formula(rule: dict[str, Any]) -> bool:
+    if "formula" in rule and (
+        rule.get("effective_from") is not None or rule.get("from") is not None
+    ):
+        return True
+    versions = rule.get("versions")
+    if not isinstance(versions, list) or not versions:
+        return False
+    return all(
+        isinstance(version, dict)
+        and (
+            version.get("effective_from") is not None
+            or version.get("from") is not None
+        )
+        and (
+            version.get("formula") is not None
+            or (
+                rule.get("kind") == "parameter"
+                and isinstance(version.get("values"), dict)
+                and bool(version["values"])
+            )
+        )
+        for version in versions
+    )
+
+
+def _is_canonical_import(target: str) -> bool:
+    match = CONCEPT_ID_RE.fullmatch(target)
+    if match is None or any(character.isspace() for character in target):
+        return False
+    parts = match.group("path").split("/")
+    terminal = parts[-1].lower()
+    return (
+        len(parts) >= 2
+        and parts[0] in ATOMIC_ROOTS
+        and not terminal.endswith((".yaml", ".yml"))
+        and not terminal.endswith(".test")
+        and all(part not in {"", ".", ".."} for part in parts)
+    )
+
+
+def _validate_recursive_citation_fields(value: Any, path: Path) -> None:
+    if isinstance(value, dict):
+        if "corpus_citation_paths" in value:
+            raise ValueError(f"plural corpus_citation_paths was removed: {path}")
+        if "corpus_citation_path" in value:
+            citation = value["corpus_citation_path"]
+            if (
+                not isinstance(citation, str)
+                or CORPUS_CITATION_PATH_RE.fullmatch(citation) is None
+            ):
+                raise ValueError(f"non-canonical corpus_citation_path: {path}")
+        if "source_sha256" in value:
+            digest = value["source_sha256"]
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"[0-9A-Fa-f]{64}", digest) is None
+            ):
+                raise ValueError(f"source_sha256 must be 64 hexadecimal characters: {path}")
+        for nested in value.values():
+            _validate_recursive_citation_fields(nested, path)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_recursive_citation_fields(nested, path)
 
 
 def _base_concept_id(root: Path, path: Path) -> str:
-    root_path = root.resolve()
-    prefix = _repo_prefix(root_path)
-    relative = path.resolve().relative_to(root_path).with_suffix("")
-    return f"{prefix}:{relative.as_posix()}"
-
-
-def _repo_prefix(root: Path) -> str:
-    name = root.name
-    return name.removeprefix("rulespec-") if name.startswith("rulespec-") else name
+    relative = path.relative_to(root).with_suffix("")
+    jurisdiction, *module_path = relative.parts
+    return f"{jurisdiction}:{Path(*module_path).as_posix()}"
 
 
 def _corpus_citation_path(module: dict[str, Any]) -> str | None:
