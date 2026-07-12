@@ -7,7 +7,7 @@ use axiom_rules_engine::compile::{
 use axiom_rules_engine::rulespec::{RuleSpecError, ValidationStatus, lower_rulespec_str};
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
-    ScalarExprSpec, ScalarValueSpec,
+    ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
 };
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -281,9 +281,16 @@ rules:
     let artifact =
         CompiledProgramArtifact::from_rulespec_str(rulespec).expect("DKK RuleSpec compiles");
     assert_eq!(artifact.program.parameters.len(), 1);
+    let dkk = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "DKK")
+        .expect("DKK should be a seeded currency unit");
     assert!(
-        artifact.program.units.iter().any(|u| u.name == "DKK"),
-        "DKK should be a seeded currency unit"
+        matches!(dkk.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "DKK must carry the ISO 4217 exponent (100 øre = 1 krone): {:?}",
+        dkk.kind
     );
 }
 
