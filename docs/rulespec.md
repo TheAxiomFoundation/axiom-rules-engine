@@ -196,7 +196,10 @@ name is published only when an originless synthesized rule actually owns that
 slot, and it is then canonical. Otherwise the lexicographically first exact
 atomic `<module>#input.<slot>` owner is canonical. Multiple owner names are
 equivalent inputs to one slot; arbitrary prefixes and `<target>#<slot>` aliases
-are not accepted.
+are not accepted. This is a deterministic runtime-input catalog, not a source
+manifest. Artifact loading also recomputes compiler-derived metadata and checks
+it for consistency with the embedded program; source-tamper evidence belongs to
+the signed-corpus-release and supervisor chain.
 
 Filesystem search is one host strategy, not part of the core. A host can
 instead supply module text directly through the `source::ModuleSource` trait

@@ -997,6 +997,10 @@ struct CanonicalCountryRoot {
 #[derive(Clone, Debug)]
 pub struct CanonicalRuleSpecRoots {
     roots: Vec<CanonicalCountryRoot>,
+    /// Exact regular files present during validation. This construction-time
+    /// scan is the authoritative file set for this capability; later additions
+    /// are not discoverable during the same compile run.
+    validated_files: HashSet<PathBuf>,
 }
 
 #[cfg(feature = "fs")]
@@ -1017,6 +1021,7 @@ impl CanonicalRuleSpecRoots {
         }
 
         let mut validated = Vec::with_capacity(raw_roots.len());
+        let mut validated_files = HashSet::new();
         let mut seen_paths = HashSet::new();
         let mut seen_countries = HashSet::new();
         for root in raw_roots {
@@ -1042,11 +1047,15 @@ impl CanonicalRuleSpecRoots {
                 )));
             }
             validated.push(CanonicalCountryRoot {
-                path: root,
+                path: root.clone(),
                 country,
             });
+            collect_regular_files(&root, &mut validated_files)?;
         }
-        Ok(Self { roots: validated })
+        Ok(Self {
+            roots: validated,
+            validated_files,
+        })
     }
 
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
@@ -1063,6 +1072,12 @@ impl CanonicalRuleSpecRoots {
             let Ok(relative) = path.strip_prefix(&root.path) else {
                 continue;
             };
+            if !self.validated_files.contains(path) {
+                return Err(invalid_path(
+                    path,
+                    "file was not present in the construction-time root scan",
+                ));
+            }
             let components = relative
                 .components()
                 .map(|component| component.as_os_str().to_str())
@@ -1141,6 +1156,9 @@ impl CanonicalRuleSpecRoots {
             .path
             .join(jurisdiction)
             .join(format!("{relative}.yaml"));
+        if !self.validated_files.contains(&path) {
+            return Ok(None);
+        }
         match fs::symlink_metadata(&path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1159,6 +1177,32 @@ impl CanonicalRuleSpecRoots {
                 error,
             })
     }
+}
+
+#[cfg(feature = "fs")]
+fn collect_regular_files(root: &Path, files: &mut HashSet<PathBuf>) -> Result<(), RuleSpecError> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(|error| {
+            repository_root_error(format!("cannot read `{}`: {error}", directory.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                repository_root_error(format!("cannot read `{}`: {error}", directory.display()))
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                repository_root_error(format!(
+                    "cannot inspect `{}`: {error}",
+                    entry.path().display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.insert(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "fs")]

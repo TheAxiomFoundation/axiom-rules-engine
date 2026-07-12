@@ -200,6 +200,22 @@ fn filesystem_source_and_file_loader_share_the_exact_root_set() {
 }
 
 #[test]
+fn construction_time_scan_rejects_modules_added_later() {
+    let (temp, root, _) = canonical_fixture("construction-scan-authority");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical roots");
+    let source = FsModuleSource::new([&root]).expect("filesystem source");
+    let added = root.join("us/policies/added.yaml");
+    std::fs::write(&added, BASE_MODULE).expect("late-added module");
+
+    assert!(matches!(
+        load_rulespec_file(&added, &roots),
+        Err(RuleSpecError::InvalidFilesystemPath { .. })
+    ));
+    assert!(load_rulespec_with_source("us:policies/added", &source).is_err());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
 fn roots_reject_empty_duplicate_relative_aliased_and_noncanonical_checkouts() {
     assert!(CanonicalRuleSpecRoots::new(std::iter::empty::<&Path>()).is_err());
 

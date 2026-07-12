@@ -8,6 +8,11 @@ The current direction is:
 3. Formula strings are fields inside RuleSpec, parsed by an internal engine
    module and normalised into `ProgramSpec`.
 
+Compiled artifacts carry a deterministic runtime-input catalog and perform a
+derived-metadata consistency check against their embedded program. Neither is
+source-tamper evidence; that assurance lives in the signed-corpus-release and
+supervisor chain.
+
 No external RuleSpec module adapter layer is part of the design. The repository
 is still pre-adoption, so Git history is the migration path for old experiments.
 The active code and docs should describe the architecture we would choose from a

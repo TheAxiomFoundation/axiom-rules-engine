@@ -90,8 +90,10 @@ accepted `request_names`. An originless synthesized owner makes the bare slot
 canonical; otherwise the lexicographically first exact
 `<module>#input.<slot>` owner is canonical. All listed names feed the same slot.
 Invented module prefixes and `<target>#<slot>` aliases are rejected. Artifact
-loading recomputes the catalog, evaluation order, and fast-path metadata from
-the embedded program and rejects tampering.
+loading recomputes the catalog, evaluation order, and fast-path metadata as a
+derived-metadata consistency check against the embedded program. This does not
+provide source-tamper evidence; that belongs to the signed-corpus-release and
+supervisor chain.
 
 Run a compiled artifact:
 

@@ -114,7 +114,7 @@ fn artifact_file_round_trip_preserves_versions() {
 }
 
 #[test]
-fn artifact_loader_rejects_tampering_and_removed_fields() {
+fn artifact_loader_rejects_inconsistent_metadata_and_removed_fields() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles");
     let base = serde_json::to_value(&artifact).expect("artifact serialises");
@@ -172,10 +172,10 @@ fn artifact_loader_rejects_tampering_and_removed_fields() {
     cases.push(removed_extends);
 
     for value in cases {
-        let json = serde_json::to_string(&value).expect("tampered artifact serialises");
+        let json = serde_json::to_string(&value).expect("inconsistent artifact serialises");
         assert!(
             CompiledProgramArtifact::from_json_str(&json).is_err(),
-            "tampered v1 artifact must fail: {json}"
+            "inconsistent v1 artifact must fail: {json}"
         );
     }
 }

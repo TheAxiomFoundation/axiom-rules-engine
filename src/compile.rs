@@ -136,6 +136,8 @@ impl CompiledProgramArtifact {
         }
         self.program.validate_provenance()?;
         self.program.validate_rounding()?;
+        // This is a derived-metadata consistency check: it proves the metadata
+        // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;
         if self.metadata != expected_metadata {
             return Err(invalid_artifact_contract(
@@ -309,6 +311,8 @@ fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, C
 fn compiled_input_catalog(
     program: &ProgramSpec,
 ) -> Result<Vec<CompiledInputCatalogEntry>, crate::spec::SpecError> {
+    // This deterministic catalog describes accepted runtime input names and
+    // slots. It is not a source manifest and contains no source paths or hashes.
     Ok(program
         .to_program()?
         .input_catalog()

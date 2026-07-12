@@ -334,8 +334,13 @@ Compiled artifacts publish an exact input-owner catalog. Atomic owners expose
 only `<module>#input.<slot>`; originless synthesized owners expose the bare
 slot. The canonical request name is the bare owner when present, otherwise the
 lexicographically first atomic owner, while every actual owner remains
-accepted for the shared runtime slot. The loader recomputes this catalog and
-the other compiler-derived metadata, and rejects any mismatch.
+accepted for the shared runtime slot. This is a deterministic runtime-input
+catalog, not a source manifest. The loader recomputes this catalog and the
+other compiler-derived metadata and rejects inconsistencies with the embedded
+program; this is a derived-metadata consistency check, not tamper detection.
+Source-tamper evidence lives in the signed-corpus-release and supervisor chain.
+Source-level tamper evidence (full source manifest with SHA-256, race-safe
+reads) is tracked as a follow-up issue.
 
 ## 2026-06-10 — Module resolution is a host concern behind `ModuleSource`
 
