@@ -307,7 +307,6 @@ fn rulespec_lowers_danish_krone_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: dk:statutes/lbk-603-2025/boerne-og-ungeydelsesloven
   title: Danish child and youth benefit base amounts (DKK unit check)
 rules:
   - name: child_benefit_annual_base_age_under_3
