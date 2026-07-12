@@ -9,7 +9,7 @@ use axiom_rules_engine::rulespec::{
 };
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
-    ScalarExprSpec, ScalarValueSpec,
+    ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
 };
 use std::fs;
 use std::path::Path;
@@ -296,6 +296,43 @@ rules:
     assert!(
         artifact.program.units.iter().any(|u| u.name == "TZS"),
         "TZS should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_danish_krone_money_parameter() {
+    // Danish Krone (DKK, ISO 4217, 2 minor units = øre) must be a
+    // seeded currency so rulespec-dk modules can declare `unit: DKK`
+    // without a repo inline unit declaration, exactly like ZMW/ETB/TZS.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: dk:statutes/lbk-603-2025/boerne-og-ungeydelsesloven
+  title: Danish child and youth benefit base amounts (DKK unit check)
+rules:
+  - name: child_benefit_annual_base_age_under_3
+    kind: parameter
+    dtype: Money
+    unit: DKK
+    source: "Børne- og ungeydelsesloven (LBK nr 603 af 12/05/2025) § 1, stk. 1"
+    versions:
+      - effective_from: 2025-05-12
+        formula: "16992"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("DKK RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let dkk = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "DKK")
+        .expect("DKK should be a seeded currency unit");
+    assert!(
+        matches!(dkk.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "DKK must carry the ISO 4217 exponent (100 øre = 1 krone): {:?}",
+        dkk.kind
     );
 }
 
