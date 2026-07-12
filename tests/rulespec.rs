@@ -258,6 +258,36 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_danish_krone_money_parameter() {
+    // Danish Krone (DKK, ISO 4217, 2 minor units = øre) must be a
+    // seeded currency so rulespec-dk modules can declare `unit: DKK`
+    // without a repo inline unit declaration, exactly like ZMW/ETB/TZS.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  id: dk:statutes/lbk-603-2025/boerne-og-ungeydelsesloven
+  title: Danish child and youth benefit base amounts (DKK unit check)
+rules:
+  - name: child_benefit_annual_base_age_under_3
+    kind: parameter
+    dtype: Money
+    unit: DKK
+    source: "Børne- og ungeydelsesloven (LBK nr 603 af 12/05/2025) § 1, stk. 1"
+    versions:
+      - effective_from: 2025-05-12
+        formula: "16992"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("DKK RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "DKK"),
+        "DKK should be a seeded currency unit"
+    );
+}
+
+#[test]
 fn rulespec_lowers_rwandan_franc_money_parameter() {
     // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
     // circulation) must be a seeded currency so rulespec-rw modules can

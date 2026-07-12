@@ -1121,6 +1121,9 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Tanzanian Shilling: ISO 4217 exponent 2 (100 senti = 1
         // shilingi); Tanzanian statutes state amounts in shillings.
         ("TZS", UnitKindSpec::Currency { minor_units: 2 }),
+        // Danish Krone: ISO 4217 exponent 2 (100 øre = 1 krone);
+        // Danish statutes state amounts in whole kroner.
+        ("DKK", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),
