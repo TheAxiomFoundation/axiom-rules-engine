@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
@@ -515,25 +515,28 @@ impl Program {
     }
 
     pub fn resolve_input_name(&self, reference: &str) -> Option<String> {
-        let input_slots = self.input_slots();
-        self.resolve_input_name_with_slots(reference, &input_slots)
+        let input_catalog = self.input_catalog();
+        self.resolve_input_name_with_catalog(reference, &input_catalog)
     }
 
-    pub(crate) fn resolve_input_name_with_slots(
+    pub(crate) fn resolve_input_name_with_catalog(
         &self,
         reference: &str,
-        input_slots: &HashSet<&str>,
+        input_catalog: &BTreeMap<String, Vec<String>>,
     ) -> Option<String> {
-        if !self.has_public_ids() {
-            return Some(reference.to_string());
+        if !reference.contains('#') {
+            return input_catalog
+                .get(reference)
+                .is_some_and(|request_names| request_names.iter().any(|name| name == reference))
+                .then(|| reference.to_string());
         }
 
         let public_reference = PublicReference::parse(reference)?;
         if let Some(input_name) = public_reference.fragment.strip_prefix("input.") {
-            if input_slots.contains(input_name) {
-                return Some(input_name.to_string());
-            }
-            return None;
+            return input_catalog
+                .get(input_name)
+                .is_some_and(|request_names| request_names.iter().any(|name| name == reference))
+                .then(|| input_name.to_string());
         }
 
         if let Some(derived) = self
@@ -550,10 +553,6 @@ impl Program {
             .find(|parameter| parameter.id.as_deref() == Some(reference))
         {
             return Some(parameter.name.clone());
-        }
-
-        if input_slots.contains(public_reference.fragment) {
-            return Some(public_reference.fragment.to_string());
         }
 
         None
@@ -592,20 +591,54 @@ impl Program {
                 .any(|parameter| parameter.id.is_some())
     }
 
-    pub(crate) fn input_slots(&self) -> HashSet<&str> {
-        let mut slots = HashSet::new();
+    /// Canonical request names for every runtime input slot. Originless
+    /// synthesized rules expose the bare slot; atomic rules expose only the
+    /// exact owning `<module>#input.<slot>` name. A shared slot may therefore
+    /// have multiple allowed request names.
+    pub fn input_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        let mut catalog: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for derived in self.derived.values() {
+            let mut slots = HashSet::new();
             collect_input_slots_from_semantics(&derived.semantics, &mut slots);
             for version in &derived.versions {
                 collect_input_slots_from_semantics(&version.semantics, &mut slots);
             }
-        }
-        for parameter in self.parameters.values() {
-            if let Some(indexed_by) = parameter.indexed_by.as_deref() {
-                slots.insert(indexed_by);
+            for slot in slots {
+                let request_name = derived
+                    .id
+                    .as_deref()
+                    .and_then(public_rule_target)
+                    .map_or_else(
+                        || slot.to_string(),
+                        |target| format!("{target}#input.{slot}"),
+                    );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
             }
         }
-        slots
+        for parameter in self.parameters.values() {
+            let Some(slot) = parameter.indexed_by.as_deref() else {
+                continue;
+            };
+            let request_name = parameter
+                .id
+                .as_deref()
+                .and_then(public_rule_target)
+                .map_or_else(
+                    || slot.to_string(),
+                    |target| format!("{target}#input.{slot}"),
+                );
+            catalog
+                .entry(slot.to_string())
+                .or_default()
+                .insert(request_name);
+        }
+        catalog
+            .into_iter()
+            .map(|(slot, request_names)| (slot, request_names.into_iter().collect()))
+            .collect()
     }
 }
 
@@ -616,11 +649,20 @@ struct PublicReference<'a> {
 impl<'a> PublicReference<'a> {
     fn parse(reference: &'a str) -> Option<Self> {
         let (target, fragment) = reference.split_once('#')?;
-        if !target.contains(':') || target.trim().is_empty() || fragment.trim().is_empty() {
+        if reference != reference.trim()
+            || fragment.is_empty()
+            || fragment.contains('#')
+            || crate::rulespec::validate_module_target(target).is_err()
+        {
             return None;
         }
         Some(Self { fragment })
     }
+}
+
+fn public_rule_target(id: &str) -> Option<&str> {
+    let (target, fragment) = id.split_once('#')?;
+    (!fragment.is_empty()).then_some(target)
 }
 
 fn collect_input_slots_from_semantics<'a>(

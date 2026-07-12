@@ -11,7 +11,50 @@
       ],
       "type": "string"
     },
+    "CompiledInputCatalogEntry": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "canonical_request_name": {
+          "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$",
+          "type": "string"
+        },
+        "request_names": {
+          "items": {
+            "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "slot": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot",
+        "canonical_request_name",
+        "request_names"
+      ],
+      "type": "object"
+    },
     "CompiledProgramMetadata": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "evaluation_order": {
           "items": {
@@ -21,11 +64,18 @@
         },
         "fast_path": {
           "$ref": "#/$defs/FastPathMetadata"
+        },
+        "input_catalog": {
+          "items": {
+            "$ref": "#/$defs/CompiledInputCatalogEntry"
+          },
+          "type": "array"
         }
       },
       "required": [
         "evaluation_order",
-        "fast_path"
+        "fast_path",
+        "input_catalog"
       ],
       "type": "object"
     },
@@ -54,8 +104,26 @@
       "type": "string"
     },
     "DerivedSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "expr": {
               "$ref": "#/$defs/ScalarExprSpec"
@@ -72,6 +140,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "expr": {
               "$ref": "#/$defs/JudgmentExprSpec"
@@ -91,6 +168,7 @@
       "properties": {
         "corpus_citation_path": {
           "description": "Corpus provision path of the rule's origin module\n(`module.source_verification.corpus_citation_path`), carried per rule\nso artifact consumers can join the rule to its legal source.",
+          "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
           "type": [
             "string",
             "null"
@@ -103,6 +181,7 @@
           "type": "string"
         },
         "id": {
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$",
           "type": [
             "string",
             "null"
@@ -164,8 +243,26 @@
       "type": "object"
     },
     "DerivedVersionSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "expr": {
               "$ref": "#/$defs/ScalarExprSpec"
@@ -182,6 +279,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "expr": {
               "$ref": "#/$defs/JudgmentExprSpec"
@@ -211,6 +317,15 @@
     },
     "EncodingProvenance": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "description": "Who and what produced the encoding: tool (`encoder`, for example\n`axiom-encode/0.2.645`), `model`, `run_id`, and human `reviewed_by`.\nAll fields optional; unknown subfields are rejected so typos do not\nsilently pass for provenance.",
       "properties": {
         "encoder": {
@@ -241,6 +356,15 @@
       "type": "object"
     },
     "FastPathMetadata": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "blockers": {
           "items": {
@@ -263,15 +387,26 @@
       "type": "object"
     },
     "IndexedParameterSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "corpus_citation_path": {
           "description": "Corpus provision path of the rule's origin module\n(`module.source_verification.corpus_citation_path`), carried per rule\nso artifact consumers can join the parameter to its legal source.",
+          "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
           "type": [
             "string",
             "null"
           ]
         },
         "id": {
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$",
           "type": [
             "string",
             "null"
@@ -323,6 +458,15 @@
     "JudgmentExprSpec": {
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "comparison",
@@ -347,6 +491,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "derived",
@@ -363,6 +516,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "current_slot": {
               "format": "uint",
@@ -391,6 +553,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {
@@ -410,6 +581,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {
@@ -429,6 +609,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "item": {
               "$ref": "#/$defs/JudgmentExprSpec"
@@ -447,6 +636,22 @@
       ]
     },
     "ModuleMetadata": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          }
+        }
+      ],
       "description": "Module-level metadata block of a RuleSpec document. Every field is\noptional; the whole block is descriptive and inert — it never affects\nlowering output names, compilation, or execution. The lowered\n[`ProgramSpec`] keeps the (merged) root module's metadata so tooling\nreading a loaded module or a compiled artifact can see it.",
       "properties": {
         "encoding_provenance": {
@@ -459,7 +664,7 @@
             }
           ]
         },
-        "id": {
+        "kind": {
           "type": [
             "string",
             "null"
@@ -513,6 +718,15 @@
       "type": "string"
     },
     "ParameterVersionSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "effective_from": {
           "format": "date",
@@ -520,6 +734,15 @@
         },
         "values": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "patternProperties": {
             "^-?\\d+$": {
               "$ref": "#/$defs/ScalarValueSpec"
@@ -535,6 +758,22 @@
       "type": "object"
     },
     "ProgramSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "extends"
+            ]
+          }
+        }
+      ],
       "properties": {
         "derived": {
           "default": [],
@@ -542,13 +781,6 @@
             "$ref": "#/$defs/DerivedSpec"
           },
           "type": "array"
-        },
-        "extends": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "module": {
           "anyOf": [
@@ -559,7 +791,7 @@
               "type": "null"
             }
           ],
-          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status) carried through RuleSpec lowering for tooling and\nartifact pass-through. Compilation and execution never read it."
+          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status) carried through RuleSpec lowering for tooling and\nartifact pass-through. Load/compile boundaries validate it; execution\nsemantics do not depend on it."
         },
         "parameters": {
           "default": [],
@@ -588,6 +820,15 @@
     "RelatedValueRefSpec": {
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "input",
@@ -604,6 +845,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "derived",
@@ -622,6 +872,15 @@
       ]
     },
     "RelationDerivationSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "current_slot": {
           "format": "uint",
@@ -667,6 +926,15 @@
       "type": "object"
     },
     "RelationSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "properties": {
         "arity": {
           "format": "uint",
@@ -706,6 +974,15 @@
     "ScalarExprSpec": {
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "literal",
@@ -722,6 +999,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "input",
@@ -738,6 +1024,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "default": {
               "$ref": "#/$defs/ScalarValueSpec"
@@ -758,6 +1053,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "derived",
@@ -774,6 +1078,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "index": {
               "$ref": "#/$defs/ScalarExprSpec"
@@ -794,6 +1107,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {
@@ -813,6 +1135,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "sub",
@@ -833,6 +1164,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "mul",
@@ -853,6 +1193,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "div",
@@ -873,6 +1222,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {
@@ -892,6 +1250,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {
@@ -911,6 +1278,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "ceil",
@@ -927,6 +1303,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "floor",
@@ -943,6 +1328,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "period_start",
@@ -955,6 +1349,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "period_end",
@@ -967,6 +1370,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "date": {
               "$ref": "#/$defs/ScalarExprSpec"
@@ -987,6 +1399,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "from": {
               "$ref": "#/$defs/ScalarExprSpec"
@@ -1007,6 +1428,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "current_slot": {
               "format": "uint",
@@ -1046,6 +1476,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "current_slot": {
               "format": "uint",
@@ -1089,6 +1528,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "condition": {
               "$ref": "#/$defs/JudgmentExprSpec"
@@ -1113,6 +1561,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "description": "Reduction over an entity's own period axis (lifetime execution only).\n`n` is present only for the `sum_top_n` reduction. Expression-level,\nadditive to the serialized surface — no artifact-format-version bump.",
           "properties": {
             "kind": {
@@ -1148,6 +1605,15 @@
     "ScalarValueSpec": {
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "bool",
@@ -1164,6 +1630,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "integer",
@@ -1181,6 +1656,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "decimal",
@@ -1201,6 +1685,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "text",
@@ -1217,6 +1710,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "date",
@@ -1236,27 +1738,56 @@
       ]
     },
     "SourceVerification": {
-      "additionalProperties": true,
-      "description": "Grounding of a module in legal source text. `corpus_citation_path`\naddresses the provision in the Axiom corpus; `source_sha256` pins the\nSHA-256 hex digest of the exact provision text the module was encoded\nfrom, so tooling can detect mechanically when the published source has\nchanged out from under the encoding. Additional subfields (for example\n`corpus_citation_paths`) are preserved verbatim.",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
+      "description": "Grounding of a module in legal source text. `corpus_citation_path`\naddresses the provision in the Axiom corpus; `source_sha256` pins the\nSHA-256 hex digest of the exact provision text the module was encoded\nfrom, so tooling can detect mechanically when the published source has\nchanged out from under the encoding. The mapping is exact: the singular\ncitation path is required and unknown/plural fields are rejected.",
       "properties": {
         "corpus_citation_path": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+          "type": "string"
         },
         "source_sha256": {
+          "pattern": "^[0-9a-fA-F]{64}$",
           "type": [
             "string",
             "null"
           ]
         }
       },
+      "required": [
+        "corpus_citation_path"
+      ],
       "type": "object"
     },
     "UnitSpec": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "oneOf": [
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "currency",
@@ -1276,6 +1807,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "count",
@@ -1288,6 +1828,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "ratio",
@@ -1300,6 +1849,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "duration",
@@ -1312,6 +1870,15 @@
           "type": "object"
         },
         {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "custom",
@@ -1339,6 +1906,15 @@
       "type": "object"
     },
     "ValidationRecord": {
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
       "description": "One oracle-validation result for the module: which oracle, whether the\nencoding currently matches it, and when it last ran.",
       "properties": {
         "last_run": {
@@ -1373,10 +1949,19 @@
   },
   "$id": "https://schemas.axiom-foundation.org/rules-engine/compiled-artifact.v1.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "allOf": [
+    {
+      "not": {
+        "required": [
+          "corpus_citation_paths"
+        ]
+      }
+    }
+  ],
   "description": "A compiled RuleSpec program: the ProgramSpec IR plus evaluation order and fast-path metadata, stamped with an artifact format version. Produced by `axiom-rules-engine compile`.",
   "properties": {
     "artifact_format_version": {
-      "default": 0,
+      "const": 1,
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
@@ -1395,6 +1980,7 @@
     }
   },
   "required": [
+    "artifact_format_version",
     "program",
     "metadata"
   ],

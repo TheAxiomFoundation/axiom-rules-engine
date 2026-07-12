@@ -6,30 +6,36 @@ runtime and schema infrastructure only; checked-in policy content belongs in
 
 ## Repository Layout
 
-Each repository represents one jurisdiction. Every jurisdiction should use the
-same top-level taxonomy:
+Each repository represents one country and is named exactly
+`rulespec-<country>`. Direct jurisdiction directories use the same five-root
+filesystem taxonomy:
 
 ```text
 us/
-  statutes/
-  regulations/
+  legislation/
   policies/
-  sources/
+  programs/
+  regulations/
+  statutes/
 
 us-tn/
-  statutes/
-  regulations/
+  legislation/
   policies/
-  sources/
+  programs/
+  regulations/
+  statutes/
 ```
+
+The four atomic `rulespec/v1` roots are `legislation/`, `policies/`,
+`regulations/`, and `statutes/`. `programs/` contains declarative ProgramSpecs
+for `axiom-compose` and must never be loaded as an atomic RuleSpec module.
 
 State repositories use `statutes/` for state statutes. Federal authorities stay
 in `us/statutes/...` or `us/regulations/...` and are referenced by absolute
 cross-repo paths.
 
-Executable RuleSpec modules can compose those authorities with top-level
-`imports`. Use canonical imports for cross-repo dependencies and relative
-imports for files in the same repository:
+Executable RuleSpec modules compose authorities with top-level `imports`.
+Every import is an exact absolute canonical target:
 
 ```yaml
 format: rulespec/v1
@@ -40,15 +46,21 @@ rules: []
 ```
 
 Import targets follow the same path identity scheme as rule IDs, without the
-optional `#rule_name` suffix. The runtime resolves `us:` to `rulespec-us`,
-`us-tn:` to `rulespec-us-tn`, etc., using sibling checkouts and
-`AXIOM_RULESPEC_REPO_ROOTS`. To restrict canonical-import lookup to configured
-roots, pass `axiom-rules-engine compile --exclusive-rulespec-roots` with one or
-more non-empty `AXIOM_RULESPEC_REPO_ROOTS` entries; this disables ambient
-ancestor, cwd, and sibling-checkout fallback for canonical imports.
+optional `#rule_name` suffix. Supply the exact country checkout explicitly:
+
+```bash
+axiom-rules-engine compile \
+  --program /srv/rulespec-us/us-tn/policies/example.yaml \
+  --rulespec-root /srv/rulespec-us \
+  --output /tmp/example.compiled.json
+```
+
+The runtime resolves `us:` to `/srv/rulespec-us/us/` and `us-tn:` to
+`/srv/rulespec-us/us-tn/`. It never discovers or prefers standalone,
+suffixed-worktree, sibling, ancestor, cwd, or environment-provided roots.
 
 Rule files are named by the legal or policy unit they encode. Companion tests use
-the same stem:
+the same stem and are never importable module targets:
 
 ```text
 us/
@@ -62,8 +74,8 @@ us/
 
 ## Path Identity
 
-The file path is the canonical ID. Do not duplicate it in an `id:` field by
-default.
+The file path is the canonical module ID. `module.id` has been removed and is
+rejected; the configured path or `ModuleSource` target is the sole identity.
 
 ```text
 us:statutes/7/2014/e/6/A
@@ -73,125 +85,25 @@ us-tn:policies/dhs/snap/manual/23/L
 These IDs derive from:
 
 ```text
-<repo>:<relative path without extension>
+<jurisdiction>:<atomic-root>/<relative path without extension>
 ```
 
-For source registry files under `sources/`, the `sources/` prefix is removed:
+External citation aliases belong in the pinned `axiom-corpus` release or other
+graph metadata, not in a second module-identity field.
 
-```text
-us-tn/sources/policies/dhs/snap/manual/23/L.yaml
-```
+## Corpus Provenance
 
-has source identity:
-
-```text
-us-tn:policies/dhs/snap/manual/23/L
-```
-
-Use `aliases:` only for external citations or other non-canonical identifiers
-that must remain resolvable.
-
-## Source Registry
-
-Git stores source metadata and expected hashes. R2 stores the actual artifacts.
-`sources/` mirrors the root rule tree:
-
-```text
-us-tn/
-  policies/dhs/snap/manual/23/L.yaml
-  policies/dhs/snap/manual/23/L.test.yaml
-  sources/policies/dhs/snap/manual/23/L.yaml
-```
-
-Default source registry shape:
-
-```yaml
-publisher: Tennessee DHS
-canonical_url: https://...
-retrieved_at: 2026-04-25T00:00:00Z
-hashes:
-  raw_sha256: ...
-  text_sha256: ...
-```
-
-Do not include `id:` or `storage:` by default. Identity and storage paths are
-derived from the repository and filepath.
-
-## Deterministic R2 Paths
-
-The default R2 path is:
-
-```text
-r2://axiom-sources/<repo>/<relative source identity>/<artifact>
-```
-
-Example:
-
-```text
-Git:
-us-tn/sources/policies/dhs/snap/manual/23/L.yaml
-
-R2:
-r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/raw
-r2://axiom-sources/us-tn/policies/dhs/snap/manual/23/L/text
-```
-
-R2 may store actual hashes in object metadata for fast validation. Git still
-stores expected hashes so a reviewed rule can prove which exact source artifacts
-it was reviewed against. Validation derives the R2 path, reads object metadata
-or bytes, and compares actual hashes to the Git-declared expected hashes.
-
-Validate registry files with:
-
-```bash
-PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/us-tn --verbose
-```
-
-The validator rejects duplicated `id:` fields, top-level `storage:` fields,
-missing expected hashes, non-taxonomy source paths, and non-absolute graph-edge
-targets. By default it derives source IDs from `<repo>:<sources-relative-path>`
-and R2 paths from `r2://axiom-sources/<repo>/<source-path>/<artifact>`.
-
-To verify live R2 objects as well:
-
-```bash
-AXIOM_R2_ACCOUNT_ID=...
-AXIOM_R2_ACCESS_KEY_ID=...
-AXIOM_R2_SECRET_ACCESS_KEY=...
-PYTHONPATH=python python3 -m axiom_rules_engine.cli check-sources /path/to/us-tn --verify-r2
-```
-
-`AXIOM_R2_ENDPOINT_URL` can be used instead of `AXIOM_R2_ACCOUNT_ID`. Live
-verification checks that each derived R2 object exists, streams its bytes, and
-compares the actual SHA-256 with the Git-declared expected hash.
-
-## Artifact Overrides
-
-Use explicit artifact metadata only for exceptions:
-
-```yaml
-publisher: Tennessee DHS
-canonical_url: https://...
-retrieved_at: 2026-04-25T00:00:00Z
-artifacts:
-  raw:
-    path: manual.pdf
-    sha256: ...
-    media_type: application/pdf
-  text:
-    path: manual.txt
-    sha256: ...
-    media_type: text/plain
-```
-
-Exceptions include multiple source files for one unit, nonstandard filenames,
-page ranges, historical snapshots, alternate official URLs, or manually curated
-OCR text corrections.
+Legal source artifacts and validation belong to `axiom-corpus`, not to a
+parallel `sources/` tree in RuleSpec checkouts. Each module optionally carries
+an exact `module.source_verification` mapping with one required singular
+`corpus_citation_path` and an optional `source_sha256`. RuleSpec repositories
+pin an immutable named corpus release in `.axiom/toolchain.toml`; the corpus
+release owns source acquisition, hashes, aliases, and publication validation.
 
 ## Upstream Relationships
 
 State policy files can point to upstream federal authorities through graph-level
-metadata such as `sets`, `implements`, `extends`, or `authority`. Those edges
+metadata such as `sets`, `implements`, or `authority`. Those edges
 should point to absolute canonical paths, for example:
 
 ```text

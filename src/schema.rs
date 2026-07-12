@@ -48,6 +48,7 @@ pub struct NamedSchema {
 
 /// `$id` prefix so the published schemas resolve as a coherent family.
 const ID_BASE: &str = "https://schemas.axiom-foundation.org/rules-engine";
+const CORPUS_CITATION_PATH_PATTERN: &str = "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$";
 
 /// All published schemas, in a stable order. The golden-file test writes
 /// each `schema` to `schemas/<file_name>` and asserts the checked-in copy is
@@ -110,12 +111,13 @@ pub fn write_all_to_dir(dir: &std::path::Path) -> std::io::Result<Vec<std::path:
 ///   [`string_or_integer_schema`].
 /// - `usize` slot fields serialize as JSON numbers; schemars describes them as
 ///   non-negative integers, which is correct.
-/// - `SourceVerification` carries a flattened catch-all map, so its schema has
-///   `additionalProperties: true` with arbitrary JSON values.
+/// - `SourceVerification` is an exact mapping with one required singular
+///   corpus citation path and an optional source digest.
 #[cfg(feature = "schema")]
 pub fn compiled_artifact_schema() -> Value {
     let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
         .expect("artifact schema serializes");
+    harden_compiled_artifact_schema(&mut schema);
     stamp_meta(
         &mut schema,
         "compiled-artifact.v1",
@@ -125,6 +127,91 @@ pub fn compiled_artifact_schema() -> Value {
          version. Produced by `axiom-rules-engine compile`.",
     );
     schema
+}
+
+#[cfg(feature = "schema")]
+fn harden_compiled_artifact_schema(value: &mut Value) {
+    match value {
+        Value::Object(mapping) => {
+            let mut forbidden = vec!["corpus_citation_paths"];
+            let object_schema = mapping.get("type").and_then(Value::as_str) == Some("object")
+                || mapping.contains_key("properties");
+            if let Some(Value::Object(properties)) = mapping.get_mut("properties") {
+                if properties.contains_key("source_verification")
+                    && properties.contains_key("encoding_provenance")
+                {
+                    forbidden.push("id");
+                }
+                if properties.contains_key("module")
+                    && properties.contains_key("units")
+                    && properties.contains_key("parameters")
+                    && properties.contains_key("derived")
+                {
+                    forbidden.push("extends");
+                }
+                if let Some(Value::Object(version)) = properties.get_mut("artifact_format_version")
+                {
+                    version.insert(
+                        "const".to_string(),
+                        json!(crate::compile::ARTIFACT_FORMAT_VERSION),
+                    );
+                }
+                if let Some(Value::Object(citation)) = properties.get_mut("corpus_citation_path") {
+                    citation.insert("pattern".to_string(), json!(CORPUS_CITATION_PATH_PATTERN));
+                }
+                if let Some(Value::Object(digest)) = properties.get_mut("source_sha256") {
+                    digest.insert("pattern".to_string(), json!("^[0-9a-fA-F]{64}$"));
+                }
+                if let Some(Value::Object(id)) = properties.get_mut("id") {
+                    id.insert(
+                        "pattern".to_string(),
+                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$"),
+                    );
+                }
+                if let Some(Value::Object(slot)) = properties.get_mut("slot") {
+                    slot.insert("pattern".to_string(), json!("^[A-Za-z_][A-Za-z0-9_]*$"));
+                }
+                if let Some(Value::Object(request_names)) = properties.get_mut("request_names") {
+                    request_names.insert(
+                        "items".to_string(),
+                        json!({
+                            "type": "string",
+                            "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$"
+                        }),
+                    );
+                }
+                if let Some(Value::Object(request_name)) =
+                    properties.get_mut("canonical_request_name")
+                {
+                    request_name.insert(
+                        "pattern".to_string(),
+                        json!("^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$"),
+                    );
+                }
+            }
+            if object_schema {
+                let constraints = mapping
+                    .entry("allOf".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(constraints) = constraints {
+                    constraints.extend(
+                        forbidden
+                            .into_iter()
+                            .map(|field| json!({ "not": { "required": [field] } })),
+                    );
+                }
+            }
+            for nested in mapping.values_mut() {
+                harden_compiled_artifact_schema(nested);
+            }
+        }
+        Value::Array(sequence) => {
+            for nested in sequence {
+                harden_compiled_artifact_schema(nested);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// `{ "type": ["string", "integer"] }` — the accepted JSON for a decimal
@@ -244,24 +331,18 @@ pub fn rulespec_module_schema() -> Value {
         // (e.g. tooling side-channels) deserialize and are ignored.
         "additionalProperties": true,
         "properties": {
-            // A file is only treated as RuleSpec when `format: rulespec/v1`
-            // OR `schema:` starts with `axiom.rules`. Both are Option in the
-            // struct (either discriminator satisfies the gate), so neither is
-            // `required` here; the discriminator rule is expressed in
-            // `anyOf` below.
             "format": {
                 "type": "string",
-                "description": "RuleSpec format discriminator. Canonically `rulespec/v1`."
+                "const": "rulespec/v1",
+                "description": "Exact RuleSpec format discriminator."
             },
-            "schema": {
+            "imports": nullable_array(json!({
                 "type": "string",
-                "description": "Alternative discriminator; recognized when it starts with `axiom.rules`."
-            },
-            "extends": {
-                "type": "string",
-                "description": "Relative or canonical target of a base module to merge before this one."
-            },
-            "imports": nullable_array(json!({ "type": "string" })),
+                "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+(?:#[A-Za-z0-9_.-]+)?$",
+                "not": {
+                    "pattern": "\\.(?:[Yy][Aa][Mm][Ll]|[Yy][Mm][Ll])(?:#|$)"
+                }
+            })),
             "module": nullable_object(module_metadata_schema()),
             "units": nullable_array(unit_spec_schema()),
             // Top-level `relations:` deserializes but is rejected at lowering
@@ -271,14 +352,12 @@ pub fn rulespec_module_schema() -> Value {
             "relations": nullable_array(json!({ "type": "object" })),
             "rules": nullable_array(rule_definition_schema())
         },
-        // At least one discriminator must be present for the file to be
-        // accepted as RuleSpec (`looks_like_rulespec_yaml`). Value-level
-        // constraints (`format` == rulespec/v1, `schema` prefix) are not
-        // expressible in pure JSON Schema draft-07 for the prefix case, so
-        // this asserts presence and documents the value rule.
-        "anyOf": [
-            { "required": ["format"] },
-            { "required": ["schema"] }
+        "required": ["format"],
+        // Unknown tooling side-channels remain open, but the removed engine
+        // composition directive is explicitly forbidden.
+        "allOf": [
+            { "not": { "required": ["extends"] } },
+            { "not": { "required": ["schema"] } }
         ]
     });
     stamp_meta(
@@ -300,9 +379,10 @@ fn module_metadata_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": true,
+        "not": { "required": ["id"] },
         "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
         "properties": {
-            "id": { "type": "string" },
+            "kind": { "type": "string" },
             "title": { "type": "string" },
             "summary": { "type": "string" },
             "status": { "type": "string" },
@@ -314,15 +394,16 @@ fn module_metadata_schema() -> Value {
 }
 
 /// `module.source_verification` — [`crate::rulespec::SourceVerification`].
-/// Models the two named fields; a flattened catch-all preserves any other
-/// subfield verbatim, so `additionalProperties` is open.
+/// Exact mapping: one required singular corpus path, plus an optional digest.
 fn source_verification_schema() -> Value {
     json!({
         "type": "object",
-        "additionalProperties": true,
+        "additionalProperties": false,
+        "required": ["corpus_citation_path"],
         "properties": {
             "corpus_citation_path": {
                 "type": "string",
+                "pattern": CORPUS_CITATION_PATH_PATTERN,
                 "description": "Corpus provision path the module was encoded from."
             },
             "source_sha256": {

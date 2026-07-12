@@ -15,6 +15,8 @@ wheel). Build locally with::
     maturin develop --release --manifest-path python-ext/Cargo.toml
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -25,6 +27,16 @@ pytestmark = pytest.mark.skipif(
     NativeCompiledDenseProgram is None,
     reason="axiom_rules_engine_dense extension is not built",
 )
+
+
+def _write_rulespec(base: Path, name: str, source: str) -> tuple[Path, Path]:
+    root = base / "rulespec-us"
+    path = root / "us/policies/tests" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    path = path.resolve()
+    path.write_text(source, encoding="utf-8")
+    return path, root
 
 # 42 USC 415(b): AIME is the sum of a worker's highest-35 years of indexed
 # earnings divided by 420 (35 years x 12 months), rounded down. Under the strict
@@ -65,9 +77,12 @@ rules:
 
 @pytest.fixture(scope="module")
 def program(tmp_path_factory) -> CompiledDenseProgram:
-    path = tmp_path_factory.mktemp("lifetime") / "aime.yaml"
-    path.write_text(AIME_MODULE, encoding="utf-8")
-    return CompiledDenseProgram.from_file(path, entity="Worker")
+    path, root = _write_rulespec(
+        tmp_path_factory.mktemp("lifetime"), "aime.yaml", AIME_MODULE
+    )
+    return CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Worker"
+    )
 
 
 def _aime_worker() -> tuple[list[tuple[str, str, str]], list[dict[str, np.ndarray]]]:
@@ -191,9 +206,12 @@ rules:
 
 @pytest.fixture(scope="module")
 def derived_n_program(tmp_path_factory) -> CompiledDenseProgram:
-    path = tmp_path_factory.mktemp("derived_n") / "aime.yaml"
-    path.write_text(DERIVED_N_MODULE, encoding="utf-8")
-    return CompiledDenseProgram.from_file(path, entity="Worker")
+    path, root = _write_rulespec(
+        tmp_path_factory.mktemp("derived_n"), "aime.yaml", DERIVED_N_MODULE
+    )
+    return CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Worker"
+    )
 
 
 class TestDerivedPersonVaryingN:
@@ -325,9 +343,10 @@ class TestReductionSemantics:
     def test_count_over_periods_counts_nonzero_per_row(self, tmp_path) -> None:
         # count_over_periods counts, per row, the periods with a nonzero value.
         module = _single_rule_module("years", "Integer", "count_over_periods(earnings)")
-        path = tmp_path / "count.yaml"
-        path.write_text(module, encoding="utf-8")
-        program = CompiledDenseProgram.from_file(path, entity="Worker")
+        path, root = _write_rulespec(tmp_path, "count.yaml", module)
+        program = CompiledDenseProgram.from_file(
+            path, rulespec_roots=[root], entity="Worker"
+        )
         periods = [
             ("calendar_year", f"{2001 + k}-01-01", f"{2001 + k}-12-31")
             for k in range(4)
@@ -350,9 +369,10 @@ class TestReductionSemantics:
         module = _single_rule_module(
             "top", "Money", "sum_top_n_over_periods(earnings, 45)"
         )
-        path = tmp_path / "topn.yaml"
-        path.write_text(module, encoding="utf-8")
-        program = CompiledDenseProgram.from_file(path, entity="Worker")
+        path, root = _write_rulespec(tmp_path, "topn.yaml", module)
+        program = CompiledDenseProgram.from_file(
+            path, rulespec_roots=[root], entity="Worker"
+        )
         periods = [
             ("calendar_year", f"{1985 + k}-01-01", f"{1985 + k}-12-31")
             for k in range(41)
@@ -366,7 +386,8 @@ class TestReductionSemantics:
     def test_unknown_over_periods_reduction_fails_to_parse(self, tmp_path) -> None:
         # An unknown *_over_periods name fails at parse/compile time.
         module = _single_rule_module("bad", "Money", "avg_over_periods(earnings)")
-        path = tmp_path / "bad.yaml"
-        path.write_text(module, encoding="utf-8")
+        path, root = _write_rulespec(tmp_path, "bad.yaml", module)
         with pytest.raises((ValueError, RuntimeError), match="avg_over_periods"):
-            CompiledDenseProgram.from_file(path, entity="Worker")
+            CompiledDenseProgram.from_file(
+                path, rulespec_roots=[root], entity="Worker"
+            )

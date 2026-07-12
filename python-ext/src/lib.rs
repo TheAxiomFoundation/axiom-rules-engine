@@ -80,38 +80,34 @@ fn dtype_name(dtype: &DTypeSpec) -> &'static str {
 struct CompiledDenseProgramHandle {
     compiled: DenseCompiledProgram,
     derived_metadata: Vec<DerivedMetadataHandle>,
+    input_catalog: HashMap<String, String>,
+    input_request_names: HashMap<String, Vec<String>>,
 }
 
 #[pymethods]
 impl CompiledDenseProgramHandle {
     #[staticmethod]
-    #[pyo3(signature = (path, entity=None))]
-    fn from_file(path: &str, entity: Option<&str>) -> PyResult<Self> {
-        let artifact = CompiledProgramArtifact::from_rulespec_file(path)
+    #[pyo3(signature = (path, rulespec_roots, entity=None))]
+    fn from_file(path: &str, rulespec_roots: Vec<String>, entity: Option<&str>) -> PyResult<Self> {
+        let roots = axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new(&rulespec_roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        // Capture authoring metadata (including `period`, which the runtime
-        // model drops) for every derived rule across all entities — the
-        // dense program itself compiles only the root entity's rules.
-        let derived_metadata = artifact
-            .program
-            .derived
-            .iter()
-            .map(|spec| DerivedMetadataHandle {
-                name: spec.name.clone(),
-                id: spec.id.clone(),
-                entity: spec.entity.clone(),
-                dtype: dtype_name(&spec.dtype).to_string(),
-                unit: spec.unit.clone(),
-                period: spec.period.clone(),
-                source: spec.source.clone(),
-            })
-            .collect();
-        let compiled = DenseCompiledProgram::from_artifact(&artifact, entity)
+        let artifact = CompiledProgramArtifact::from_rulespec_file(path, &roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        Ok(Self {
-            compiled,
-            derived_metadata,
-        })
+        compiled_dense_from_artifact(artifact, entity)
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (path, rulespec_roots, entity=None))]
+    fn from_composed_file(
+        path: &str,
+        rulespec_roots: Vec<String>,
+        entity: Option<&str>,
+    ) -> PyResult<Self> {
+        let roots = axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new(&rulespec_roots)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let artifact = CompiledProgramArtifact::from_composed_rulespec_file(path, &roots)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        compiled_dense_from_artifact(artifact, entity)
     }
 
     /// Metadata for every derived rule in the compiled module, across all
@@ -133,6 +129,14 @@ impl CompiledDenseProgramHandle {
         self.compiled.output_names()
     }
 
+    fn input_catalog(&self) -> HashMap<String, String> {
+        self.input_catalog.clone()
+    }
+
+    fn input_request_names(&self) -> HashMap<String, Vec<String>> {
+        self.input_request_names.clone()
+    }
+
     fn relations(&self) -> Vec<RelationSchemaHandle> {
         self.compiled
             .relations()
@@ -152,7 +156,16 @@ impl CompiledDenseProgramHandle {
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        self.run(py, period_kind, start, end, inputs, relations, outputs, false)
+        self.run(
+            py,
+            period_kind,
+            start,
+            end,
+            inputs,
+            relations,
+            outputs,
+            false,
+        )
     }
 
     /// Execute in `f64` arithmetic: numeric outputs skip the Decimal
@@ -169,9 +182,17 @@ impl CompiledDenseProgramHandle {
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        self.run(py, period_kind, start, end, inputs, relations, outputs, true)
+        self.run(
+            py,
+            period_kind,
+            start,
+            end,
+            inputs,
+            relations,
+            outputs,
+            true,
+        )
     }
-
     /// Execute over an entity's lifetime in `f64` arithmetic: one positionally
     /// aligned input batch per period, so formulas can reduce over the period
     /// axis with `sum_over_periods` / `max_over_periods` / `count_over_periods`
@@ -225,6 +246,49 @@ impl CompiledDenseProgramHandle {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         execution_to_pydict(py, execution)
     }
+}
+
+fn compiled_dense_from_artifact(
+    artifact: CompiledProgramArtifact,
+    entity: Option<&str>,
+) -> PyResult<CompiledDenseProgramHandle> {
+    // Capture authoring metadata (including `period`, which the runtime model
+    // drops) for every derived rule across all entities — the dense program
+    // itself compiles only the root entity's rules.
+    let derived_metadata = artifact
+        .program
+        .derived
+        .iter()
+        .map(|spec| DerivedMetadataHandle {
+            name: spec.name.clone(),
+            id: spec.id.clone(),
+            entity: spec.entity.clone(),
+            dtype: dtype_name(&spec.dtype).to_string(),
+            unit: spec.unit.clone(),
+            period: spec.period.clone(),
+            source: spec.source.clone(),
+        })
+        .collect();
+    let input_catalog = artifact
+        .metadata
+        .input_catalog
+        .iter()
+        .map(|entry| (entry.slot.clone(), entry.canonical_request_name.clone()))
+        .collect();
+    let input_request_names = artifact
+        .metadata
+        .input_catalog
+        .iter()
+        .map(|entry| (entry.slot.clone(), entry.request_names.clone()))
+        .collect();
+    let compiled = DenseCompiledProgram::from_artifact(&artifact, entity)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(CompiledDenseProgramHandle {
+        compiled,
+        derived_metadata,
+        input_catalog,
+        input_request_names,
+    })
 }
 
 impl CompiledDenseProgramHandle {

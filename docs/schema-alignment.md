@@ -8,6 +8,11 @@ The current direction is:
 3. Formula strings are fields inside RuleSpec, parsed by an internal engine
    module and normalised into `ProgramSpec`.
 
+Compiled artifacts carry a deterministic runtime-input catalog and perform a
+derived-metadata consistency check against their embedded program. Neither is
+source-tamper evidence; that assurance lives in the signed-corpus-release and
+supervisor chain.
+
 No external RuleSpec module adapter layer is part of the design. The repository
 is still pre-adoption, so Git history is the migration path for old experiments.
 The active code and docs should describe the architecture we would choose from a
@@ -30,7 +35,8 @@ RuleSpec should make machine-authored structure explicit:
 - Explicit rule kind: `parameter`, `derived`, `data_relation`,
   `derived_relation`, and `source_relation`.
 - Explicit data-relation arity and, in a follow-up, slot names/orientation.
-- Multi-source provenance and source-document anchors.
+- One canonical corpus-provision join key per source/proof node; multi-source
+  composition happens upstream.
 - Legal/provenance graph edges such as `restates`, `sets`, `implements`, and
   `amends` as `source_relation` records. Same-kind `sets` edges with
   `source_relation.value` lower into runtime as delegated parameter bindings
@@ -55,8 +61,8 @@ schema/runtime gaps are explicit:
   subset, not arbitrary legal operators.
 - Relation slot orientation is still inferred in some expression forms and
   should become explicit before larger-scale jurisdiction ingestion.
-- Multi-source provenance needs first-class arrays on executable outputs and
-  trace nodes.
+- Executable outputs and trace nodes carry the same singular canonical corpus
+  join key; plural provenance fields are intentionally rejected.
 
 ## Tests In This Pass
 

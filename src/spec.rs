@@ -17,13 +17,14 @@ use crate::model::{
 pub enum SpecError {
     #[error("invalid decimal literal `{literal}`")]
     InvalidDecimal { literal: String },
-    #[error("yaml parse error: {0}")]
-    Yaml(#[from] serde_yaml::Error),
-    #[cfg(feature = "fs")]
-    #[error("failed to read program file `{path}`: {error}")]
-    ReadFile { path: String, error: std::io::Error },
-    #[error("duplicate {kind} `{name}` when merging extended program")]
-    DuplicateOnMerge { kind: String, name: String },
+    #[error("{location} declares non-canonical corpus_citation_path `{value}`")]
+    InvalidCorpusCitationPath { location: String, value: String },
+    #[error(
+        "{location} declares source_sha256 `{value}`, which is not a 64-character hexadecimal SHA-256 digest"
+    )]
+    InvalidSourceSha256 { location: String, value: String },
+    #[error("{location} declares non-canonical public rule id `{value}`")]
+    InvalidPublicRuleId { location: String, value: String },
     #[error(
         "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot, derived rule, or parameter in the compiled program"
     )]
@@ -45,11 +46,10 @@ pub enum SpecError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
-    #[serde(default)]
-    pub extends: Option<String>,
     /// Module-level metadata (source pinning, encoding provenance,
     /// validation status) carried through RuleSpec lowering for tooling and
-    /// artifact pass-through. Compilation and execution never read it.
+    /// artifact pass-through. Load/compile boundaries validate it; execution
+    /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<crate::rulespec::ModuleMetadata>,
     #[serde(default)]
@@ -63,8 +63,48 @@ pub struct ProgramSpec {
 }
 
 impl ProgramSpec {
-    pub fn from_yaml_str(source: &str) -> Result<Self, SpecError> {
-        Ok(serde_yaml::from_str(source)?)
+    /// Validate provenance carried by compiled IR, including artifacts loaded
+    /// directly without passing through RuleSpec lowering.
+    pub fn validate_provenance(&self) -> Result<(), SpecError> {
+        if let Some(verification) = self
+            .module
+            .as_ref()
+            .and_then(|module| module.source_verification.as_ref())
+        {
+            validate_citation_path(
+                "program.module.source_verification",
+                &verification.corpus_citation_path,
+            )?;
+            if let Some(digest) = verification.source_sha256.as_deref()
+                && (digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            {
+                return Err(SpecError::InvalidSourceSha256 {
+                    location: "program.module.source_verification".to_string(),
+                    value: digest.to_string(),
+                });
+            }
+        }
+        for parameter in &self.parameters {
+            if let Some(id) = parameter.id.as_deref() {
+                validate_public_rule_id(
+                    &format!("parameter `{}`", parameter.name),
+                    id,
+                    &parameter.name,
+                )?;
+            }
+            if let Some(citation_path) = parameter.corpus_citation_path.as_deref() {
+                validate_citation_path(&format!("parameter `{}`", parameter.name), citation_path)?;
+            }
+        }
+        for derived in &self.derived {
+            if let Some(id) = derived.id.as_deref() {
+                validate_public_rule_id(&format!("derived `{}`", derived.name), id, &derived.name)?;
+            }
+            if let Some(citation_path) = derived.corpus_citation_path.as_deref() {
+                validate_citation_path(&format!("derived `{}`", derived.name), citation_path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Validate every declared `rounding:` against its rule's unit, without
@@ -91,28 +131,6 @@ impl ProgramSpec {
             derived.resolve_rounding(&program)?;
         }
         Ok(())
-    }
-
-    /// Load a program from `path`, resolving any `extends: <other.yaml>`
-    /// relative to the current file's directory. Conflicting parameter names
-    /// have their versions concatenated, preserving effective_from order; the
-    /// engine picks whichever version is live for the query period. Units,
-    /// relations, and derived outputs are additive with duplicate-name errors.
-    #[cfg(feature = "fs")]
-    pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self, SpecError> {
-        let path = path.as_ref();
-        let source = std::fs::read_to_string(path).map_err(|error| SpecError::ReadFile {
-            path: path.display().to_string(),
-            error,
-        })?;
-        let mut spec: Self = serde_yaml::from_str(&source)?;
-        if let Some(extends) = spec.extends.take() {
-            let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
-            let base_path = base_dir.join(&extends);
-            let base = Self::from_yaml_file(&base_path)?;
-            spec = merge_programs(base, spec)?;
-        }
-        Ok(spec)
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
@@ -145,6 +163,36 @@ impl ProgramSpec {
     }
 }
 
+fn validate_public_rule_id(
+    location: &str,
+    value: &str,
+    expected_name: &str,
+) -> Result<(), SpecError> {
+    let valid = value.split_once('#').is_some_and(|(target, fragment)| {
+        fragment == expected_name
+            && !fragment.is_empty()
+            && !fragment.chars().any(char::is_whitespace)
+            && crate::rulespec::validate_module_target(target).is_ok()
+    });
+    if !valid {
+        return Err(SpecError::InvalidPublicRuleId {
+            location: location.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_citation_path(location: &str, value: &str) -> Result<(), SpecError> {
+    if !crate::rulespec::is_canonical_corpus_citation_path(value) {
+        return Err(SpecError::InvalidCorpusCitationPath {
+            location: location.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DatasetSpec {
@@ -171,11 +219,11 @@ impl DatasetSpec {
     }
 
     pub fn to_dataset_for_program(&self, program: &Program) -> Result<DataSet, SpecError> {
-        let input_slots = program.input_slots();
+        let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
             .iter()
-            .map(|input| input.to_model_for_program(program, &input_slots))
+            .map(|input| input.to_model_for_program(program, &input_catalog))
             .collect::<Result<Vec<InputRecord>, SpecError>>()?;
         let relations = self
             .relations
@@ -1061,10 +1109,10 @@ impl InputRecordSpec {
     fn to_model_for_program(
         &self,
         program: &Program,
-        input_slots: &std::collections::HashSet<&str>,
+        input_catalog: &std::collections::BTreeMap<String, Vec<String>>,
     ) -> Result<InputRecord, SpecError> {
         let name = program
-            .resolve_input_name_with_slots(&self.name, input_slots)
+            .resolve_input_name_with_catalog(&self.name, input_catalog)
             .ok_or_else(|| SpecError::InvalidDatasetInputReference {
                 reference: self.name.clone(),
             })?;
@@ -1107,54 +1155,4 @@ impl RelationRecordSpec {
             interval: self.interval.to_model(),
         })
     }
-}
-
-/// Merge an extending program into its base. Parameter versions are
-/// concatenated by parameter name (the engine's effective_from ordering picks
-/// the right version at evaluation). Units, relations, and derived outputs
-/// are additive — duplicate names across base and extension raise
-/// `SpecError::DuplicateOnMerge`.
-pub fn merge_programs(
-    mut base: ProgramSpec,
-    extension: ProgramSpec,
-) -> Result<ProgramSpec, SpecError> {
-    if extension.module.is_some() {
-        base.module = extension.module;
-    }
-    for unit in extension.units {
-        if base.units.iter().any(|u| u.name == unit.name) {
-            continue;
-        }
-        base.units.push(unit);
-    }
-    for relation in extension.relations {
-        if base.relations.iter().any(|r| r.name == relation.name) {
-            return Err(SpecError::DuplicateOnMerge {
-                kind: "relation".to_string(),
-                name: relation.name,
-            });
-        }
-        base.relations.push(relation);
-    }
-    for parameter in extension.parameters {
-        if let Some(existing) = base
-            .parameters
-            .iter_mut()
-            .find(|p| p.name == parameter.name)
-        {
-            existing.versions.extend(parameter.versions);
-        } else {
-            base.parameters.push(parameter);
-        }
-    }
-    for derived in extension.derived {
-        if base.derived.iter().any(|d| d.name == derived.name) {
-            return Err(SpecError::DuplicateOnMerge {
-                kind: "derived".to_string(),
-                name: derived.name,
-            });
-        }
-        base.derived.push(derived);
-    }
-    Ok(base)
 }

@@ -249,17 +249,18 @@ targets: `--target web` (browser ESM) into `wasm/pkg-web/` and
   four functions.
 ## 2026-06-10 — Source pinning, encoding provenance, and validation status are module content
 
-**Decision.** The RuleSpec `module:` block grows three optional, inert
-fields: `source_verification.source_sha256` (the SHA-256 hex digest of the
-exact corpus provision text the module was encoded from),
+**Decision.** The RuleSpec `module:` block carries inert provenance. When
+present, `source_verification` is an exact mapping with one required singular
+`corpus_citation_path` and optional `source_sha256` (the SHA-256 hex digest of
+the exact corpus provision text the module was encoded from),
 `encoding_provenance` (optional `encoder`, `model`, `run_id`, `reviewed_by`
 strings; unknown subfields rejected), and `validation` (a list of
 `{oracle, status, last_run}` records with `status` one of
 `matches` / `mismatches` / `pending`). The engine validates shape at load —
 a malformed sha fails with an error naming the module file — carries the
 merged root module's metadata on `ProgramSpec.module`, and passes it
-through compiled-artifact JSON. Nothing in lowering, compilation, or
-execution reads any of it.
+through compiled-artifact JSON. Load and artifact boundaries validate it;
+the metadata does not alter formula semantics or execution results.
 
 **Why.**
 
@@ -277,19 +278,69 @@ execution reads any of it.
 
 **Consequences.**
 
-- Every field is optional; absent means exactly today's behavior. Existing
-  modules and fixtures are untouched, and artifacts without module
-  metadata serialize byte-identically to before.
+- The module block remains optional. A declared `source_verification` must
+  identify exactly one canonical corpus provision; source lists are composed
+  upstream before they reach the engine.
 - Artifacts gain an optional `program.module` pass-through. No
   `ARTIFACT_FORMAT_VERSION` bump: the field is additive, ignored by older
   engines, and evaluation semantics are unchanged.
 - Malformed `source_sha256` values (not 64 hex characters), unknown
   `encoding_provenance` subfields, and unknown `validation[].status`
   values are rejected at load instead of passing silently.
-- Unmodeled `source_verification` subfields (for example
-  `corpus_citation_paths`) are preserved verbatim for tooling.
+- Unknown `source_verification` subfields and plural
+  `corpus_citation_paths` at any source/proof depth are rejected.
 - axiom-encode owns stamping the blocks at encode time and the staleness
   checker that compares pinned hashes against the current corpus.
+
+## 2026-07-11 — Filesystem module loading uses explicit canonical country roots only
+
+**Decision.** Every filesystem compile/load caller supplies a non-empty
+`CanonicalRuleSpecRoots`. CLI callers pass required repeatable
+`--rulespec-root` arguments; Rust and PyO3 callers pass the roots directly.
+Each root is an absolute, real, unaliased checkout named exactly
+`rulespec-<two-letter-country>`, containing direct matching jurisdiction
+directories. Environment, cwd, ancestor, sibling, suffixed-worktree, and
+legacy standalone discovery are removed rather than retained as compatibility
+paths.
+
+The filesystem recognizes five jurisdiction content roots: `legislation/`,
+`policies/`, `programs/`, `regulations/`, and `statutes/`. Only the other four
+are atomic `rulespec/v1` module roots. `programs/` belongs to `axiom-compose`
+and cannot be a module target. `.yml`, root-level content roots,
+wrong-country jurisdictions, duplicate roots or countries, symlinks, aliases,
+special paths, and empty checkouts fail closed.
+
+**Why.** Ambient discovery made the compiled closure depend on unrelated
+filesystem state and allowed false-green builds against stale sibling
+checkouts. The former resolver also admitted relative imports and top-level
+`extends`. A single validated capability object makes
+the root module and its whole closure obey one deterministic policy.
+
+**Consequences.** File API signatures intentionally break: callers must pass
+`CanonicalRuleSpecRoots`. The removed `AXIOM_RULESPEC_REPO_ROOTS`,
+`AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE`, and `--exclusive-rulespec-roots`
+surfaces have no compatibility aliases. Pure `ModuleSource` hosts remain
+filesystem-free, while their canonical targets now also require an atomic
+content root. Ephemeral `axiom-compose` output uses the separate
+`compile-composed` / `from_composed_rulespec_file` surface: exact external
+`module.kind: composition` input, originless synthesized rules, and canonical
+atomic dependencies resolved only through the same explicit roots.
+Atomic imports are exact absolute canonical targets with at most one validated
+symbol fragment. Relative, extension-bearing, quoted, whitespace, redundant,
+or dot-segment spellings are rejected. `extends` and the legacy `schema:`
+discriminator are removed rather than aliased.
+
+Compiled artifacts publish an exact input-owner catalog. Atomic owners expose
+only `<module>#input.<slot>`; originless synthesized owners expose the bare
+slot. The canonical request name is the bare owner when present, otherwise the
+lexicographically first atomic owner, while every actual owner remains
+accepted for the shared runtime slot. This is a deterministic runtime-input
+catalog, not a source manifest. The loader recomputes this catalog and the
+other compiler-derived metadata and rejects inconsistencies with the embedded
+program; this is a derived-metadata consistency check, not tamper detection.
+Source-tamper evidence lives in the signed-corpus-release and supervisor chain.
+Source-level tamper evidence (full source manifest with SHA-256, race-safe
+reads) is tracked as a follow-up issue.
 
 ## 2026-06-10 — Module resolution is a host concern behind `ModuleSource`
 
@@ -299,12 +350,10 @@ variable, or wall clock. Finding module text for a canonical target
 (`us:statutes/7/2015/e`) goes behind the `source::ModuleSource` trait
 (`load(target) -> Result<Option<String>, SourceError>`);
 `load_rulespec_with_source` and `CompiledProgramArtifact::from_rulespec_with_source`
-are the pure entry points. Resolving relative imports to canonical targets is
-pure string logic on the importer's canonical target and stays in the core
-(`resolve_import_target`). The existing filesystem resolution
-(sibling checkouts, country monorepos, `AXIOM_RULESPEC_REPO_ROOTS`) becomes
-`FsModuleSource` plus the unchanged `*_file` APIs, all behind a default-on
-`fs` feature; the CLI binary requires it. wasm32-unknown-unknown is a
+are the pure entry points. Exact absolute imports are validated and their
+optional symbol fragments removed in the core (`resolve_import_target`). The
+filesystem implementation is `FsModuleSource`, behind a default-on `fs`
+feature; the CLI binary requires it. wasm32-unknown-unknown is a
 supported check target: CI runs
 `cargo check --target wasm32-unknown-unknown --no-default-features`.
 
@@ -319,10 +368,10 @@ supported check target: CI runs
   "find and read the text" (host) keeps durable ids identical across hosts:
   an in-memory host and a checkout produce byte-identical programs.
 
-**Consequences.**
+**Consequences (filesystem behavior superseded by the 2026-07-11 decision).**
 
-- Default builds are unchanged: `fs` is on, the CLI, `load_rulespec_file`,
-  `from_rulespec_file`, and artifact file I/O behave exactly as before.
+- The default `fs` feature still owns filesystem APIs and the CLI; their root
+  contract and signatures are now the explicit hard-cut surface above.
 - With `--no-default-features` the crate has no `std::fs` / `std::env` usage
   and no clock reads; chrono is pinned `default-features = false` (no `clock`
   feature) so wall-clock reads cannot creep into core paths unnoticed.
@@ -378,9 +427,9 @@ full design.
 ## 2026-06-09 — Compiled artifacts carry a format version and are bounded subprocesses
 
 **Decision.** `CompiledProgramArtifact` stamps `artifact_format_version`
-(currently 1) and `engine_version` at compile time. Loading rejects artifacts
-whose format version is newer than the engine supports; artifacts without the
-field (version 0, pre-stamping) still load. The Python wrapper bounds every
+(currently 1) and `engine_version` at compile time. Before launch, version 1 is
+the sole artifact contract: loading rejects missing, older, or newer format
+versions. The Python wrapper bounds every
 engine subprocess with a configurable timeout (default 600 s, `None` to
 disable).
 
@@ -395,9 +444,8 @@ disable).
 
 **Consequences.**
 
-- New artifacts include two extra JSON fields; legacy artifacts deserialize
-  with `artifact_format_version: 0` and `engine_version: null`, so nothing
-  shipped breaks.
+- Missing or mismatched artifact versions fail closed; there is no unstamped
+  compatibility surface before launch.
 - Future IR-breaking changes must bump `ARTIFACT_FORMAT_VERSION` so older
   engines reject newer artifacts instead of guessing.
 - The `compile` CLI summary now reports both versions.
@@ -476,7 +524,8 @@ the Rust engine normalises RuleSpec into `ProgramSpec` before compilation.
 
 `ProgramSpec` is the engine IR, not the author schema. It remains useful inside
 compiled artifacts and tests, but rule files accepted by the compile path
-must be explicit RuleSpec (`format: rulespec/v1` or `schema: axiom.rules.*`).
+must be explicit RuleSpec with exact `format: rulespec/v1`. The former
+`schema:` discriminator is rejected.
 
 **Why.**
 
@@ -500,6 +549,10 @@ must be explicit RuleSpec (`format: rulespec/v1` or `schema: axiom.rules.*`).
   code.
 
 ## 2026-04-25 — Jurisdiction repo paths are canonical IDs
+
+**Superseded on 2026-07-11.** Canonical country monorepos now use the five-root
+taxonomy, while legal source artifacts live in immutable named `axiom-corpus`
+releases rather than RuleSpec `sources/` trees.
 
 **Decision.** Production rule content lives in jurisdiction repositories using
 the same top-level taxonomy in every repo:
@@ -547,13 +600,17 @@ They do include expected hashes in Git.
 
 ## 2026-04-19 — Rule content lives in jurisdiction repos
 
+**Superseded on 2026-07-11.** The current loader accepts only explicit
+canonical country roots and exact absolute imports; it does not resolve
+top-level `extends` or arbitrary mounted layouts.
+
 **Decision.** Production encodings live in the jurisdiction repo they belong to.
 The engine repo keeps RuleSpec YAML only as parser/execution fixtures under
 `tests/fixtures/rulespec/`. Canonical jurisdiction repositories use `statutes/`,
 `regulation/`, `policy/`, and `sources/` paths.
 
-The engine resolves `extends:` and RuleSpec imports by filesystem path; any
-mounted layout works.
+The historical engine resolved dependency paths from arbitrary mounted
+layouts; that behavior has been deleted.
 
 **Why.**
 

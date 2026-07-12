@@ -32,9 +32,6 @@ pub enum CompileError {
     #[error("cyclic relation dependency detected involving: {cycle}")]
     CyclicRelationDependency { cycle: String },
     #[cfg(feature = "fs")]
-    #[error("failed to read program file `{path}`: {error}")]
-    ReadProgramFile { path: String, error: std::io::Error },
-    #[cfg(feature = "fs")]
     #[error("failed to write compiled artefact `{path}`: {error}")]
     WriteArtifactFile { path: String, error: std::io::Error },
     #[error("failed to serialise compiled artefact: {0}")]
@@ -44,17 +41,19 @@ pub enum CompileError {
         path: String,
         error: serde_json::Error,
     },
+    #[error("compiled artefact `{path}` violates the v1 contract: {message}")]
+    InvalidArtifactContract { path: String, message: String },
     #[error("failed to load RuleSpec module `{path}`: {error}")]
     RuleSpec {
         path: String,
         error: crate::rulespec::RuleSpecError,
     },
     #[error(
-        "ambiguous RuleSpec module YAML `{path}` has a top-level `rules:` key but no RuleSpec discriminator (`format: rulespec/v1` or `schema: axiom.rules.*`)"
+        "ambiguous RuleSpec module YAML `{path}` has a top-level `rules:` key but no exact RuleSpec discriminator (`format: rulespec/v1`)"
     )]
     AmbiguousRuleSpecYaml { path: String },
     #[error(
-        "compiled artefact `{path}` has artifact_format_version {found}, but this engine supports up to {supported}; recompile the program with this engine or upgrade the engine"
+        "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
     )]
     UnsupportedArtifactFormatVersion {
         path: String,
@@ -73,14 +72,13 @@ pub enum CompileError {
 }
 
 /// Format version stamped into every artifact this engine compiles.
-/// Artifacts with a missing field (version 0) predate stamping and are
-/// accepted; artifacts newer than this are rejected at load.
+/// Prelaunch artifact v1 is the sole accepted contract. Missing, older, and
+/// newer versions are rejected at load.
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramArtifact {
-    #[serde(default)]
     pub artifact_format_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
@@ -88,14 +86,23 @@ pub struct CompiledProgramArtifact {
     pub metadata: CompiledProgramMetadata,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramMetadata {
     pub evaluation_order: Vec<String>,
     pub fast_path: FastPathMetadata,
+    pub input_catalog: Vec<CompiledInputCatalogEntry>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CompiledInputCatalogEntry {
+    pub slot: String,
+    pub canonical_request_name: String,
+    pub request_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FastPathMetadata {
     pub strategy: String,
@@ -105,30 +112,38 @@ pub struct FastPathMetadata {
 
 impl CompiledProgramArtifact {
     pub fn compile(program: ProgramSpec) -> Result<Self, CompileError> {
+        program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
-        let evaluation_order = evaluation_order(&program)?;
-        let fast_path = fast_path_metadata(&program);
+        let metadata = compiled_metadata(&program)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             program,
-            metadata: CompiledProgramMetadata {
-                evaluation_order,
-                fast_path,
-            },
+            metadata,
         })
     }
 
     fn check_format_version(self, path: &str) -> Result<Self, CompileError> {
-        if self.artifact_format_version > ARTIFACT_FORMAT_VERSION {
+        if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
                 path: path.to_string(),
                 found: self.artifact_format_version,
                 supported: ARTIFACT_FORMAT_VERSION,
             });
+        }
+        self.program.validate_provenance()?;
+        self.program.validate_rounding()?;
+        // This is a derived-metadata consistency check: it proves the metadata
+        // agrees with the embedded program, not that either payload is untampered.
+        let expected_metadata = compiled_metadata(&self.program)?;
+        if self.metadata != expected_metadata {
+            return Err(invalid_artifact_contract(
+                path,
+                "metadata does not match the compiled program",
+            ));
         }
         Ok(self)
     }
@@ -173,38 +188,38 @@ impl CompiledProgramArtifact {
     }
 
     #[cfg(feature = "fs")]
-    pub fn from_rulespec_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
+    pub fn from_rulespec_file(
+        path: impl AsRef<Path>,
+        roots: &crate::rulespec::CanonicalRuleSpecRoots,
+    ) -> Result<Self, CompileError> {
         let p = path.as_ref();
-        let source = fs::read_to_string(p).map_err(|error| CompileError::ReadProgramFile {
-            path: p.display().to_string(),
-            error,
-        })?;
-        if crate::rulespec::looks_like_rulespec_yaml(&source) {
-            let program =
-                crate::rulespec::load_rulespec_file(p).map_err(|error| CompileError::RuleSpec {
-                    path: p.display().to_string(),
-                    error,
-                })?;
-            return Self::compile(program);
-        }
-        if crate::rulespec::has_top_level_rules_key(&source) {
-            return Err(CompileError::AmbiguousRuleSpecYaml {
+        let program = crate::rulespec::load_rulespec_file(p, roots).map_err(|error| {
+            CompileError::RuleSpec {
                 path: p.display().to_string(),
-            });
-        }
-        Err(CompileError::RuleSpec {
-            path: p.display().to_string(),
-            error: crate::rulespec::RuleSpecError::MissingDiscriminator,
-        })
+                error,
+            }
+        })?;
+        Self::compile(program)
+    }
+
+    /// Compile an originless RuleSpec composition emitted by `axiom-compose`.
+    #[cfg(feature = "fs")]
+    pub fn from_composed_rulespec_file(
+        path: impl AsRef<Path>,
+        roots: &crate::rulespec::CanonicalRuleSpecRoots,
+    ) -> Result<Self, CompileError> {
+        let p = path.as_ref();
+        let program = crate::rulespec::load_composed_rulespec_file(p, roots).map_err(|error| {
+            CompileError::RuleSpec {
+                path: p.display().to_string(),
+                error,
+            }
+        })?;
+        Self::compile(program)
     }
 
     pub fn from_json_str(source: &str) -> Result<Self, CompileError> {
-        let artifact: Self =
-            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
-                path: "<memory>".to_string(),
-                error,
-            })?;
-        artifact.check_format_version("<memory>")
+        Self::from_json_source(source, "<memory>")
     }
 
     #[cfg(feature = "fs")]
@@ -214,12 +229,7 @@ impl CompiledProgramArtifact {
             path: path.display().to_string(),
             error,
         })?;
-        let artifact: Self =
-            serde_json::from_str(&source).map_err(|error| CompileError::DeserializeArtifact {
-                path: path.display().to_string(),
-                error,
-            })?;
-        artifact.check_format_version(&path.display().to_string())
+        Self::from_json_source(&source, &path.display().to_string())
     }
 
     #[cfg(feature = "fs")]
@@ -230,6 +240,33 @@ impl CompiledProgramArtifact {
             path: path.display().to_string(),
             error,
         })
+    }
+
+    fn from_json_source(source: &str, path: &str) -> Result<Self, CompileError> {
+        let value: serde_json::Value =
+            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+                path: path.to_string(),
+                error,
+            })?;
+        if let Some(found) = value
+            .get("artifact_format_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            && found != ARTIFACT_FORMAT_VERSION
+        {
+            return Err(CompileError::UnsupportedArtifactFormatVersion {
+                path: path.to_string(),
+                found,
+                supported: ARTIFACT_FORMAT_VERSION,
+            });
+        }
+        validate_raw_artifact_contract(&value, path)?;
+        let artifact: Self =
+            serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
+                path: path.to_string(),
+                error,
+            })?;
+        artifact.check_format_version(path)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -260,6 +297,143 @@ impl CompiledProgramArtifact {
             fill(&derived.corpus_citation_path, &mut derived.source_url);
         }
         resolved
+    }
+}
+
+fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, CompileError> {
+    Ok(CompiledProgramMetadata {
+        evaluation_order: evaluation_order(program)?,
+        fast_path: fast_path_metadata(program),
+        input_catalog: compiled_input_catalog(program)?,
+    })
+}
+
+fn compiled_input_catalog(
+    program: &ProgramSpec,
+) -> Result<Vec<CompiledInputCatalogEntry>, crate::spec::SpecError> {
+    // This deterministic catalog describes accepted runtime input names and
+    // slots. It is not a source manifest and contains no source paths or hashes.
+    Ok(program
+        .to_program()?
+        .input_catalog()
+        .into_iter()
+        .map(|(slot, request_names)| {
+            let canonical_request_name = request_names
+                .iter()
+                .find(|request_name| request_name.as_str() == slot)
+                .or_else(|| request_names.first())
+                .expect("every discovered input slot has an owning request name")
+                .clone();
+            CompiledInputCatalogEntry {
+                slot,
+                canonical_request_name,
+                request_names,
+            }
+        })
+        .collect())
+}
+
+fn validate_raw_artifact_contract(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<(), CompileError> {
+    if let Some(program) = value.get("program").and_then(serde_json::Value::as_object) {
+        if program.contains_key("extends") {
+            return Err(invalid_artifact_contract(
+                path,
+                "program.extends was removed; compose before compilation",
+            ));
+        }
+        if program
+            .get("module")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|module| module.contains_key("id"))
+        {
+            return Err(invalid_artifact_contract(
+                path,
+                "program.module.id was removed; canonical source target is the sole identity",
+            ));
+        }
+    }
+    validate_raw_provenance_value(value, path)
+}
+
+fn validate_raw_provenance_value(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<(), CompileError> {
+    match value {
+        serde_json::Value::Object(mapping) => {
+            if mapping.contains_key("corpus_citation_paths") {
+                return Err(invalid_artifact_contract(
+                    path,
+                    "plural corpus_citation_paths was removed",
+                ));
+            }
+            if let Some(citation_path) = mapping.get("corpus_citation_path") {
+                let Some(citation_path) = citation_path.as_str() else {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        "corpus_citation_path must be a string",
+                    ));
+                };
+                if !crate::rulespec::is_canonical_corpus_citation_path(citation_path) {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        format!("non-canonical corpus_citation_path `{citation_path}`"),
+                    ));
+                }
+            }
+            if let Some(digest) = mapping.get("source_sha256") {
+                let Some(digest) = digest.as_str() else {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        "source_sha256 must be a string",
+                    ));
+                };
+                if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        format!("invalid source_sha256 `{digest}`"),
+                    ));
+                }
+            }
+            if let Some(verification) = mapping.get("source_verification") {
+                let Some(verification) = verification.as_object() else {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        "source_verification must be an exact mapping",
+                    ));
+                };
+                if !verification.contains_key("corpus_citation_path")
+                    || verification.keys().any(|key| {
+                        !matches!(key.as_str(), "corpus_citation_path" | "source_sha256")
+                    })
+                {
+                    return Err(invalid_artifact_contract(
+                        path,
+                        "source_verification requires one singular corpus_citation_path and optional source_sha256 only",
+                    ));
+                }
+            }
+            for nested in mapping.values() {
+                validate_raw_provenance_value(nested, path)?;
+            }
+        }
+        serde_json::Value::Array(sequence) => {
+            for nested in sequence {
+                validate_raw_provenance_value(nested, path)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn invalid_artifact_contract(path: &str, message: impl Into<String>) -> CompileError {
+    CompileError::InvalidArtifactContract {
+        path: path.to_string(),
+        message: message.into(),
     }
 }
 
@@ -309,13 +483,12 @@ impl CorpusProvisionIndex {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: ProvisionRecord = serde_json::from_str(line).map_err(|error| {
-                CompileError::ParseProvisionRecord {
+            let record: ProvisionRecord =
+                serde_json::from_str(line).map_err(|error| CompileError::ParseProvisionRecord {
                     path: path.to_string(),
                     line: index + 1,
                     error,
-                }
-            })?;
+                })?;
             let (Some(citation_path), Some(source_url)) = (record.citation_path, record.source_url)
             else {
                 continue;
@@ -368,7 +541,10 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::
         let path = entry?.path();
         if path.is_dir() {
             collect_jsonl_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "jsonl") {
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
             files.push(path);
         }
     }
@@ -898,9 +1074,21 @@ fn collect_relation_members_from_judgment(
 pub fn compile_program_file_to_json(
     program_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
+    roots: &crate::rulespec::CanonicalRuleSpecRoots,
 ) -> Result<CompiledProgramArtifact, CompileError> {
     let p = program_path.as_ref();
-    let artifact = CompiledProgramArtifact::from_rulespec_file(p)?;
+    let artifact = CompiledProgramArtifact::from_rulespec_file(p, roots)?;
+    artifact.write_json_file(output_path)?;
+    Ok(artifact)
+}
+
+#[cfg(feature = "fs")]
+pub fn compile_composed_program_file_to_json(
+    program_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    roots: &crate::rulespec::CanonicalRuleSpecRoots,
+) -> Result<CompiledProgramArtifact, CompileError> {
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(program_path, roots)?;
     artifact.write_json_file(output_path)?;
     Ok(artifact)
 }

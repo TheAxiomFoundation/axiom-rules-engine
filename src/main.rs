@@ -8,7 +8,7 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
-use axiom_rules_engine::rulespec::AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV;
+use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
 fn main() {
     if let Err(error) = run() {
@@ -21,7 +21,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     if let Some(command) = args.next() {
         match command.as_str() {
-            "compile" => return run_compile(args.collect()),
+            "compile" => return run_compile(args.collect(), false),
+            "compile-composed" => return run_compile(args.collect(), true),
             "run-compiled" => return run_compiled(args.collect()),
             #[cfg(feature = "schema")]
             "emit-schemas" => return run_emit_schemas(args.collect()),
@@ -38,13 +39,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 const COMPILE_USAGE: &str = "\
-usage: axiom-rules-engine compile --program <rules.yaml> --output <compiled.json> [--exclusive-rulespec-roots] [--corpus-provisions <path>]...
+usage: axiom-rules-engine compile --program <absolute rules.yaml> --rulespec-root <absolute rulespec-cc> [--rulespec-root <absolute rulespec-cc>]... --output <compiled.json> [--corpus-provisions <path>]...
+       axiom-rules-engine compile-composed --program <absolute composition.yaml> --rulespec-root <absolute rulespec-cc> [--rulespec-root <absolute rulespec-cc>]... --output <compiled.json> [--corpus-provisions <path>]...
 
-  --program <path>            RuleSpec module or program YAML to compile.
+  --program <path>            `compile`: atomic module inside a configured root.
+                              `compile-composed`: originless, external
+                              `module.kind: composition` output from
+                              axiom-compose with canonical imports only.
+  --rulespec-root <path>      Required, repeatable exact canonical country
+                              checkout named rulespec-<country>. This is the
+                              sole filesystem import authority.
   --output <path>             Where to write the compiled artifact JSON.
-  --exclusive-rulespec-roots  Resolve canonical imports only through non-empty
-                              AXIOM_RULESPEC_REPO_ROOTS entries. Never fall back
-                              to importer ancestors, cwd, or sibling checkouts.
   --corpus-provisions <path>  Optional, repeatable. A corpus provisions JSONL
                               file, or a directory scanned recursively for
                               *.jsonl files in sorted path order. Each record's
@@ -57,11 +62,11 @@ usage: axiom-rules-engine compile --program <rules.yaml> --output <compiled.json
                               same inputs always produce a byte-identical
                               artifact.";
 
-fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut program_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut rulespec_roots: Vec<PathBuf> = Vec::new();
     let mut provisions_paths: Vec<PathBuf> = Vec::new();
-    let mut exclusive_rulespec_roots = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -72,15 +77,19 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             "--output" => {
                 output_path = iter.next().map(PathBuf::from);
             }
+            "--rulespec-root" => {
+                rulespec_roots.push(
+                    iter.next()
+                        .map(PathBuf::from)
+                        .ok_or("`--rulespec-root` requires a path argument")?,
+                );
+            }
             "--corpus-provisions" => {
                 provisions_paths.push(
                     iter.next()
                         .map(PathBuf::from)
                         .ok_or("`--corpus-provisions` requires a path argument")?,
                 );
-            }
-            "--exclusive-rulespec-roots" => {
-                exclusive_rulespec_roots = true;
             }
             "--help" | "-h" => {
                 println!("{COMPILE_USAGE}");
@@ -97,13 +106,12 @@ fn run_compile(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let output_path =
         output_path.ok_or("missing required `--output /path/to/compiled.json` argument")?;
 
-    if exclusive_rulespec_roots {
-        // SAFETY: the single-threaded CLI has not spawned any worker threads;
-        // compilation reads this process-local setting synchronously below.
-        unsafe { env::set_var(AXIOM_RULESPEC_REPO_ROOTS_EXCLUSIVE_ENV, "1") };
-    }
-
-    let mut artifact = CompiledProgramArtifact::from_rulespec_file(&program_path)?;
+    let rulespec_roots = CanonicalRuleSpecRoots::new(&rulespec_roots)?;
+    let mut artifact = if composed {
+        CompiledProgramArtifact::from_composed_rulespec_file(&program_path, &rulespec_roots)?
+    } else {
+        CompiledProgramArtifact::from_rulespec_file(&program_path, &rulespec_roots)?
+    };
     if !provisions_paths.is_empty() {
         let provisions = CorpusProvisionIndex::from_paths(&provisions_paths)?;
         let resolved = artifact.resolve_source_urls(&provisions);

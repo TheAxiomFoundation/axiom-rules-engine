@@ -4,20 +4,67 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompileError, CompiledProgramArtifact, compile_program_file_to_json,
 };
-use axiom_rules_engine::rulespec::{RuleSpecError, ValidationStatus, lower_rulespec_str};
+use axiom_rules_engine::rulespec::{
+    CanonicalRuleSpecRoots, RuleSpecError, ValidationStatus, lower_rulespec_str,
+};
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
     ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
 };
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn exact_temp_dir() -> PathBuf {
+    std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+}
+
+fn unique_test_root() -> PathBuf {
+    exact_temp_dir().join(format!(
+        "axiom-rules-engine-test-{}-{}",
+        std::process::id(),
+        TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn canonical_roots_for(path: &Path) -> CanonicalRuleSpecRoots {
+    let root = path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.len() == "rulespec-xx".len() && name.starts_with("rulespec-")
+                })
+        })
+        .expect("test module is below an exact rulespec-<country> root");
+    CanonicalRuleSpecRoots::new([root]).expect("test RuleSpec root is canonical")
+}
+
+fn compile_rulespec_file(path: &Path) -> Result<CompiledProgramArtifact, CompileError> {
+    let roots = canonical_roots_for(path);
+    CompiledProgramArtifact::from_rulespec_file(path, &roots)
+}
+
+fn compile_rulespec_file_to_json(
+    path: &Path,
+    output: &Path,
+) -> Result<CompiledProgramArtifact, CompileError> {
+    let roots = canonical_roots_for(path);
+    compile_program_file_to_json(path, output, &roots)
+}
 
 #[test]
 fn rulespec_lowers_snap_like_formulas() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: us-tx:policies/hhsc/snap/overlay-subset
   title: Texas SNAP overlay subset
 rules:
   - name: member_of_household
@@ -125,8 +172,7 @@ rules:
         program
             .relations
             .iter()
-            .any(|r| r.name
-                == "us-tx:policies/hhsc/snap/overlay-subset#relation.member_of_household")
+            .any(|r| r.name == "member_of_household")
     );
     assert!(
         artifact
@@ -144,7 +190,6 @@ fn rulespec_lowers_ghana_cedi_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: gh:statutes/act-1111/income-tax/first-schedule
   title: Ghana income tax first schedule (GHS unit check)
 rules:
   - name: first_band_upper_chargeable_income
@@ -175,7 +220,6 @@ fn rulespec_lowers_ugandan_shilling_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: ug:statutes/cap-340/income-tax/third-schedule
   title: Uganda income tax third schedule (UGX unit check)
 rules:
   - name: paye_annual_threshold
@@ -205,7 +249,6 @@ fn rulespec_lowers_ethiopian_birr_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: et:proclamations/proc-2025-1395/income-tax-amendment
   title: Ethiopia income tax amendment schedule (ETB unit check)
 rules:
   - name: employment_income_exempt_bound
@@ -235,7 +278,6 @@ fn rulespec_lowers_tanzanian_shilling_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: tz:statutes/cap-332/income-tax-act
   title: Tanzania income tax schedule (TZS unit check)
 rules:
   - name: resident_individual_exempt_bound
@@ -265,7 +307,6 @@ fn rulespec_lowers_danish_krone_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: dk:statutes/lbk-603-2025/boerne-og-ungeydelsesloven
   title: Danish child and youth benefit base amounts (DKK unit check)
 rules:
   - name: child_benefit_annual_base_age_under_3
@@ -303,7 +344,6 @@ fn rulespec_lowers_rwandan_franc_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: rw:laws/law-2022-027/taxes-on-income
   title: Rwanda income tax schedule (RWF unit check)
 rules:
   - name: employment_income_exempt_bound
@@ -333,7 +373,6 @@ fn rulespec_lowers_zambian_kwacha_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: zm:statutes/cap-323/income-tax/charging-schedule
   title: Zambia income tax charging schedule (ZMW unit check)
 rules:
   - name: paye_exempt_threshold
@@ -363,7 +402,6 @@ fn rulespec_lowers_nigerian_naira_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: ng:statutes/nigeria-tax-act-2025/fourth-schedule
   title: Nigeria Tax Act 2025 rate schedule (NGN unit check)
 rules:
   - name: first_band_upper_chargeable_income
@@ -394,7 +432,6 @@ fn rulespec_lowers_ghana_pesewa_money_parameter() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: gh:statutes/act-1141/energy-sector-levies-amendment-2025/schedule
   title: Energy Sector Levies 2025 schedule (GHp unit check)
 rules:
   - name: petrol_shortfall_debt_repayment_levy_rate_per_litre
@@ -533,12 +570,8 @@ rules:
 
 #[test]
 fn repo_backed_rulespec_outputs_reject_bare_friendly_names() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -559,8 +592,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let program = artifact.program.to_program().expect("program lowers");
 
     assert_eq!(
@@ -577,12 +609,8 @@ rules:
 
 #[test]
 fn repo_backed_rulespec_execution_rejects_bare_friendly_input_names() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -603,8 +631,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -647,12 +674,8 @@ rules:
 
 #[test]
 fn repo_backed_rulespec_execution_resolves_absolute_input_names() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/7/2017/a.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -673,8 +696,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -726,12 +748,8 @@ rules:
 
 #[test]
 fn repo_backed_rulespec_execution_resolves_indexed_parameter_input_names() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/policies/irs/brackets.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/policies/irs/brackets.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -759,8 +777,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::TaxYear,
         start: "2026-01-01".parse().expect("valid date"),
@@ -809,13 +826,9 @@ rules:
 }
 
 #[test]
-fn repo_backed_rulespec_execution_resolves_absolute_upstream_output_inputs() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/7/2014/e/6/A.yaml");
+fn repo_backed_rulespec_execution_requires_the_owning_input_slot_reference() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2014/e/6/A.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -836,8 +849,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -864,8 +876,7 @@ rules:
                     },
                 },
                 InputRecordSpec {
-                    name: "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction"
-                        .to_string(),
+                    name: "us:statutes/7/2014/e/6/A#input.snap_standard_deduction".to_string(),
                     entity: "Household".to_string(),
                     entity_id: "household-1".to_string(),
                     interval: IntervalSpec {
@@ -886,7 +897,7 @@ rules:
             outputs: vec![output_id.clone()],
         }],
     })
-    .expect("absolute upstream output input reference executes");
+    .expect("exact owning input-slot reference executes");
 
     let OutputValue::Scalar { value, .. } = response.results[0]
         .outputs
@@ -905,12 +916,8 @@ rules:
 
 #[test]
 fn repo_backed_rulespec_execution_resolves_absolute_relation_names() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/7/2012/j.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2012/j.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -934,8 +941,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -993,12 +999,8 @@ rules:
 
 #[test]
 fn count_where_can_use_related_derived_judgment_predicates() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/regulations/7-cfr/273/5.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/regulations/7-cfr/273/5.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -1030,8 +1032,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -1088,14 +1089,10 @@ rules:
 
 #[test]
 fn composition_count_where_uses_imported_relation_for_imported_predicate() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let relation_file = root.join("rulespec-us/statutes/7/2012/j.yaml");
-    let member_rules_file = root.join("rulespec-us/regulations/7-cfr/273/5.yaml");
-    let program_file = root.join("rulespec-us-co/policies/snap.yaml");
+    let root = unique_test_root();
+    let relation_file = root.join("rulespec-us/us/statutes/7/2012/j.yaml");
+    let member_rules_file = root.join("rulespec-us/us/regulations/7-cfr/273/5.yaml");
+    let program_file = root.join("rulespec-us/us-co/policies/snap.yaml");
     fs::create_dir_all(relation_file.parent().expect("relation file has parent"))
         .expect("create relation rules dir");
     fs::create_dir_all(
@@ -1154,8 +1151,7 @@ rules:
     )
     .expect("write composition RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: "2026-01-01".parse().expect("valid date"),
@@ -1212,12 +1208,8 @@ rules:
 
 #[test]
 fn sum_where_can_sum_related_derived_scalar_values() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/26/25A.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/26/25A.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create temp rules repo");
     fs::write(
@@ -1271,8 +1263,7 @@ rules:
     )
     .expect("write temp RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::TaxYear,
         start: "2026-01-01".parse().expect("valid date"),
@@ -1354,18 +1345,16 @@ rules:
 
 #[test]
 fn rulespec_namespaces_same_named_relations_by_origin_target() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let first_file = root.join("rulespec-us/statutes/26/24/h.yaml");
-    let second_file = root.join("rulespec-us/statutes/26/63/c.yaml");
-    let program_file = root.join("program.yaml");
+    let root = unique_test_root();
+    let first_file = root.join("rulespec-us/us/statutes/26/24/h.yaml");
+    let second_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
+    let program_file = root.join("rulespec-us/us/policies/test/relation-namespaces.yaml");
     fs::create_dir_all(first_file.parent().expect("rules file has parent"))
         .expect("create first rules dir");
     fs::create_dir_all(second_file.parent().expect("rules file has parent"))
         .expect("create second rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
     fs::write(
         &first_file,
         r#"
@@ -1418,8 +1407,7 @@ rules: []
     )
     .expect("write program RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
     let period = PeriodSpec {
         kind: PeriodKindSpec::TaxYear,
         start: "2026-01-01".parse().expect("valid date"),
@@ -1492,12 +1480,8 @@ rules: []
 
 #[test]
 fn rulespec_rejects_namespaced_relation_arity_mismatch() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let rules_file = root.join("rulespec-us/statutes/26/63/c.yaml");
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
     fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
         .expect("create rules dir");
     fs::write(
@@ -1521,8 +1505,8 @@ rules:
     )
     .expect("write RuleSpec");
 
-    let error = CompiledProgramArtifact::from_rulespec_file(&rules_file)
-        .expect_err("relation arity mismatch should be rejected");
+    let error =
+        compile_rulespec_file(&rules_file).expect_err("relation arity mismatch should be rejected");
     assert!(
         error
             .to_string()
@@ -1539,15 +1523,13 @@ rules:
 
 #[test]
 fn rulespec_keeps_unscoped_inferred_relation_when_import_uses_same_short_name() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("axiom-rules-engine-test-{nonce}"));
-    let imported_file = root.join("rulespec-us/statutes/26/63/c.yaml");
-    let program_file = root.join("program.yaml");
+    let root = unique_test_root();
+    let imported_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
+    let program_file = root.join("rulespec-us/us/policies/test/unscoped-relation.yaml");
     fs::create_dir_all(imported_file.parent().expect("rules file has parent"))
         .expect("create rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
     fs::write(
         &imported_file,
         r#"
@@ -1579,8 +1561,7 @@ rules:
     )
     .expect("write program RuleSpec");
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
     assert!(
         artifact
             .program
@@ -1987,7 +1968,6 @@ fn rulespec_lowers_date_and_relation_judgment_formulas() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: uk:statutes/ukpga/1988/50/section/21
 rules:
   - name: minimum_notice_days
     kind: parameter
@@ -2300,13 +2280,14 @@ rules:
 
 #[test]
 fn compile_program_file_to_json_accepts_rulespec_yaml() {
-    let temp_root = std::env::temp_dir().join(format!(
+    let temp_root = exact_temp_dir().join(format!(
         "axiom-rules-engine-rulespec-yaml-test-{}",
         std::process::id()
     ));
-    let program_path = temp_root.join("rules.yaml");
+    let program_path = temp_root.join("rulespec-us/us/policies/test/rules.yaml");
     let artifact_path = temp_root.join("rules.compiled.json");
-    std::fs::create_dir_all(&temp_root).expect("temp dir is created");
+    std::fs::create_dir_all(program_path.parent().expect("program parent"))
+        .expect("temp dir is created");
     std::fs::write(
         &program_path,
         r#"
@@ -2323,7 +2304,7 @@ rules:
     )
     .expect("RuleSpec fixture is written");
 
-    let artifact = compile_program_file_to_json(&program_path, &artifact_path)
+    let artifact = compile_rulespec_file_to_json(&program_path, &artifact_path)
         .expect("RuleSpec file compiles");
 
     assert!(
@@ -2336,16 +2317,16 @@ rules:
 
 #[test]
 fn compile_program_file_to_json_merges_rulespec_imports() {
-    let temp_root = std::env::temp_dir().join(format!(
+    let temp_root = exact_temp_dir().join(format!(
         "axiom-rules-engine-rulespec-import-test-{}",
         std::process::id()
     ));
     let us_path = temp_root
         .join("rulespec-us")
-        .join("policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
+        .join("us/policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
     let co_path = temp_root
-        .join("rulespec-us-co")
-        .join("policies/cdhs/snap/fy-2026-benefit.yaml");
+        .join("rulespec-us")
+        .join("us-co/policies/cdhs/snap/fy-2026-benefit.yaml");
     let artifact_path = temp_root.join("benefit.compiled.json");
 
     std::fs::create_dir_all(us_path.parent().expect("us parent")).expect("us dir");
@@ -2403,7 +2384,7 @@ rules:
     )
     .expect("program fixture is written");
 
-    let artifact = compile_program_file_to_json(&co_path, &artifact_path)
+    let artifact = compile_rulespec_file_to_json(&co_path, &artifact_path)
         .expect("RuleSpec file with canonical import compiles");
     assert!(
         artifact
@@ -2509,12 +2490,9 @@ fn rulespec_module_provenance_round_trips_into_artifact() {
     let rulespec = r#"
 format: rulespec/v1
 module:
-  id: us:statutes/7/2017/a
   title: SNAP allotment
   source_verification:
     corpus_citation_path: us/statute/7/2017/a
-    corpus_citation_paths:
-      - us/statute/7/2017/a
     source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
   encoding_provenance:
     encoder: axiom-encode/0.2.645
@@ -2549,25 +2527,15 @@ rules:
         .module
         .as_ref()
         .expect("module metadata survives lowering and the artifact round trip");
-    assert_eq!(module.id.as_deref(), Some("us:statutes/7/2017/a"));
-
     let verification = module
         .source_verification
         .as_ref()
         .expect("source verification block survives");
-    assert_eq!(
-        verification.corpus_citation_path.as_deref(),
-        Some("us/statute/7/2017/a")
-    );
+    assert_eq!(verification.corpus_citation_path, "us/statute/7/2017/a");
     assert_eq!(
         verification.source_sha256.as_deref(),
         Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
     );
-    assert!(
-        verification.extra.contains_key("corpus_citation_paths"),
-        "unmodeled source_verification subfields are preserved verbatim"
-    );
-
     let provenance = module
         .encoding_provenance
         .as_ref()
@@ -2625,7 +2593,6 @@ fn rulespec_rejects_malformed_source_sha256() {
             r#"
 format: rulespec/v1
 module:
-  id: us:statutes/7/2017/a
   source_verification:
     corpus_citation_path: us/statute/7/2017/a
     source_sha256: "{bad_sha}"
@@ -2644,25 +2611,105 @@ rules:
         assert!(matches!(
             &err,
             RuleSpecError::InvalidSourceSha256 { path, value }
-                if path == "us:statutes/7/2017/a" && value == bad_sha
+                if path == "<memory>" && value == bad_sha
         ));
     }
 }
 
 #[test]
+fn rulespec_rejects_plural_missing_and_noncanonical_corpus_paths_recursively() {
+    for (label, source) in [
+        (
+            "plural module path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_paths: [us/statute/7/2017/a]\nrules: []\n",
+        ),
+        (
+            "missing singular path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrules: []\n",
+        ),
+        (
+            "noncanonical path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: ' us/statute/7/2017/a'\nrules: []\n",
+        ),
+        (
+            "document class rather than provision",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute\nrules: []\n",
+        ),
+        (
+            "empty provision segment",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/26//62\nrules: []\n",
+        ),
+        (
+            "traversal provision segment",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/26/../62\nrules: []\n",
+        ),
+        (
+            "backslash provision alias",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: 'us/statute/26\\62'\nrules: []\n",
+        ),
+        (
+            "nested plural proof path",
+            "format: rulespec/v1\nrules:\n  - name: p\n    kind: parameter\n    metadata:\n      proof:\n        source:\n          corpus_citation_paths: [us/statute/7/2017/a]\n    formula: '1'\n    effective_from: 2020-01-01\n",
+        ),
+        (
+            "nested malformed source digest",
+            "format: rulespec/v1\nrules:\n  - name: p\n    kind: parameter\n    metadata:\n      proof:\n        source:\n          corpus_citation_path: us/statute/7/2017/a\n          source_sha256: not-a-digest\n    formula: '1'\n    effective_from: 2020-01-01\n",
+        ),
+        (
+            "trailing provision whitespace",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: 'us/statute/26/62 /a'\nrules: []\n",
+        ),
+    ] {
+        assert!(
+            lower_rulespec_str(source).is_err(),
+            "{label} must fail the canonical singular citation contract"
+        );
+    }
+}
+
+#[test]
+fn rulespec_rejects_removed_schema_discriminator_with_or_without_format() {
+    for source in [
+        "schema: axiom.rules.module.v1\nrules: []\n",
+        "format: rulespec/v1\nschema: axiom.rules.module.v1\nrules: []\n",
+    ] {
+        assert!(
+            lower_rulespec_str(source).is_err(),
+            "legacy schema discriminator must fail"
+        );
+    }
+}
+
+#[test]
+fn rulespec_accepts_canonical_multi_segment_corpus_jurisdictions() {
+    for citation in [
+        "uk-kingston-upon-thames/regulation/ctr/2026",
+        "nz/agency/msd/benefit-rates",
+        "nz/secondary-legislation/2026/He-W 704.04",
+    ] {
+        lower_rulespec_str(&format!(
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: {citation}\nrules: []\n"
+        ))
+        .unwrap_or_else(|error| panic!("canonical corpus identity {citation} failed: {error}"));
+    }
+}
+
+#[test]
 fn rulespec_malformed_source_sha256_error_names_the_file() {
-    let temp_root = std::env::temp_dir().join(format!(
+    let temp_root = exact_temp_dir().join(format!(
         "axiom-rules-engine-source-sha-test-{}",
         std::process::id()
     ));
-    let program_path = temp_root.join("rules.yaml");
-    std::fs::create_dir_all(&temp_root).expect("temp dir is created");
+    let program_path = temp_root.join("rulespec-us/us/policies/test/rules.yaml");
+    std::fs::create_dir_all(program_path.parent().expect("program parent"))
+        .expect("temp dir is created");
     std::fs::write(
         &program_path,
         r#"
 format: rulespec/v1
 module:
   source_verification:
+    corpus_citation_path: us/statute/7/2017/a
     source_sha256: not-a-digest
 rules:
   - name: flat_amount
@@ -2676,8 +2723,7 @@ rules:
     )
     .expect("RuleSpec fixture is written");
 
-    let err = CompiledProgramArtifact::from_rulespec_file(&program_path)
-        .expect_err("malformed sha should fail");
+    let err = compile_rulespec_file(&program_path).expect_err("malformed sha should fail");
     let message = err.to_string();
     assert!(
         message.contains("rules.yaml"),

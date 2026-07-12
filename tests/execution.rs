@@ -1196,13 +1196,18 @@ fn compiled_program_artifact_round_trips_and_executes() {
 
 #[test]
 fn cli_compile_and_run_compiled_round_trip() {
-    let temp_root = std::env::temp_dir().join(format!(
-        "axiom-rules-engine-compile-test-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&temp_root).expect("temp dir created");
-    let program_path = temp_root.join("rules.yaml");
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+        .join(format!(
+            "axiom-rules-engine-compile-test-{}",
+            std::process::id()
+        ));
+    let rulespec_root = temp_root.join("rulespec-us");
+    let program_path = rulespec_root.join("us/policies/tests/simple.yaml");
     let artifact_path = temp_root.join("rules.compiled.json");
+    std::fs::create_dir_all(program_path.parent().expect("program parent"))
+        .expect("temp dir created");
     std::fs::write(&program_path, SIMPLE_RULESPEC).expect("RuleSpec module written");
 
     let compile_output = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -1210,6 +1215,8 @@ fn cli_compile_and_run_compiled_round_trip() {
             "compile",
             "--program",
             program_path.to_str().expect("utf8 path"),
+            "--rulespec-root",
+            rulespec_root.to_str().expect("utf8 root"),
             "--output",
             artifact_path.to_str().expect("utf8 path"),
         ])
@@ -1227,10 +1234,18 @@ fn cli_compile_and_run_compiled_round_trip() {
     );
 
     let period = simple_period();
+    let mut dataset = simple_dataset(&period);
+    for input in &mut dataset.inputs {
+        input.name = "us:policies/tests/simple#input.amount".to_string();
+    }
+    let mut queries = simple_queries(&period);
+    for query in &mut queries {
+        query.outputs = vec!["us:policies/tests/simple#adjusted_amount".to_string()];
+    }
     let request = CompiledExecutionRequest {
         mode: ExecutionMode::Fast,
-        dataset: simple_dataset(&period),
-        queries: simple_queries(&period),
+        dataset,
+        queries,
     };
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -1270,15 +1285,13 @@ fn cli_compile_and_run_compiled_round_trip() {
         decimal_output(
             response.results[0]
                 .outputs
-                .get("adjusted_amount")
+                .get("us:policies/tests/simple#adjusted_amount")
                 .expect("adjusted amount output")
         ),
         decimal("25")
     );
 
-    std::fs::remove_file(program_path).ok();
-    std::fs::remove_file(artifact_path).ok();
-    std::fs::remove_dir(temp_root).ok();
+    std::fs::remove_dir_all(temp_root).ok();
 }
 
 // `assessment_date` is a reserved bitemporal field (see docs/bitemporal.md):

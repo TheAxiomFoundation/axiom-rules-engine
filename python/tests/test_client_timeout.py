@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from axiom_rules_engine.client import DEFAULT_TIMEOUT_SECONDS, AxiomRulesEngine
 from axiom_rules_engine.models import (
@@ -47,6 +48,17 @@ def test_compile_times_out_instead_of_hanging(tmp_path: Path) -> None:
     with pytest.raises(subprocess.TimeoutExpired):
         engine.compile(
             program_path=tmp_path / "rules.yaml",
+            rulespec_roots=(tmp_path / "rulespec-us",),
+            output_path=tmp_path / "out.json",
+        )
+
+
+def test_compile_composed_times_out_instead_of_hanging(tmp_path: Path) -> None:
+    engine = AxiomRulesEngine(binary_path=_hanging_binary(tmp_path), timeout=0.5)
+    with pytest.raises(subprocess.TimeoutExpired):
+        engine.compile_composed(
+            program_path=tmp_path / "composition.yaml",
+            rulespec_roots=(tmp_path / "rulespec-us",),
             output_path=tmp_path / "out.json",
         )
 
@@ -56,14 +68,16 @@ def test_timeout_defaults_on_and_is_configurable() -> None:
     assert AxiomRulesEngine(timeout=None).timeout is None
 
 
-def test_compiled_program_parses_legacy_artifact_without_version_fields() -> None:
+def test_compiled_program_rejects_missing_and_wrong_artifact_versions() -> None:
     legacy = {
         "program": {"units": [], "relations": [], "parameters": [], "derived": []},
         "metadata": {
             "evaluation_order": [],
             "fast_path": {"strategy": "generic_bulk", "compatible": True},
+            "input_catalog": [],
         },
     }
-    parsed = CompiledProgram.model_validate(legacy)
-    assert parsed.artifact_format_version == 0
-    assert parsed.engine_version is None
+    with pytest.raises(ValidationError):
+        CompiledProgram.model_validate(legacy)
+    with pytest.raises(ValidationError):
+        CompiledProgram.model_validate({**legacy, "artifact_format_version": 0})
