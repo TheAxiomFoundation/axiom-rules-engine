@@ -76,7 +76,8 @@ jobs:
           curl --retry 5 --proto '=https' --tlsv1.2 -LsSf -o "/tmp/$archive" "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/$archive"
           echo "cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8  /tmp/$archive" | sha256sum -c -
           tar -xJf "/tmp/$archive" -C /tmp
-          install -m 0755 /tmp/cargo-dist-x86_64-unknown-linux-gnu/cargo-dist "$HOME/.cargo/bin/dist"
+          mkdir -p "$HOME/.cargo/bin"
+          install -m 0755 /tmp/cargo-dist-x86_64-unknown-linux-gnu/dist "$HOME/.cargo/bin/dist"
       - name: Cache dist
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

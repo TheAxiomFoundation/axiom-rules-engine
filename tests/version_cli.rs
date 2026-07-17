@@ -21,12 +21,18 @@ fn version_flag_prints_package_version() {
 
 #[test]
 fn version_rejects_extra_arguments() {
-    let out = engine().args(["version", "surprise"]).output().expect("run engine");
+    let out = engine()
+        .args(["version", "surprise"])
+        .output()
+        .expect("run engine");
     assert!(!out.status.success(), "stray arg must be an error");
 }
 
 #[test]
 fn unknown_command_is_an_error() {
-    let out = engine().arg("definitely-not-a-command").output().expect("run engine");
+    let out = engine()
+        .arg("definitely-not-a-command")
+        .output()
+        .expect("run engine");
     assert!(!out.status.success());
 }
