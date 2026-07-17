@@ -22,6 +22,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.next() {
         match command.as_str() {
             "--version" | "version" => {
+                if args.next().is_some() {
+                    return Err("`version` takes no arguments".into());
+                }
                 println!("{}", version_line());
                 return Ok(());
             }
