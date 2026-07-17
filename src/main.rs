@@ -21,6 +21,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     if let Some(command) = args.next() {
         match command.as_str() {
+            "--version" | "version" => {
+                println!("{}", version_line());
+                return Ok(());
+            }
             "compile" => return run_compile(args.collect(), false),
             "compile-composed" => return run_compile(args.collect(), true),
             "run-compiled" => return run_compiled(args.collect()),
@@ -36,6 +40,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let response = execute_request(request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn version_line() -> String {
+    format!("axiom-rules-engine {}", env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_line;
+
+    #[test]
+    fn version_line_uses_package_version() {
+        assert_eq!(version_line(), "axiom-rules-engine 0.1.0");
+    }
 }
 
 const COMPILE_USAGE: &str = "\
