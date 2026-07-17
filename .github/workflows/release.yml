@@ -4,6 +4,8 @@
 # - attest global artifacts and grant attestation permissions only to build jobs
 # - default GITHUB_TOKEN to read-only; only the host job receives contents: write
 # - pin actions and the checksum-verified cargo-dist 0.31.0 binary immutably
+# - cargo fetch --locked before each offline dist build (populate the cache so
+#   the offline build cannot resolve newer deps, and does not fail on a clean runner)
 # - validate Cargo.lock with --locked/--offline and force dist builds offline
 # Finding 3 (tag ruleset) is a repository-settings change and is intentionally not handled here.
 #
@@ -166,6 +168,9 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           # Actually do builds and make zips and whatnot
+          # Populate the registry cache with exactly the locked dependency set,
+          # so the subsequent offline build cannot silently resolve newer deps.
+          cargo fetch --locked
           cargo metadata --locked --offline --format-version=1 > /dev/null
           chmod a-w Cargo.lock
           TAG_FLAG=()
@@ -233,6 +238,7 @@ jobs:
         env:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
+          cargo fetch --locked
           cargo metadata --locked --offline --format-version=1 > /dev/null
           chmod a-w Cargo.lock
           TAG_FLAG=()
