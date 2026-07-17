@@ -16,3 +16,10 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 checksum = "sha256"
 # Whether to enable GitHub Attestations
 github-attestations = true
+# The generated release.yml is intentionally hand-hardened (tag-injection fix,
+# per-job least-privilege permissions, SHA-pinned actions, checksum-verified
+# installer, offline locked builds) — security patches cargo-dist cannot express
+# in config. allow-dirty tells dist not to fail its CI-consistency check on those
+# edits; the patches are documented at the top of release.yml for re-application
+# after any `dist init` regeneration.
+allow-dirty = ["ci"]
