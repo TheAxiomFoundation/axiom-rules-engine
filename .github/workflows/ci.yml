@@ -57,6 +57,45 @@ jobs:
       - name: cargo check (python-ext)
         run: cargo check --manifest-path python-ext/Cargo.toml --verbose
 
+  rust-macos:
+    name: Rust build + tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: cargo build
+        run: cargo build --verbose
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: explicit RuleSpec root adversarial tests
+        run: >-
+          cargo test
+          --test exclusive_root_resolution
+          --test composed_compile
+          --verbose
+
+      - name: cargo test
+        run: cargo test --verbose
+
+      - name: cargo test (schema feature)
+        run: cargo test --features schema --verbose
+
+      - name: cargo build --release
+        run: cargo build --release --verbose
+
+      - name: cargo check (python-ext)
+        run: cargo check --manifest-path python-ext/Cargo.toml --verbose
+
   python-ext-macos:
     name: PyO3 extension build (macOS)
     runs-on: macos-latest
