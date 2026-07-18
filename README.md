@@ -52,6 +52,8 @@ remain local formula symbols only.
 
 ## Commands
 
+To install and verify a published executable, see [Install a released binary](docs/install.md).
+
 Compile a RuleSpec file:
 
 ```bash

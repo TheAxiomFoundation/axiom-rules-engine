@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Prototype temporal-relational Axiom Rules Engine in Rust"
+repository = "https://github.com/TheAxiomFoundation/axiom-rules-engine"
 
 [features]
 default = ["fs"]
@@ -40,3 +41,8 @@ thiserror = "2.0.17"
 
 [dev-dependencies]
 jsonschema = "0.46"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
