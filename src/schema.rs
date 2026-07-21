@@ -129,7 +129,8 @@ fn archived_compiled_artifact_v1_schema() -> Value {
 /// - `usize` slot fields serialize as JSON numbers; schemars describes them as
 ///   non-negative integers, which is correct.
 /// - `SourceVerification` is an exact mapping with one required singular
-///   corpus citation path and an optional source digest.
+///   corpus citation path, an optional source digest, and an optional typed
+///   higher-authority source check.
 #[cfg(feature = "schema")]
 pub fn compiled_artifact_schema() -> Value {
     let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
@@ -411,7 +412,8 @@ fn module_metadata_schema() -> Value {
 }
 
 /// `module.source_verification` — [`crate::rulespec::SourceVerification`].
-/// Exact mapping: one required singular corpus path, plus an optional digest.
+/// Exact mapping: one required singular corpus path, plus an optional digest
+/// and typed higher-authority source check.
 fn source_verification_schema() -> Value {
     json!({
         "type": "object",
@@ -427,7 +429,27 @@ fn source_verification_schema() -> Value {
                 "type": "string",
                 "pattern": "^[0-9a-fA-F]{64}$",
                 "description": "SHA-256 hex digest of the exact provision text. Validated at load — must be 64 hex chars."
-            }
+            },
+            "upstream_source_check": nullable_object(upstream_source_check_schema())
+        }
+    })
+}
+
+/// `module.source_verification.upstream_source_check` —
+/// [`crate::rulespec::UpstreamSourceCheck`]. Structural fidelity is enforced
+/// here; status and authority semantics remain encoder policy.
+fn upstream_source_check_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "checked_paths", "rationale"],
+        "properties": {
+            "status": { "type": "string" },
+            "checked_paths": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "rationale": { "type": "string" }
         }
     })
 }

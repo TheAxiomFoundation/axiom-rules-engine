@@ -298,8 +298,10 @@ impl ModuleMetadata {
 /// addresses the provision in the Axiom corpus; `source_sha256` pins the
 /// SHA-256 hex digest of the exact provision text the module was encoded
 /// from, so tooling can detect mechanically when the published source has
-/// changed out from under the encoding. The mapping is exact: the singular
-/// citation path is required and unknown/plural fields are rejected.
+/// changed out from under the encoding. `upstream_source_check` records the
+/// higher-authority sources checked before using guidance or another
+/// implementation source. The mapping is exact: the singular citation path
+/// is required and unknown/plural fields are rejected.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -307,6 +309,23 @@ pub struct SourceVerification {
     pub corpus_citation_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_source_check: Option<UpstreamSourceCheck>,
+}
+
+/// Structural record of a higher-authority source audit. The encoder owns
+/// semantic policy for accepted statuses, path authority, and rationale
+/// quality; the engine preserves the exact typed record in compiled artifacts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamSourceCheck {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub status: String,
+    #[serde(deserialize_with = "deserialize_strict_string_list")]
+    pub checked_paths: Vec<String>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub rationale: String,
 }
 
 /// Who and what produced the encoding: tool (`encoder`, for example
@@ -3416,6 +3435,34 @@ where
             "expected scalar string-like value, got {other:?}"
         ))),
     }
+}
+
+fn deserialize_strict_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_yaml::Value::deserialize(deserializer)? {
+        serde_yaml::Value::String(value) => Ok(value),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string, got {other:?}"
+        ))),
+    }
+}
+
+fn deserialize_strict_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<serde_yaml::Value>::deserialize(deserializer)?;
+    values
+        .into_iter()
+        .map(|value| match value {
+            serde_yaml::Value::String(value) => Ok(value),
+            other => Err(serde::de::Error::custom(format!(
+                "expected string in list, got {other:?}"
+            ))),
+        })
+        .collect()
 }
 
 fn deserialize_parameter_value_map<'de, D>(

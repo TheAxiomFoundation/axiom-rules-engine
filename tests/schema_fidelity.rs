@@ -115,6 +115,11 @@ fn schema_accepts_what_serde_accepts() {
         "validation-null",
         "format: rulespec/v1\nmodule:\n  validation:\nrules: []\n",
     );
+    assert_agrees(
+        &v,
+        "upstream-source-check-null",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\nrules: []\n",
+    );
     // String-like coercion: a numeric unit.
     assert_agrees(
         &v,
@@ -185,7 +190,7 @@ fn bad_source_sha256_is_rejected_by_pattern() {
         "a non-64-hex source_sha256 must fail the schema pattern"
     );
     let good = format!(
-        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/7/2017/a\n    source_sha256: '{}'\nrules: []\n",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    source_sha256: '{}'\n    upstream_source_check:\n      status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: Guidance supplies the current annual parameter.\nrules: []\n",
         "a".repeat(64)
     );
     let good_value: Value = serde_yaml::from_str(&good).expect("valid yaml");
@@ -194,6 +199,7 @@ fn bad_source_sha256_is_rejected_by_pattern() {
     for invalid in [
         "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrules: []\n",
         "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_paths: [us/statute/7/2017/a]\nrules: []\n",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\n      status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: checked\n      note: unknown\nrules: []\n",
     ] {
         let value: Value = serde_yaml::from_str(invalid).expect("valid yaml");
         assert!(!v.is_valid(&value), "invalid source verification must fail");

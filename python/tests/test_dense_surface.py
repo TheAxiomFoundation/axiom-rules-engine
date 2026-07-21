@@ -24,6 +24,13 @@ module:
   summary: |-
     Dense-surface test fixture: a two-bracket flat tax with a boolean
     exemption predicate, exercising metadata, Decimal and f64 execution.
+  source_verification:
+    corpus_citation_path: us/guidance/tests/dense-flat-tax
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/tests/dense-flat-tax
+      rationale: The synthetic guidance supplies the current test parameters.
 units:
   - name: EUR
     kind: currency

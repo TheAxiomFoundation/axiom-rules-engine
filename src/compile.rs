@@ -411,12 +411,15 @@ fn validate_raw_provenance_value(
                 };
                 if !verification.contains_key("corpus_citation_path")
                     || verification.keys().any(|key| {
-                        !matches!(key.as_str(), "corpus_citation_path" | "source_sha256")
+                        !matches!(
+                            key.as_str(),
+                            "corpus_citation_path" | "source_sha256" | "upstream_source_check"
+                        )
                     })
                 {
                     return Err(invalid_artifact_contract(
                         path,
-                        "source_verification requires one singular corpus_citation_path and optional source_sha256 only",
+                        "source_verification requires one singular corpus_citation_path and permits only optional source_sha256 and upstream_source_check metadata",
                     ));
                 }
             }

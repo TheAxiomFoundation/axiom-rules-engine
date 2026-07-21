@@ -733,3 +733,21 @@ the hook's semantics when both sides are present in the merged program.
   hooks with `source_relation.type: sets` and `source_relation.value`.
 - Lowering rejects cross-kind bindings and incompatible derived hooks instead
   of silently copying formulas across unlike concepts.
+
+## 2026-07-21 — Upstream source audits survive strict engine boundaries
+
+**Decision.** `module.source_verification` permits an optional exact
+`upstream_source_check` mapping with required string `status`, string-list
+`checked_paths`, and string `rationale`. The engine validates and preserves the
+record but does not interpret its source-authority policy.
+
+**Why.** Encoder-validated modules may use official guidance for a current
+parameter after checking higher-authority law. That audit must travel with the
+singular corpus citation through compilation without weakening strict unknown-
+field rejection.
+
+**Consequences.** RuleSpec, compiled-artifact, Python, and wasm boundaries
+accept and preserve the typed optional record. Unknown or malformed nested
+fields remain errors. The additive inert metadata does not require an artifact
+version bump; axiom-encode continues to own allowed statuses, path authority,
+and rationale-quality policy.

@@ -84,6 +84,32 @@
               "description": "SHA-256 hex digest of the exact provision text. Validated at load — must be 64 hex chars.",
               "pattern": "^[0-9a-fA-F]{64}$",
               "type": "string"
+            },
+            "upstream_source_check": {
+              "additionalProperties": false,
+              "properties": {
+                "checked_paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "rationale": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "checked_paths",
+                "rationale"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
             }
           },
           "required": [
