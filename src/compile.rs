@@ -54,7 +54,7 @@ pub enum CompileError {
     )]
     AmbiguousRuleSpecYaml { path: String },
     #[error(
-        "compiled artefact `{path}` has artifact_format_version {found}, but this engine supports up to {supported}; recompile the program with this engine or upgrade the engine"
+        "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
     )]
     UnsupportedArtifactFormatVersion {
         path: String,
@@ -64,14 +64,15 @@ pub enum CompileError {
 }
 
 /// Format version stamped into every artifact this engine compiles.
-/// Artifacts with a missing field (version 0) predate stamping and are
-/// accepted; artifacts newer than this are rejected at load.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
+/// Artifact v2 is the sole accepted contract. It adds executable
+/// `effective_to` bounds to parameter and derived versions. Missing, older,
+/// and newer versions are rejected at load so no engine can silently ignore
+/// or guess at temporal semantics from another artifact generation.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramArtifact {
-    #[serde(default)]
     pub artifact_format_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
@@ -100,6 +101,7 @@ impl CompiledProgramArtifact {
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
+        program.validate_effective_ranges()?;
         let evaluation_order = evaluation_order(&program)?;
         let fast_path = fast_path_metadata(&program);
         Ok(Self {
@@ -114,13 +116,14 @@ impl CompiledProgramArtifact {
     }
 
     fn check_format_version(self, path: &str) -> Result<Self, CompileError> {
-        if self.artifact_format_version > ARTIFACT_FORMAT_VERSION {
+        if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
                 path: path.to_string(),
                 found: self.artifact_format_version,
                 supported: ARTIFACT_FORMAT_VERSION,
             });
         }
+        self.program.validate_effective_ranges()?;
         Ok(self)
     }
 

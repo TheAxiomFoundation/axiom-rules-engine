@@ -68,7 +68,7 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
 
     let schema_value = all_schemas()
         .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v1.schema.json")
+        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
         .expect("artifact schema is published")
         .schema;
     let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
@@ -93,7 +93,7 @@ fn artifact_schema_accepts_the_annotated_divergences() {
     // `source_verification.extra` field, and a judgment/comparison expression.
     // If any of these regress, this artifact stops validating.
     let artifact = serde_json::json!({
-        "artifact_format_version": 1,
+        "artifact_format_version": 2,
         "engine_version": "0.1.0",
         "program": {
             "module": {
@@ -111,7 +111,7 @@ fn artifact_schema_accepts_the_annotated_divergences() {
             "parameters": [{
                 "id": "us:statutes/7/2017/a#p",
                 "name": "p", "unit": "USD", "indexed_by": "household_size",
-                "versions": [{"effective_from": "2020-01-01", "values": {
+                "versions": [{"effective_from": "2020-01-01", "effective_to": "2020-12-31", "values": {
                     "1": {"kind": "decimal", "value": 200},
                     "2": {"kind": "decimal", "value": "250.50"},
                     "3": {"kind": "integer", "value": 3},
@@ -142,7 +142,7 @@ fn artifact_schema_accepts_the_annotated_divergences() {
 
     let schema_value = all_schemas()
         .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v1.schema.json")
+        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
         .expect("artifact schema is published")
         .schema;
     let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
@@ -167,4 +167,30 @@ fn artifact_schema_accepts_the_annotated_divergences() {
             panic!("schema advertises dtype `{dtype}` but serde rejects it: {e}")
         });
     }
+}
+
+#[test]
+fn current_artifact_schema_rejects_missing_and_v1_versions() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
+    let artifact = CompiledProgramArtifact::from_rulespec_file(&fixture)
+        .expect("fixture compiles to a v2 artifact");
+    let base = serde_json::to_value(&artifact).expect("artifact serializes");
+    let schema = all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
+        .expect("current artifact schema is published")
+        .schema;
+    let validator = jsonschema::draft7::new(&schema).expect("artifact schema compiles");
+
+    let mut missing = base.clone();
+    missing
+        .as_object_mut()
+        .expect("artifact is an object")
+        .remove("artifact_format_version");
+    let mut v1 = base;
+    v1["artifact_format_version"] = serde_json::json!(1);
+
+    assert!(!validator.is_valid(&missing));
+    assert!(!validator.is_valid(&v1));
 }

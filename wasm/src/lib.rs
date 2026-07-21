@@ -72,23 +72,12 @@ pub fn compile(modules_json: &str, root_target: &str) -> Result<String, JsError>
 /// `ExecutionResponse` as JSON, byte-compatible with the CLI's `execute`
 /// subcommand output.
 ///
-/// Artifacts newer than this engine's supported format version are rejected,
-/// mirroring the core's load-time check.
+/// Missing, older, or newer artifact versions are rejected, mirroring the
+/// core's exact artifact contract.
 #[wasm_bindgen]
 pub fn execute(artifact_json: &str, request_json: &str) -> Result<String, JsError> {
-    let artifact: CompiledProgramArtifact = serde_json::from_str(artifact_json).map_err(|error| {
-        JsError::new(&format!(
-            "artifact_json is not a CompiledProgramArtifact: {error}"
-        ))
-    })?;
-    if artifact.artifact_format_version > ARTIFACT_FORMAT_VERSION {
-        return Err(JsError::new(&format!(
-            "compiled artefact has artifact_format_version {found}, but this engine supports up \
-             to {supported}; recompile the program with this engine or upgrade the engine",
-            found = artifact.artifact_format_version,
-            supported = ARTIFACT_FORMAT_VERSION,
-        )));
-    }
+    let artifact = CompiledProgramArtifact::from_json_str(artifact_json)
+        .map_err(|error| JsError::new(&error.to_string()))?;
     let request: CompiledExecutionRequest = serde_json::from_str(request_json).map_err(|error| {
         JsError::new(&format!(
             "request_json is not a CompiledExecutionRequest: {error}"
@@ -107,8 +96,7 @@ pub fn engine_version() -> String {
     axiom_rules_engine::ENGINE_VERSION.to_string()
 }
 
-/// The artifact format version this engine writes and the newest it accepts
-/// (re-exported from the core), for provenance display in UIs.
+/// The exact artifact format version this engine writes and accepts.
 #[wasm_bindgen]
 pub fn artifact_format_version() -> u32 {
     ARTIFACT_FORMAT_VERSION

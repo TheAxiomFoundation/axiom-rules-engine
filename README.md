@@ -143,14 +143,18 @@ formats the engine exchanges:
 - `rulespec-module.v1.schema.json` — the RuleSpec module/authoring format
   (`format: rulespec/v1`).
 - `rulespec-test.v1.schema.json` — the companion `*.test.yaml` case format.
-- `compiled-artifact.v1.schema.json` — `CompiledProgramArtifact` (the compiled
-  program, embedding the `ProgramSpec` IR).
+- `compiled-artifact.v2.schema.json` — the current `CompiledProgramArtifact`
+  contract, including executable version `effective_to` bounds.
+- `compiled-artifact.v1.schema.json` — the immutable archived v1 contract.
+  Current engines reject v1 artifacts rather than guessing at missing temporal
+  semantics.
 
 These are the single source of truth for consumers that would otherwise
-re-implement the shape by hand. They mirror the engine's serde **deserialization**
-acceptance: a document that deserializes validates, and vice versa. A document
-can still validate and fail lowering for semantic reasons (unknown rule `kind`,
-top-level `relations:`, missing `effective_from`).
+re-implement the shape by hand. Current schemas mirror the engine's serde
+**deserialization** acceptance: a document that deserializes validates, and
+vice versa. The archived v1 schema remains available only to describe stored
+v1 data. A document can still validate and fail lowering for semantic reasons
+(unknown rule `kind`, top-level `relations:`, missing `effective_from`).
 
 Schema generation lives behind the non-default `schema` feature, so pure-runtime
 consumers do not compile `schemars`. Regenerate the checked-in files with:

@@ -3369,6 +3369,63 @@ fn dense_broadcasts_scalar_entity_formula_parameters() {
 }
 
 #[test]
+fn dense_parameter_lookup_honors_effective_to() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: bounded_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2026-12-31
+        formula: "0.5"
+  - name: tapered_amount
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: 2020-01-01
+        formula: income * bounded_rate
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("bounded parameter RuleSpec compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Person"))
+        .expect("dense compilation succeeds");
+    let batch = || DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::from([(
+            "income".to_string(),
+            DenseColumn::Decimal(vec![decimal("100")]),
+        )]),
+        relations: HashMap::new(),
+    };
+
+    dense
+        .execute(
+            &axiom_rules_engine::model::Period::month(2026, 12),
+            batch(),
+            &["tapered_amount".to_string()],
+        )
+        .expect("effective_to remains live through its date");
+
+    let error = dense
+        .execute(
+            &axiom_rules_engine::model::Period::month(2027, 1),
+            batch(),
+            &["tapered_amount".to_string()],
+        )
+        .expect_err("expired parameter is unavailable to dense execution");
+    assert!(matches!(
+        error,
+        axiom_rules_engine::engine::EvalError::MissingParameterValue { parameter, .. }
+            if parameter == "bounded_rate"
+    ));
+}
+
+#[test]
 fn dense_compiles_scalar_only_module_with_scalar_root() {
     // A module containing only scalar formula parameters falls back to the
     // Scalar pseudo-entity as its root and executes as a broadcast.
