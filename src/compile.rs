@@ -41,7 +41,7 @@ pub enum CompileError {
         path: String,
         error: serde_json::Error,
     },
-    #[error("compiled artefact `{path}` violates the v1 contract: {message}")]
+    #[error("compiled artefact `{path}` violates the v2 contract: {message}")]
     InvalidArtifactContract { path: String, message: String },
     #[error("failed to load RuleSpec module `{path}`: {error}")]
     RuleSpec {
@@ -72,9 +72,11 @@ pub enum CompileError {
 }
 
 /// Format version stamped into every artifact this engine compiles.
-/// Prelaunch artifact v1 is the sole accepted contract. Missing, older, and
-/// newer versions are rejected at load.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
+/// Artifact v2 is the sole accepted contract. It adds executable
+/// `effective_to` bounds to parameter and derived versions. Missing, older,
+/// and newer versions are rejected at load so a v1 engine cannot silently
+/// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -117,6 +119,7 @@ impl CompiledProgramArtifact {
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
+        program.validate_effective_ranges()?;
         let metadata = compiled_metadata(&program)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
@@ -136,6 +139,7 @@ impl CompiledProgramArtifact {
         }
         self.program.validate_provenance()?;
         self.program.validate_rounding()?;
+        self.program.validate_effective_ranges()?;
         // This is a derived-metadata consistency check: it proves the metadata
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;

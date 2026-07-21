@@ -79,5 +79,13 @@ def test_compiled_program_rejects_missing_and_wrong_artifact_versions() -> None:
     }
     with pytest.raises(ValidationError):
         CompiledProgram.model_validate(legacy)
-    with pytest.raises(ValidationError):
-        CompiledProgram.model_validate({**legacy, "artifact_format_version": 0})
+    for wrong_version in [0, 1, 3]:
+        with pytest.raises(ValidationError):
+            CompiledProgram.model_validate(
+                {**legacy, "artifact_format_version": wrong_version}
+            )
+
+    compiled = CompiledProgram.model_validate(
+        {**legacy, "artifact_format_version": 2}
+    )
+    assert compiled.artifact_format_version == 2

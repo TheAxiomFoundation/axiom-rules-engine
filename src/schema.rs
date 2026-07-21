@@ -1,7 +1,7 @@
 //! Authoritative JSON Schemas for the serialized RuleSpec surface.
 //!
-//! Three schemas are published, one per format the engine and its
-//! consumers exchange:
+//! Current schemas are published for each format the engine and its consumers
+//! exchange, with superseded compiled-artifact schemas retained as archives:
 //!
 //! - `rulespec-module.v1` — the RuleSpec module/authoring format
 //!   (`format: rulespec/v1`): the document [`crate::rulespec::RulesDocument`]
@@ -10,19 +10,22 @@
 //!   versions.
 //! - `rulespec-test.v1` — the companion `*.test.yaml` format: the case list
 //!   the jurisdiction-repo and `axiom-encode` harnesses run against a module.
-//! - `compiled-artifact.v1` — [`crate::compile::CompiledProgramArtifact`],
-//!   the compiled program (embedding the `ProgramSpec` IR) that ships to
-//!   consumers.
+//! - `compiled-artifact.v2` — [`crate::compile::CompiledProgramArtifact`], the
+//!   current compiled program (embedding the `ProgramSpec` IR) that ships to
+//!   consumers. `compiled-artifact.v1` remains published unchanged so stored
+//!   v1 artifacts have a stable historical schema, but this engine does not
+//!   execute them.
 //!
 //! Fidelity is the whole point: a file that serde deserializes MUST validate
 //! against its schema, and a file that validates MUST deserialize. That goal
 //! forces two authoring strategies:
 //!
-//! - The **artifact** schema is derived from the Rust types with `schemars`
+//! - The current **artifact** schema is derived from the Rust types with `schemars`
 //!   (`#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]` on the
 //!   `*Spec` types). Those types are ordinary internally-tagged enums and
 //!   structs `schemars` mirrors exactly, so derivation is the source of
-//!   truth and cannot drift from the deserializer.
+//!   truth and cannot drift from the deserializer. Superseded artifact schemas
+//!   are frozen checked-in archives rather than regenerated from current types.
 //! - The **module** and **test** schemas are written by hand. Several fields
 //!   in the module format have hand-written `Deserialize` behavior a derive
 //!   cannot mirror — `RuleKind` accepts *any* string (deferring unknown
@@ -66,6 +69,10 @@ pub fn all_schemas() -> Vec<NamedSchema> {
         },
         NamedSchema {
             file_name: "compiled-artifact.v1.schema.json",
+            schema: archived_compiled_artifact_v1_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-artifact.v2.schema.json",
             schema: compiled_artifact_schema(),
         },
     ]
@@ -100,8 +107,18 @@ pub fn write_all_to_dir(dir: &std::path::Path) -> std::io::Result<Vec<std::path:
 // Compiled artifact — derived from the Rust types via schemars.
 // ---------------------------------------------------------------------------
 
-/// JSON Schema for [`crate::compile::CompiledProgramArtifact`], generated from
-/// the `schemars` derive so it tracks the serde types automatically.
+/// Archived v1 schema. It is loaded from the checked-in bytes instead of being
+/// regenerated from current Rust types because v1 predates executable
+/// `effective_to` fields and must remain immutable.
+#[cfg(feature = "schema")]
+fn archived_compiled_artifact_v1_schema() -> Value {
+    serde_json::from_str(include_str!("../schemas/compiled-artifact.v1.schema.json"))
+        .expect("archived compiled-artifact.v1 schema is valid JSON")
+}
+
+/// JSON Schema for the current [`crate::compile::CompiledProgramArtifact`],
+/// generated from the `schemars` derive so it tracks the serde types
+/// automatically.
 ///
 /// Known, deliberate divergences from raw serde acceptance (documented in the
 /// PR and in `docs/schema-alignment.md`):
@@ -120,7 +137,7 @@ pub fn compiled_artifact_schema() -> Value {
     harden_compiled_artifact_schema(&mut schema);
     stamp_meta(
         &mut schema,
-        "compiled-artifact.v1",
+        "compiled-artifact.v2",
         "Axiom compiled program artifact",
         "A compiled RuleSpec program: the ProgramSpec IR plus evaluation \
          order and fast-path metadata, stamped with an artifact format \

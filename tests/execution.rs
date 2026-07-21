@@ -3,10 +3,11 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{
-    CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest, ExecutionResponse,
-    OutputValue, execute_compiled_request, execute_request,
+    ApiError, CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest,
+    ExecutionResponse, OutputValue, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
     DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec,
@@ -288,11 +289,13 @@ fn derived_formula_versions_select_by_query_period() {
                 DerivedVersionSpec {
                     effective_from: chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
                         .expect("valid date"),
+                    effective_to: None,
                     semantics: false_semantics,
                 },
                 DerivedVersionSpec {
                     effective_from: chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
                         .expect("valid date"),
+                    effective_to: None,
                     semantics: true_semantics,
                 },
             ],
@@ -355,6 +358,155 @@ fn derived_formula_versions_select_by_query_period() {
         ),
         JudgmentOutcomeSpec::Holds
     );
+}
+
+#[test]
+fn parameter_versions_expire_and_leave_gaps_in_all_execution_modes() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: bounded_rate
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        effective_to: 2025-12-31
+        formula: "1"
+      - effective_from: 2027-01-01
+        effective_to: 2027-12-31
+        formula: "3"
+  - name: amount_using_bounded_rate
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2020-01-01
+        formula: bounded_rate
+"#;
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
+        .expect("bounded parameter RuleSpec lowers");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        assert_eq!(
+            integer_result(
+                &program,
+                mode.clone(),
+                2025,
+                12,
+                31,
+                "amount_using_bounded_rate"
+            )
+            .expect("effective_to is inclusive"),
+            1
+        );
+        assert!(matches!(
+            integer_result(&program, mode.clone(), 2026, 1, 1, "amount_using_bounded_rate"),
+            Err(ApiError::Eval(EvalError::MissingParameterValue { parameter, .. }))
+                if parameter == "bounded_rate"
+        ));
+        assert_eq!(
+            integer_result(
+                &program,
+                mode.clone(),
+                2027,
+                1,
+                1,
+                "amount_using_bounded_rate"
+            )
+            .expect("later parameter version begins after the gap"),
+            3
+        );
+        assert!(matches!(
+            integer_result(&program, mode, 2028, 1, 1, "amount_using_bounded_rate"),
+            Err(ApiError::Eval(EvalError::MissingParameterValue { parameter, .. }))
+                if parameter == "bounded_rate"
+        ));
+    }
+}
+
+#[test]
+fn derived_versions_expire_and_leave_gaps_in_all_execution_modes() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: bounded_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2025-01-01
+        effective_to: 2025-12-31
+        formula: "1"
+      - effective_from: 2027-01-01
+        effective_to: 2027-12-31
+        formula: "3"
+"#;
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
+        .expect("bounded derived RuleSpec lowers");
+
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        assert_eq!(
+            integer_result(&program, mode.clone(), 2025, 12, 31, "bounded_amount")
+                .expect("effective_to is inclusive"),
+            1
+        );
+        assert!(matches!(
+            integer_result(&program, mode.clone(), 2026, 1, 1, "bounded_amount"),
+            Err(ApiError::Eval(EvalError::MissingDerivedFormulaVersion { derived, .. }))
+                if derived == "bounded_amount"
+        ));
+        assert_eq!(
+            integer_result(&program, mode.clone(), 2027, 1, 1, "bounded_amount")
+                .expect("later derived version begins after the gap"),
+            3
+        );
+        assert!(matches!(
+            integer_result(&program, mode, 2028, 1, 1, "bounded_amount"),
+            Err(ApiError::Eval(EvalError::MissingDerivedFormulaVersion { derived, .. }))
+                if derived == "bounded_amount"
+        ));
+    }
+}
+
+fn integer_result(
+    program: &ProgramSpec,
+    mode: ExecutionMode,
+    year: i32,
+    month: u32,
+    day: u32,
+    output: &str,
+) -> Result<i64, ApiError> {
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid test date");
+    let response = execute_request(ExecutionRequest {
+        mode,
+        program: program.clone(),
+        dataset: DatasetSpec::default(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit-1".to_string(),
+            period: PeriodSpec {
+                kind: PeriodKindSpec::Custom {
+                    name: "Day".to_string(),
+                },
+                start: date,
+                end: date,
+            },
+            outputs: vec![output.to_string()],
+        }],
+    })?;
+    let value = response.results[0]
+        .outputs
+        .get(output)
+        .expect("requested output is returned");
+    match value {
+        OutputValue::Scalar {
+            value: ScalarValueSpec::Integer { value },
+            ..
+        } => Ok(*value),
+        other => panic!("expected integer output, got {other:?}"),
+    }
 }
 
 #[test]

@@ -73,6 +73,19 @@ implicitly define their own durable outputs, so explicit `defines` records are
 only needed for span-level provenance that is not otherwise represented by an
 executable rule.
 
+Parameter and derived versions may declare an inclusive `effective_to` in
+addition to `effective_from`. Runtime selection uses the query period's start
+date and chooses the latest version whose complete range contains that date.
+After a bounded version expires, it does not remain as a fallback: a gap before
+the next version produces the ordinary missing-parameter or missing-derived-
+version error. An `effective_to` before its `effective_from` is rejected when
+the program is compiled or a compiled artifact is loaded.
+
+Explain and bulk-fast execution honor bounded derived versions directly. The
+standalone `DenseCompiledProgram` compiler continues to reject every versioned
+derived formula, including a single bounded version; callers using that surface
+must use generic execution until dated-derived dense compilation is added.
+
 RuleSpec files must not use top-level `relations:`. Runtime predicates are
 normal rule records:
 
@@ -468,10 +481,10 @@ Known hard gaps:
 
 - Formula strings are parsed by the internal `crate::formula` parser and
   normalised into `ProgramSpec`.
-- Current formula-string gaps include latest-only derived temporal formulas,
-  inferred relation slot orientation, and incomplete optimized support for
-  complex cross-scope derived-relation predicates. These should be closed in
-  RuleSpec and `ProgramSpec`, not by adding another source format.
+- Current formula-string gaps include inferred relation slot orientation and
+  incomplete optimized support for complex cross-scope derived-relation
+  predicates. These should be closed in RuleSpec and `ProgramSpec`, not by
+  adding another source format.
 
 ## Why This Instead Of Direct `ProgramSpec` YAML
 

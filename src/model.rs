@@ -377,7 +377,14 @@ pub enum DerivedSemantics {
 #[derive(Clone, Debug)]
 pub struct DerivedVersion {
     pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
     pub semantics: DerivedSemantics,
+}
+
+impl DerivedVersion {
+    pub fn applies_at(&self, date: NaiveDate) -> bool {
+        self.effective_from <= date && self.effective_to.is_none_or(|end| date <= end)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -409,7 +416,7 @@ impl Derived {
         }
         self.versions
             .iter()
-            .filter(|version| version.effective_from <= period.start)
+            .filter(|version| version.applies_at(period.start))
             .max_by_key(|version| version.effective_from)
             .map(|version| &version.semantics)
     }
@@ -436,7 +443,14 @@ pub struct RelationDerivation {
 #[derive(Clone, Debug)]
 pub struct ParameterVersion {
     pub effective_from: NaiveDate,
+    pub effective_to: Option<NaiveDate>,
     pub values: BTreeMap<i64, ScalarValue>,
+}
+
+impl ParameterVersion {
+    pub fn applies_at(&self, date: NaiveDate) -> bool {
+        self.effective_from <= date && self.effective_to.is_none_or(|end| date <= end)
+    }
 }
 
 #[derive(Clone, Debug)]
