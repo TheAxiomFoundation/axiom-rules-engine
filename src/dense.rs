@@ -3252,7 +3252,7 @@ fn lookup_parameter_dense<N: DenseNum>(
     let version = parameter
         .versions
         .iter()
-        .filter(|version| version.effective_from <= period.start)
+        .filter(|version| version.applies_at(period.start))
         .max_by_key(|version| version.effective_from)
         .ok_or_else(|| EvalError::MissingParameterValue {
             parameter: parameter.name.clone(),

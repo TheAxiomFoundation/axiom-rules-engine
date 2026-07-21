@@ -20,7 +20,7 @@ wasm build and the CLI cannot drift apart:
 | `compile(modules_json, root_target)` | `{canonical_target: yaml_text}` map + root target | `CompiledProgramArtifact` JSON (same format the CLI's `compile` writes) |
 | `execute(artifact_json, request_json)` | artifact JSON + `CompiledExecutionRequest` JSON (`mode`, `dataset`, `queries`) | `ExecutionResponse` JSON (same format the CLI's `execute` prints) |
 | `engine_version()` | — | core crate version string, for provenance display |
-| `artifact_format_version()` | — | newest artifact format this engine writes/accepts |
+| `artifact_format_version()` | — | exact artifact format this engine writes/accepts |
 
 Canonical targets are the `<jurisdiction>:<path>` form
 (`us:policies/usda/snap/fy-2026-cola/maximum-allotments`). Relative imports

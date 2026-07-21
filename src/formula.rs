@@ -484,6 +484,7 @@ pub enum UnaryOpKind {
 #[derive(Clone, Debug)]
 pub struct TemporalValue {
     pub start: NaiveDate,
+    pub end: Option<NaiveDate>,
     pub expr: Expr,
 }
 
@@ -752,15 +753,19 @@ impl Parser {
             let start_tok = self.consume(TokType::Date)?;
             let start = NaiveDate::parse_from_str(&start_tok.value, "%Y-%m-%d")
                 .map_err(|e| FormulaError::parse(start_tok.line, start_tok.col, e.to_string()))?;
-            if self.at(&[TokType::To]) {
+            let end = if self.at(&[TokType::To]) {
                 self.consume(TokType::To)?;
                 let t = self.consume(TokType::Date)?;
-                NaiveDate::parse_from_str(&t.value, "%Y-%m-%d")
-                    .map_err(|e| FormulaError::parse(t.line, t.col, e.to_string()))?;
-            }
+                Some(
+                    NaiveDate::parse_from_str(&t.value, "%Y-%m-%d")
+                        .map_err(|e| FormulaError::parse(t.line, t.col, e.to_string()))?,
+                )
+            } else {
+                None
+            };
             self.consume(TokType::Colon)?;
             let expr = self.parse_expr()?;
-            decl.values.push(TemporalValue { start, expr });
+            decl.values.push(TemporalValue { start, end, expr });
         }
         Ok(decl)
     }
@@ -1146,6 +1151,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
             values.insert(0, literal_to_scalar_value(&t.expr)?);
             versions.push(ParameterVersionSpec {
                 effective_from: t.start,
+                effective_to: t.end,
                 values,
             });
         }
@@ -1196,12 +1202,13 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
                 }
             };
         let semantics = lower_semantics(&last.expr, &dtype)?;
-        let versions = if v.values.len() > 1 {
+        let versions = if v.values.len() > 1 || last.end.is_some() {
             v.values
                 .iter()
                 .map(|value| {
                     Ok(DerivedVersionSpec {
                         effective_from: value.start,
+                        effective_to: value.end,
                         semantics: lower_semantics(&value.expr, &dtype)?,
                     })
                 })

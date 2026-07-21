@@ -4,6 +4,39 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
+
+**Decision.** Parameter and derived versions carry an optional inclusive
+`effective_to` through RuleSpec lowering, `ProgramSpec`, compiled artifacts,
+and runtime selection. A version applies when
+`effective_from <= period.start <= effective_to`, with the upper comparison
+omitted when `effective_to` is absent. Expired versions are not fallbacks: a
+gap produces the existing missing-parameter or missing-derived-version error.
+An upper bound before its lower bound is rejected at compile and artifact-load
+boundaries. `ARTIFACT_FORMAT_VERSION` advances from 1 to 2, and engines accept
+only their exact format version.
+
+**Why.** RuleSpec already accepted `effective_to`, but the formula parser and
+runtime IR discarded it, leaving a one-year rate or benefit rule live forever.
+Adding the field without a format bump would let a v1 engine deserialize a new
+artifact, ignore the unknown upper bound, and silently compute under expired
+law. Exact cross-version rejection is required by the 2026-06-09 artifact
+policy.
+
+**Consequences.**
+
+- Existing RuleSpec without `effective_to` retains its temporal behavior, but
+  every compiled artifact must be rebuilt as v2; this engine rejects stored v1
+  artifacts.
+- `schemas/compiled-artifact.v1.schema.json` remains byte-for-byte archived for
+  stored-data inspection. The derived current schema is
+  `compiled-artifact.v2.schema.json` and includes `effective_to` on parameter
+  and derived versions.
+- Explain and bulk-fast execution honor bounded derived versions. The
+  standalone dense compiler still rejects versioned derived formulas,
+  including a single bounded version; bounded parameter lookups are supported
+  in dense execution.
+
 ## 2026-07-05 — Lifetime execution surface: over-periods reductions and their semantics
 
 **Decision.** A `derived` formula may reduce a value across an entity's own

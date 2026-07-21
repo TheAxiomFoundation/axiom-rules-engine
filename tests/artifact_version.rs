@@ -9,6 +9,7 @@ rules:
     unit: USD
     versions:
       - effective_from: 2026-01-01
+        effective_to: 2026-12-31
         formula: "10"
   - name: adjusted_amount
     kind: derived
@@ -18,6 +19,7 @@ rules:
     unit: USD
     versions:
       - effective_from: 2026-01-01
+        effective_to: 2026-12-31
         formula: amount + base_amount
 "#;
 
@@ -25,6 +27,7 @@ rules:
 fn compile_stamps_format_and_engine_versions() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
+    assert_eq!(ARTIFACT_FORMAT_VERSION, 2);
     assert_eq!(artifact.artifact_format_version, ARTIFACT_FORMAT_VERSION);
     assert_eq!(
         artifact.engine_version.as_deref(),
@@ -42,19 +45,51 @@ fn compile_stamps_format_and_engine_versions() {
 }
 
 #[test]
-fn legacy_artifact_without_version_fields_still_loads() {
+fn v2_engine_rejects_a_v1_artifact() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("RuleSpec module compiles to v2");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    value["artifact_format_version"] = serde_json::json!(1);
+    let v1_json = serde_json::to_string(&value).expect("v1 JSON serialises");
+
+    let error = CompiledProgramArtifact::from_json_str(&v1_json)
+        .expect_err("the v2 engine must reject a v1 artifact");
+    assert!(matches!(
+        error,
+        CompileError::UnsupportedArtifactFormatVersion {
+            found: 1,
+            supported: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn missing_and_prelaunch_artifact_versions_are_rejected() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
     let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
-    let object = value.as_object_mut().expect("artifact is a JSON object");
-    object.remove("artifact_format_version");
-    object.remove("engine_version");
-    let legacy_json = serde_json::to_string(&value).expect("legacy JSON serialises");
+    value
+        .as_object_mut()
+        .expect("artifact is a JSON object")
+        .remove("artifact_format_version");
+    let missing_json = serde_json::to_string(&value).expect("missing-version JSON serialises");
+    assert!(
+        CompiledProgramArtifact::from_json_str(&missing_json).is_err(),
+        "unstamped artifacts must fail closed"
+    );
 
-    let reloaded = CompiledProgramArtifact::from_json_str(&legacy_json)
-        .expect("legacy artifact without version fields loads");
-    assert_eq!(reloaded.artifact_format_version, 0);
-    assert_eq!(reloaded.engine_version, None);
+    value
+        .as_object_mut()
+        .expect("artifact is a JSON object")
+        .insert("artifact_format_version".to_string(), serde_json::json!(0));
+    let v0_json = serde_json::to_string(&value).expect("v0 JSON serialises");
+    let error = CompiledProgramArtifact::from_json_str(&v0_json)
+        .expect_err("prelaunch v0 artifact must fail");
+    assert!(matches!(
+        error,
+        CompileError::UnsupportedArtifactFormatVersion { found: 0, .. }
+    ));
 }
 
 #[test]
@@ -99,4 +134,18 @@ fn artifact_file_round_trip_preserves_versions() {
     assert_eq!(reloaded.artifact_format_version, ARTIFACT_FORMAT_VERSION);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn artifact_loader_rejects_an_inverted_effective_range() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+        .expect("bounded RuleSpec compiles");
+    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    value["program"]["parameters"][0]["versions"][0]["effective_to"] =
+        serde_json::json!("2025-12-31");
+    let json = serde_json::to_string(&value).expect("mutated artifact serialises");
+
+    let error = CompiledProgramArtifact::from_json_str(&json)
+        .expect_err("inverted artifact range must fail before execution");
+    assert!(matches!(error, CompileError::Spec(_)));
 }

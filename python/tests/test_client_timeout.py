@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from axiom_rules_engine.client import DEFAULT_TIMEOUT_SECONDS, AxiomRulesEngine
 from axiom_rules_engine.models import (
@@ -56,7 +57,7 @@ def test_timeout_defaults_on_and_is_configurable() -> None:
     assert AxiomRulesEngine(timeout=None).timeout is None
 
 
-def test_compiled_program_parses_legacy_artifact_without_version_fields() -> None:
+def test_compiled_program_rejects_missing_and_wrong_artifact_versions() -> None:
     legacy = {
         "program": {"units": [], "relations": [], "parameters": [], "derived": []},
         "metadata": {
@@ -64,6 +65,15 @@ def test_compiled_program_parses_legacy_artifact_without_version_fields() -> Non
             "fast_path": {"strategy": "generic_bulk", "compatible": True},
         },
     }
-    parsed = CompiledProgram.model_validate(legacy)
-    assert parsed.artifact_format_version == 0
-    assert parsed.engine_version is None
+    with pytest.raises(ValidationError):
+        CompiledProgram.model_validate(legacy)
+    for wrong_version in [0, 1, 3]:
+        with pytest.raises(ValidationError):
+            CompiledProgram.model_validate(
+                {**legacy, "artifact_format_version": wrong_version}
+            )
+
+    compiled = CompiledProgram.model_validate(
+        {**legacy, "artifact_format_version": 2}
+    )
+    assert compiled.artifact_format_version == 2

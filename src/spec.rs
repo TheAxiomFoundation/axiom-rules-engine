@@ -40,6 +40,14 @@ pub enum SpecError {
         mode: String,
         unit: String,
     },
+    #[error(
+        "rule `{rule}` has an effective_to date {effective_to} before effective_from {effective_from}"
+    )]
+    InvalidEffectiveRange {
+        rule: String,
+        effective_from: NaiveDate,
+        effective_to: NaiveDate,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -89,6 +97,31 @@ impl ProgramSpec {
         };
         for derived in &self.derived {
             derived.resolve_rounding(&program)?;
+        }
+        Ok(())
+    }
+
+    /// Reject a version whose inclusive upper bound precedes its lower bound.
+    /// Called at both compile and artifact-load boundaries so malformed dated
+    /// rules fail before any execution path can see them.
+    pub fn validate_effective_ranges(&self) -> Result<(), SpecError> {
+        for parameter in &self.parameters {
+            validate_effective_ranges(
+                &parameter.name,
+                parameter
+                    .versions
+                    .iter()
+                    .map(|version| (version.effective_from, version.effective_to)),
+            )?;
+        }
+        for derived in &self.derived {
+            validate_effective_ranges(
+                &derived.name,
+                derived
+                    .versions
+                    .iter()
+                    .map(|version| (version.effective_from, version.effective_to)),
+            )?;
         }
         Ok(())
     }
@@ -295,6 +328,12 @@ pub struct IndexedParameterSpec {
 
 impl IndexedParameterSpec {
     fn to_model(&self) -> Result<IndexedParameter, SpecError> {
+        validate_effective_ranges(
+            &self.name,
+            self.versions
+                .iter()
+                .map(|version| (version.effective_from, version.effective_to)),
+        )?;
         Ok(IndexedParameter {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -313,6 +352,8 @@ impl IndexedParameterSpec {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ParameterVersionSpec {
     pub effective_from: NaiveDate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<NaiveDate>,
     pub values: BTreeMap<i64, ScalarValueSpec>,
 }
 
@@ -324,6 +365,7 @@ impl ParameterVersionSpec {
         }
         Ok(ParameterVersion {
             effective_from: self.effective_from,
+            effective_to: self.effective_to,
             values,
         })
     }
@@ -361,6 +403,12 @@ pub struct DerivedSpec {
 
 impl DerivedSpec {
     fn to_model(&self) -> Result<Derived, SpecError> {
+        validate_effective_ranges(
+            &self.name,
+            self.versions
+                .iter()
+                .map(|version| (version.effective_from, version.effective_to)),
+        )?;
         Ok(Derived {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -408,6 +456,24 @@ impl DerivedSpec {
     }
 }
 
+fn validate_effective_ranges(
+    rule: &str,
+    versions: impl IntoIterator<Item = (NaiveDate, Option<NaiveDate>)>,
+) -> Result<(), SpecError> {
+    for (effective_from, effective_to) in versions {
+        if let Some(effective_to) = effective_to
+            && effective_to < effective_from
+        {
+            return Err(SpecError::InvalidEffectiveRange {
+                rule: rule.to_string(),
+                effective_from,
+                effective_to,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The RuleSpec `rounding:` vocabulary, mirroring [`crate::model::RoundingMode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -443,6 +509,8 @@ impl RoundingModeSpec {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DerivedVersionSpec {
     pub effective_from: NaiveDate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<NaiveDate>,
     #[serde(flatten)]
     pub semantics: DerivedSemanticsSpec,
 }
@@ -451,6 +519,7 @@ impl DerivedVersionSpec {
     fn to_model(&self) -> Result<DerivedVersion, SpecError> {
         Ok(DerivedVersion {
             effective_from: self.effective_from,
+            effective_to: self.effective_to,
             semantics: self.semantics.to_model()?,
         })
     }
