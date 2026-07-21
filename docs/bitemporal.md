@@ -1,8 +1,9 @@
 # Bitemporal semantics: valid time and assessment time
 
 The engine currently has one time axis. Parameter and derived rules carry
-`versions[]` with `effective_from`, and the query's `period` selects whichever
-version is live for the period being calculated. That single axis answers one
+`versions[]` with `effective_from` and optional inclusive `effective_to`, and
+the query's `period` selects whichever version is live for the period being
+calculated. That single axis answers one
 question — "what does the law say about this benefit period?" — while silently
 assuming a second answer: that the assessor knows every enactment that will
 ever touch that period.
@@ -17,9 +18,9 @@ second one, and states exactly what is and is not implemented today.
 ## The two axes
 
 - **Valid time** — the benefit period the law governs. This is the existing
-  axis: the query's `period`, matched against each version's
-  `effective_from`. It answers: *which version of the rule was in force for
-  the period being calculated?*
+  axis: the query's `period`, matched against each version's effective range.
+  It answers: *which version of the rule was in force for the period being
+  calculated?*
 - **Decision/assessment time** — when the determination is made. This is the
   new axis: the query's `assessment_date`, matched against each version's
   enactment/knowledge date. It answers: *which enactments were visible to the
@@ -28,7 +29,7 @@ second one, and states exactly what is and is not implemented today.
 | | Valid time | Assessment time |
 |---|---|---|
 | Query field | `period` | `assessment_date` |
-| Version field | `effective_from` | `enacted_on` / `known_from` |
+| Version field | `effective_from` / `effective_to` | `enacted_on` / `known_from` |
 | Question | law in force during the period | law as known at determination |
 
 Today the engine conflates the two: selecting a version by
@@ -127,7 +128,8 @@ divide the work:
 Normatively, once implemented:
 
 1. visible = versions where `visibility_date <= assessment_date`
-2. applicable = visible where `effective_from <= period.start`
+2. applicable = visible where `effective_from <= period.start` and
+   (`effective_to` is absent or `period.start <= effective_to`)
 3. select the maximum by (`effective_from`, then visibility date, then
    document order)
 

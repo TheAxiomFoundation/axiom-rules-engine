@@ -9,7 +9,7 @@ use axiom_rules_engine::rulespec::{
 };
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
-    ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
+    ScalarExprSpec, ScalarValueSpec, SpecError, UnitKindSpec,
 };
 use std::fs;
 use std::path::Path;
@@ -489,6 +489,7 @@ rules:
     source: USDA SNAP FY 2026 COLA maximum monthly allotment table
     versions:
       - effective_from: 2025-10-01
+        effective_to: 2026-09-30
         values:
           1: 298
           2: 546
@@ -521,6 +522,10 @@ rules:
         .find(|parameter| parameter.name == "snap_maximum_allotment_table")
         .expect("indexed parameter is present");
     assert_eq!(table.versions.len(), 1);
+    assert_eq!(
+        table.versions[0].effective_to,
+        Some("2026-09-30".parse().expect("valid effective_to"))
+    );
     assert_eq!(table.versions[0].values.len(), 2);
     assert_eq!(table.indexed_by.as_deref(), Some("household_size"));
 
@@ -2252,6 +2257,7 @@ rules:
     unit: USD
     versions:
       - effective_from: 2026-01-01
+        effective_to: 2026-12-31
         formula: qualified_retirement_contributions
       - effective_from: 2027-01-01
         formula: able_account_contributions
@@ -2264,6 +2270,10 @@ rules:
         .find(|derived| derived.name == "savers_credit_gross_contributions")
         .expect("derived output present");
     assert_eq!(derived.versions.len(), 2);
+    assert_eq!(
+        derived.versions[0].effective_to,
+        Some("2026-12-31".parse().expect("valid effective_to"))
+    );
     assert!(matches!(
         &derived.versions[0].semantics,
         DerivedSemanticsSpec::Scalar {
@@ -2275,6 +2285,59 @@ rules:
         DerivedSemanticsSpec::Scalar {
             expr: ScalarExprSpec::Input { name },
         } if name == "able_account_contributions"
+    ));
+}
+
+#[test]
+fn rulespec_retains_single_bounded_derived_as_a_runtime_version() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: temporary_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2026-12-31
+        formula: "100"
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("bounded derived formula lowers");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "temporary_credit")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 1);
+    assert_eq!(
+        derived.versions[0].effective_to,
+        Some("2026-12-31".parse().expect("valid effective_to"))
+    );
+}
+
+#[test]
+fn compile_rejects_an_effective_to_before_effective_from() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: impossible_window
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2025-12-31
+        formula: "1"
+"#;
+
+    let error = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect_err("an inverted effective range must fail compilation");
+    assert!(matches!(
+        error,
+        CompileError::Spec(SpecError::InvalidEffectiveRange { rule, .. })
+            if rule == "impossible_window"
     ));
 }
 

@@ -117,6 +117,7 @@ impl CompiledProgramArtifact {
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
+        program.validate_effective_ranges()?;
         let metadata = compiled_metadata(&program)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
@@ -136,6 +137,7 @@ impl CompiledProgramArtifact {
         }
         self.program.validate_provenance()?;
         self.program.validate_rounding()?;
+        self.program.validate_effective_ranges()?;
         // This is a derived-metadata consistency check: it proves the metadata
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;

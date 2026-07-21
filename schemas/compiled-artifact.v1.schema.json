@@ -308,6 +308,13 @@
         "effective_from": {
           "format": "date",
           "type": "string"
+        },
+        "effective_to": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -731,6 +738,13 @@
         "effective_from": {
           "format": "date",
           "type": "string"
+        },
+        "effective_to": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "values": {
           "additionalProperties": false,

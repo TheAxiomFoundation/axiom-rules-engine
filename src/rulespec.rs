@@ -1949,6 +1949,7 @@ impl RuleDefinition {
                     })?;
             versions.push(ParameterVersionSpec {
                 effective_from,
+                effective_to: version.effective_to,
                 values: version.values.clone(),
             });
         }
