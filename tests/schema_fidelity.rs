@@ -115,6 +115,11 @@ fn schema_accepts_what_serde_accepts() {
         "validation-null",
         "format: rulespec/v1\nmodule:\n  validation:\nrules: []\n",
     );
+    assert_agrees(
+        &v,
+        "upstream-source-check-null",
+        "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\nrules: []\n",
+    );
     // String-like coercion: a numeric unit.
     assert_agrees(
         &v,

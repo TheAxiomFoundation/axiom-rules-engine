@@ -430,7 +430,7 @@ fn source_verification_schema() -> Value {
                 "pattern": "^[0-9a-fA-F]{64}$",
                 "description": "SHA-256 hex digest of the exact provision text. Validated at load — must be 64 hex chars."
             },
-            "upstream_source_check": upstream_source_check_schema()
+            "upstream_source_check": nullable_object(upstream_source_check_schema())
         }
     })
 }
