@@ -542,7 +542,11 @@ def _validate_atomic_document(
     if verification is not None:
         if not isinstance(verification, dict):
             raise ValueError(f"source_verification must be an exact mapping: {path}")
-        if set(verification) - {"corpus_citation_path", "source_sha256"}:
+        if set(verification) - {
+            "corpus_citation_path",
+            "source_sha256",
+            "upstream_source_check",
+        }:
             raise ValueError(f"source_verification contains unknown fields: {path}")
         citation = verification.get("corpus_citation_path")
         if not isinstance(citation, str) or CORPUS_CITATION_PATH_RE.fullmatch(citation) is None:
@@ -555,6 +559,30 @@ def _validate_atomic_document(
             or re.fullmatch(r"[0-9A-Fa-f]{64}", digest) is None
         ):
             raise ValueError(f"source_sha256 must be 64 hexadecimal characters: {path}")
+        upstream_check = verification.get("upstream_source_check")
+        if upstream_check is not None:
+            if not isinstance(upstream_check, dict) or set(upstream_check) != {
+                "status",
+                "checked_paths",
+                "rationale",
+            }:
+                raise ValueError(
+                    "upstream_source_check must contain exactly status, "
+                    f"checked_paths, and rationale: {path}"
+                )
+            if not isinstance(upstream_check["status"], str):
+                raise ValueError(f"upstream_source_check status must be a string: {path}")
+            checked_paths = upstream_check["checked_paths"]
+            if not isinstance(checked_paths, list) or not all(
+                isinstance(checked_path, str) for checked_path in checked_paths
+            ):
+                raise ValueError(
+                    f"upstream_source_check checked_paths must be a list of strings: {path}"
+                )
+            if not isinstance(upstream_check["rationale"], str):
+                raise ValueError(
+                    f"upstream_source_check rationale must be a string: {path}"
+                )
 
     _validate_recursive_citation_fields(document, path)
     _validate_rule_shapes(document.get("rules"), path)

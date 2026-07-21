@@ -46,6 +46,14 @@ const STATE_MODULE = `
 format: rulespec/v1
 imports:
   - ${FEDERAL_TARGET}
+module:
+  source_verification:
+    corpus_citation_path: us-co/guidance/cdhs/snap/fy-2026-benefit
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/7/2017/a
+      rationale: The state guidance supplies the current implementation parameter.
 rules:
   - name: snap_household_food_contribution_rate
     kind: parameter
@@ -85,6 +93,14 @@ assert.ok(
   artifact.program.derived.some((derived) => derived.id === OUTPUT_ID),
   `compiled program exposes ${OUTPUT_ID}`,
 );
+assert.deepEqual(artifact.program.module.source_verification, {
+  corpus_citation_path: "us-co/guidance/cdhs/snap/fy-2026-benefit",
+  upstream_source_check: {
+    status: "official_parameter_source",
+    checked_paths: ["us/statute/7/2017/a"],
+    rationale: "The state guidance supplies the current implementation parameter.",
+  },
+});
 
 // execute: CompiledExecutionRequest JSON -> ExecutionResponse JSON, exactly
 // the CLI's request/response shapes.

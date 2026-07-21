@@ -434,8 +434,9 @@ is auditable.
 The `module:` block can carry inert metadata that grounds the module in source
 text and records how the encoding was produced and checked. The block itself
 is optional. When `source_verification` is present it is an exact mapping with
-one required singular `corpus_citation_path` and an optional `source_sha256`;
-unknown fields and the removed plural spelling are rejected recursively.
+one required singular `corpus_citation_path`, an optional `source_sha256`, and
+an optional typed `upstream_source_check`; unknown fields and the removed
+plural spelling are rejected recursively.
 The loader and artifact boundary validate this metadata, but it never changes
 formula semantics or execution results. The lowered `ProgramSpec` keeps the
 (merged) root module's metadata on `program.module`, and compiled artifacts pass
@@ -445,8 +446,13 @@ without re-parsing the YAML.
 ```yaml
 module:
   source_verification:
-    corpus_citation_path: us/statute/7/2017/a
+    corpus_citation_path: us/guidance/agency/annual-parameter
     source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/7/2017/a
+      rationale: The cited guidance supplies the annually determined parameter.
   encoding_provenance:
     encoder: axiom-encode/0.2.645
     model: claude-fable-5
@@ -468,7 +474,14 @@ module:
   mechanical "this module is stale" signal; `axiom-encode
   check-source-staleness` does exactly that. The value must be 64
   hexadecimal characters — anything else is rejected at load with an error
-  naming the module file. No other `source_verification` subfields are allowed.
+  naming the module file.
+- Optional `source_verification.upstream_source_check` preserves an encoder-
+  validated higher-authority audit with required `status` (string),
+  `checked_paths` (list of strings), and `rationale` (string). The nested
+  mapping is exact, so misspelled or additional keys are rejected. The engine
+  validates structure only; axiom-encode owns allowed statuses, authority
+  classification, and rationale-quality policy.
+- No other `source_verification` subfields are allowed.
 - `encoding_provenance` records the encoding tool (`encoder`, for example
   `axiom-encode/0.2.645`), `model`, `run_id`, and human `reviewed_by` — all
   optional strings. Unknown subfields are rejected so typos cannot pass for

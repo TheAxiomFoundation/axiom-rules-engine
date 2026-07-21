@@ -2555,8 +2555,13 @@ format: rulespec/v1
 module:
   title: SNAP allotment
   source_verification:
-    corpus_citation_path: us/statute/7/2017/a
+    corpus_citation_path: us/guidance/agency/annual-parameter
     source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/7/2017/a
+      rationale: The cited guidance supplies the annually determined parameter.
   encoding_provenance:
     encoder: axiom-encode/0.2.645
     model: claude-fable-5
@@ -2594,10 +2599,23 @@ rules:
         .source_verification
         .as_ref()
         .expect("source verification block survives");
-    assert_eq!(verification.corpus_citation_path, "us/statute/7/2017/a");
+    assert_eq!(
+        verification.corpus_citation_path,
+        "us/guidance/agency/annual-parameter"
+    );
     assert_eq!(
         verification.source_sha256.as_deref(),
         Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+    );
+    let upstream_check = verification
+        .upstream_source_check
+        .as_ref()
+        .expect("upstream source check survives");
+    assert_eq!(upstream_check.status, "official_parameter_source");
+    assert_eq!(upstream_check.checked_paths, ["us/statute/7/2017/a"]);
+    assert_eq!(
+        upstream_check.rationale,
+        "The cited guidance supplies the annually determined parameter."
     );
     let provenance = module
         .encoding_provenance
@@ -2726,6 +2744,40 @@ fn rulespec_rejects_plural_missing_and_noncanonical_corpus_paths_recursively() {
         assert!(
             lower_rulespec_str(source).is_err(),
             "{label} must fail the canonical singular citation contract"
+        );
+    }
+}
+
+#[test]
+fn rulespec_rejects_malformed_upstream_source_checks() {
+    for (label, check) in [
+        (
+            "missing rationale",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]",
+        ),
+        (
+            "non-string checked path",
+            "status: official_parameter_source\n      checked_paths: [42]\n      rationale: checked",
+        ),
+        (
+            "non-string status",
+            "status: 42\n      checked_paths: [us/statute/7/2017/a]\n      rationale: checked",
+        ),
+        (
+            "non-string rationale",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: 42",
+        ),
+        (
+            "unknown nested field",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: checked\n      note: typo",
+        ),
+    ] {
+        let source = format!(
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\n      {check}\nrules: []\n"
+        );
+        assert!(
+            lower_rulespec_str(&source).is_err(),
+            "{label} must fail the exact upstream source check contract"
         );
     }
 }

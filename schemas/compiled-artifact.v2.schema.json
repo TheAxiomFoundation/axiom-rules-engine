@@ -1762,7 +1762,7 @@
           }
         }
       ],
-      "description": "Grounding of a module in legal source text. `corpus_citation_path`\naddresses the provision in the Axiom corpus; `source_sha256` pins the\nSHA-256 hex digest of the exact provision text the module was encoded\nfrom, so tooling can detect mechanically when the published source has\nchanged out from under the encoding. The mapping is exact: the singular\ncitation path is required and unknown/plural fields are rejected.",
+      "description": "Grounding of a module in legal source text. `corpus_citation_path`\naddresses the provision in the Axiom corpus; `source_sha256` pins the\nSHA-256 hex digest of the exact provision text the module was encoded\nfrom, so tooling can detect mechanically when the published source has\nchanged out from under the encoding. `upstream_source_check` records the\nhigher-authority sources checked before using guidance or another\nimplementation source. The mapping is exact: the singular citation path\nis required and unknown/plural fields are rejected.",
       "properties": {
         "corpus_citation_path": {
           "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
@@ -1773,6 +1773,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "upstream_source_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamSourceCheck"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -1916,6 +1926,39 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "UpstreamSourceCheck": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
+      "description": "Structural record of a higher-authority source audit. The encoder owns\nsemantic policy for accepted statuses, path authority, and rationale\nquality; the engine preserves the exact typed record in compiled artifacts.",
+      "properties": {
+        "checked_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "checked_paths",
+        "rationale"
       ],
       "type": "object"
     },

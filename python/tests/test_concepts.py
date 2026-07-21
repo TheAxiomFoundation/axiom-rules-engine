@@ -258,7 +258,15 @@ def test_concepts_reject_yml_wrong_country_and_missing_explicit_root(
         ),
         (
             "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/26/62\n    upstream_source_check: {}\nrules: []",
-            "unknown fields",
+            "must contain exactly status, checked_paths, and rationale",
+        ),
+        (
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\n      status: official_parameter_source\n      checked_paths: [42]\n      rationale: checked\nrules: []",
+            "checked_paths must be a list of strings",
+        ),
+        (
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\n      status: official_parameter_source\n      checked_paths: [us/statute/26/62]\n      rationale: checked\n      note: typo\nrules: []",
+            "must contain exactly status, checked_paths, and rationale",
         ),
         (
             "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute\nrules: []",
@@ -326,6 +334,28 @@ rules: []
     )
     concepts = discover_concepts([root.resolve()])
     assert concepts[0].concept_id == "uk-kingston-upon-thames:policies/ctr/2026"
+
+
+def test_concepts_accept_typed_upstream_source_check(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_rulespec(
+        root,
+        "us/policies/treasury/rate.yaml",
+        """
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/guidance/treasury/rate
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/26/62
+      rationale: The official guidance supplies the current annual parameter.
+rules: []
+""",
+    )
+    concepts = discover_concepts([root])
+    assert concepts[0].concept_id == "us:policies/treasury/rate"
 
 
 def test_concepts_reject_case_aliased_root_on_case_insensitive_filesystems(

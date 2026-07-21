@@ -100,7 +100,12 @@ fn artifact_schema_accepts_the_annotated_divergences() {
             "module": {
                 "source_verification": {
                     "corpus_citation_path": "us/statute/7/2017/a",
-                    "source_sha256": "a".repeat(64)
+                    "source_sha256": "a".repeat(64),
+                    "upstream_source_check": {
+                        "status": "official_parameter_source",
+                        "checked_paths": ["us/statute/7/2017/a"],
+                        "rationale": "The official guidance supplies the current parameter."
+                    }
                 },
                 "encoding_provenance": {"encoder": "axiom-encode/0.2"},
                 "validation": [{"oracle": "taxsim", "status": "matches", "last_run": "2026-06-01"}]
@@ -194,6 +199,22 @@ fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
         serde_json::json!({"corpus_citation_path": "us/statute"}),
         serde_json::json!({"corpus_citation_path": "us/statute/26/62", "source_sha256": "bad"}),
         serde_json::json!({"corpus_citation_paths": ["us/statute/26/62"]}),
+        serde_json::json!({
+            "corpus_citation_path": "us/guidance/treasury/rate",
+            "upstream_source_check": {
+                "status": "official_parameter_source",
+                "checked_paths": ["us/statute/26/62"],
+                "rationale": "checked",
+                "note": "unknown"
+            }
+        }),
+        serde_json::json!({
+            "corpus_citation_path": "us/guidance/treasury/rate",
+            "upstream_source_check": {
+                "status": "official_parameter_source",
+                "checked_paths": ["us/statute/26/62"]
+            }
+        }),
     ] {
         let mut value = base.clone();
         value["program"]["module"] = serde_json::json!({"source_verification": verification});
