@@ -142,11 +142,11 @@ assert.throws(
   /CompiledExecutionRequest/,
   "malformed request JSON is reported",
 );
-const v0Artifact = JSON.stringify({ ...artifact, artifact_format_version: 0 });
+const v1Artifact = JSON.stringify({ ...artifact, artifact_format_version: 1 });
 assert.throws(
-  () => engine.execute(v0Artifact, JSON.stringify(request)),
+  () => engine.execute(v1Artifact, JSON.stringify(request)),
   /requires exact version/,
-  "prelaunch v0 artifacts are rejected",
+  "v1 artifacts are rejected by the v2 engine",
 );
 
 console.log("smoke test passed");

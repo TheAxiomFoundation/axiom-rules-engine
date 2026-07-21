@@ -32,13 +32,12 @@ second one, and states exactly what is and is not implemented today.
 | Version field | `effective_from` / `effective_to` | `enacted_on` / `known_from` |
 | Question | law in force during the period | law as known at determination |
 
-Today the engine conflates the two: selecting a version by
-`effective_from <= period.start` implicitly evaluates every query as an
-omniscient, end-of-history assessment. For a single point-in-time snapshot of
-the law that is correct. The moment an encoding contains a retroactive
-enactment — two versions claiming the same valid time, enacted at different
-moments — the single axis cannot say which one a March determination should
-have used.
+Today the engine conflates the two: selecting a version whose valid-time range
+contains `period.start` implicitly evaluates every query as an omniscient,
+end-of-history assessment. For a single point-in-time snapshot of the law that
+is correct. The moment an encoding contains a retroactive enactment — two
+versions claiming the same valid time, enacted at different moments — the
+single axis cannot say which one a March determination should have used.
 
 ## Why eligibility systems need both
 
@@ -122,8 +121,9 @@ divide the work:
 
 - `assessment_date` selects which enactments are **visible**: versions whose
   visibility date is on or before the assessment date.
-- `period` selects which visible version **applies**: the latest
-  `effective_from` at or before `period.start`, exactly as today.
+- `period` selects which visible version **applies**: among versions whose
+  inclusive valid-time range contains `period.start`, the one with the latest
+  `effective_from`, exactly as today.
 
 Normatively, once implemented:
 
@@ -150,29 +150,32 @@ remains self-describing about the assessment it was computed under.
 **Implemented today:** the field is parsed, validated against `period.start`,
 and echoed (`src/api.rs`; mirrored in
 `python/axiom_rules_engine/models.py`). It has **no effect on evaluation**.
-Version selection still considers every version
-(`src/engine.rs`, `src/bulk.rs`, `src/dense.rs` all select by
-`effective_from` only). The point of reserving the field now is that requests,
-stored results, and calling code can start carrying assessment dates before
-any encoding depends on the semantics.
+Version selection still considers every version visible regardless of
+assessment date; it filters only by the implemented valid-time range
+(`effective_from` through inclusive `effective_to`). The point of reserving the
+field now is that requests, stored results, and calling code can start carrying
+assessment dates before any encoding depends on the semantics.
 
 ## Migration story
 
 Absent fields mean "known since forever": a version without `enacted_on` or
 `known_from` has a visibility date of negative infinity, is visible at every
 assessment date, and the selection rule above reduces exactly to today's
-`effective_from` rule — with or without an `assessment_date` on the query.
-Every existing encoding, request, artifact, and response is therefore
-unaffected:
+valid-time range rule — with or without an `assessment_date` on the query.
+Within the current v2 contract, encodings and requests that omit the future
+visibility fields are therefore unaffected. Artifact v1 was already retired
+when executable `effective_to` bounds landed; it is not part of this future
+assessment-time migration:
 
 - Requests: `assessment_date` is optional and omitted from the wire when
   unset, so requests that do not use it are byte-identical to before.
 - Responses: the echo is likewise omitted when unset.
 - Encodings: `enacted_on`/`known_from` are optional; existing rule files are
   valid and mean what they always meant.
-- Compiled artifacts: today's engines ignore unknown fields, so an artifact
+- Compiled artifacts: a current v2 engine ignores unknown visibility fields,
+  so an artifact
   carrying visibility dates would *silently evaluate omnisciently* on an old
-  engine. When the engine starts honoring visibility dates,
+  v2 engine. When the engine starts honoring visibility dates,
   `ARTIFACT_FORMAT_VERSION` must bump so older engines reject such artifacts
   loudly (see the 2026-06-09 decision in `DECISIONS.md`).
 

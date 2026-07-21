@@ -81,6 +81,11 @@ the next version produces the ordinary missing-parameter or missing-derived-
 version error. An `effective_to` before its `effective_from` is rejected when
 the program is compiled or a compiled artifact is loaded.
 
+Explain and bulk-fast execution honor bounded derived versions directly. The
+standalone `DenseCompiledProgram` compiler continues to reject every versioned
+derived formula, including a single bounded version; callers using that surface
+must use generic execution until dated-derived dense compilation is added.
+
 RuleSpec files must not use top-level `relations:`. Runtime predicates are
 normal rule records:
 

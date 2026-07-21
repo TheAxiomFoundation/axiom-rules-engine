@@ -72,7 +72,7 @@ pub fn compile(modules_json: &str, root_target: &str) -> Result<String, JsError>
 /// subcommand output.
 ///
 /// Missing, older, or newer artifact versions are rejected, mirroring the
-/// core's exact prelaunch v1 contract.
+/// core's exact artifact contract.
 #[wasm_bindgen]
 pub fn execute(artifact_json: &str, request_json: &str) -> Result<String, JsError> {
     let artifact = CompiledProgramArtifact::from_json_str(artifact_json)

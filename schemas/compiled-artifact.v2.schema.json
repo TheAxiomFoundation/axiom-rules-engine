@@ -308,6 +308,13 @@
         "effective_from": {
           "format": "date",
           "type": "string"
+        },
+        "effective_to": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -731,6 +738,13 @@
         "effective_from": {
           "format": "date",
           "type": "string"
+        },
+        "effective_to": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "values": {
           "additionalProperties": false,
@@ -1947,7 +1961,7 @@
       "type": "string"
     }
   },
-  "$id": "https://schemas.axiom-foundation.org/rules-engine/compiled-artifact.v1.schema.json",
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/compiled-artifact.v2.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "allOf": [
     {
@@ -1961,7 +1975,7 @@
   "description": "A compiled RuleSpec program: the ProgramSpec IR plus evaluation order and fast-path metadata, stamped with an artifact format version. Produced by `axiom-rules-engine compile`.",
   "properties": {
     "artifact_format_version": {
-      "const": 1,
+      "const": 2,
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
