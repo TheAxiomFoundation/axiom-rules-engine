@@ -1129,6 +1129,24 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         // Danish Krone: ISO 4217 exponent 2 (100 øre = 1 krone);
         // Danish statutes state amounts in whole kroner.
         ("DKK", UnitKindSpec::Currency { minor_units: 2 }),
+        // Peruvian Sol: ISO 4217 exponent 2 (100 centimos = 1 sol);
+        // Peruvian statutes state amounts in soles (S/).
+        ("PEN", UnitKindSpec::Currency { minor_units: 2 }),
+        // Colombian Peso: ISO 4217 exponent 2 (100 centavos = 1 peso);
+        // Colombian statutes state amounts in pesos.
+        ("COP", UnitKindSpec::Currency { minor_units: 2 }),
+        // Mozambican Metical: ISO 4217 exponent 2 (100 centavos =
+        // 1 metical); Mozambican statutes state amounts in meticais.
+        ("MZN", UnitKindSpec::Currency { minor_units: 2 }),
+        // Boliviano: ISO 4217 exponent 2 (100 centavos = 1 boliviano);
+        // Bolivian statutes state amounts in bolivianos (Bs).
+        ("BOB", UnitKindSpec::Currency { minor_units: 2 }),
+        // Vietnamese Dong: ISO 4217 exponent 0 (no minor unit in
+        // circulation); Vietnamese statutes state amounts in dong.
+        ("VND", UnitKindSpec::Currency { minor_units: 0 }),
+        // Egyptian Pound: ISO 4217 exponent 2 (100 piastres = 1 pound);
+        // Egyptian statutes state amounts in pounds (EGP).
+        ("EGP", UnitKindSpec::Currency { minor_units: 2 }),
         ("count", UnitKindSpec::Count),
         ("person", UnitKindSpec::Count),
         ("ratio", UnitKindSpec::Ratio),

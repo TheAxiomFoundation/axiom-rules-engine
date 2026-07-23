@@ -336,6 +336,222 @@ rules:
 }
 
 #[test]
+fn rulespec_lowers_peruvian_sol_money_parameter() {
+    // Peruvian Sol (PEN, ISO 4217, 2 minor units = centimos) must be a seeded
+    // currency so rulespec modules can declare `unit: PEN` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Peru Pension 65 subvention (PEN unit check)
+rules:
+  - name: pension_65_bimonthly_subvention
+    kind: parameter
+    dtype: Money
+    unit: PEN
+    source: "Decreto Supremo 081-2011-PCM, articulo 1"
+    versions:
+      - effective_from: 2011-10-19
+        formula: "250"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("PEN RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "PEN")
+        .expect("PEN should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "PEN must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_colombian_peso_money_parameter() {
+    // Colombian Peso (COP, ISO 4217, 2 minor units = centavos) must be a seeded
+    // currency so rulespec modules can declare `unit: COP` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Colombia income tax UVT base (COP unit check)
+rules:
+  - name: uvt_base_value
+    kind: parameter
+    dtype: Money
+    unit: COP
+    source: "Estatuto Tributario, articulo 868"
+    versions:
+      - effective_from: 2019-01-01
+        formula: "34270"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("COP RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "COP")
+        .expect("COP should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "COP must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_mozambican_metical_money_parameter() {
+    // Mozambican Metical (MZN, ISO 4217, 2 minor units = centavos) must be a seeded
+    // currency so rulespec modules can declare `unit: MZN` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Mozambique IRPS band floor (MZN unit check)
+rules:
+  - name: irps_first_band_floor
+    kind: parameter
+    dtype: Money
+    unit: MZN
+    source: "Codigo do IRPS, artigo 54"
+    versions:
+      - effective_from: 2015-01-01
+        formula: "42000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("MZN RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "MZN")
+        .expect("MZN should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "MZN must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_boliviano_money_parameter() {
+    // Boliviano (BOB, ISO 4217, 2 minor units = centavos) must be a seeded
+    // currency so rulespec modules can declare `unit: BOB` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Bolivia Renta Dignidad annual amount (BOB unit check)
+rules:
+  - name: renta_dignidad_annual_amount
+    kind: parameter
+    dtype: Money
+    unit: BOB
+    source: "Ley 3791, articulo 5"
+    versions:
+      - effective_from: 2019-01-01
+        formula: "3900"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("BOB RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "BOB")
+        .expect("BOB should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "BOB must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_vietnamese_dong_money_parameter() {
+    // Vietnamese Dong (VND, ISO 4217, exponent 0 - no minor unit) must be a seeded
+    // currency so rulespec modules can declare `unit: VND` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Viet Nam PIT band threshold (VND unit check)
+rules:
+  - name: pit_first_band_monthly_ceiling
+    kind: parameter
+    dtype: Money
+    unit: VND
+    source: "Law on Personal Income Tax 04/2007/QH12, Article 22"
+    versions:
+      - effective_from: 2013-07-01
+        formula: "5000000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("VND RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "VND")
+        .expect("VND should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 0 }),
+        "VND must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_egyptian_pound_money_parameter() {
+    // Egyptian Pound (EGP, ISO 4217, 2 minor units = piastres) must be a seeded
+    // currency so rulespec modules can declare `unit: EGP` without a
+    // repo inline unit declaration, exactly like ZMW/ETB/TZS/DKK.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Egypt income tax exempt band (EGP unit check)
+rules:
+  - name: income_tax_exempt_band_ceiling
+    kind: parameter
+    dtype: Money
+    unit: EGP
+    source: "Income Tax Law 91/2005, Article 8"
+    versions:
+      - effective_from: 2019-07-01
+        formula: "15000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("EGP RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let unit = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "EGP")
+        .expect("EGP should be a seeded currency unit");
+    assert!(
+        matches!(unit.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "EGP must carry the ISO 4217 exponent: {:?}",
+        unit.kind
+    );
+}
+
+#[test]
 fn rulespec_lowers_rwandan_franc_money_parameter() {
     // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
     // circulation) must be a seeded currency so rulespec-rw modules can
