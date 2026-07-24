@@ -25,3 +25,8 @@ paper/_build/
 
 # setuptools build output from pip installs of python/
 python/build/
+
+# wasm npm packaging outputs
+wasm/pkg-npm-web/
+wasm/pkg-npm-node/
+wasm/npm-dist/
