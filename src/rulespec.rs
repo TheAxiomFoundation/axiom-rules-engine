@@ -1462,6 +1462,26 @@ fn validate_content_tree(
                     path.display()
                 ))
             })?;
+            // File type is inspected BEFORE spelling, and the symlink and
+            // special-path prohibitions stay unconditional. Those are authority
+            // guarantees about what may exist inside a root at all, not about
+            // what is addressable — quarantining on the name first would let
+            // `evil:link.yaml -> /etc/passwd` through on a technicality.
+            let file_type = entry.file_type().map_err(|error| {
+                repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))
+            })?;
+            if file_type.is_symlink() {
+                return Err(repository_root_error(format!(
+                    "symlink `{}` is forbidden",
+                    path.display()
+                )));
+            }
+            if !file_type.is_dir() && !file_type.is_file() {
+                return Err(repository_root_error(format!(
+                    "special path `{}` is forbidden",
+                    path.display()
+                )));
+            }
             if name.chars().any(char::is_whitespace)
                 || name
                     .chars()
@@ -1473,30 +1493,21 @@ fn validate_content_tree(
                 // Quarantined, not fatal. No canonical module target can spell
                 // this name, so nothing can legitimately import it; recording it
                 // here keeps it out of the loadable set and lets resolution name
-                // it precisely if anything tries. A quarantined directory is not
-                // descended into — every path beneath it is equally unaddressable.
+                // it precisely if anything tries.
                 quarantined.push(QuarantinedPath {
                     path: path.clone(),
                     reason: format!("non-canonical path component `{name}`"),
                 });
+                // Still descend: everything below is equally unaddressable (the
+                // quarantine covers the whole subtree), but a symlink or device
+                // node down there must still be found and refused.
+                if file_type.is_dir() {
+                    pending.push(path);
+                }
                 continue;
-            }
-            let file_type = entry.file_type().map_err(|error| {
-                repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))
-            })?;
-            if file_type.is_symlink() {
-                return Err(repository_root_error(format!(
-                    "symlink `{}` is forbidden",
-                    path.display()
-                )));
             }
             if file_type.is_dir() {
                 pending.push(path);
-            } else if !file_type.is_file() {
-                return Err(repository_root_error(format!(
-                    "special path `{}` is forbidden",
-                    path.display()
-                )));
             } else if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
                 let extension_lower = extension.to_ascii_lowercase();
                 if matches!(extension_lower.as_str(), "yaml" | "yml") && extension != "yaml" {

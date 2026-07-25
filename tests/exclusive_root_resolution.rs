@@ -448,3 +448,34 @@ fn symlinked_roots_and_content_are_rejected() {
     assert!(CanonicalRuleSpecRoots::new([&root]).is_err());
     std::fs::remove_dir_all(temp).ok();
 }
+
+/// Quarantine must never launder a symlink or a special file.
+///
+/// The name check runs after the file-type check for exactly this reason: a
+/// symlink is forbidden because of what it is, not because of what it is
+/// called, and the two prohibitions answer different questions. Naming it
+/// `evil:link.yaml` once made it merely unaddressable instead of refused.
+#[test]
+fn quarantine_does_not_launder_symlinks() {
+    for (label, relative) in [
+        ("symlink-noncanonical-name", "us/policies/evil:link.yaml"),
+        ("symlink-under-quarantined-dir", "us/policies/bad:dir/sneaky.yaml"),
+    ] {
+        let temp = temp_dir(label);
+        let root = temp.join("rulespec-us");
+        let link = root.join(relative);
+        std::fs::create_dir_all(link.parent().expect("link parent")).expect("link dir");
+        std::fs::write(root.join("us/policies/base.yaml"), BASE_MODULE).expect("base module");
+        std::os::unix::fs::symlink("/etc/passwd", &link).expect("symlink fixture");
+
+        let error = CanonicalRuleSpecRoots::new([&root])
+            .err()
+            .unwrap_or_else(|| panic!("{label}: a symlink must fail the root whatever it is named"))
+            .to_string();
+        assert!(
+            error.contains("symlink") && error.contains("forbidden"),
+            "{label}: must be refused as a symlink, got: {error}"
+        );
+        std::fs::remove_dir_all(temp).ok();
+    }
+}
