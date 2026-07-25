@@ -103,6 +103,26 @@ Run a compiled artifact:
 cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
 ```
 
+Before downloading or running an artifact, ask the binary what it can load.
+`artifact_format_version` is matched **exactly** at load and moves
+independently of the package version, so semver alone cannot answer the
+question:
+
+```bash
+axiom-rules-engine capabilities
+```
+
+```json
+{
+  "engine_version": "0.1.0",
+  "artifact_format_version": 2
+}
+```
+
+Compare that number against the publisher's
+`programs[].compat.requires_engine.artifact_format_version` in the artifact
+manifest. If they differ the artifact will not load, whatever the versions say.
+
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
 name. Queried atomic outputs and relations still use their legal RuleSpec IDs:

@@ -6,7 +6,7 @@ use axiom_rules_engine::api::{
     CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
 };
 use axiom_rules_engine::compile::{
-    CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
+    ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
@@ -28,8 +28,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", version_line());
                 return Ok(());
             }
+            "capabilities" => {
+                if args.next().is_some() {
+                    return Err("`capabilities` takes no arguments".into());
+                }
+                println!("{}", capabilities_json()?);
+                return Ok(());
+            }
             "compile" => return run_compile(args.collect(), false),
             "compile-composed" => return run_compile(args.collect(), true),
+            "check-artifact" => return check_artifact(args.collect()),
             "run-compiled" => return run_compiled(args.collect()),
             #[cfg(feature = "schema")]
             "emit-schemas" => return run_emit_schemas(args.collect()),
@@ -49,13 +57,41 @@ fn version_line() -> String {
     format!("axiom-rules-engine {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// Machine-readable compatibility surface.
+///
+/// A semver string alone cannot express whether this engine can load a given
+/// artifact: `artifact_format_version` is matched exactly at load, and it moves
+/// independently of the package version. A publisher stamping
+/// `requires_engine` into a manifest, and a consumer deciding whether to
+/// download an artifact, both need that number before attempting a load —
+/// otherwise the only way to discover incompatibility is to hit the load error.
+fn capabilities_json() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "engine_version": env!("CARGO_PKG_VERSION"),
+        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+    }))?)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::version_line;
+    use super::{capabilities_json, version_line};
 
     #[test]
     fn version_line_uses_package_version() {
-        assert_eq!(version_line(), "axiom-rules-engine 0.1.0");
+        assert_eq!(
+            version_line(),
+            format!("axiom-rules-engine {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn capabilities_report_the_exact_artifact_format_version() {
+        let value: serde_json::Value = serde_json::from_str(&capabilities_json().unwrap()).unwrap();
+        assert_eq!(value["engine_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            value["artifact_format_version"],
+            serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION)
+        );
     }
 }
 
@@ -144,6 +180,40 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
     for (key, value) in compile_summary_lines(&artifact) {
         println!("{key}: {value}");
     }
+    Ok(())
+}
+
+/// `check-artifact --artifact <compiled.json>`: can this engine load it?
+///
+/// Loading is the gate that decides whether a published artifact is usable, and
+/// it can fail for reasons the format version does not express — a v2 artifact
+/// still gets rejected if it violates the v2 contract. Without this, the only
+/// way to answer "will this run?" is to attempt a full execution and then guess
+/// from the error text whether the artifact or the request was at fault. That
+/// guess is what let a release-gate check report green while every load failed.
+///
+/// Exit 0 and print the load verdict as JSON; exit 1 with the load error.
+fn check_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifact_path: Option<PathBuf> = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--artifact" => artifact_path = iter.next().map(PathBuf::from),
+            _ => return Err(format!("unknown check-artifact argument `{arg}`").into()),
+        }
+    }
+    let artifact_path =
+        artifact_path.ok_or("missing required `--artifact /path/to/compiled.json` argument")?;
+    let artifact = CompiledProgramArtifact::from_json_file(&artifact_path)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "loadable": true,
+            "artifact_format_version": artifact.artifact_format_version,
+            "engine_artifact_format_version": ARTIFACT_FORMAT_VERSION,
+            "engine_version": env!("CARGO_PKG_VERSION"),
+        }))?
+    );
     Ok(())
 }
 
