@@ -1020,6 +1020,10 @@ pub struct CanonicalRuleSpecRoots {
     /// scan is the authoritative file set for this capability; later additions
     /// are not discoverable during the same compile run.
     validated_files: HashSet<PathBuf>,
+    /// Paths excluded from `validated_files` because their spelling is not a
+    /// canonical module target, kept so resolution can say why rather than
+    /// report a bare "not found". Fixed by the same construction-time scan.
+    quarantined: Vec<QuarantinedPath>,
 }
 
 #[cfg(feature = "fs")]
@@ -1041,10 +1045,11 @@ impl CanonicalRuleSpecRoots {
 
         let mut validated = Vec::with_capacity(raw_roots.len());
         let mut validated_files = HashSet::new();
+        let mut quarantined: Vec<QuarantinedPath> = Vec::new();
         let mut seen_paths = HashSet::new();
         let mut seen_countries = HashSet::new();
         for root in raw_roots {
-            let country = validate_country_root(&root)?;
+            let country = validate_country_root(&root, &mut quarantined)?;
             if !seen_paths.insert(root.clone()) {
                 return Err(repository_root_error(format!(
                     "duplicate root `{}`",
@@ -1069,12 +1074,22 @@ impl CanonicalRuleSpecRoots {
                 path: root.clone(),
                 country,
             });
-            collect_regular_files(&root, &mut validated_files)?;
+            collect_regular_files(&root, &mut validated_files, &quarantined)?;
         }
         Ok(Self {
             roots: validated,
             validated_files,
+            quarantined,
         })
+    }
+
+    /// The quarantine reason for `path`, if it is excluded or sits beneath an
+    /// excluded directory.
+    fn quarantine_reason(&self, path: &Path) -> Option<&str> {
+        self.quarantined
+            .iter()
+            .find(|entry| path == entry.path || path.starts_with(&entry.path))
+            .map(|entry| entry.reason.as_str())
     }
 
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
@@ -1092,9 +1107,14 @@ impl CanonicalRuleSpecRoots {
                 continue;
             };
             if !self.validated_files.contains(path) {
+                // Say why. A quarantined spelling is the likely cause here, and
+                // "not present in the scan" would send the reader looking for a
+                // missing file rather than a misnamed one.
                 return Err(invalid_path(
                     path,
-                    "file was not present in the construction-time root scan",
+                    self.quarantine_reason(path).unwrap_or(
+                        "file was not present in the construction-time root scan",
+                    ),
                 ));
             }
             let components = relative
@@ -1176,6 +1196,13 @@ impl CanonicalRuleSpecRoots {
             .join(jurisdiction)
             .join(format!("{relative}.yaml"));
         if !self.validated_files.contains(&path) {
+            // An import that resolves onto a quarantined path is a real error,
+            // not an absent module: the file exists and something asked for it.
+            // Reporting it here — and only here — is what keeps exclusion from
+            // being silent while still not failing unrelated compiles.
+            if let Some(reason) = self.quarantine_reason(&path) {
+                return Err(invalid_path(&path, reason));
+            }
             return Ok(None);
         }
         match fs::symlink_metadata(&path) {
@@ -1199,7 +1226,16 @@ impl CanonicalRuleSpecRoots {
 }
 
 #[cfg(feature = "fs")]
-fn collect_regular_files(root: &Path, files: &mut HashSet<PathBuf>) -> Result<(), RuleSpecError> {
+fn collect_regular_files(
+    root: &Path,
+    files: &mut HashSet<PathBuf>,
+    quarantined: &[QuarantinedPath],
+) -> Result<(), RuleSpecError> {
+    let excluded = |path: &Path| {
+        quarantined
+            .iter()
+            .any(|entry| path == entry.path || path.starts_with(&entry.path))
+    };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(|error| {
@@ -1214,6 +1250,11 @@ fn collect_regular_files(root: &Path, files: &mut HashSet<PathBuf>) -> Result<()
                     entry.path().display()
                 ))
             })?;
+            // A quarantined path is not loadable, so it never enters the
+            // authoritative set — and neither does anything beneath it.
+            if excluded(&entry.path()) {
+                continue;
+            }
             if file_type.is_dir() {
                 pending.push(entry.path());
             } else if file_type.is_file() {
@@ -1225,7 +1266,10 @@ fn collect_regular_files(root: &Path, files: &mut HashSet<PathBuf>) -> Result<()
 }
 
 #[cfg(feature = "fs")]
-fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
+fn validate_country_root(
+    root: &Path,
+    quarantined: &mut Vec<QuarantinedPath>,
+) -> Result<String, RuleSpecError> {
     if !root.is_absolute() {
         return Err(repository_root_error(format!(
             "root `{}` must be absolute",
@@ -1368,7 +1412,7 @@ fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
             }
             validate_exact_component_spelling(&content_path).map_err(repository_root_error)?;
             content_root_count += 1;
-            validate_content_tree(&content_path)?;
+            validate_content_tree(&content_path, quarantined)?;
         }
     }
     if jurisdiction_count == 0 || content_root_count == 0 {
@@ -1380,8 +1424,28 @@ fn validate_country_root(root: &Path) -> Result<String, RuleSpecError> {
     Ok(country.to_string())
 }
 
+/// A path whose spelling makes it unaddressable as a module, and why.
+///
+/// Non-canonical spellings are quarantined rather than fatal to the whole root.
+/// A 52-jurisdiction monorepo is one authority boundary but not one program:
+/// `us-la/statutes/47:294.yaml` cannot be named by any canonical module target,
+/// so it can never participate in compiling `us-co:` SNAP, and failing that
+/// compile because of it reports a fault the caller cannot act on and did not
+/// cause. The file is still recorded — it is excluded from the loadable set and
+/// named exactly if anything ever resolves to it, so nothing becomes silently
+/// invisible.
 #[cfg(feature = "fs")]
-fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
+#[derive(Clone, Debug)]
+struct QuarantinedPath {
+    path: PathBuf,
+    reason: String,
+}
+
+#[cfg(feature = "fs")]
+fn validate_content_tree(
+    root: &Path,
+    quarantined: &mut Vec<QuarantinedPath>,
+) -> Result<(), RuleSpecError> {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(|error| {
@@ -1406,10 +1470,16 @@ fn validate_content_tree(root: &Path) -> Result<(), RuleSpecError> {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'~')
                 })
             {
-                return Err(repository_root_error(format!(
-                    "non-canonical path component `{name}` in `{}`",
-                    path.display()
-                )));
+                // Quarantined, not fatal. No canonical module target can spell
+                // this name, so nothing can legitimately import it; recording it
+                // here keeps it out of the loadable set and lets resolution name
+                // it precisely if anything tries. A quarantined directory is not
+                // descended into — every path beneath it is equally unaddressable.
+                quarantined.push(QuarantinedPath {
+                    path: path.clone(),
+                    reason: format!("non-canonical path component `{name}`"),
+                });
+                continue;
             }
             let file_type = entry.file_type().map_err(|error| {
                 repository_root_error(format!("cannot inspect `{}`: {error}", path.display()))

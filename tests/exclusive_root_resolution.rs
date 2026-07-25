@@ -304,6 +304,12 @@ fn programs_and_yml_are_never_atomic_modules() {
     std::fs::remove_dir_all(temp).ok();
 }
 
+/// Ambiguous spellings stay fatal to the whole root.
+///
+/// These names ARE reachable as canonical targets — two of them can denote the
+/// same module — so tolerating them would mean silently choosing one. There is
+/// no safe way to continue past a collision, and no caller can be told which
+/// file answered.
 #[test]
 fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
     for (label, relative) in [
@@ -311,6 +317,33 @@ fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
         ("double-yml", "us/policies/foo.yml.yaml"),
         ("uppercase-extension", "us/policies/foo.YAML"),
         ("mixed-extension", "us/policies/foo.Yml"),
+    ] {
+        let temp = temp_dir(label);
+        let root = temp.join("rulespec-us");
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
+        std::fs::write(&path, BASE_MODULE).expect("invalid fixture");
+        assert!(
+            CanonicalRuleSpecRoots::new([&root]).is_err(),
+            "ambiguous path must fail the root: {relative}"
+        );
+        std::fs::remove_dir_all(temp).ok();
+    }
+}
+
+/// Unaddressable spellings are quarantined, not fatal to the whole root.
+///
+/// No canonical module target can spell `foo#bar` or `foo:bar`, so such a file
+/// can never be imported by anything — its presence says nothing about whether
+/// an unrelated jurisdiction compiles. In a 52-jurisdiction monorepo, failing
+/// every compile because one Louisiana filename contains a colon reports a
+/// fault the caller did not cause and cannot act on.
+///
+/// Quarantine is not silence: the file is excluded from the loadable set, and
+/// anything that does resolve onto it gets an error naming the spelling.
+#[test]
+fn roots_quarantine_unaddressable_names_without_failing_the_root() {
+    for (label, relative) in [
         ("fragment-name", "us/policies/foo#bar.yaml"),
         ("space-name", "us/policies/foo bar.yaml"),
         ("quote-name", "us/policies/foo'.yaml"),
@@ -323,9 +356,22 @@ fn roots_reject_ambiguous_extensions_and_reserved_path_aliases() {
         let path = root.join(relative);
         std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dir");
         std::fs::write(&path, BASE_MODULE).expect("invalid fixture");
+        // A sibling that IS addressable must still compile.
+        std::fs::write(root.join("us/policies/base.yaml"), BASE_MODULE).expect("valid sibling");
+
+        let roots = CanonicalRuleSpecRoots::new([&root])
+            .unwrap_or_else(|e| panic!("{label}: unaddressable sibling must not fail the root: {e}"));
+        load_rulespec_file(&root.join("us/policies/base.yaml"), &roots)
+            .unwrap_or_else(|e| panic!("{label}: the addressable module must still load: {e}"));
+
+        // …and the quarantined file is not loadable, with the spelling named
+        // rather than reported as a missing module.
+        let error = load_rulespec_file(&path, &roots)
+            .expect_err("a quarantined path must not load")
+            .to_string();
         assert!(
-            CanonicalRuleSpecRoots::new([&root]).is_err(),
-            "non-canonical path must fail: {relative}"
+            error.contains("canonical") && error.contains(relative.rsplit('/').next().unwrap()),
+            "{label}: error must name the file and the canonicality fault, got: {error}"
         );
         std::fs::remove_dir_all(temp).ok();
     }
