@@ -142,6 +142,10 @@ fn complete_contract_emits_state_reachability_and_provenance() {
             NodeProvenanceSpec::ProvisionBacked,
             "the in-memory atomic surface remains distinguishable from a composition"
         );
+        assert_eq!(
+            node(nodes, kind, name).corpus_citation_path.as_deref(),
+            Some("us/statutes/26/32/j")
+        );
     }
 
     let mut sorted = nodes.to_vec();
@@ -228,6 +232,70 @@ fn input_state_declarations_must_cover_exactly_the_runtime_slots() {
 }
 
 #[test]
+fn relation_state_declarations_must_cover_exactly_the_runtime_data_relations() {
+    let relation = axiom_rules_engine::spec::RelationSpec {
+        name: "member_of_household".to_string(),
+        arity: 2,
+        derivation: None,
+    };
+
+    let mut without_outputs = annotated_program();
+    without_outputs.outputs = None;
+    without_outputs.input_states.clear();
+    without_outputs
+        .relation_states
+        .insert(relation.name.clone(), InputStateSpec::Exogenous);
+    assert!(matches!(
+        CompiledProgramArtifact::compile(without_outputs),
+        Err(CompileError::RelationStatesWithoutOutputs)
+    ));
+
+    let mut missing = annotated_program();
+    missing.relations.push(relation);
+    assert!(matches!(
+        CompiledProgramArtifact::compile(missing),
+        Err(CompileError::MissingRelationStates { .. })
+    ));
+
+    let mut unknown = annotated_program();
+    unknown
+        .relation_states
+        .insert("not_a_relation".to_string(), InputStateSpec::Exogenous);
+    assert!(matches!(
+        CompiledProgramArtifact::compile(unknown),
+        Err(CompileError::UnknownRelationStates { .. })
+    ));
+}
+
+#[test]
+fn duplicate_parameter_and_relation_nodes_are_rejected() {
+    let mut duplicate_parameter = annotated_program();
+    duplicate_parameter
+        .parameters
+        .push(duplicate_parameter.parameters[0].clone());
+    assert!(matches!(
+        CompiledProgramArtifact::compile(duplicate_parameter),
+        Err(CompileError::DuplicateParameterNode { .. })
+    ));
+
+    let mut duplicate_relation = annotated_program();
+    let relation = axiom_rules_engine::spec::RelationSpec {
+        name: "member_of_household".to_string(),
+        arity: 2,
+        derivation: None,
+    };
+    duplicate_relation.relations.push(relation.clone());
+    duplicate_relation.relations.push(relation);
+    duplicate_relation
+        .relation_states
+        .insert("member_of_household".to_string(), InputStateSpec::Exogenous);
+    assert!(matches!(
+        CompiledProgramArtifact::compile(duplicate_relation),
+        Err(CompileError::DuplicateRelationNode { .. })
+    ));
+}
+
+#[test]
 fn node_provenance_declarations_must_resolve_uniquely() {
     let mut duplicate = annotated_program();
     let existing = duplicate
@@ -248,11 +316,52 @@ fn node_provenance_declarations_must_resolve_uniquely() {
             kind: NodeKindSpec::Derived,
             name: "not_a_node".to_string(),
             provenance: NodeProvenanceSpec::ProvisionBacked,
+            corpus_citation_path: Some("us/statutes/26/32/j".to_string()),
         });
     assert!(matches!(
         CompiledProgramArtifact::compile(unknown),
         Err(CompileError::UnknownNodeProvenance { .. })
     ));
+
+    let mut ungrounded = annotated_program();
+    ungrounded.node_provenance[0].corpus_citation_path = None;
+    assert!(matches!(
+        CompiledProgramArtifact::compile(ungrounded),
+        Err(CompileError::InvalidNodeProvenance { .. })
+    ));
+
+    let mut mismatched = annotated_program();
+    mismatched.node_provenance[0].corpus_citation_path = Some("us/statutes/7/2014/e".to_string());
+    assert!(matches!(
+        CompiledProgramArtifact::compile(mismatched),
+        Err(CompileError::InvalidNodeProvenance { .. })
+    ));
+
+    let mut invalid_relation_path = annotated_program();
+    invalid_relation_path
+        .relations
+        .push(axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            derivation: None,
+        });
+    invalid_relation_path
+        .relation_states
+        .insert("member_of_household".to_string(), InputStateSpec::Exogenous);
+    invalid_relation_path
+        .node_provenance
+        .push(axiom_rules_engine::spec::NodeProvenanceEntrySpec {
+            kind: NodeKindSpec::DataRelation,
+            name: "member_of_household".to_string(),
+            provenance: NodeProvenanceSpec::ProvisionBacked,
+            corpus_citation_path: Some("not canonical".to_string()),
+        });
+    let error = CompiledProgramArtifact::compile(invalid_relation_path)
+        .expect_err("non-canonical relation backing must fail");
+    assert!(
+        matches!(error, CompileError::InvalidNodeProvenance { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -284,6 +393,20 @@ fn reachability_traverses_relations_and_related_inputs() {
             arity: 2,
             derivation: None,
         });
+    program
+        .relations
+        .push(axiom_rules_engine::spec::RelationSpec {
+            name: "future_relation".to_string(),
+            arity: 2,
+            derivation: None,
+        });
+    program.relation_states.insert(
+        "member_of_household".to_string(),
+        InputStateSpec::PolicyDerived,
+    );
+    program
+        .relation_states
+        .insert("future_relation".to_string(), InputStateSpec::Pending);
     let result = program
         .derived
         .iter_mut()
@@ -310,6 +433,13 @@ fn reachability_traverses_relations_and_related_inputs() {
 
     let artifact = CompiledProgramArtifact::compile(program).expect("relation graph compiles");
     let nodes = artifact.metadata.nodes.as_deref().expect("node catalog");
-    assert!(node(nodes, NodeKindSpec::DataRelation, "member_of_household").reachable);
+    let relation = node(nodes, NodeKindSpec::DataRelation, "member_of_household");
+    assert!(relation.reachable);
+    assert_eq!(relation.state, CompiledNodeState::Input);
+    assert_eq!(relation.input_kind, Some(CompiledInputKind::PolicyDerived));
+    let pending_relation = node(nodes, NodeKindSpec::DataRelation, "future_relation");
+    assert_eq!(pending_relation.state, CompiledNodeState::Pending);
+    assert_eq!(pending_relation.input_kind, None);
+    assert!(!pending_relation.reachable);
     assert!(node(nodes, NodeKindSpec::Input, "related_amount").reachable);
 }

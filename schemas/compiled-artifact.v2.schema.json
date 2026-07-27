@@ -63,6 +63,13 @@
         }
       ],
       "properties": {
+        "corpus_citation_path": {
+          "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "description": "Stable public identifier where one exists, otherwise the exact local\nruntime name. `kind` remains part of node identity.",
           "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$",
@@ -853,6 +860,14 @@
       ],
       "description": "Provenance for one declared executable node before reachability is derived.",
       "properties": {
+        "corpus_citation_path": {
+          "description": "Exact provision join key grounding a `provision_backed` claim.\nForbidden for synthesized and unverified declarations.",
+          "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "$ref": "#/$defs/NodeKindSpec"
         },
@@ -1008,6 +1023,22 @@
             "$ref": "#/$defs/IndexedParameterSpec"
           },
           "type": "array"
+        },
+        "relation_states": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputStateSpec"
+          },
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "Complete classification of runtime-supplied data relations whenever\n`outputs` is present. Kept separate from scalar input slots so a shared\nname cannot alias two different executable node kinds.",
+          "type": "object"
         },
         "relations": {
           "default": [],

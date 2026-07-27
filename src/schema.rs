@@ -498,6 +498,13 @@ pub fn rulespec_module_schema() -> Value {
                     "enum": ["exogenous", "policy_derived", "pending"]
                 }
             },
+            "relation_states": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string",
+                    "enum": ["exogenous", "policy_derived", "pending"]
+                }
+            },
             // Top-level `relations:` deserializes but is rejected at lowering
             // (`TopLevelRelationsUnsupported`). It is included so that files
             // which *deserialize* still validate; consumers that lower will

@@ -293,11 +293,20 @@ the stale comments, and pinned every case as a test.
 - Updated current schemas plus Rust and composed-loader coverage; preserved the
   archived v1 artifact schema byte-for-byte.
 - Added typed Python model round-tripping and native-extension node metadata.
+- Independent review found and the implementation now fixes four additional
+  certification hazards: explicit data-relation state classification,
+  duplicate parameter/relation rejection, citation-grounded provision claims,
+  and actual-kind provenance for computed parameters that lower to derived
+  Scalar nodes.
+- The public dense Python wrapper now preserves legacy absence and exposes
+  typed node annotations.
+- Full Rust validation after review remediation: `cargo test --all-features`
+  passed 225 tests; schema golden/conformance coverage is included.
 
 ## Next
 
-- Run schema, full Rust, Python, native-extension, and WASM validation; address
-  any failures without changing protected project/toolchain surfaces.
+- Finish strict Python source-contract/state validation, then rerun the staged
+  native suite and no-default-features WASM check.
 - Push issue #115 and open a draft PR if remote access is available.
 - After #115 is complete, write and post the issue #117 design note before any
   implementation.

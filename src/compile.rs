@@ -41,6 +41,10 @@ pub enum CompileError {
         declaration: String,
         reason: String,
     },
+    #[error("duplicate parameter node `{name}`")]
+    DuplicateParameterNode { name: String },
+    #[error("duplicate relation node `{name}`")]
+    DuplicateRelationNode { name: String },
     #[error("cyclic derived dependency detected involving: {cycle}")]
     CyclicDependency { cycle: String },
     #[error("unknown relation dependency `{dependency}` referenced from relation `{relation}`")]
@@ -54,6 +58,8 @@ pub enum CompileError {
     EmptyDeclaredOutputs,
     #[error("input_states requires typed outputs; reachability cannot otherwise be computed")]
     InputStatesWithoutOutputs,
+    #[error("relation_states requires typed outputs; reachability cannot otherwise be computed")]
+    RelationStatesWithoutOutputs,
     #[error("declared output `{output}` does not resolve to a derived rule")]
     UnknownDeclaredOutput { output: String },
     #[error("declared output `{output}` resolves to derived rule `{resolved}` more than once")]
@@ -62,10 +68,22 @@ pub enum CompileError {
     MissingInputStates { slots: String },
     #[error("compiled node annotations declare input_states for unknown slots: {slots}")]
     UnknownInputStates { slots: String },
+    #[error("compiled node annotations are missing relation_states for: {relations}")]
+    MissingRelationStates { relations: String },
+    #[error(
+        "compiled node annotations declare relation_states for unknown data relations: {relations}"
+    )]
+    UnknownRelationStates { relations: String },
     #[error("duplicate node_provenance entry for {kind:?} node `{name}`")]
     DuplicateNodeProvenance { kind: NodeKindSpec, name: String },
     #[error("node_provenance refers to unknown {kind:?} node `{name}`")]
     UnknownNodeProvenance { kind: NodeKindSpec, name: String },
+    #[error("invalid node_provenance for {kind:?} node `{name}`: {message}")]
+    InvalidNodeProvenance {
+        kind: NodeKindSpec,
+        name: String,
+        message: String,
+    },
     #[cfg(feature = "fs")]
     #[error("failed to write compiled artefact `{path}`: {error}")]
     WriteArtifactFile { path: String, error: std::io::Error },
@@ -228,6 +246,8 @@ pub struct CompiledNodeMetadata {
     pub input_kind: Option<CompiledInputKind>,
     pub reachable: bool,
     pub provenance: NodeProvenanceSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_citation_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -770,6 +790,7 @@ fn parameter_version_interval(version: &ParameterVersionSpec) -> String {
 }
 
 fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, CompileError> {
+    validate_unique_node_names(program)?;
     let input_catalog = compiled_input_catalog(program)?;
     Ok(CompiledProgramMetadata {
         evaluation_order: evaluation_order(program)?,
@@ -777,6 +798,26 @@ fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, C
         nodes: compiled_node_metadata(program, &input_catalog)?,
         input_catalog,
     })
+}
+
+fn validate_unique_node_names(program: &ProgramSpec) -> Result<(), CompileError> {
+    let mut parameters = BTreeSet::new();
+    for parameter in &program.parameters {
+        if !parameters.insert(parameter.name.clone()) {
+            return Err(CompileError::DuplicateParameterNode {
+                name: parameter.name.clone(),
+            });
+        }
+    }
+    let mut relations = BTreeSet::new();
+    for relation in &program.relations {
+        if !relations.insert(relation.name.clone()) {
+            return Err(CompileError::DuplicateRelationNode {
+                name: relation.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn compiled_input_catalog(
@@ -812,6 +853,9 @@ fn compiled_node_metadata(
         if !program.input_states.is_empty() {
             return Err(CompileError::InputStatesWithoutOutputs);
         }
+        if !program.relation_states.is_empty() {
+            return Err(CompileError::RelationStatesWithoutOutputs);
+        }
         return Ok(None);
     };
     let provenance = validated_node_provenance(program)?;
@@ -844,6 +888,35 @@ fn compiled_node_metadata(
     if !unknown.is_empty() {
         return Err(CompileError::UnknownInputStates {
             slots: unknown.join(", "),
+        });
+    }
+    let data_relations = program
+        .relations
+        .iter()
+        .filter(|relation| relation.derivation.is_none())
+        .map(|relation| relation.name.clone())
+        .collect::<BTreeSet<_>>();
+    let declared_relations = program
+        .relation_states
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing_relations = data_relations
+        .difference(&declared_relations)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_relations.is_empty() {
+        return Err(CompileError::MissingRelationStates {
+            relations: missing_relations.join(", "),
+        });
+    }
+    let unknown_relations = declared_relations
+        .difference(&data_relations)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_relations.is_empty() {
+        return Err(CompileError::UnknownRelationStates {
+            relations: unknown_relations.join(", "),
         });
     }
 
@@ -899,9 +972,16 @@ fn compiled_node_metadata(
             // Input leaves are implicit expression slots, not declarations.
             // Their legal backing cannot be inferred from an owning formula.
             provenance: NodeProvenanceSpec::Unverified,
+            corpus_citation_path: None,
         });
     }
     for parameter in &program.parameters {
+        let backing = provenance_for(
+            &provenance,
+            NodeKindSpec::Parameter,
+            &parameter.name,
+            parameter.corpus_citation_path.as_deref(),
+        );
         nodes.push(CompiledNodeMetadata {
             id: parameter
                 .id
@@ -912,10 +992,17 @@ fn compiled_node_metadata(
             state: CompiledNodeState::Derived,
             input_kind: None,
             reachable: reachable.contains(&(NodeKindSpec::Parameter, parameter.name.clone())),
-            provenance: provenance_for(&provenance, NodeKindSpec::Parameter, &parameter.name),
+            provenance: backing.provenance,
+            corpus_citation_path: backing.corpus_citation_path,
         });
     }
     for derived in &program.derived {
+        let backing = provenance_for(
+            &provenance,
+            NodeKindSpec::Derived,
+            &derived.name,
+            derived.corpus_citation_path.as_deref(),
+        );
         nodes.push(CompiledNodeMetadata {
             id: derived.id.clone().unwrap_or_else(|| derived.name.clone()),
             name: derived.name.clone(),
@@ -923,7 +1010,8 @@ fn compiled_node_metadata(
             state: CompiledNodeState::Derived,
             input_kind: None,
             reachable: reachable.contains(&(NodeKindSpec::Derived, derived.name.clone())),
-            provenance: provenance_for(&provenance, NodeKindSpec::Derived, &derived.name),
+            provenance: backing.provenance,
+            corpus_citation_path: backing.corpus_citation_path,
         });
     }
     for relation in &program.relations {
@@ -932,21 +1020,33 @@ fn compiled_node_metadata(
         } else {
             NodeKindSpec::DataRelation
         };
+        let backing = provenance_for(&provenance, kind, &relation.name, None);
+        let (state, input_kind) = match relation.derivation.as_ref() {
+            Some(_) => (CompiledNodeState::Derived, None),
+            None => match program
+                .relation_states
+                .get(&relation.name)
+                .expect("data-relation state coverage was checked above")
+            {
+                InputStateSpec::Exogenous => {
+                    (CompiledNodeState::Input, Some(CompiledInputKind::Exogenous))
+                }
+                InputStateSpec::PolicyDerived => (
+                    CompiledNodeState::Input,
+                    Some(CompiledInputKind::PolicyDerived),
+                ),
+                InputStateSpec::Pending => (CompiledNodeState::Pending, None),
+            },
+        };
         nodes.push(CompiledNodeMetadata {
             id: relation.name.clone(),
             name: relation.name.clone(),
             kind,
-            state: if relation.derivation.is_some() {
-                CompiledNodeState::Derived
-            } else {
-                CompiledNodeState::Input
-            },
-            input_kind: relation
-                .derivation
-                .is_none()
-                .then_some(CompiledInputKind::Exogenous),
+            state,
+            input_kind,
             reachable: reachable.contains(&(kind, relation.name.clone())),
-            provenance: provenance_for(&provenance, kind, &relation.name),
+            provenance: backing.provenance,
+            corpus_citation_path: backing.corpus_citation_path,
         });
     }
     nodes.sort_by(|left, right| {
@@ -959,30 +1059,39 @@ fn compiled_node_metadata(
     Ok(Some(nodes))
 }
 
+#[derive(Clone, Debug)]
+struct ValidatedNodeProvenance {
+    provenance: NodeProvenanceSpec,
+    corpus_citation_path: Option<String>,
+}
+
 fn validated_node_provenance(
     program: &ProgramSpec,
-) -> Result<BTreeMap<(NodeKindSpec, String), NodeProvenanceSpec>, CompileError> {
-    let mut actual = BTreeSet::new();
-    actual.extend(
-        program
-            .parameters
-            .iter()
-            .map(|parameter| (NodeKindSpec::Parameter, parameter.name.clone())),
-    );
-    actual.extend(
-        program
-            .derived
-            .iter()
-            .map(|derived| (NodeKindSpec::Derived, derived.name.clone())),
-    );
+) -> Result<BTreeMap<(NodeKindSpec, String), ValidatedNodeProvenance>, CompileError> {
+    let mut actual = BTreeMap::new();
+    actual.extend(program.parameters.iter().map(|parameter| {
+        (
+            (NodeKindSpec::Parameter, parameter.name.clone()),
+            parameter.corpus_citation_path.clone(),
+        )
+    }));
+    actual.extend(program.derived.iter().map(|derived| {
+        (
+            (NodeKindSpec::Derived, derived.name.clone()),
+            derived.corpus_citation_path.clone(),
+        )
+    }));
     actual.extend(program.relations.iter().map(|relation| {
         (
-            if relation.derivation.is_some() {
-                NodeKindSpec::DerivedRelation
-            } else {
-                NodeKindSpec::DataRelation
-            },
-            relation.name.clone(),
+            (
+                if relation.derivation.is_some() {
+                    NodeKindSpec::DerivedRelation
+                } else {
+                    NodeKindSpec::DataRelation
+                },
+                relation.name.clone(),
+            ),
+            None,
         )
     }));
 
@@ -991,34 +1100,92 @@ fn validated_node_provenance(
         kind,
         name,
         provenance,
+        corpus_citation_path,
     } in &program.node_provenance
     {
         let key = (*kind, name.clone());
-        if !actual.contains(&key) {
+        let Some(actual_citation_path) = actual.get(&key) else {
             return Err(CompileError::UnknownNodeProvenance {
                 kind: *kind,
                 name: name.clone(),
             });
-        }
-        if declared.insert(key, *provenance).is_some() {
+        };
+        if declared.contains_key(&key) {
             return Err(CompileError::DuplicateNodeProvenance {
                 kind: *kind,
                 name: name.clone(),
             });
         }
+        let invalid = |message: String| CompileError::InvalidNodeProvenance {
+            kind: *kind,
+            name: name.clone(),
+            message,
+        };
+        match provenance {
+            NodeProvenanceSpec::ProvisionBacked => {
+                let Some(citation_path) = corpus_citation_path.as_deref() else {
+                    return Err(invalid(
+                        "provision_backed requires corpus_citation_path".to_string(),
+                    ));
+                };
+                if !crate::rulespec::is_canonical_corpus_citation_path(citation_path) {
+                    return Err(invalid(format!(
+                        "non-canonical corpus_citation_path `{citation_path}`"
+                    )));
+                }
+                if matches!(kind, NodeKindSpec::Parameter | NodeKindSpec::Derived)
+                    && actual_citation_path.as_deref() != Some(citation_path)
+                {
+                    return Err(invalid(
+                        "corpus_citation_path does not match the executable node".to_string(),
+                    ));
+                }
+            }
+            NodeProvenanceSpec::Synthesized | NodeProvenanceSpec::Unverified => {
+                if corpus_citation_path.is_some() {
+                    return Err(invalid(
+                        "only provision_backed may carry corpus_citation_path".to_string(),
+                    ));
+                }
+                if matches!(kind, NodeKindSpec::Parameter | NodeKindSpec::Derived)
+                    && actual_citation_path.is_some()
+                {
+                    return Err(invalid(
+                        "a cited executable node cannot be synthesized or unverified".to_string(),
+                    ));
+                }
+            }
+        }
+        declared.insert(
+            key,
+            ValidatedNodeProvenance {
+                provenance: *provenance,
+                corpus_citation_path: corpus_citation_path.clone(),
+            },
+        );
     }
     Ok(declared)
 }
 
 fn provenance_for(
-    provenance: &BTreeMap<(NodeKindSpec, String), NodeProvenanceSpec>,
+    provenance: &BTreeMap<(NodeKindSpec, String), ValidatedNodeProvenance>,
     kind: NodeKindSpec,
     name: &str,
-) -> NodeProvenanceSpec {
+    executable_citation_path: Option<&str>,
+) -> ValidatedNodeProvenance {
     provenance
         .get(&(kind, name.to_string()))
-        .copied()
-        .unwrap_or(NodeProvenanceSpec::Unverified)
+        .cloned()
+        .unwrap_or_else(|| match executable_citation_path {
+            Some(path) => ValidatedNodeProvenance {
+                provenance: NodeProvenanceSpec::ProvisionBacked,
+                corpus_citation_path: Some(path.to_string()),
+            },
+            None => ValidatedNodeProvenance {
+                provenance: NodeProvenanceSpec::Unverified,
+                corpus_citation_path: None,
+            },
+        })
 }
 
 fn collect_reachable_derived(

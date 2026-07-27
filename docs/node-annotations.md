@@ -25,12 +25,19 @@ input_states:
   observed_income: exogenous
   upstream_program_amount: policy_derived
   not_yet_encoded_intermediate: pending
+relation_states:
+  household_membership: exogenous
+  upstream_case_links: policy_derived
+  not_yet_encoded_links: pending
 ```
 
 `outputs` is the exact set of derived roots for structural reachability.
 `input_states` must classify every runtime input slot exactly once whenever
-`outputs` is present. Unknown outputs, duplicate outputs, missing input
-classifications, and classifications for unknown slots are compile errors.
+`outputs` is present. `relation_states` does the same for runtime-supplied data
+relations; the compiler never assumes that relation data is exogenous. Unknown
+outputs, duplicate outputs, duplicate executable nodes, missing
+classifications, and classifications for unknown slots or relations are
+compile errors.
 
 Legacy RuleSpec without this contract still compiles and legacy v2 artifacts
 still load, but they do not gain a node catalog. Absence means “not declared,”
@@ -56,10 +63,13 @@ Each entry carries:
 - `input_kind: exogenous | policy_derived` only for `input` state;
 - `reachable`, computed by a backwards structural traversal from `outputs`;
 - `provenance: provision_backed | synthesized | unverified`.
+- `corpus_citation_path` when and only when provenance is
+  `provision_backed`.
 
 Parameters are `derived` state because the runtime computes their value from a
 compiled, effective-dated table rather than accepting them as runtime facts.
-Data relations are exogenous `input` state; derived relations are `derived`.
+Data relations take their state and input kind from `relation_states`; derived
+relations are `derived`.
 `unverified` is necessary for legacy/uncited atomic declarations and implicit
 input slots: neither “provision-backed” nor “synthesized” is truthful for them.
 
@@ -82,4 +92,13 @@ Canonical IDs, citation fields after lowering, source prose, transformation
 names, and `_core` naming are never used to infer backing. Metadata propagation
 is restricted to the declaration's executable kind so an imported parameter
 cannot stamp its ID, citation, or backing onto a same-named synthesized derived
-rule.
+rule. A computed entity-free parameter is the supported exception to the
+declared-kind mapping: because formula lowering makes it an actual derived
+Scalar node, identity and provenance follow that actual node only when no exact
+derived declaration owns the same name.
+
+Every `provision_backed` entry is grounded by a canonical
+`corpus_citation_path`. For parameter and derived nodes that path must equal the
+path already carried by the executable node; relations retain the path in the
+provenance sidecar because `RelationSpec` has no citation field. A raw
+`ProgramSpec` therefore cannot assert provision backing with a bare enum.

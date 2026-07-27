@@ -91,6 +91,30 @@ rules:
         formula: observed
 "#;
 
+const CITED_COMPUTED_PARAMETER: &str = r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statutes/26/32/j
+rules:
+  - name: computed_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: 2026-01-01
+        formula: 1 / 2
+"#;
+
+const COMPUTED_PARAMETER_COMPOSITION: &str = r#"
+format: rulespec/v1
+module:
+  kind: composition
+imports:
+  - us:policies/base
+outputs:
+  - computed_rate
+"#;
+
 fn fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let temp = std::env::temp_dir()
         .canonicalize()
@@ -270,6 +294,53 @@ fn composed_compile_does_not_transfer_identity_across_same_named_rule_kinds() {
         NodeProvenanceSpec::Synthesized,
         "same-name cross-kind matching must not transfer provision identity"
     );
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn computed_parameter_provenance_follows_its_actual_lowered_node_kind() {
+    let (temp, root, atomic, composed) = fixture("computed-parameter-provenance");
+    std::fs::write(&atomic, CITED_COMPUTED_PARAMETER).expect("computed atomic module");
+    std::fs::write(&composed, COMPUTED_PARAMETER_COMPOSITION)
+        .expect("computed parameter composition");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical root");
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(&composed, &roots)
+        .expect("computed parameter composition compiles");
+
+    assert!(
+        artifact.program.parameters.is_empty(),
+        "computed entity-free parameters lower to derived Scalar nodes"
+    );
+    let derived = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "computed_rate")
+        .expect("computed parameter's actual node");
+    assert_eq!(
+        derived.id.as_deref(),
+        Some("us:policies/base#computed_rate")
+    );
+    assert_eq!(
+        derived.corpus_citation_path.as_deref(),
+        Some("us/statutes/26/32/j")
+    );
+
+    let node = artifact
+        .metadata
+        .nodes
+        .as_deref()
+        .expect("typed node metadata")
+        .iter()
+        .find(|node| node.kind == NodeKindSpec::Derived && node.name == "computed_rate")
+        .expect("computed derived annotation");
+    assert_eq!(node.provenance, NodeProvenanceSpec::ProvisionBacked);
+    assert_eq!(
+        node.corpus_citation_path.as_deref(),
+        Some("us/statutes/26/32/j")
+    );
+    assert!(node.reachable);
 
     std::fs::remove_dir_all(temp).ok();
 }

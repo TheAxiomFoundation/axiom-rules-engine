@@ -188,6 +188,17 @@
         "null"
       ]
     },
+    "relation_states": {
+      "additionalProperties": {
+        "enum": [
+          "exogenous",
+          "policy_derived",
+          "pending"
+        ],
+        "type": "string"
+      },
+      "type": "object"
+    },
     "relations": {
       "items": {
         "type": "object"

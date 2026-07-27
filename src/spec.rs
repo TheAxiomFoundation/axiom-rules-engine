@@ -88,6 +88,11 @@ pub struct ProgramSpec {
     /// `outputs` is present. The compiler rejects missing and unknown entries.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_states: BTreeMap<String, InputStateSpec>,
+    /// Complete classification of runtime-supplied data relations whenever
+    /// `outputs` is present. Kept separate from scalar input slots so a shared
+    /// name cannot alias two different executable node kinds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relation_states: BTreeMap<String, InputStateSpec>,
     /// Declaration-origin sidecar retained through RuleSpec lowering. Kind is
     /// part of the key so cross-kind name collisions cannot transfer legal
     /// provenance.
@@ -139,6 +144,10 @@ pub struct NodeProvenanceEntrySpec {
     pub kind: NodeKindSpec,
     pub name: String,
     pub provenance: NodeProvenanceSpec,
+    /// Exact provision join key grounding a `provision_backed` claim.
+    /// Forbidden for synthesized and unverified declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_citation_path: Option<String>,
 }
 
 impl ProgramSpec {
