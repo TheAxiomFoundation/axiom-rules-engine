@@ -86,6 +86,8 @@ struct NodeMetadataHandle {
     reachable: bool,
     #[pyo3(get)]
     provenance: String,
+    #[pyo3(get)]
+    corpus_citation_path: Option<String>,
 }
 
 impl From<&CompiledNodeMetadata> for NodeMetadataHandle {
@@ -100,6 +102,7 @@ impl From<&CompiledNodeMetadata> for NodeMetadataHandle {
                 .map(|kind| input_kind_name(kind).to_string()),
             reachable: metadata.reachable,
             provenance: node_provenance_name(metadata.provenance).to_string(),
+            corpus_citation_path: metadata.corpus_citation_path.clone(),
         }
     }
 }

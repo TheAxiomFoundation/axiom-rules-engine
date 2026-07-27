@@ -10,6 +10,7 @@ from .loader import load_composed_program, load_program
 from .models import (
     CompiledExecutionRequest,
     CompiledInputCatalogEntry,
+    CompiledNodeMetadata,
     CompiledProgram,
     CompiledProgramMetadata,
     Dataset,
@@ -20,6 +21,7 @@ from .models import (
     ExecutionResponse,
     FastPathMetadata,
     Interval,
+    NodeProvenanceEntry,
     Program,
     QueryResult,
 )
@@ -27,6 +29,7 @@ from .models import (
 __all__ = [
     "CompiledExecutionRequest",
     "CompiledInputCatalogEntry",
+    "CompiledNodeMetadata",
     "CompiledDenseProgram",
     "CompiledProgram",
     "CompiledProgramMetadata",
@@ -42,6 +45,7 @@ __all__ = [
     "FastPathMetadata",
     "Interval",
     "NodeMetadata",
+    "NodeProvenanceEntry",
     "Program",
     "QueryResult",
     "AxiomRulesEngine",

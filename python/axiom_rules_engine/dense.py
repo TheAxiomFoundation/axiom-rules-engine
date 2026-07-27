@@ -62,6 +62,7 @@ class NodeMetadata:
     input_kind: Literal["exogenous", "policy_derived"] | None
     reachable: bool
     provenance: Literal["provision_backed", "synthesized", "unverified"]
+    corpus_citation_path: str | None
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class CompiledDenseProgram:
                 input_kind=item.input_kind,
                 reachable=item.reachable,
                 provenance=item.provenance,
+                corpus_citation_path=item.corpus_citation_path,
             )
             for item in self._native.node_metadata()
         ]

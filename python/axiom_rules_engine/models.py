@@ -1,12 +1,72 @@
 from __future__ import annotations
 
+import re
 from datetime import date
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ExecutionMode = Literal["explain", "fast"]
+InputState = Literal["exogenous", "policy_derived", "pending"]
+NodeKind = Literal[
+    "input",
+    "parameter",
+    "derived",
+    "data_relation",
+    "derived_relation",
+]
+NodeProvenance = Literal["provision_backed", "synthesized", "unverified"]
+_CORPUS_JURISDICTION = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]+)*")
+_CORPUS_DOCUMENT_CLASS = re.compile(r"[a-z][a-z0-9-]*")
+_CORPUS_PATH_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .:–-]*")
+
+
+def _is_canonical_corpus_citation_path(value: str) -> bool:
+    segments = value.split("/")
+    return (
+        value == value.strip()
+        and len(segments) >= 3
+        and _CORPUS_JURISDICTION.fullmatch(segments[0]) is not None
+        and _CORPUS_DOCUMENT_CLASS.fullmatch(segments[1]) is not None
+        and all(
+            segment == segment.strip()
+            and _CORPUS_PATH_SEGMENT.fullmatch(segment) is not None
+            for segment in segments[2:]
+        )
+    )
+
+
+def _validate_provenance_citation(
+    provenance: NodeProvenance,
+    corpus_citation_path: str | None,
+) -> None:
+    if provenance == "provision_backed" and corpus_citation_path is None:
+        raise ValueError("provision_backed requires corpus_citation_path")
+    if provenance != "provision_backed" and corpus_citation_path is not None:
+        raise ValueError("only provision_backed may carry corpus_citation_path")
+    if (
+        corpus_citation_path is not None
+        and not _is_canonical_corpus_citation_path(corpus_citation_path)
+    ):
+        raise ValueError(
+            f"non-canonical corpus_citation_path {corpus_citation_path!r}"
+        )
+
+
+class NodeProvenanceEntry(BaseModel):
+    kind: NodeKind
+    name: str
+    provenance: NodeProvenance
+    corpus_citation_path: str | None = None
+
+    @model_validator(mode="after")
+    def validate_citation_grounding(self) -> Self:
+        _validate_provenance_citation(
+            self.provenance,
+            self.corpus_citation_path,
+        )
+        return self
 
 
 class Program(BaseModel):
@@ -16,6 +76,21 @@ class Program(BaseModel):
     relations: list[dict[str, Any]] = Field(default_factory=list)
     parameters: list[dict[str, Any]] = Field(default_factory=list)
     derived: list[dict[str, Any]] = Field(default_factory=list)
+    outputs: list[str] | None = None
+    input_states: dict[str, InputState] = Field(default_factory=dict)
+    relation_states: dict[str, InputState] = Field(default_factory=dict)
+    node_provenance: list[NodeProvenanceEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_annotation_roots(self) -> Self:
+        if self.outputs is None:
+            if self.input_states:
+                raise ValueError("input_states requires typed outputs")
+            if self.relation_states:
+                raise ValueError("relation_states requires typed outputs")
+        elif not self.outputs:
+            raise ValueError("compiled node annotations require a declared output")
+        return self
 
 
 class Interval(BaseModel):
@@ -88,17 +163,37 @@ class CompiledInputCatalogEntry(BaseModel):
 class CompiledNodeMetadata(BaseModel):
     id: str
     name: str
-    kind: Literal[
-        "input",
-        "parameter",
-        "derived",
-        "data_relation",
-        "derived_relation",
-    ]
+    kind: NodeKind
     state: Literal["input", "derived", "pending"]
     input_kind: Literal["exogenous", "policy_derived"] | None = None
     reachable: bool
-    provenance: Literal["provision_backed", "synthesized", "unverified"]
+    provenance: NodeProvenance
+    corpus_citation_path: str | None = None
+
+    @model_validator(mode="after")
+    def validate_node_contract(self) -> Self:
+        allowed_states = {
+            "input": {"input", "pending"},
+            "data_relation": {"input", "pending"},
+            "parameter": {"derived"},
+            "derived": {"derived"},
+            "derived_relation": {"derived"},
+        }
+        if self.state not in allowed_states[self.kind]:
+            raise ValueError(
+                f"{self.kind} node cannot have state {self.state}"
+            )
+        if (self.state == "input") != (self.input_kind is not None):
+            raise ValueError(
+                "input_kind is required exactly when state is input"
+            )
+        if self.kind == "input" and self.provenance != "unverified":
+            raise ValueError("implicit input nodes must have unverified provenance")
+        _validate_provenance_citation(
+            self.provenance,
+            self.corpus_citation_path,
+        )
+        return self
 
 
 class CompiledProgramMetadata(BaseModel):
