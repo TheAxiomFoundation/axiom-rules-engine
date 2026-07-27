@@ -264,8 +264,10 @@ the stale comments, and pinned every case as a test.
 
 ## State
 
-- Issue #115 complete and independently reviewed; ready to push/open a draft
-  PR. Issue #117 design is next.
+- Issue #115 is complete, independently reviewed, and fully validated.
+  Publication is blocked in this environment: the Git remote cannot resolve
+  `github.com`, and the available GitHub write connector cancelled both branch
+  creation attempts. No draft PR was opened.
 - Branch: `codex/node-state-annotations-115`.
 - Base: cached `origin/main` at `68d6522`; network DNS blocked a refresh.
 - Isolation: implementation is in a clean temporary worktree because the requested
@@ -317,9 +319,14 @@ the stale comments, and pinned every case as a test.
   WASM check all pass.
 - Final independent re-review found no remaining high/medium issue in collision
   binding or fail-closed backing behavior.
+- A shell push was attempted again after validation and failed before
+  authentication with `Could not resolve host: github.com`. The GitHub write
+  fallback was also attempted and cancelled without changing remote state.
 
 ## Next
 
-- Push issue #115 and open a draft PR if remote access is available.
-- After #115 is complete, write and post the issue #117 design note before any
-  implementation.
+- Push `codex/node-state-annotations-115` and open a draft PR referencing #115
+  when a writable GitHub path is available.
+- Issue #117 design work continues on the separate
+  `codex/delegation-design-117` branch; do not implement before its issue note
+  is posted and agreed.
