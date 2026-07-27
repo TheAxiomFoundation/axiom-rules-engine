@@ -577,10 +577,7 @@ rules:
             assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
-            outputs: vec![
-                "snap_unit_size".to_string(),
-                "snap_unit_income".to_string(),
-            ],
+            outputs: vec!["snap_unit_size".to_string(), "snap_unit_income".to_string()],
         }],
     })
     .expect("request succeeds");
@@ -724,10 +721,7 @@ rules:
             assessment_date: None,
             entity_id: "household-1".to_string(),
             period,
-            outputs: vec![
-                "snap_unit_size".to_string(),
-                "snap_unit_income".to_string(),
-            ],
+            outputs: vec!["snap_unit_size".to_string(), "snap_unit_income".to_string()],
         }],
     })
     .expect("filtered entity request succeeds");

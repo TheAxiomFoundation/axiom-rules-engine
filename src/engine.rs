@@ -474,7 +474,12 @@ impl<'a> Engine<'a> {
             JudgmentExpr::And(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+                    match self.eval_judgment_expr_inner(
+                        item,
+                        entity_id,
+                        period,
+                        relation_context,
+                    )? {
                         JudgmentOutcome::Holds => {}
                         JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -489,7 +494,12 @@ impl<'a> Engine<'a> {
             JudgmentExpr::Or(items) => {
                 let mut saw_undetermined = false;
                 for item in items {
-                    match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+                    match self.eval_judgment_expr_inner(
+                        item,
+                        entity_id,
+                        period,
+                        relation_context,
+                    )? {
                         JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
                         JudgmentOutcome::NotHolds => {}
                         JudgmentOutcome::Undetermined => saw_undetermined = true,
@@ -501,13 +511,13 @@ impl<'a> Engine<'a> {
                     JudgmentOutcome::NotHolds
                 })
             }
-            JudgmentExpr::Not(item) => {
-                Ok(match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+            JudgmentExpr::Not(item) => Ok(
+                match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
                     JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
                     JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
                     JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                })
-            }
+                },
+            ),
         }
     }
 
@@ -630,8 +640,14 @@ impl<'a> Engine<'a> {
                 let context = RelationEvalContext {
                     current_id: entity_id,
                     related_id: &related_id,
-                    current_entity: derivation.slot_entities.get(derivation.current_slot).map(String::as_str),
-                    related_entity: derivation.slot_entities.get(derivation.related_slot).map(String::as_str),
+                    current_entity: derivation
+                        .slot_entities
+                        .get(derivation.current_slot)
+                        .map(String::as_str),
+                    related_entity: derivation
+                        .slot_entities
+                        .get(derivation.related_slot)
+                        .map(String::as_str),
                 };
                 if self
                     .eval_judgment_expr_inner(

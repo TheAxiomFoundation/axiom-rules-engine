@@ -215,12 +215,11 @@ fn in_memory_module_source_compiles_and_executes_without_filesystem() {
             )
     }));
 
-    let artifact =
-        CompiledProgramArtifact::from_rulespec_with_source(
-            "us-co:policies/cdhs/snap/fy-2026-benefit",
-            &source,
-        )
-        .expect("in-memory modules compile");
+    let artifact = CompiledProgramArtifact::from_rulespec_with_source(
+        "us-co:policies/cdhs/snap/fy-2026-benefit",
+        &source,
+    )
+    .expect("in-memory modules compile");
     let output_id =
         "us-co:policies/cdhs/snap/fy-2026-benefit#snap_regular_month_allotment".to_string();
     assert!(
@@ -277,7 +276,9 @@ fn in_memory_module_source_compiles_and_executes_without_filesystem() {
     })
     .expect("in-memory program executes");
 
-    let OutputValue::Scalar { name, id, value, .. } = response.results[0]
+    let OutputValue::Scalar {
+        name, id, value, ..
+    } = response.results[0]
         .outputs
         .get(&output_id)
         .expect("snap_regular_month_allotment output")
@@ -567,12 +568,17 @@ rules:
     assert!(program.parameters.iter().any(|parameter| {
         parameter.id.as_deref() == Some("us:statutes/7/2014/base#base_amount")
     }));
-    assert!(program.parameters.iter().any(|parameter| {
-        parameter.id.as_deref() == Some("us:statutes/7/2015/peer#peer_rate")
-    }));
-    assert!(program.derived.iter().any(|derived| {
-        derived.id.as_deref() == Some("us:statutes/7/2015/e#total_amount")
-    }));
+    assert!(
+        program.parameters.iter().any(|parameter| {
+            parameter.id.as_deref() == Some("us:statutes/7/2015/peer#peer_rate")
+        })
+    );
+    assert!(
+        program
+            .derived
+            .iter()
+            .any(|derived| { derived.id.as_deref() == Some("us:statutes/7/2015/e#total_amount") })
+    );
 }
 
 #[test]
@@ -699,7 +705,10 @@ rules:
 
     let error = load_rulespec_with_source("us:policies/a", &source)
         .expect_err("cyclic imports are rejected");
-    assert!(matches!(error, RuleSpecError::ImportCycle { .. }), "{error}");
+    assert!(
+        matches!(error, RuleSpecError::ImportCycle { .. }),
+        "{error}"
+    );
 }
 
 #[test]
@@ -729,7 +738,10 @@ rules:
 
     let error = load_rulespec_with_source("us:policies/never-written", &source)
         .expect_err("missing root module errors");
-    assert!(matches!(error, RuleSpecError::ModuleNotFound { .. }), "{error}");
+    assert!(
+        matches!(error, RuleSpecError::ModuleNotFound { .. }),
+        "{error}"
+    );
 }
 
 /// `FsModuleSource` + the pure loader must agree with the path-based loader

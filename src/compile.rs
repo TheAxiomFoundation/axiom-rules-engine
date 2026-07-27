@@ -146,12 +146,13 @@ impl CompiledProgramArtifact {
         root_target: &str,
         source: &dyn crate::source::ModuleSource,
     ) -> Result<Self, CompileError> {
-        let program = crate::rulespec::load_rulespec_with_source(root_target, source).map_err(
-            |error| CompileError::RuleSpec {
-                path: root_target.to_string(),
-                error,
-            },
-        )?;
+        let program =
+            crate::rulespec::load_rulespec_with_source(root_target, source).map_err(|error| {
+                CompileError::RuleSpec {
+                    path: root_target.to_string(),
+                    error,
+                }
+            })?;
         Self::compile(program)
     }
 

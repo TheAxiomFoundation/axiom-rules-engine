@@ -556,7 +556,9 @@ fn dense_sum_related_over_derived_matches_explain_mode() {
                 entity: "Person".to_string(),
                 entity_id: (*child_id).to_string(),
                 interval: interval.clone(),
-                value: ScalarValueSpec::Bool { value: *is_eligible },
+                value: ScalarValueSpec::Bool {
+                    value: *is_eligible,
+                },
             });
             dataset.relations.push(RelationRecordSpec {
                 name: "member_of_family".to_string(),
@@ -643,8 +645,10 @@ fn dense_sum_related_over_derived_matches_explain_mode() {
 
     // The award values are deterministic, so also pin them down exactly
     // rather than relying solely on explain-mode agreement.
-    let DenseOutputValue::Scalar(DenseColumn::Decimal(awards)) =
-        dense_result.outputs.get("family_weekly_award").expect("dense award")
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(awards)) = dense_result
+        .outputs
+        .get("family_weekly_award")
+        .expect("dense award")
     else {
         panic!("expected decimal award column");
     };
@@ -728,10 +732,7 @@ fn dense_filtered_entity_scope_matches_explain_mode() {
                 assessment_date: None,
                 entity_id: entity_id.to_string(),
                 period: period.clone(),
-                outputs: vec![
-                    "snap_unit_size".to_string(),
-                    "snap_unit_income".to_string(),
-                ],
+                outputs: vec!["snap_unit_size".to_string(), "snap_unit_income".to_string()],
             })
             .collect(),
     })
@@ -1016,10 +1017,7 @@ fn dense_filtered_entities_can_compose_source_relations() {
                                 "has_ssn".to_string(),
                                 DenseColumn::Bool(vec![true, true, false]),
                             ),
-                            (
-                                "age".to_string(),
-                                DenseColumn::Integer(vec![30, 12, 40]),
-                            ),
+                            ("age".to_string(), DenseColumn::Integer(vec![30, 12, 40])),
                         ]),
                     },
                 )]),
@@ -3356,8 +3354,10 @@ fn dense_broadcasts_scalar_entity_formula_parameters() {
         )
         .expect("dense execution succeeds");
 
-    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) =
-        result.outputs.get("tapered_amount").expect("output present")
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) = result
+        .outputs
+        .get("tapered_amount")
+        .expect("output present")
     else {
         panic!("expected decimal output");
     };
@@ -3398,8 +3398,10 @@ rules:
         )
         .expect("dense execution succeeds");
 
-    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) =
-        result.outputs.get("taper_fraction").expect("output present")
+    let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) = result
+        .outputs
+        .get("taper_fraction")
+        .expect("output present")
     else {
         panic!("expected decimal output");
     };
