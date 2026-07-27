@@ -5,9 +5,13 @@ use std::process::{Command, Output};
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::rulespec::{CanonicalRuleSpecRoots, RuleSpecError};
+use axiom_rules_engine::spec::{NodeKindSpec, NodeProvenanceSpec};
 
 const ATOMIC_MODULE: &str = r#"
 format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statutes/26/32/j
 rules:
   - name: base_amount
     kind: parameter
@@ -34,6 +38,10 @@ module:
   summary: Deterministic test composition.
 imports:
   - us:policies/base
+outputs:
+  - adjusted_amount
+input_states:
+  amount: exogenous
 rules:
   - name: adjusted_amount
     kind: derived
@@ -68,6 +76,10 @@ module:
     corpus_citation_path: us/statutes/7/2014/e
 imports:
   - us:policies/base
+outputs:
+  - collision
+input_states:
+  observed: exogenous
 rules:
   - name: collision
     kind: derived
@@ -158,6 +170,35 @@ fn composed_compile_resolves_atomic_imports_and_keeps_root_rules_originless() {
         .find(|derived| derived.name == "adjusted_amount")
         .expect("synthesized output");
     assert_eq!(adjusted.id, None, "composed root rules must be originless");
+    let nodes = artifact
+        .metadata
+        .nodes
+        .as_deref()
+        .expect("typed composition contract emits node annotations");
+    let provenance = |kind, name: &str| {
+        nodes
+            .iter()
+            .find(|node| node.kind == kind && node.name == name)
+            .unwrap_or_else(|| panic!("{kind:?} node `{name}`"))
+    };
+    assert_eq!(
+        provenance(NodeKindSpec::Parameter, "base_amount").provenance,
+        NodeProvenanceSpec::ProvisionBacked
+    );
+    assert!(provenance(NodeKindSpec::Parameter, "base_amount").reachable);
+    assert_eq!(
+        provenance(NodeKindSpec::Derived, "atomic_adjusted_amount").provenance,
+        NodeProvenanceSpec::ProvisionBacked
+    );
+    assert!(
+        !provenance(NodeKindSpec::Derived, "atomic_adjusted_amount").reachable,
+        "unused imported law remains visible but is not counted as reachable surface"
+    );
+    assert_eq!(
+        provenance(NodeKindSpec::Derived, "adjusted_amount").provenance,
+        NodeProvenanceSpec::Synthesized
+    );
+    assert!(provenance(NodeKindSpec::Derived, "adjusted_amount").reachable);
 
     let output = temp.join("composition.compiled.json");
     let cli = compile_command("compile-composed", &composed, &root, &output)
@@ -206,6 +247,29 @@ fn composed_compile_does_not_transfer_identity_across_same_named_rule_kinds() {
         .expect("observed input");
     assert_eq!(observed.canonical_request_name, "observed");
     assert_eq!(observed.request_names, ["observed"]);
+
+    let nodes = artifact
+        .metadata
+        .nodes
+        .as_deref()
+        .expect("collision fixture has a complete annotation contract");
+    let parameter_node = nodes
+        .iter()
+        .find(|node| node.kind == NodeKindSpec::Parameter && node.name == "collision")
+        .expect("parameter annotation");
+    assert_eq!(
+        parameter_node.provenance,
+        NodeProvenanceSpec::ProvisionBacked
+    );
+    let derived_node = nodes
+        .iter()
+        .find(|node| node.kind == NodeKindSpec::Derived && node.name == "collision")
+        .expect("derived annotation");
+    assert_eq!(
+        derived_node.provenance,
+        NodeProvenanceSpec::Synthesized,
+        "same-name cross-kind matching must not transfer provision identity"
+    );
 
     std::fs::remove_dir_all(temp).ok();
 }
@@ -270,7 +334,7 @@ fn composed_compile_rejects_program_specs_atomic_sources_and_relative_dependenci
         (
             "atomic-source.yaml",
             ATOMIC_MODULE,
-            "module must be a mapping",
+            "module.kind must be exactly `composition`",
         ),
         (
             "wrong-kind.yaml",

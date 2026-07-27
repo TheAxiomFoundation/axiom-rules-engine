@@ -264,7 +264,8 @@ the stale comments, and pinned every case as a test.
 
 ## State
 
-- Active: issue #115 implementation; the additive contract is specified.
+- Active: issue #115 validation; the Rust compiler contract, RuleSpec bridge,
+  schemas, and focused tests are implemented.
 - Branch: `codex/node-state-annotations-115`.
 - Base: cached `origin/main` at `68d6522`; network DNS blocked a refresh.
 - Isolation: implementation is in a clean temporary worktree because the requested
@@ -281,12 +282,22 @@ the stale comments, and pinned every case as a test.
   transformation identity; documented the limitation instead of inferring it.
 - Specified the fail-closed authoring and compiled contracts in
   `docs/node-annotations.md`.
+- Fixed cross-kind identity propagation and added a regression proving that a
+  cited imported parameter cannot provision-stamp a same-named synthesized
+  derived rule.
+- Added typed RuleSpec/ProgramSpec `outputs` and `input_states`, exact
+  compile-time contract gates, deterministic per-node state/input-kind/
+  reachability/provenance metadata, and structural graph traversal.
+- Preserved legacy v2 loading without inventing annotations and made present
+  node metadata part of the artifact recomputation integrity check.
+- Updated current schemas plus Rust and composed-loader coverage; preserved the
+  archived v1 artifact schema byte-for-byte.
+- Added typed Python model round-tripping and native-extension node metadata.
 
 ## Next
 
-- Implement collision-safe origin propagation and the optional node catalog.
-- Add focused rejection, reachability, collision, compatibility, and schema tests.
-- Run the full available validation suite, commit each coherent step, and open a
-  draft PR if remote access is available.
+- Run schema, full Rust, Python, native-extension, and WASM validation; address
+  any failures without changing protected project/toolchain surfaces.
+- Push issue #115 and open a draft PR if remote access is available.
 - After #115 is complete, write and post the issue #117 design note before any
   implementation.

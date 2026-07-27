@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, InputStateSpec, JudgmentExprSpec, NodeKindSpec,
+    NodeProvenanceEntrySpec, NodeProvenanceSpec, ParameterVersionSpec, ProgramSpec,
+    RelatedValueRefSpec, ScalarExprSpec,
 };
 
 #[derive(Debug, Error)]
@@ -49,6 +50,22 @@ pub enum CompileError {
     },
     #[error("cyclic relation dependency detected involving: {cycle}")]
     CyclicRelationDependency { cycle: String },
+    #[error("compiled node annotations require at least one declared output")]
+    EmptyDeclaredOutputs,
+    #[error("input_states requires typed outputs; reachability cannot otherwise be computed")]
+    InputStatesWithoutOutputs,
+    #[error("declared output `{output}` does not resolve to a derived rule")]
+    UnknownDeclaredOutput { output: String },
+    #[error("declared output `{output}` resolves to derived rule `{resolved}` more than once")]
+    DuplicateDeclaredOutput { output: String, resolved: String },
+    #[error("compiled node annotations are missing input_states for: {slots}")]
+    MissingInputStates { slots: String },
+    #[error("compiled node annotations declare input_states for unknown slots: {slots}")]
+    UnknownInputStates { slots: String },
+    #[error("duplicate node_provenance entry for {kind:?} node `{name}`")]
+    DuplicateNodeProvenance { kind: NodeKindSpec, name: String },
+    #[error("node_provenance refers to unknown {kind:?} node `{name}`")]
+    UnknownNodeProvenance { kind: NodeKindSpec, name: String },
     #[cfg(feature = "fs")]
     #[error("failed to write compiled artefact `{path}`: {error}")]
     WriteArtifactFile { path: String, error: std::io::Error },
@@ -166,6 +183,11 @@ pub struct CompiledProgramMetadata {
     /// explicit `[]` remains a mismatch rather than a way to skip the check.
     #[serde(default)]
     pub input_catalog: Vec<CompiledInputCatalogEntry>,
+    /// Complete node metadata when the source carries typed outputs and a
+    /// complete input-state declaration. `None` is the legacy, unknown state;
+    /// consumers must not interpret absence as successful certification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<CompiledNodeMetadata>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +196,38 @@ pub struct CompiledInputCatalogEntry {
     pub slot: String,
     pub canonical_request_name: String,
     pub request_names: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CompiledNodeState {
+    Input,
+    Derived,
+    Pending,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CompiledInputKind {
+    Exogenous,
+    PolicyDerived,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CompiledNodeMetadata {
+    /// Stable public identifier where one exists, otherwise the exact local
+    /// runtime name. `kind` remains part of node identity.
+    pub id: String,
+    pub name: String,
+    pub kind: NodeKindSpec,
+    pub state: CompiledNodeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_kind: Option<CompiledInputKind>,
+    pub reachable: bool,
+    pub provenance: NodeProvenanceSpec,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -716,10 +770,12 @@ fn parameter_version_interval(version: &ParameterVersionSpec) -> String {
 }
 
 fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, CompileError> {
+    let input_catalog = compiled_input_catalog(program)?;
     Ok(CompiledProgramMetadata {
         evaluation_order: evaluation_order(program)?,
         fast_path: fast_path_metadata(program),
-        input_catalog: compiled_input_catalog(program)?,
+        nodes: compiled_node_metadata(program, &input_catalog)?,
+        input_catalog,
     })
 }
 
@@ -746,6 +802,402 @@ fn compiled_input_catalog(
             }
         })
         .collect())
+}
+
+fn compiled_node_metadata(
+    program: &ProgramSpec,
+    input_catalog: &[CompiledInputCatalogEntry],
+) -> Result<Option<Vec<CompiledNodeMetadata>>, CompileError> {
+    let Some(declared_outputs) = program.outputs.as_ref() else {
+        if !program.input_states.is_empty() {
+            return Err(CompileError::InputStatesWithoutOutputs);
+        }
+        return Ok(None);
+    };
+    let provenance = validated_node_provenance(program)?;
+    if declared_outputs.is_empty() {
+        return Err(CompileError::EmptyDeclaredOutputs);
+    }
+
+    let catalog_slots = input_catalog
+        .iter()
+        .map(|entry| entry.slot.clone())
+        .collect::<BTreeSet<_>>();
+    let declared_slots = program
+        .input_states
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing = catalog_slots
+        .difference(&declared_slots)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CompileError::MissingInputStates {
+            slots: missing.join(", "),
+        });
+    }
+    let unknown = declared_slots
+        .difference(&catalog_slots)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(CompileError::UnknownInputStates {
+            slots: unknown.join(", "),
+        });
+    }
+
+    let mut resolved_outputs = Vec::with_capacity(declared_outputs.len());
+    let mut seen_outputs = BTreeSet::new();
+    for output in declared_outputs {
+        let Some(derived) = program
+            .derived
+            .iter()
+            .find(|derived| derived.name == *output || derived.id.as_deref() == Some(output))
+        else {
+            return Err(CompileError::UnknownDeclaredOutput {
+                output: output.clone(),
+            });
+        };
+        if !seen_outputs.insert(derived.name.clone()) {
+            return Err(CompileError::DuplicateDeclaredOutput {
+                output: output.clone(),
+                resolved: derived.name.clone(),
+            });
+        }
+        resolved_outputs.push(derived.name.clone());
+    }
+
+    let mut reachable = BTreeSet::new();
+    for output in &resolved_outputs {
+        collect_reachable_derived(program, output, &mut reachable);
+    }
+
+    let mut nodes = Vec::new();
+    for entry in input_catalog {
+        let (state, input_kind) = match program
+            .input_states
+            .get(&entry.slot)
+            .expect("input-state coverage was checked above")
+        {
+            InputStateSpec::Exogenous => {
+                (CompiledNodeState::Input, Some(CompiledInputKind::Exogenous))
+            }
+            InputStateSpec::PolicyDerived => (
+                CompiledNodeState::Input,
+                Some(CompiledInputKind::PolicyDerived),
+            ),
+            InputStateSpec::Pending => (CompiledNodeState::Pending, None),
+        };
+        nodes.push(CompiledNodeMetadata {
+            id: entry.canonical_request_name.clone(),
+            name: entry.slot.clone(),
+            kind: NodeKindSpec::Input,
+            state,
+            input_kind,
+            reachable: reachable.contains(&(NodeKindSpec::Input, entry.slot.clone())),
+            // Input leaves are implicit expression slots, not declarations.
+            // Their legal backing cannot be inferred from an owning formula.
+            provenance: NodeProvenanceSpec::Unverified,
+        });
+    }
+    for parameter in &program.parameters {
+        nodes.push(CompiledNodeMetadata {
+            id: parameter
+                .id
+                .clone()
+                .unwrap_or_else(|| parameter.name.clone()),
+            name: parameter.name.clone(),
+            kind: NodeKindSpec::Parameter,
+            state: CompiledNodeState::Derived,
+            input_kind: None,
+            reachable: reachable.contains(&(NodeKindSpec::Parameter, parameter.name.clone())),
+            provenance: provenance_for(&provenance, NodeKindSpec::Parameter, &parameter.name),
+        });
+    }
+    for derived in &program.derived {
+        nodes.push(CompiledNodeMetadata {
+            id: derived.id.clone().unwrap_or_else(|| derived.name.clone()),
+            name: derived.name.clone(),
+            kind: NodeKindSpec::Derived,
+            state: CompiledNodeState::Derived,
+            input_kind: None,
+            reachable: reachable.contains(&(NodeKindSpec::Derived, derived.name.clone())),
+            provenance: provenance_for(&provenance, NodeKindSpec::Derived, &derived.name),
+        });
+    }
+    for relation in &program.relations {
+        let kind = if relation.derivation.is_some() {
+            NodeKindSpec::DerivedRelation
+        } else {
+            NodeKindSpec::DataRelation
+        };
+        nodes.push(CompiledNodeMetadata {
+            id: relation.name.clone(),
+            name: relation.name.clone(),
+            kind,
+            state: if relation.derivation.is_some() {
+                CompiledNodeState::Derived
+            } else {
+                CompiledNodeState::Input
+            },
+            input_kind: relation
+                .derivation
+                .is_none()
+                .then_some(CompiledInputKind::Exogenous),
+            reachable: reachable.contains(&(kind, relation.name.clone())),
+            provenance: provenance_for(&provenance, kind, &relation.name),
+        });
+    }
+    nodes.sort_by(|left, right| {
+        (left.kind, left.id.as_str(), left.name.as_str()).cmp(&(
+            right.kind,
+            right.id.as_str(),
+            right.name.as_str(),
+        ))
+    });
+    Ok(Some(nodes))
+}
+
+fn validated_node_provenance(
+    program: &ProgramSpec,
+) -> Result<BTreeMap<(NodeKindSpec, String), NodeProvenanceSpec>, CompileError> {
+    let mut actual = BTreeSet::new();
+    actual.extend(
+        program
+            .parameters
+            .iter()
+            .map(|parameter| (NodeKindSpec::Parameter, parameter.name.clone())),
+    );
+    actual.extend(
+        program
+            .derived
+            .iter()
+            .map(|derived| (NodeKindSpec::Derived, derived.name.clone())),
+    );
+    actual.extend(program.relations.iter().map(|relation| {
+        (
+            if relation.derivation.is_some() {
+                NodeKindSpec::DerivedRelation
+            } else {
+                NodeKindSpec::DataRelation
+            },
+            relation.name.clone(),
+        )
+    }));
+
+    let mut declared = BTreeMap::new();
+    for NodeProvenanceEntrySpec {
+        kind,
+        name,
+        provenance,
+    } in &program.node_provenance
+    {
+        let key = (*kind, name.clone());
+        if !actual.contains(&key) {
+            return Err(CompileError::UnknownNodeProvenance {
+                kind: *kind,
+                name: name.clone(),
+            });
+        }
+        if declared.insert(key, *provenance).is_some() {
+            return Err(CompileError::DuplicateNodeProvenance {
+                kind: *kind,
+                name: name.clone(),
+            });
+        }
+    }
+    Ok(declared)
+}
+
+fn provenance_for(
+    provenance: &BTreeMap<(NodeKindSpec, String), NodeProvenanceSpec>,
+    kind: NodeKindSpec,
+    name: &str,
+) -> NodeProvenanceSpec {
+    provenance
+        .get(&(kind, name.to_string()))
+        .copied()
+        .unwrap_or(NodeProvenanceSpec::Unverified)
+}
+
+fn collect_reachable_derived(
+    program: &ProgramSpec,
+    name: &str,
+    reachable: &mut BTreeSet<(NodeKindSpec, String)>,
+) {
+    if !reachable.insert((NodeKindSpec::Derived, name.to_string())) {
+        return;
+    }
+    let Some(derived) = program.derived.iter().find(|derived| derived.name == name) else {
+        return;
+    };
+    collect_reachable_semantics(program, &derived.semantics, reachable);
+    for version in &derived.versions {
+        collect_reachable_semantics(program, &version.semantics, reachable);
+    }
+}
+
+fn collect_reachable_relation(
+    program: &ProgramSpec,
+    name: &str,
+    reachable: &mut BTreeSet<(NodeKindSpec, String)>,
+) {
+    let Some(relation) = program
+        .relations
+        .iter()
+        .find(|relation| relation.name == name)
+    else {
+        return;
+    };
+    let kind = if relation.derivation.is_some() {
+        NodeKindSpec::DerivedRelation
+    } else {
+        NodeKindSpec::DataRelation
+    };
+    if !reachable.insert((kind, relation.name.clone())) {
+        return;
+    }
+    let Some(derivation) = relation.derivation.as_ref() else {
+        return;
+    };
+    collect_reachable_relation(program, &derivation.source_relation, reachable);
+    if let Some(member_relation) = derivation.member_relation.as_deref() {
+        collect_reachable_relation(program, member_relation, reachable);
+    }
+    collect_reachable_judgment(program, &derivation.predicate, reachable);
+}
+
+fn collect_reachable_semantics(
+    program: &ProgramSpec,
+    semantics: &DerivedSemanticsSpec,
+    reachable: &mut BTreeSet<(NodeKindSpec, String)>,
+) {
+    match semantics {
+        DerivedSemanticsSpec::Scalar { expr } => {
+            collect_reachable_scalar(program, expr, reachable);
+        }
+        DerivedSemanticsSpec::Judgment { expr } => {
+            collect_reachable_judgment(program, expr, reachable);
+        }
+    }
+}
+
+fn collect_reachable_scalar(
+    program: &ProgramSpec,
+    expr: &ScalarExprSpec,
+    reachable: &mut BTreeSet<(NodeKindSpec, String)>,
+) {
+    match expr {
+        ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::PeriodStart
+        | ScalarExprSpec::PeriodEnd => {}
+        ScalarExprSpec::Input { name } | ScalarExprSpec::InputOrElse { name, .. } => {
+            reachable.insert((NodeKindSpec::Input, name.clone()));
+        }
+        ScalarExprSpec::Derived { name } => {
+            collect_reachable_derived(program, name, reachable);
+        }
+        ScalarExprSpec::ParameterLookup { parameter, index } => {
+            reachable.insert((NodeKindSpec::Parameter, parameter.clone()));
+            collect_reachable_scalar(program, index, reachable);
+        }
+        ScalarExprSpec::Add { items }
+        | ScalarExprSpec::Max { items }
+        | ScalarExprSpec::Min { items } => {
+            for item in items {
+                collect_reachable_scalar(program, item, reachable);
+            }
+        }
+        ScalarExprSpec::Sub { left, right }
+        | ScalarExprSpec::Mul { left, right }
+        | ScalarExprSpec::Div { left, right } => {
+            collect_reachable_scalar(program, left, reachable);
+            collect_reachable_scalar(program, right, reachable);
+        }
+        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
+            collect_reachable_scalar(program, value, reachable);
+        }
+        ScalarExprSpec::DateAddDays { date, days } => {
+            collect_reachable_scalar(program, date, reachable);
+            collect_reachable_scalar(program, days, reachable);
+        }
+        ScalarExprSpec::DaysBetween { from, to } => {
+            collect_reachable_scalar(program, from, reachable);
+            collect_reachable_scalar(program, to, reachable);
+        }
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            collect_reachable_relation(program, relation, reachable);
+            if let Some(predicate) = where_clause {
+                collect_reachable_judgment(program, predicate, reachable);
+            }
+        }
+        ScalarExprSpec::SumRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        } => {
+            collect_reachable_relation(program, relation, reachable);
+            match value {
+                RelatedValueRefSpec::Input { name } => {
+                    reachable.insert((NodeKindSpec::Input, name.clone()));
+                }
+                RelatedValueRefSpec::Derived { name } => {
+                    collect_reachable_derived(program, name, reachable);
+                }
+            }
+            if let Some(predicate) = where_clause {
+                collect_reachable_judgment(program, predicate, reachable);
+            }
+        }
+        ScalarExprSpec::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_reachable_judgment(program, condition, reachable);
+            collect_reachable_scalar(program, then_expr, reachable);
+            collect_reachable_scalar(program, else_expr, reachable);
+        }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            collect_reachable_scalar(program, value, reachable);
+            if let Some(n) = n {
+                collect_reachable_scalar(program, n, reachable);
+            }
+        }
+    }
+}
+
+fn collect_reachable_judgment(
+    program: &ProgramSpec,
+    expr: &JudgmentExprSpec,
+    reachable: &mut BTreeSet<(NodeKindSpec, String)>,
+) {
+    match expr {
+        JudgmentExprSpec::Comparison { left, right, .. } => {
+            collect_reachable_scalar(program, left, reachable);
+            collect_reachable_scalar(program, right, reachable);
+        }
+        JudgmentExprSpec::Derived { name } => {
+            collect_reachable_derived(program, name, reachable);
+        }
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            collect_reachable_relation(program, relation, reachable);
+        }
+        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+            for item in items {
+                collect_reachable_judgment(program, item, reachable);
+            }
+        }
+        JudgmentExprSpec::Not { item } => {
+            collect_reachable_judgment(program, item, reachable);
+        }
+    }
 }
 
 fn validate_raw_artifact_contract(

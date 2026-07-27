@@ -487,6 +487,17 @@ pub fn rulespec_module_schema() -> Value {
             })),
             "module": nullable_object(module_metadata_schema()),
             "units": nullable_array(unit_spec_schema()),
+            "outputs": nullable_array(json!({
+                "type": "string",
+                "minLength": 1
+            })),
+            "input_states": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string",
+                    "enum": ["exogenous", "policy_derived", "pending"]
+                }
+            },
             // Top-level `relations:` deserializes but is rejected at lowering
             // (`TopLevelRelationsUnsupported`). It is included so that files
             // which *deserialize* still validate; consumers that lower will

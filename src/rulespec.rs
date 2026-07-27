@@ -12,9 +12,10 @@ use thiserror::Error;
 use crate::source::ModuleSource;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec,
-    ScalarValueSpec, UnitSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, InputStateSpec, JudgmentExprSpec, NodeKindSpec,
+    NodeProvenanceEntrySpec, NodeProvenanceSpec, ParameterVersionSpec, ProgramSpec,
+    RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    UnitSpec,
 };
 
 /// The only content roots admitted directly below a jurisdiction directory.
@@ -371,6 +372,14 @@ pub struct RulesDocument {
     pub relations: Vec<RelationSpec>,
     #[serde(default)]
     pub rules: Vec<RuleDefinition>,
+    /// Typed program outputs used as the roots of compiled reachability.
+    #[serde(default)]
+    pub outputs: Option<Vec<String>>,
+    /// Complete classification of runtime input slots for an annotated
+    /// program. Imported module contracts are replaced, not merged, so only
+    /// the root program controls this declaration.
+    #[serde(default)]
+    pub input_states: BTreeMap<String, InputStateSpec>,
 }
 
 /// Module-level metadata block of a RuleSpec document. Every field is
@@ -1198,6 +1207,11 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     base.units.extend(extension.units);
     base.relations.extend(extension.relations);
     base.rules.extend(extension.rules);
+    // These fields describe the program being lowered, not an imported
+    // module. Every extension replaces them, including with the legacy
+    // absent/empty values, so the root document is authoritative.
+    base.outputs = extension.outputs;
+    base.input_states = extension.input_states;
     base
 }
 
@@ -2075,6 +2089,13 @@ impl RulesDocument {
         append_missing_relations(&mut program, &explicit_relations)?;
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
+        program.outputs = self.outputs.clone();
+        program.input_states = self.input_states.clone();
+        program.node_provenance = self
+            .rules
+            .iter()
+            .filter_map(RuleDefinition::node_provenance_entry)
+            .collect();
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2334,6 +2355,32 @@ impl RuleDefinition {
         self.origin_target
             .clone()
             .unwrap_or_else(|| "<memory>".to_string())
+    }
+
+    fn node_provenance_entry(&self) -> Option<NodeProvenanceEntrySpec> {
+        let (kind, name) = match self.kind.as_ref()? {
+            RuleKind::Parameter => (NodeKindSpec::Parameter, self.name.clone()),
+            RuleKind::Derived => (NodeKindSpec::Derived, self.name.clone()),
+            RuleKind::DataRelation => (NodeKindSpec::DataRelation, self.canonical_relation_id()),
+            RuleKind::DerivedRelation => {
+                (NodeKindSpec::DerivedRelation, self.canonical_relation_id())
+            }
+            RuleKind::SourceRelation | RuleKind::Unsupported(_) => return None,
+        };
+        let provenance = match self.origin_surface {
+            RuleOriginSurface::AtomicModule if self.origin_citation_path.is_some() => {
+                NodeProvenanceSpec::ProvisionBacked
+            }
+            RuleOriginSurface::CompositionRoot => NodeProvenanceSpec::Synthesized,
+            RuleOriginSurface::AtomicModule | RuleOriginSurface::Unassigned => {
+                NodeProvenanceSpec::Unverified
+            }
+        };
+        Some(NodeProvenanceEntrySpec {
+            kind,
+            name,
+            provenance,
+        })
     }
 
     fn canonical_rule_id(&self) -> Option<String> {
