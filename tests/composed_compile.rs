@@ -46,6 +46,39 @@ rules:
         formula: base_amount + amount
 "#;
 
+const CITED_COLLISION_ATOMIC_MODULE: &str = r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statutes/26/32/j
+rules:
+  - name: collision
+    kind: parameter
+    dtype: Number
+    versions:
+      - effective_from: 2026-01-01
+        formula: "10"
+"#;
+
+const CITED_COLLISION_COMPOSITION: &str = r#"
+format: rulespec/v1
+module:
+  kind: composition
+  source_verification:
+    corpus_citation_path: us/statutes/7/2014/e
+imports:
+  - us:policies/base
+rules:
+  - name: collision
+    kind: derived
+    entity: Household
+    dtype: Number
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: observed
+"#;
+
 fn fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let temp = std::env::temp_dir()
         .canonicalize()
@@ -132,6 +165,48 @@ fn composed_compile_resolves_atomic_imports_and_keeps_root_rules_originless() {
         .expect("compile-composed command");
     assert!(cli.status.success(), "{}", stderr(&cli));
     assert!(output.is_file());
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn composed_compile_does_not_transfer_identity_across_same_named_rule_kinds() {
+    let (temp, root, atomic, composed) = fixture("cross-kind-identity-collision");
+    std::fs::write(&atomic, CITED_COLLISION_ATOMIC_MODULE).expect("cited atomic module");
+    std::fs::write(&composed, CITED_COLLISION_COMPOSITION).expect("cited composition");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical root");
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(&composed, &roots)
+        .expect("composition compiles");
+
+    let parameter = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "collision")
+        .expect("imported parameter");
+    assert_eq!(parameter.id.as_deref(), Some("us:policies/base#collision"));
+    assert_eq!(
+        parameter.corpus_citation_path.as_deref(),
+        Some("us/statutes/26/32/j")
+    );
+
+    let derived = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "collision")
+        .expect("synthesized derived rule");
+    assert_eq!(derived.id, None);
+    assert_eq!(derived.corpus_citation_path, None);
+
+    let observed = artifact
+        .metadata
+        .input_catalog
+        .iter()
+        .find(|entry| entry.slot == "observed")
+        .expect("observed input");
+    assert_eq!(observed.canonical_request_name, "observed");
+    assert_eq!(observed.request_names, ["observed"]);
+
     std::fs::remove_dir_all(temp).ok();
 }
 

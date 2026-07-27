@@ -510,6 +510,14 @@ pub enum RuleKind {
     Unsupported(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RuleOriginSurface {
+    #[default]
+    Unassigned,
+    AtomicModule,
+    CompositionRoot,
+}
+
 impl<'de> Deserialize<'de> for RuleKind {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -667,6 +675,11 @@ pub struct SourceRelationRef {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RuleDefinition {
     pub name: String,
+    /// Loader-only distinction between an atomic declaration and a rule
+    /// synthesized at a composition root. Both can be originless, so
+    /// `origin_target: None` cannot encode this distinction.
+    #[serde(skip)]
+    origin_surface: RuleOriginSurface,
     #[serde(skip)]
     pub origin_target: Option<String>,
     /// `source_verification.corpus_citation_path` of the module the rule was
@@ -934,7 +947,7 @@ pub fn lower_rulespec_str_with_options(
     validate_recursive_corpus_contract(source, "<memory>")?;
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
-    document.assign_origin_target(None);
+    document.assign_rule_origin(RuleOriginSurface::AtomicModule, None);
     document.to_program_spec_with_options(options)
 }
 
@@ -999,7 +1012,7 @@ pub fn load_composed_rulespec_file_with_options(
 
     let mut document: RulesDocument = serde_yaml::from_str(&source)?;
     document.validate_module_metadata(&path.display().to_string())?;
-    document.assign_origin_target(None);
+    document.assign_rule_origin(RuleOriginSurface::CompositionRoot, None);
 
     let module_source = crate::source::FsModuleSource::from_validated_roots(roots.clone());
     let mut context = SourceLoadContext::default();
@@ -1087,7 +1100,7 @@ fn load_rulespec_document_from_source(
     context.stack.push(target.to_string());
     let mut document: RulesDocument = serde_yaml::from_str(&text)?;
     document.validate_atomic_module_metadata(target)?;
-    document.assign_origin_target(Some(target.to_string()));
+    document.assign_rule_origin(RuleOriginSurface::AtomicModule, Some(target.to_string()));
     let mut combined = RulesDocument::default();
 
     for import in &document.imports {
@@ -1903,17 +1916,26 @@ impl RulesDocument {
         Ok(())
     }
 
-    fn assign_origin_target(&mut self, origin_target: Option<String>) {
+    fn assign_rule_origin(
+        &mut self,
+        origin_surface: RuleOriginSurface,
+        origin_target: Option<String>,
+    ) {
         // The module-level corpus citation path rides onto every rule here,
         // because `merge_rules_documents` keeps only the root module's
         // metadata: without stamping, an imported module's join key would be
-        // lost with its `module:` block.
-        let citation_path = self
-            .module
-            .as_ref()
-            .and_then(|module| module.source_verification.as_ref())
-            .map(|verification| verification.corpus_citation_path.clone());
+        // lost with its `module:` block. Composition metadata is descriptive
+        // of the generated document, not legal provenance for its rules.
+        let citation_path = match origin_surface {
+            RuleOriginSurface::AtomicModule => self
+                .module
+                .as_ref()
+                .and_then(|module| module.source_verification.as_ref())
+                .map(|verification| verification.corpus_citation_path.clone()),
+            RuleOriginSurface::CompositionRoot | RuleOriginSurface::Unassigned => None,
+        };
         for rule in &mut self.rules {
+            rule.origin_surface = origin_surface;
             rule.origin_target = origin_target.clone();
             rule.origin_citation_path = citation_path.clone();
         }
@@ -2236,44 +2258,46 @@ impl RulesDocument {
 
     fn apply_rule_ids(&self, program: &mut ProgramSpec) {
         for rule in &self.rules {
-            // A rule's declared `rounding:` mode rides onto the lowered derived
-            // spec here (after the formula round-trip), mirroring how ids are
-            // reattached by name. The mode is validated against the unit later
-            // in `to_program`. Only `derived` rules carry rounding.
-            if rule.rounding.is_some() {
-                for derived in &mut program.derived {
-                    if derived.name == rule.name {
-                        derived.rounding = rule.rounding;
+            match rule.kind.as_ref() {
+                Some(RuleKind::Parameter) => {
+                    for parameter in &mut program.parameters {
+                        if parameter.name != rule.name {
+                            continue;
+                        }
+                        if let Some(citation_path) = rule.origin_citation_path.as_ref() {
+                            parameter.corpus_citation_path = Some(citation_path.clone());
+                        }
+                        if let Some(rule_id) = rule.canonical_rule_id() {
+                            parameter.id = Some(rule_id);
+                        }
                     }
                 }
-            }
-            // The origin module's corpus citation path is reattached by name
-            // the same way, so every parameter and derived rule carries the
-            // join key to its legal source in the corpus.
-            if let Some(citation_path) = rule.origin_citation_path.as_ref() {
-                for parameter in &mut program.parameters {
-                    if parameter.name == rule.name {
-                        parameter.corpus_citation_path = Some(citation_path.clone());
+                Some(RuleKind::Derived) => {
+                    for derived in &mut program.derived {
+                        if derived.name != rule.name {
+                            continue;
+                        }
+                        // Output rounding is validated against the unit later
+                        // in `to_program`; only a declared derived rule can
+                        // attach it to a lowered derived node.
+                        if rule.rounding.is_some() {
+                            derived.rounding = rule.rounding;
+                        }
+                        if let Some(citation_path) = rule.origin_citation_path.as_ref() {
+                            derived.corpus_citation_path = Some(citation_path.clone());
+                        }
+                        if let Some(rule_id) = rule.canonical_rule_id() {
+                            derived.id = Some(rule_id);
+                        }
                     }
                 }
-                for derived in &mut program.derived {
-                    if derived.name == rule.name {
-                        derived.corpus_citation_path = Some(citation_path.clone());
-                    }
-                }
-            }
-            let Some(rule_id) = rule.canonical_rule_id() else {
-                continue;
-            };
-            for parameter in &mut program.parameters {
-                if parameter.name == rule.name {
-                    parameter.id = Some(rule_id.clone());
-                }
-            }
-            for derived in &mut program.derived {
-                if derived.name == rule.name {
-                    derived.id = Some(rule_id.clone());
-                }
+                Some(
+                    RuleKind::DataRelation
+                    | RuleKind::DerivedRelation
+                    | RuleKind::SourceRelation
+                    | RuleKind::Unsupported(_),
+                )
+                | None => {}
             }
         }
     }
@@ -2313,12 +2337,18 @@ impl RuleDefinition {
     }
 
     fn canonical_rule_id(&self) -> Option<String> {
+        if self.origin_surface != RuleOriginSurface::AtomicModule {
+            return None;
+        }
         self.origin_target
             .as_ref()
             .map(|target| format!("{target}#{}", self.name))
     }
 
     fn canonical_relation_id(&self) -> String {
+        if self.origin_surface != RuleOriginSurface::AtomicModule {
+            return self.name.clone();
+        }
         self.origin_target
             .as_ref()
             .map(|target| format!("{target}#relation.{}", self.name))
