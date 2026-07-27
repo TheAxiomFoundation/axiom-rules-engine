@@ -4,6 +4,7 @@ from .dense import (
     DenseRelationBatch,
     DenseRelationSchema,
     DerivedMetadata,
+    NodeMetadata,
 )
 from .loader import load_composed_program, load_program
 from .models import (
@@ -40,6 +41,7 @@ __all__ = [
     "ExecutionResponse",
     "FastPathMetadata",
     "Interval",
+    "NodeMetadata",
     "Program",
     "QueryResult",
     "AxiomRulesEngine",

@@ -152,7 +152,7 @@ fn dtype_name(dtype: &DTypeSpec) -> &'static str {
 struct CompiledDenseProgramHandle {
     compiled: DenseCompiledProgram,
     derived_metadata: Vec<DerivedMetadataHandle>,
-    node_metadata: Vec<NodeMetadataHandle>,
+    node_metadata: Option<Vec<NodeMetadataHandle>>,
     input_catalog: HashMap<String, String>,
     input_request_names: HashMap<String, Vec<String>>,
 }
@@ -192,7 +192,13 @@ impl CompiledDenseProgramHandle {
     /// Certification metadata for every annotated executable node. Legacy
     /// artifacts without a node catalog return an empty list.
     fn node_metadata(&self) -> Vec<NodeMetadataHandle> {
-        self.node_metadata.clone()
+        self.node_metadata.clone().unwrap_or_default()
+    }
+
+    /// Whether the source artifact declared a complete node catalog. This
+    /// distinguishes legacy absence from a present catalog at higher layers.
+    fn has_node_metadata(&self) -> bool {
+        self.node_metadata.is_some()
     }
 
     #[getter]
@@ -334,11 +340,8 @@ fn compiled_dense_from_artifact(
     let node_metadata = artifact
         .metadata
         .nodes
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(NodeMetadataHandle::from)
-        .collect();
+        .as_ref()
+        .map(|nodes| nodes.iter().map(NodeMetadataHandle::from).collect());
     // Capture authoring metadata (including `period`, which the runtime model
     // drops) for every derived rule across all entities — the dense program
     // itself compiles only the root entity's rules.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import numpy as np
 
@@ -38,6 +38,30 @@ class DerivedMetadata:
     unit: str | None
     period: str | None
     source: str | None
+
+
+@dataclass(frozen=True)
+class NodeMetadata:
+    """Certification metadata for one executable node.
+
+    ``None`` at :attr:`CompiledDenseProgram.node_metadata` means the legacy
+    artifact did not declare a complete catalog. A list means the compiler
+    produced the fail-closed node annotations.
+    """
+
+    id: str
+    name: str
+    kind: Literal[
+        "input",
+        "parameter",
+        "derived",
+        "data_relation",
+        "derived_relation",
+    ]
+    state: Literal["input", "derived", "pending"]
+    input_kind: Literal["exogenous", "policy_derived"] | None
+    reachable: bool
+    provenance: Literal["provision_backed", "synthesized", "unverified"]
 
 
 @dataclass(frozen=True)
@@ -139,6 +163,24 @@ class CompiledDenseProgram:
                 source=item.source,
             )
             for item in self._native.derived_metadata()
+        ]
+
+    @property
+    def node_metadata(self) -> list[NodeMetadata] | None:
+        """Compiled certification catalog, or ``None`` for legacy artifacts."""
+        if not self._native.has_node_metadata():
+            return None
+        return [
+            NodeMetadata(
+                id=item.id,
+                name=item.name,
+                kind=item.kind,
+                state=item.state,
+                input_kind=item.input_kind,
+                reachable=item.reachable,
+                provenance=item.provenance,
+            )
+            for item in self._native.node_metadata()
         ]
 
     def execute(
