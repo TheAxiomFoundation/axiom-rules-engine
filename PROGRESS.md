@@ -264,7 +264,7 @@ the stale comments, and pinned every case as a test.
 
 ## State
 
-- Active: issue #115, per-node state and provenance annotations.
+- Active: issue #115 implementation; the additive contract is specified.
 - Branch: `codex/node-state-annotations-115`.
 - Base: cached `origin/main` at `68d6522`; network DNS blocked a refresh.
 - Isolation: implementation is in a clean temporary worktree because the requested
@@ -276,12 +276,16 @@ the stale comments, and pinned every case as a test.
 - Confirmed the protected-file constraints.
 - Preserved the pre-existing dirty worktree without modification.
 - Created this scoped progress ledger before implementation work.
+- Mapped compiler, runtime, schema, Python, and composed-program surfaces.
+- Confirmed that current composer output drops typed outputs, input state, and
+  transformation identity; documented the limitation instead of inferring it.
+- Specified the fail-closed authoring and compiled contracts in
+  `docs/node-annotations.md`.
 
 ## Next
 
-- Map the compiled node schema and all compiler construction paths.
-- Specify additive annotation semantics, including collision-safe provenance.
-- Implement issue #115 with focused rejection/behavior tests and compatibility tests.
+- Implement collision-safe origin propagation and the optional node catalog.
+- Add focused rejection, reachability, collision, compatibility, and schema tests.
 - Run the full available validation suite, commit each coherent step, and open a
   draft PR if remote access is available.
 - After #115 is complete, write and post the issue #117 design note before any
