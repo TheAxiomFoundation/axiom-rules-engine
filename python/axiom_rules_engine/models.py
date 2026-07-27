@@ -85,10 +85,27 @@ class CompiledInputCatalogEntry(BaseModel):
     request_names: list[str]
 
 
+class CompiledNodeMetadata(BaseModel):
+    id: str
+    name: str
+    kind: Literal[
+        "input",
+        "parameter",
+        "derived",
+        "data_relation",
+        "derived_relation",
+    ]
+    state: Literal["input", "derived", "pending"]
+    input_kind: Literal["exogenous", "policy_derived"] | None = None
+    reachable: bool
+    provenance: Literal["provision_backed", "synthesized", "unverified"]
+
+
 class CompiledProgramMetadata(BaseModel):
     evaluation_order: list[str]
     fast_path: FastPathMetadata
     input_catalog: list[CompiledInputCatalogEntry]
+    nodes: list[CompiledNodeMetadata] | None = None
 
 
 class CompiledProgram(BaseModel):

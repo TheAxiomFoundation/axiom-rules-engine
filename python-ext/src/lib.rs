@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{
+    CompiledInputKind, CompiledNodeMetadata, CompiledNodeState, CompiledProgramArtifact,
+};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec, DenseRelationKey,
     DenseRelationSchema,
 };
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
-use axiom_rules_engine::spec::DTypeSpec;
+use axiom_rules_engine::spec::{DTypeSpec, NodeKindSpec, NodeProvenanceSpec};
 use chrono::NaiveDate;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -65,6 +67,76 @@ struct DerivedMetadataHandle {
     source: Option<String>,
 }
 
+/// Certification metadata for one executable node in a compiled artifact.
+/// Enum values use the artifact's stable snake_case wire vocabulary.
+#[pyclass(module = "axiom_rules_engine_dense")]
+#[derive(Clone)]
+struct NodeMetadataHandle {
+    #[pyo3(get)]
+    id: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    state: String,
+    #[pyo3(get)]
+    input_kind: Option<String>,
+    #[pyo3(get)]
+    reachable: bool,
+    #[pyo3(get)]
+    provenance: String,
+}
+
+impl From<&CompiledNodeMetadata> for NodeMetadataHandle {
+    fn from(metadata: &CompiledNodeMetadata) -> Self {
+        Self {
+            id: metadata.id.clone(),
+            name: metadata.name.clone(),
+            kind: node_kind_name(metadata.kind).to_string(),
+            state: node_state_name(metadata.state).to_string(),
+            input_kind: metadata
+                .input_kind
+                .map(|kind| input_kind_name(kind).to_string()),
+            reachable: metadata.reachable,
+            provenance: node_provenance_name(metadata.provenance).to_string(),
+        }
+    }
+}
+
+fn node_kind_name(kind: NodeKindSpec) -> &'static str {
+    match kind {
+        NodeKindSpec::Input => "input",
+        NodeKindSpec::Parameter => "parameter",
+        NodeKindSpec::Derived => "derived",
+        NodeKindSpec::DataRelation => "data_relation",
+        NodeKindSpec::DerivedRelation => "derived_relation",
+    }
+}
+
+fn node_state_name(state: CompiledNodeState) -> &'static str {
+    match state {
+        CompiledNodeState::Input => "input",
+        CompiledNodeState::Derived => "derived",
+        CompiledNodeState::Pending => "pending",
+    }
+}
+
+fn input_kind_name(kind: CompiledInputKind) -> &'static str {
+    match kind {
+        CompiledInputKind::Exogenous => "exogenous",
+        CompiledInputKind::PolicyDerived => "policy_derived",
+    }
+}
+
+fn node_provenance_name(provenance: NodeProvenanceSpec) -> &'static str {
+    match provenance {
+        NodeProvenanceSpec::ProvisionBacked => "provision_backed",
+        NodeProvenanceSpec::Synthesized => "synthesized",
+        NodeProvenanceSpec::Unverified => "unverified",
+    }
+}
+
 fn dtype_name(dtype: &DTypeSpec) -> &'static str {
     match dtype {
         DTypeSpec::Judgment => "judgment",
@@ -80,6 +152,7 @@ fn dtype_name(dtype: &DTypeSpec) -> &'static str {
 struct CompiledDenseProgramHandle {
     compiled: DenseCompiledProgram,
     derived_metadata: Vec<DerivedMetadataHandle>,
+    node_metadata: Vec<NodeMetadataHandle>,
     input_catalog: HashMap<String, String>,
     input_request_names: HashMap<String, Vec<String>>,
 }
@@ -114,6 +187,12 @@ impl CompiledDenseProgramHandle {
     /// entities (not just the dense root). Order follows the module.
     fn derived_metadata(&self) -> Vec<DerivedMetadataHandle> {
         self.derived_metadata.clone()
+    }
+
+    /// Certification metadata for every annotated executable node. Legacy
+    /// artifacts without a node catalog return an empty list.
+    fn node_metadata(&self) -> Vec<NodeMetadataHandle> {
+        self.node_metadata.clone()
     }
 
     #[getter]
@@ -252,6 +331,14 @@ fn compiled_dense_from_artifact(
     artifact: CompiledProgramArtifact,
     entity: Option<&str>,
 ) -> PyResult<CompiledDenseProgramHandle> {
+    let node_metadata = artifact
+        .metadata
+        .nodes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(NodeMetadataHandle::from)
+        .collect();
     // Capture authoring metadata (including `period`, which the runtime model
     // drops) for every derived rule across all entities — the dense program
     // itself compiles only the root entity's rules.
@@ -286,6 +373,7 @@ fn compiled_dense_from_artifact(
     Ok(CompiledDenseProgramHandle {
         compiled,
         derived_metadata,
+        node_metadata,
         input_catalog,
         input_request_names,
     })
@@ -410,6 +498,7 @@ fn axiom_rules_engine_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> Py
     module.add_class::<CompiledDenseProgramHandle>()?;
     module.add_class::<RelationSchemaHandle>()?;
     module.add_class::<DerivedMetadataHandle>()?;
+    module.add_class::<NodeMetadataHandle>()?;
     Ok(())
 }
 
