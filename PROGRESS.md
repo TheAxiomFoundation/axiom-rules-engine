@@ -264,8 +264,8 @@ the stale comments, and pinned every case as a test.
 
 ## State
 
-- Active: issue #115 validation; the Rust compiler contract, RuleSpec bridge,
-  schemas, and focused tests are implemented.
+- Issue #115 complete and independently reviewed; ready to push/open a draft
+  PR. Issue #117 design is next.
 - Branch: `codex/node-state-annotations-115`.
 - Base: cached `origin/main` at `68d6522`; network DNS blocked a refresh.
 - Isolation: implementation is in a clean temporary worktree because the requested
@@ -311,10 +311,15 @@ the stale comments, and pinned every case as a test.
 - Strict Python models validate the source contract, node invariants, canonical
   citation grounding, and native/public-wrapper propagation; the staged native
   suite passed 84 tests before the final parity regression.
+- Final gates: 226 Rust tests pass with all features; 85 Python tests pass
+  against a freshly built native extension; formatting, schema golden/
+  conformance checks, Python-extension check/build, and no-default-features
+  WASM check all pass.
+- Final independent re-review found no remaining high/medium issue in collision
+  binding or fail-closed backing behavior.
 
 ## Next
 
-- Rerun final Rust, staged native Python, and no-default-features WASM gates.
 - Push issue #115 and open a draft PR if remote access is available.
 - After #115 is complete, write and post the issue #117 design note before any
   implementation.
