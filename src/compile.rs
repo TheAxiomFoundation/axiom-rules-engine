@@ -976,12 +976,7 @@ fn compiled_node_metadata(
         });
     }
     for parameter in &program.parameters {
-        let backing = provenance_for(
-            &provenance,
-            NodeKindSpec::Parameter,
-            &parameter.name,
-            parameter.corpus_citation_path.as_deref(),
-        );
+        let backing = provenance_for(&provenance, NodeKindSpec::Parameter, &parameter.name);
         nodes.push(CompiledNodeMetadata {
             id: parameter
                 .id
@@ -997,12 +992,7 @@ fn compiled_node_metadata(
         });
     }
     for derived in &program.derived {
-        let backing = provenance_for(
-            &provenance,
-            NodeKindSpec::Derived,
-            &derived.name,
-            derived.corpus_citation_path.as_deref(),
-        );
+        let backing = provenance_for(&provenance, NodeKindSpec::Derived, &derived.name);
         nodes.push(CompiledNodeMetadata {
             id: derived.id.clone().unwrap_or_else(|| derived.name.clone()),
             name: derived.name.clone(),
@@ -1020,7 +1010,7 @@ fn compiled_node_metadata(
         } else {
             NodeKindSpec::DataRelation
         };
-        let backing = provenance_for(&provenance, kind, &relation.name, None);
+        let backing = provenance_for(&provenance, kind, &relation.name);
         let (state, input_kind) = match relation.derivation.as_ref() {
             Some(_) => (CompiledNodeState::Derived, None),
             None => match program
@@ -1171,20 +1161,13 @@ fn provenance_for(
     provenance: &BTreeMap<(NodeKindSpec, String), ValidatedNodeProvenance>,
     kind: NodeKindSpec,
     name: &str,
-    executable_citation_path: Option<&str>,
 ) -> ValidatedNodeProvenance {
     provenance
         .get(&(kind, name.to_string()))
         .cloned()
-        .unwrap_or_else(|| match executable_citation_path {
-            Some(path) => ValidatedNodeProvenance {
-                provenance: NodeProvenanceSpec::ProvisionBacked,
-                corpus_citation_path: Some(path.to_string()),
-            },
-            None => ValidatedNodeProvenance {
-                provenance: NodeProvenanceSpec::Unverified,
-                corpus_citation_path: None,
-            },
+        .unwrap_or(ValidatedNodeProvenance {
+            provenance: NodeProvenanceSpec::Unverified,
+            corpus_citation_path: None,
         })
 }
 

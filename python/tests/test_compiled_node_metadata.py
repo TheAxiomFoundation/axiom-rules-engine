@@ -262,6 +262,16 @@ def test_authoring_provenance_rejects_ungrounded_citation_combinations(
             }
         )
 
+def test_authoring_provenance_rejects_implicit_input_entries() -> None:
+    with pytest.raises(ValidationError):
+        NodeProvenanceEntry.model_validate(
+            {
+                "kind": "input",
+                "name": "observed",
+                "provenance": "unverified",
+            }
+        )
+
 
 ANNOTATED_MODULE = """\
 format: rulespec/v1

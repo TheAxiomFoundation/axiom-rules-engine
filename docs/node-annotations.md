@@ -94,11 +94,13 @@ is restricted to the declaration's executable kind so an imported parameter
 cannot stamp its ID, citation, or backing onto a same-named synthesized derived
 rule. A computed entity-free parameter is the supported exception to the
 declared-kind mapping: because formula lowering makes it an actual derived
-Scalar node, identity and provenance follow that actual node only when no exact
-derived declaration owns the same name.
+Scalar node. The compiler lowers each declaration in isolation to bind origin
+to its actual executable kind, so even opposite-shape, same-name declarations
+cannot exchange identities.
 
 Every `provision_backed` entry is grounded by a canonical
 `corpus_citation_path`. For parameter and derived nodes that path must equal the
 path already carried by the executable node; relations retain the path in the
 provenance sidecar because `RelationSpec` has no citation field. A raw
-`ProgramSpec` therefore cannot assert provision backing with a bare enum.
+`ProgramSpec` therefore cannot assert provision backing with a bare enum, and
+an executable citation without an exact sidecar entry remains `unverified`.

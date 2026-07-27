@@ -1318,6 +1318,26 @@ pub(crate) fn infer_relation_slots_for_rulespec(relation: &str) -> (usize, usize
     infer_slots(relation)
 }
 
+/// Return the executable scalar-node class that [`lower_module`] will choose
+/// for one parsed declaration, without semantically lowering its dependencies.
+/// RuleSpec origin binding uses this shared classifier so same-name
+/// declarations cannot exchange identity when their authored kinds differ
+/// from their actual parameter/derived shapes.
+pub(crate) fn declaration_lowers_to_parameter(source: &str) -> Result<bool, FormulaError> {
+    let module = parse_source(source)?;
+    let [variable] = module.variables.as_slice() else {
+        return Err(FormulaError::lower(format!(
+            "expected exactly one formula declaration, found {}",
+            module.variables.len()
+        )));
+    };
+    Ok(variable.entity.is_none()
+        && variable
+            .values
+            .iter()
+            .all(|value| is_literal_expr(&value.expr)))
+}
+
 fn is_literal_expr(e: &Expr) -> bool {
     matches!(
         e,

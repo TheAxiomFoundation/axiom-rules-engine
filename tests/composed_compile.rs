@@ -115,6 +115,23 @@ outputs:
   - computed_rate
 "#;
 
+const CROSS_LOWERING_COLLISION_COMPOSITION: &str = r#"
+format: rulespec/v1
+module:
+  kind: composition
+imports:
+  - us:policies/base
+outputs:
+  - computed_rate
+rules:
+  - name: computed_rate
+    kind: derived
+    dtype: Rate
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+
 fn fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let temp = std::env::temp_dir()
         .canonicalize()
@@ -341,6 +358,60 @@ fn computed_parameter_provenance_follows_its_actual_lowered_node_kind() {
         Some("us/statutes/26/32/j")
     );
     assert!(node.reachable);
+
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn cross_lowering_collision_keeps_each_declarations_actual_origin() {
+    let (temp, root, atomic, composed) = fixture("cross-lowering-collision");
+    std::fs::write(&atomic, CITED_COMPUTED_PARAMETER).expect("computed atomic module");
+    std::fs::write(&composed, CROSS_LOWERING_COLLISION_COMPOSITION)
+        .expect("cross-lowering composition");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical root");
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(&composed, &roots)
+        .expect("cross-lowering composition compiles");
+
+    let synthesized_parameter = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "computed_rate")
+        .expect("literal declared derived lowers to a parameter");
+    assert_eq!(synthesized_parameter.id, None);
+    assert_eq!(synthesized_parameter.corpus_citation_path, None);
+
+    let provision_derived = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "computed_rate")
+        .expect("computed declared parameter lowers to derived");
+    assert_eq!(
+        provision_derived.id.as_deref(),
+        Some("us:policies/base#computed_rate")
+    );
+    assert_eq!(
+        provision_derived.corpus_citation_path.as_deref(),
+        Some("us/statutes/26/32/j")
+    );
+
+    let nodes = artifact.metadata.nodes.as_deref().expect("node metadata");
+    let parameter_node = nodes
+        .iter()
+        .find(|node| node.kind == NodeKindSpec::Parameter && node.name == "computed_rate")
+        .expect("synthesized parameter node");
+    assert_eq!(parameter_node.provenance, NodeProvenanceSpec::Synthesized);
+    assert_eq!(parameter_node.corpus_citation_path, None);
+    let derived_node = nodes
+        .iter()
+        .find(|node| node.kind == NodeKindSpec::Derived && node.name == "computed_rate")
+        .expect("provision derived node");
+    assert_eq!(derived_node.provenance, NodeProvenanceSpec::ProvisionBacked);
+    assert_eq!(
+        derived_node.corpus_citation_path.as_deref(),
+        Some("us/statutes/26/32/j")
+    );
 
     std::fs::remove_dir_all(temp).ok();
 }

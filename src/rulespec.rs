@@ -2089,7 +2089,8 @@ impl RulesDocument {
         }
         diagnostics
             .extend(self.validate_data_relation_arguments(&mut explicit_relations, &program)?);
-        self.apply_rule_ids(&mut program);
+        let lowered_rule_kinds = self.lowered_rule_node_kinds()?;
+        self.apply_rule_ids(&mut program, &lowered_rule_kinds);
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
         append_missing_relations(&mut program, &explicit_relations)?;
@@ -2098,7 +2099,7 @@ impl RulesDocument {
         program.outputs = self.outputs.clone();
         program.input_states = self.input_states.clone();
         program.relation_states = self.relation_states.clone();
-        program.node_provenance = self.node_provenance_entries(&program);
+        program.node_provenance = self.node_provenance_entries(&lowered_rule_kinds);
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2280,14 +2281,46 @@ impl RulesDocument {
         Ok(diagnostics)
     }
 
-    fn apply_rule_ids(&self, program: &mut ProgramSpec) {
-        for rule in &self.rules {
-            match rule.kind.as_ref() {
-                Some(RuleKind::Parameter) => {
-                    let lowered_as_parameter = program
-                        .parameters
-                        .iter()
-                        .any(|parameter| parameter.name == rule.name);
+    fn lowered_rule_node_kinds(&self) -> Result<Vec<Option<NodeKindSpec>>, RuleSpecError> {
+        self.rules
+            .iter()
+            .enumerate()
+            .map(|(rule_index, rule)| match rule.kind.as_ref() {
+                Some(RuleKind::Parameter | RuleKind::Derived) => {
+                    Ok(Some(self.lowered_scalar_node_kind(rule_index)?))
+                }
+                Some(RuleKind::DataRelation) => Ok(Some(NodeKindSpec::DataRelation)),
+                Some(RuleKind::DerivedRelation) => Ok(Some(NodeKindSpec::DerivedRelation)),
+                Some(RuleKind::SourceRelation | RuleKind::Unsupported(_)) | None => Ok(None),
+            })
+            .collect()
+    }
+
+    /// Classify one exact declaration with the same entity/literal rule used
+    /// by formula lowering. Parsing only this declaration avoids both
+    /// name-based origin transfer and semantic dependency resolution.
+    fn lowered_scalar_node_kind(&self, rule_index: usize) -> Result<NodeKindSpec, RuleSpecError> {
+        let target = &self.rules[rule_index];
+        if target.is_parameter_table() {
+            return Ok(NodeKindSpec::Parameter);
+        }
+        let mut source = String::new();
+        target.write_formula_definition(&mut source)?;
+        if crate::formula::declaration_lowers_to_parameter(&source)? {
+            Ok(NodeKindSpec::Parameter)
+        } else {
+            Ok(NodeKindSpec::Derived)
+        }
+    }
+
+    fn apply_rule_ids(
+        &self,
+        program: &mut ProgramSpec,
+        lowered_rule_kinds: &[Option<NodeKindSpec>],
+    ) {
+        for (rule, lowered_kind) in self.rules.iter().zip(lowered_rule_kinds) {
+            match lowered_kind {
+                Some(NodeKindSpec::Parameter) => {
                     for parameter in &mut program.parameters {
                         if parameter.name != rule.name {
                             continue;
@@ -2299,30 +2332,8 @@ impl RulesDocument {
                             parameter.id = Some(rule_id);
                         }
                     }
-                    // A supported computed, entity-free `kind: parameter`
-                    // lowers to a derived Scalar node. Only use that fallback
-                    // when no parameter node and no exact derived declaration
-                    // owns the same name; this preserves cross-kind collision
-                    // isolation.
-                    let exact_derived_declaration = self.rules.iter().any(|candidate| {
-                        candidate.name == rule.name
-                            && matches!(candidate.kind, Some(RuleKind::Derived))
-                    });
-                    if !lowered_as_parameter && !exact_derived_declaration {
-                        for derived in &mut program.derived {
-                            if derived.name != rule.name {
-                                continue;
-                            }
-                            if let Some(citation_path) = rule.origin_citation_path.as_ref() {
-                                derived.corpus_citation_path = Some(citation_path.clone());
-                            }
-                            if let Some(rule_id) = rule.canonical_rule_id() {
-                                derived.id = Some(rule_id);
-                            }
-                        }
-                    }
                 }
-                Some(RuleKind::Derived) => {
+                Some(NodeKindSpec::Derived) => {
                     for derived in &mut program.derived {
                         if derived.name != rule.name {
                             continue;
@@ -2342,66 +2353,36 @@ impl RulesDocument {
                     }
                 }
                 Some(
-                    RuleKind::DataRelation
-                    | RuleKind::DerivedRelation
-                    | RuleKind::SourceRelation
-                    | RuleKind::Unsupported(_),
+                    NodeKindSpec::Input
+                    | NodeKindSpec::DataRelation
+                    | NodeKindSpec::DerivedRelation,
                 )
                 | None => {}
             }
         }
     }
 
-    fn node_provenance_entries(&self, program: &ProgramSpec) -> Vec<NodeProvenanceEntrySpec> {
-        let mut entries = Vec::new();
-        for parameter in &program.parameters {
-            if let Some(rule) = self.rules.iter().find(|rule| {
-                rule.name == parameter.name && matches!(rule.kind, Some(RuleKind::Parameter))
-            }) {
-                entries.push(
-                    rule.node_provenance_entry(NodeKindSpec::Parameter, parameter.name.clone()),
-                );
-            }
-        }
-        for derived in &program.derived {
-            let rule = self
-                .rules
-                .iter()
-                .find(|rule| {
-                    rule.name == derived.name && matches!(rule.kind, Some(RuleKind::Derived))
+    fn node_provenance_entries(
+        &self,
+        lowered_rule_kinds: &[Option<NodeKindSpec>],
+    ) -> Vec<NodeProvenanceEntrySpec> {
+        self.rules
+            .iter()
+            .zip(lowered_rule_kinds)
+            .filter_map(|(rule, kind)| {
+                kind.map(|kind| {
+                    let name = match kind {
+                        NodeKindSpec::DataRelation | NodeKindSpec::DerivedRelation => {
+                            rule.canonical_relation_id()
+                        }
+                        NodeKindSpec::Parameter | NodeKindSpec::Derived | NodeKindSpec::Input => {
+                            rule.name.clone()
+                        }
+                    };
+                    rule.node_provenance_entry(kind, name)
                 })
-                .or_else(|| {
-                    // Computed entity-free parameters lower to derived Scalar
-                    // nodes. An exact derived declaration always wins, which
-                    // prevents a same-name parameter from transferring origin.
-                    self.rules.iter().find(|rule| {
-                        rule.name == derived.name && matches!(rule.kind, Some(RuleKind::Parameter))
-                    })
-                });
-            if let Some(rule) = rule {
-                entries
-                    .push(rule.node_provenance_entry(NodeKindSpec::Derived, derived.name.clone()));
-            }
-        }
-        for relation in &program.relations {
-            let kind = if relation.derivation.is_some() {
-                NodeKindSpec::DerivedRelation
-            } else {
-                NodeKindSpec::DataRelation
-            };
-            let declared_kind = if relation.derivation.is_some() {
-                RuleKind::DerivedRelation
-            } else {
-                RuleKind::DataRelation
-            };
-            if let Some(rule) = self.rules.iter().find(|rule| {
-                rule.kind.as_ref() == Some(&declared_kind)
-                    && rule.canonical_relation_id() == relation.name
-            }) {
-                entries.push(rule.node_provenance_entry(kind, relation.name.clone()));
-            }
-        }
-        entries
+            })
+            .collect()
     }
 
     fn write_header(&self, out: &mut String) {

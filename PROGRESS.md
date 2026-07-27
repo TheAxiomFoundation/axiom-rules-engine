@@ -302,11 +302,19 @@ the stale comments, and pinned every case as a test.
   typed node annotations.
 - Full Rust validation after review remediation: `cargo test --all-features`
   passed 225 tests; schema golden/conformance coverage is included.
+- A second adversarial review found an opposite-shape collision (computed
+  parameter and literal derived with the same name). Origin binding now shares
+  the formula lowerer's exact declaration-shape classifier, and a regression
+  proves the synthesized parameter and provision-backed derived cannot swap.
+- Missing provenance sidecars now remain `unverified`; executable citation
+  fields are consistency checks only and never infer backing.
+- Strict Python models validate the source contract, node invariants, canonical
+  citation grounding, and native/public-wrapper propagation; the staged native
+  suite passed 84 tests before the final parity regression.
 
 ## Next
 
-- Finish strict Python source-contract/state validation, then rerun the staged
-  native suite and no-default-features WASM check.
+- Rerun final Rust, staged native Python, and no-default-features WASM gates.
 - Push issue #115 and open a draft PR if remote access is available.
 - After #115 is complete, write and post the issue #117 design note before any
   implementation.

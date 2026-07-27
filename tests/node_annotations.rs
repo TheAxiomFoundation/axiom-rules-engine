@@ -297,6 +297,20 @@ fn duplicate_parameter_and_relation_nodes_are_rejected() {
 
 #[test]
 fn node_provenance_declarations_must_resolve_uniquely() {
+    let mut undeclared = annotated_program();
+    undeclared
+        .node_provenance
+        .retain(|entry| !(entry.kind == NodeKindSpec::Parameter && entry.name == "amount_by_size"));
+    let artifact = CompiledProgramArtifact::compile(undeclared)
+        .expect("missing sidecar provenance remains fail-closed");
+    let parameter = node(
+        artifact.metadata.nodes.as_deref().expect("node metadata"),
+        NodeKindSpec::Parameter,
+        "amount_by_size",
+    );
+    assert_eq!(parameter.provenance, NodeProvenanceSpec::Unverified);
+    assert_eq!(parameter.corpus_citation_path, None);
+
     let mut duplicate = annotated_program();
     let existing = duplicate
         .node_provenance

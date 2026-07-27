@@ -16,6 +16,12 @@ NodeKind = Literal[
     "data_relation",
     "derived_relation",
 ]
+ProvenanceNodeKind = Literal[
+    "parameter",
+    "derived",
+    "data_relation",
+    "derived_relation",
+]
 NodeProvenance = Literal["provision_backed", "synthesized", "unverified"]
 _CORPUS_JURISDICTION = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]+)*")
 _CORPUS_DOCUMENT_CLASS = re.compile(r"[a-z][a-z0-9-]*")
@@ -55,7 +61,7 @@ def _validate_provenance_citation(
 
 
 class NodeProvenanceEntry(BaseModel):
-    kind: NodeKind
+    kind: ProvenanceNodeKind
     name: str
     provenance: NodeProvenance
     corpus_citation_path: str | None = None
