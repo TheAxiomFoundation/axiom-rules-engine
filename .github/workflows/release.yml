@@ -151,8 +151,34 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+      # MANUAL SECURITY PATCH (#114): this job builds the binaries users download, so it must
+      # not bootstrap dist from the unchecksummed installer expression. The plan job's verified
+      # copy cannot be reused here — it is a linux-x86_64 binary and this matrix also runs on
+      # macOS — so each runner fetches its own platform archive and verifies it against a pinned
+      # digest. Unknown runners fail closed rather than falling back to an unverified install.
+      - name: Install dist (checksum-verified per platform)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)   triple="aarch64-apple-darwin";      sum="decb01c64c12501931c3cac3111b368a7f48adf8d9e65455c08e5757b9a1fd6f" ;;
+            Darwin-x86_64)  triple="x86_64-apple-darwin";       sum="fd4d8f9f07802359cbcdc52bac3abd7d5201c4b73a7cbcdd6faca2232a389f0c" ;;
+            Linux-aarch64)  triple="aarch64-unknown-linux-gnu"; sum="382cc29ff91ef12a5bf78ad8ee1804661d24e2fbe64b1bdedd6078723b677ae5" ;;
+            Linux-x86_64)   triple="x86_64-unknown-linux-gnu";  sum="cd355dab0b4c02fb59038fef87655550021d07f45f1d82f947a34ef98560abb8" ;;
+            *) echo "unsupported runner $(uname -s)-$(uname -m) for verified dist install" >&2; exit 1 ;;
+          esac
+          archive="cargo-dist-${triple}.tar.xz"
+          curl --retry 5 --proto '=https' --tlsv1.2 -LsSf -o "/tmp/${archive}" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/${archive}"
+          if command -v sha256sum > /dev/null 2>&1; then
+            echo "${sum}  /tmp/${archive}" | sha256sum -c -
+          else
+            echo "${sum}  /tmp/${archive}" | shasum -a 256 -c -
+          fi
+          tar -xJf "/tmp/${archive}" -C /tmp
+          mkdir -p "$HOME/.cargo/bin"
+          install -m 0755 "/tmp/cargo-dist-${triple}/dist" "$HOME/.cargo/bin/dist"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # Get the dist-manifest
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -320,9 +346,20 @@ jobs:
           path: artifacts
           merge-multiple: true
       - name: Cleanup
+        shell: bash
         run: |
+          set -euo pipefail
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+          # MANUAL SECURITY PATCH (#122): published .sha256 files carried a trailing blank line,
+          # so the documented `shasum -a 256 --check` printed
+          # "WARNING: 1 line is improperly formatted" immediately after reporting OK. The check
+          # passed, but a warning beside a verify-before-you-run instruction reads as a broken
+          # checksum. Normalise to exactly one terminated line per file.
+          for f in artifacts/*.sha256; do
+            [ -e "$f" ] || continue
+            awk 'NF' "$f" > "$f.norm" && mv "$f.norm" "$f"
+          done
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
