@@ -33,8 +33,10 @@ relation_states:
 
 `outputs` is the exact set of queryable roots for structural reachability:
 derived rules and non-indexed parameters, addressed with execution-query
-name/ID resolution. Indexed parameters require a key expression and therefore
-cannot be roots by themselves.
+name/ID resolution. A declaration carrying a canonical ID must be addressed by
+that ID; a bare name is queryable only for an ID-less declaration. Indexed
+parameters require a key expression and therefore cannot be roots by
+themselves.
 `input_states` must classify every runtime input slot exactly once whenever
 `outputs` is present. `relation_states` does the same for runtime-supplied data
 relations; the compiler never assumes that relation data is exogenous. Unknown

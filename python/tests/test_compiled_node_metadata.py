@@ -279,7 +279,7 @@ module:
   source_verification:
     corpus_citation_path: us/statutes/tests/node-metadata
 outputs:
-  - result
+  - us:policies/tests/node_metadata#result
 input_states:
   observed: exogenous
   upstream_result: policy_derived
