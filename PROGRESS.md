@@ -54,6 +54,10 @@ Branch: `codex/node-state-annotations-115`
   `certify_nodes` (#427) consume node `provenance` as `provision_rooted`, that
   this PR is the missing producer, and that artifacts must be rebuilt after the
   merge for the field to exist.
+- The first all-feature run exposed one expected stale rebuild-dependent
+  golden: the stage-3 NZ unit-aggregation result's plan and trace digests changed
+  because its compiled source artifact now carries node annotations. Rebuilt
+  those two deterministic digests only; the exact CLI regression now passes.
 
 ## Next
 
