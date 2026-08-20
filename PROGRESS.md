@@ -7,10 +7,9 @@ Branch: `codex/node-state-annotations-115`
 ## State
 
 - Rebase complete: the branch is based on current remote `main` at `2c0e1ed`
-  (confirmed through the connected GitHub API) and is `0` behind / `14` ahead.
-- Semantic integration and the certification-consumer documentation are
-  complete. Focused Rust integration and schema-golden tests are green; the
-  requested full validation matrix is pending.
+  (confirmed through the connected GitHub API) and is `0` behind.
+- Semantic integration, certification-consumer documentation, and the full
+  requested validation matrix are complete and green.
 - Shell DNS cannot currently resolve GitHub, but the cached `origin/main` ref
   exactly matched the connected API's live base SHA. Publication will be
   retried after all local gates pass, with the connected API available as an
@@ -58,11 +57,32 @@ Branch: `codex/node-state-annotations-115`
   golden: the stage-3 NZ unit-aggregation result's plan and trace digests changed
   because its compiled source artifact now carries node annotations. Rebuilt
   those two deterministic digests only; the exact CLI regression now passes.
+- The first native Python run exposed a stale test authoring root: a rule loaded
+  from a canonical repository carries an ID, so its declared output must use
+  that canonical ID under main's execution-query resolution. Updated the
+  fixture and clarified the authoring documentation; the focused regression
+  and full rebuilt-native suite are green.
+- Final validation on the committed tree is green:
+  - `cargo test --all-features`: 369 passed, 0 failed, 0 ignored;
+  - schema golden/fidelity/conformance test binaries: 16 passed, 0 failed;
+  - real canonical `rulespec-us` corpus at
+    `a0a0a3d428914fe6eee794adc4675192443c3fe7`: 4,336 modules and 4,336
+    companion tests passed, 0 failed (8,672 files total);
+  - CPython 3.14 native suite after a release `maturin develop`: 85 passed,
+    0 failed, and the extension import succeeded;
+  - PyO3 `cargo check` and `cargo build`: green;
+  - `cargo check --target wasm32-unknown-unknown --no-default-features`: green;
+  - `cargo fmt --all -- --check` and `git diff --check`: green.
+- The live `rulespec-us` `origin/main` snapshot is not an admissible exact root
+  for the engine's canonical-loader hard cut because it still contains legacy
+  path components. The full content lane therefore used the repository's
+  dedicated canonical-layout branch above; no schema ratchet or external
+  corpus content was changed.
+- Confirmed the branch changes no toolchain, CI, CODEOWNERS, or dependency
+  pins. Cargo's transient nested-lock refresh was restored after validation.
 
 ## Next
 
-- Run all requested Rust, Python-native, schema, PyO3, and WASM validation
-  lanes; require a fully green result before pushing.
 - Push the rebased branch, update PR #136's description with the rebase and
   exact validation results, and leave the PR unmerged for engine-side review.
 
