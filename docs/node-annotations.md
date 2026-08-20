@@ -81,6 +81,16 @@ derived references, inputs, parameter lookups and their indices, relation
 membership/aggregates, derived-relation sources and predicates, condition
 branches, and period reductions.
 
+## Certification consumers
+
+Certified-node serving (`axiom-api/docs/certified-serving.md`) and
+`certify_nodes` (`axiom-oracles` #427) consume each compiled node's
+`provenance` field as the `provision_rooted` criterion; only
+`provision_backed` satisfies it. This PR is their missing engine-side producer.
+Artifacts must be **REBUILT after this PR merges** for the field to exist:
+previously compiled artifacts are not retrofitted and certification consumers
+must continue to fail closed when node provenance is absent.
+
 ## Collision-safe provenance
 
 Backing follows the exact declaration and its loading surface:

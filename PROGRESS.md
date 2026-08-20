@@ -8,9 +8,9 @@ Branch: `codex/node-state-annotations-115`
 
 - Rebase complete: the branch is based on current remote `main` at `2c0e1ed`
   (confirmed through the connected GitHub API) and is `0` behind / `14` ahead.
-- Semantic integration is complete. Focused Rust integration and schema-golden
-  tests are green; the certification-consumer note and requested full
-  validation matrix are pending.
+- Semantic integration and the certification-consumer documentation are
+  complete. Focused Rust integration and schema-golden tests are green; the
+  requested full validation matrix is pending.
 - Shell DNS cannot currently resolve GitHub, but the cached `origin/main` ref
   exactly matched the connected API's live base SHA. Publication will be
   retried after all local gates pass, with the connected API available as an
@@ -50,11 +50,13 @@ Branch: `codex/node-state-annotations-115`
   `composed_compile`, `node_annotations`, and `rulespec`; 14 schema golden and
   fidelity tests. Main's null-extends, absent-catalog, duplicate-normalization,
   relation-slot, and diagnostic regressions all pass.
+- Documented that `axiom-api/docs/certified-serving.md` and `axiom-oracles`
+  `certify_nodes` (#427) consume node `provenance` as `provision_rooted`, that
+  this PR is the missing producer, and that artifacts must be rebuilt after the
+  merge for the field to exist.
 
 ## Next
 
-- Document the certified-serving / `certify_nodes` dependency on the
-  `provenance` field and the post-merge artifact rebuild requirement.
 - Run all requested Rust, Python-native, schema, PyO3, and WASM validation
   lanes; require a fully green result before pushing.
 - Push the rebased branch, update PR #136's description with the rebase and
