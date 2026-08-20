@@ -6,13 +6,13 @@ Branch: `codex/node-state-annotations-115`
 
 ## State
 
-- Starting the requested maintenance rebase of PR #136 onto current
-  `origin/main` after more than three weeks of drift.
-- The worktree is clean at `db801cc`; the remote tracking branch is at the same
-  commit.
-- The annotation implementation touches `compile.rs` and `rulespec.rs`, where
-  intervening relation-slot validation work (PR #140) may overlap. Conflict
-  resolutions will preserve both sets of invariants.
+- Rebase complete: the branch is based on current remote `main` at `2c0e1ed`
+  (confirmed through the connected GitHub API) and is `0` behind / `14` ahead.
+- Semantic integration and the requested full validation matrix are pending.
+- Shell DNS cannot currently resolve GitHub, but the cached `origin/main` ref
+  exactly matched the connected API's live base SHA. Publication will be
+  retried after all local gates pass, with the connected API available as an
+  authorized fallback.
 - No toolchain, CI, or CODEOWNERS changes are in scope.
 
 ## Done
@@ -22,11 +22,21 @@ Branch: `codex/node-state-annotations-115`
   committed maintenance ledger before changing branch history.
 - Chose `FINAL_REPORT.md`, the repository-family output convention, for the
   requested final report.
+- Created local recovery ref `backup/pr136-pre-rebase-20260820` at the original
+  pre-rebase branch tip plus the initial maintenance-ledger commit.
+- Rebased all 14 branch commits over the 42 intervening main commits.
+- Resolved 7 textual conflict hunks across 4 replayed commits and 3 files:
+  `rulespec.rs` (4), `compile.rs` (2), and
+  `schemas/compiled-artifact.v2.schema.json` (1).
+- Preserved main's lowering options/diagnostics, relation-slot argument
+  validation, compatible-parameter normalization, relation source-path
+  diagnostics, tolerated `extends: null`, and artifact input-catalog loading,
+  while retaining fail-closed node provenance and origin binding.
 
 ## Next
 
-- Fetch current `origin/main` and PR metadata, then rebase and resolve any
-  conflicts carefully.
+- Compile and run focused annotation/schema tests to expose semantic integration
+  issues introduced by the intervening mainline changes.
 - Document the certified-serving / `certify_nodes` dependency on the
   `provenance` field and the post-merge artifact rebuild requirement.
 - Run all requested Rust, Python-native, schema, PyO3, and WASM validation
