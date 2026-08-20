@@ -1,3 +1,41 @@
+# Maintenance rebase — node state annotations (PR #136)
+
+Date: 2026-08-20
+
+Branch: `codex/node-state-annotations-115`
+
+## State
+
+- Starting the requested maintenance rebase of PR #136 onto current
+  `origin/main` after more than three weeks of drift.
+- The worktree is clean at `db801cc`; the remote tracking branch is at the same
+  commit.
+- The annotation implementation touches `compile.rs` and `rulespec.rs`, where
+  intervening relation-slot validation work (PR #140) may overlap. Conflict
+  resolutions will preserve both sets of invariants.
+- No toolchain, CI, or CODEOWNERS changes are in scope.
+
+## Done
+
+- Confirmed the requested branch, clean worktree, remote, and PR number.
+- Preserved the prior implementation history below and established this
+  committed maintenance ledger before changing branch history.
+- Chose `FINAL_REPORT.md`, the repository-family output convention, for the
+  requested final report.
+
+## Next
+
+- Fetch current `origin/main` and PR metadata, then rebase and resolve any
+  conflicts carefully.
+- Document the certified-serving / `certify_nodes` dependency on the
+  `provenance` field and the post-merge artifact rebuild requirement.
+- Run all requested Rust, Python-native, schema, PyO3, and WASM validation
+  lanes; require a fully green result before pushing.
+- Push the rebased branch, update PR #136's description with the rebase and
+  exact validation results, and leave the PR unmerged for engine-side review.
+
+---
+
 # PROGRESS — cross-period reduction (issue #67)
 
 Branch: `cross-period-reduction` (worktree axiom-engine-67, from origin/main).
