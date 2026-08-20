@@ -10,10 +10,13 @@ Branch: `codex/node-state-annotations-115`
   (confirmed through the connected GitHub API) and is `0` behind.
 - Semantic integration, certification-consumer documentation, and the full
   requested validation matrix are complete and green.
-- Shell DNS cannot currently resolve GitHub, but the cached `origin/main` ref
-  exactly matched the connected API's live base SHA. Publication will be
-  retried after all local gates pass, with the connected API available as an
-  authorized fallback.
+- Publication is the sole blocker. Three exact force-with-lease push attempts
+  failed before authentication because shell DNS cannot resolve GitHub, and
+  direct-IP HTTPS egress is also blocked. The connected GitHub API can read the
+  PR, but both Git-object write probes were cancelled before mutation.
+- A final connected-API read confirms PR #136 is still open, draft, unmerged,
+  and unchanged at `db801cc`. The PR body was intentionally left unchanged
+  while its head still points to the pre-rebase code.
 - No toolchain, CI, or CODEOWNERS changes are in scope.
 
 ## Done
@@ -83,8 +86,10 @@ Branch: `codex/node-state-annotations-115`
 
 ## Next
 
-- Push the rebased branch, update PR #136's description with the rebase and
-  exact validation results, and leave the PR unmerged for engine-side review.
+- When a writable GitHub path is restored, force-with-lease push the rebased
+  branch only if the remote head is still `db801cc`, update PR #136's
+  description with the rebase/conflict and exact validation results, and leave
+  the PR unmerged for engine-side review.
 
 ---
 

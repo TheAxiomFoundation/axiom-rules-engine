@@ -70,5 +70,18 @@ No toolchain, CI, CODEOWNERS, or dependency-pin files were changed.
 
 ## Publication
 
-Push and PR-description update are pending. PR #136 must not be merged by this
-maintenance pass.
+The validated rebased history and this report are committed locally, but
+publication is blocked by the environment:
+
+- three force-with-lease HTTPS pushes failed before authentication with
+  `Could not resolve host: github.com`;
+- explicit-IP HTTPS probes cannot leave the sandbox;
+- the connected GitHub API still reads PR #136, but both an unreferenced tree
+  write and a tiny blob write were cancelled before mutation.
+
+A final read confirms the remote head remains the expected pre-rebase
+`db801cc245dffd83cafbddbd3f08846b1344e2a6`; PR #136 is open, draft, and
+unmerged. Its description was not changed while the remote still serves the
+old code. Once GitHub writes are restored, push with an exact lease on that SHA
+and apply this report's rebase and validation summary to the PR description.
+Do not merge; engine-side review remains required.
