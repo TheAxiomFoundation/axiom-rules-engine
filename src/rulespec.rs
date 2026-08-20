@@ -2366,23 +2366,30 @@ impl RulesDocument {
         &self,
         lowered_rule_kinds: &[Option<NodeKindSpec>],
     ) -> Vec<NodeProvenanceEntrySpec> {
-        self.rules
-            .iter()
-            .zip(lowered_rule_kinds)
-            .filter_map(|(rule, kind)| {
-                kind.map(|kind| {
-                    let name = match kind {
-                        NodeKindSpec::DataRelation | NodeKindSpec::DerivedRelation => {
-                            rule.canonical_relation_id()
-                        }
-                        NodeKindSpec::Parameter | NodeKindSpec::Derived | NodeKindSpec::Input => {
-                            rule.name.clone()
-                        }
-                    };
-                    rule.node_provenance_entry(kind, name)
-                })
-            })
-            .collect()
+        let mut entries = Vec::new();
+        for (rule, kind) in self.rules.iter().zip(lowered_rule_kinds) {
+            let Some(kind) = kind else {
+                continue;
+            };
+            let name = match kind {
+                NodeKindSpec::DataRelation | NodeKindSpec::DerivedRelation => {
+                    rule.canonical_relation_id()
+                }
+                NodeKindSpec::Parameter | NodeKindSpec::Derived | NodeKindSpec::Input => {
+                    rule.name.clone()
+                }
+            };
+            let entry = rule.node_provenance_entry(*kind, name);
+            // Mainline normalizes compatible duplicate parameter declarations
+            // before generating compiled metadata. Collapse only byte-equivalent
+            // origin claims here so that normalization still produces one node;
+            // conflicting claims remain duplicated and fail closed in compile.
+            if *kind == NodeKindSpec::Parameter && entries.contains(&entry) {
+                continue;
+            }
+            entries.push(entry);
+        }
+        entries
     }
 
     fn write_header(&self, out: &mut String) {

@@ -60,9 +60,15 @@ pub enum CompileError {
     InputStatesWithoutOutputs,
     #[error("relation_states requires typed outputs; reachability cannot otherwise be computed")]
     RelationStatesWithoutOutputs,
-    #[error("declared output `{output}` does not resolve to a derived rule")]
+    #[error(
+        "declared output `{output}` does not resolve to a queryable derived rule or non-indexed parameter"
+    )]
     UnknownDeclaredOutput { output: String },
-    #[error("declared output `{output}` resolves to derived rule `{resolved}` more than once")]
+    #[error(
+        "declared output `{output}` resolves to indexed parameter `{resolved}`; indexed parameters require a key expression"
+    )]
+    IndexedDeclaredOutput { output: String, resolved: String },
+    #[error("declared output `{output}` resolves to queryable node `{resolved}` more than once")]
     DuplicateDeclaredOutput { output: String, resolved: String },
     #[error("compiled node annotations are missing input_states for: {slots}")]
     MissingInputStates { slots: String },
@@ -791,9 +797,10 @@ fn parameter_version_interval(version: &ParameterVersionSpec) -> String {
 
 fn compiled_metadata(program: &ProgramSpec) -> Result<CompiledProgramMetadata, CompileError> {
     validate_unique_node_names(program)?;
+    let evaluation_order = evaluation_order(program)?;
     let input_catalog = compiled_input_catalog(program)?;
     Ok(CompiledProgramMetadata {
-        evaluation_order: evaluation_order(program)?,
+        evaluation_order,
         fast_path: fast_path_metadata(program),
         nodes: compiled_node_metadata(program, &input_catalog)?,
         input_catalog,
@@ -923,27 +930,60 @@ fn compiled_node_metadata(
     let mut resolved_outputs = Vec::with_capacity(declared_outputs.len());
     let mut seen_outputs = BTreeSet::new();
     for output in declared_outputs {
-        let Some(derived) = program
+        let derived = program
             .derived
             .iter()
-            .find(|derived| derived.name == *output || derived.id.as_deref() == Some(output))
-        else {
-            return Err(CompileError::UnknownDeclaredOutput {
-                output: output.clone(),
+            .find(|derived| derived.id.as_deref() == Some(output))
+            .or_else(|| {
+                program
+                    .derived
+                    .iter()
+                    .find(|derived| derived.name == *output && derived.id.is_none())
             });
+        let resolved = if let Some(derived) = derived {
+            (NodeKindSpec::Derived, derived.name.clone())
+        } else {
+            let parameter = program
+                .parameters
+                .iter()
+                .find(|parameter| parameter.id.as_deref() == Some(output))
+                .or_else(|| {
+                    program
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.name == *output && parameter.id.is_none())
+                })
+                .ok_or_else(|| CompileError::UnknownDeclaredOutput {
+                    output: output.clone(),
+                })?;
+            if parameter.indexed_by.is_some() {
+                return Err(CompileError::IndexedDeclaredOutput {
+                    output: output.clone(),
+                    resolved: parameter.name.clone(),
+                });
+            }
+            (NodeKindSpec::Parameter, parameter.name.clone())
         };
-        if !seen_outputs.insert(derived.name.clone()) {
+        if !seen_outputs.insert(resolved.clone()) {
             return Err(CompileError::DuplicateDeclaredOutput {
                 output: output.clone(),
-                resolved: derived.name.clone(),
+                resolved: resolved.1,
             });
         }
-        resolved_outputs.push(derived.name.clone());
+        resolved_outputs.push(resolved);
     }
 
     let mut reachable = BTreeSet::new();
-    for output in &resolved_outputs {
-        collect_reachable_derived(program, output, &mut reachable);
+    for (kind, output) in &resolved_outputs {
+        match kind {
+            NodeKindSpec::Derived => collect_reachable_derived(program, output, &mut reachable),
+            NodeKindSpec::Parameter => {
+                reachable.insert((NodeKindSpec::Parameter, output.clone()));
+            }
+            NodeKindSpec::Input | NodeKindSpec::DataRelation | NodeKindSpec::DerivedRelation => {
+                unreachable!("declared output resolution emits only derived and parameter nodes")
+            }
+        }
     }
 
     let mut nodes = Vec::new();
@@ -1339,7 +1379,9 @@ fn collect_reachable_judgment(
         JudgmentExprSpec::RelationMember { relation, .. } => {
             collect_reachable_relation(program, relation, reachable);
         }
-        JudgmentExprSpec::And { items } | JudgmentExprSpec::Or { items } => {
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
                 collect_reachable_judgment(program, item, reachable);
             }

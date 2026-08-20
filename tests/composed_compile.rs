@@ -112,7 +112,7 @@ module:
 imports:
   - us:policies/base
 outputs:
-  - computed_rate
+  - us:policies/base#computed_rate
 "#;
 
 const CROSS_LOWERING_COLLISION_COMPOSITION: &str = r#"
@@ -411,6 +411,14 @@ fn cross_lowering_collision_keeps_each_declarations_actual_origin() {
     assert_eq!(
         derived_node.corpus_citation_path.as_deref(),
         Some("us/statutes/26/32/j")
+    );
+    assert!(
+        parameter_node.reachable,
+        "the bare output resolves to the local non-ID parameter"
+    );
+    assert!(
+        !derived_node.reachable,
+        "the canonical imported derived is not selected by its hidden bare name"
     );
 
     std::fs::remove_dir_all(temp).ok();

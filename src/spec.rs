@@ -79,7 +79,8 @@ pub struct ProgramSpec {
     pub parameters: Vec<IndexedParameterSpec>,
     #[serde(default)]
     pub derived: Vec<DerivedSpec>,
-    /// Typed roots for structural reachability in compiled node metadata.
+    /// Queryable derived or non-indexed parameter roots for structural
+    /// reachability in compiled node metadata.
     /// `None` preserves the legacy contract: reachability is unknown and the
     /// compiler omits `metadata.nodes` rather than guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

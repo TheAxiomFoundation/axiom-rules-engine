@@ -8,7 +8,9 @@ Branch: `codex/node-state-annotations-115`
 
 - Rebase complete: the branch is based on current remote `main` at `2c0e1ed`
   (confirmed through the connected GitHub API) and is `0` behind / `14` ahead.
-- Semantic integration and the requested full validation matrix are pending.
+- Semantic integration is complete. Focused Rust integration and schema-golden
+  tests are green; the certification-consumer note and requested full
+  validation matrix are pending.
 - Shell DNS cannot currently resolve GitHub, but the cached `origin/main` ref
   exactly matched the connected API's live base SHA. Publication will be
   retried after all local gates pass, with the connected API available as an
@@ -32,11 +34,25 @@ Branch: `codex/node-state-annotations-115`
   validation, compatible-parameter normalization, relation source-path
   diagnostics, tolerated `extends: null`, and artifact input-catalog loading,
   while retaining fail-closed node provenance and origin binding.
+- Closed semantic gaps exposed after the textual rebase:
+  - traversed main's new `ExactlyOne` judgment node for reachability and added
+    a regression covering both child inputs;
+  - updated annotation relation fixtures for main's `slot_entities` contract;
+  - restored main's derived-graph validation before input-catalog construction;
+  - aligned annotation roots with main's new non-indexed parameter query
+    outputs, while rejecting key-requiring indexed parameters;
+  - preserved compatible duplicate-parameter normalization and collapsed only
+    identical generated parameter provenance claims, retaining fail-closed
+    behavior for conflicting or user-supplied claims.
+- Regenerated all-feature schemas. The stage-3 compiled-unit schema now embeds
+  the annotation contract, and the compiled-v2 root description is current.
+- Focused validation is green: 120 Rust tests across `artifact_version`,
+  `composed_compile`, `node_annotations`, and `rulespec`; 14 schema golden and
+  fidelity tests. Main's null-extends, absent-catalog, duplicate-normalization,
+  relation-slot, and diagnostic regressions all pass.
 
 ## Next
 
-- Compile and run focused annotation/schema tests to expose semantic integration
-  issues introduced by the intervening mainline changes.
 - Document the certified-serving / `certify_nodes` dependency on the
   `provenance` field and the post-merge artifact rebuild requirement.
 - Run all requested Rust, Python-native, schema, PyO3, and WASM validation

@@ -1008,7 +1008,7 @@
           "type": "array"
         },
         "outputs": {
-          "description": "Typed roots for structural reachability in compiled node metadata.\n`None` preserves the legacy contract: reachability is unknown and the\ncompiler omits `metadata.nodes` rather than guessing.",
+          "description": "Queryable derived or non-indexed parameter roots for structural\nreachability in compiled node metadata.\n`None` preserves the legacy contract: reachability is unknown and the\ncompiler omits `metadata.nodes` rather than guessing.",
           "items": {
             "type": "string"
           },

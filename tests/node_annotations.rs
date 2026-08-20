@@ -5,7 +5,8 @@ use axiom_rules_engine::compile::{
     CompiledProgramArtifact,
 };
 use axiom_rules_engine::spec::{
-    DerivedSemanticsSpec, InputStateSpec, NodeKindSpec, NodeProvenanceSpec, ScalarExprSpec,
+    ComparisonOpSpec, DerivedSemanticsSpec, InputStateSpec, JudgmentExprSpec, NodeKindSpec,
+    NodeProvenanceSpec, ScalarExprSpec, ScalarValueSpec,
 };
 
 const GRAPH_RULESPEC: &str = r#"
@@ -160,6 +161,56 @@ fn complete_contract_emits_state_reachability_and_provenance() {
 }
 
 #[test]
+fn reachability_traverses_exactly_one_items() {
+    let mut program = annotated_program();
+    for name in ["exactly_one_left", "exactly_one_right"] {
+        program
+            .input_states
+            .insert(name.to_string(), InputStateSpec::Exogenous);
+    }
+    let result = program
+        .derived
+        .iter_mut()
+        .find(|derived| derived.name == "result")
+        .expect("result rule");
+    let DerivedSemanticsSpec::Scalar { expr } = &mut result.semantics else {
+        panic!("scalar result");
+    };
+    let original = std::mem::replace(
+        expr,
+        ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value: 0 },
+        },
+    );
+    let compared_input = |name: &str| JudgmentExprSpec::Comparison {
+        left: Box::new(ScalarExprSpec::Input {
+            name: name.to_string(),
+        }),
+        op: ComparisonOpSpec::Gt,
+        right: Box::new(ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value: 0 },
+        }),
+    };
+    *expr = ScalarExprSpec::If {
+        condition: Box::new(JudgmentExprSpec::ExactlyOne {
+            items: vec![
+                compared_input("exactly_one_left"),
+                compared_input("exactly_one_right"),
+            ],
+        }),
+        then_expr: Box::new(original),
+        else_expr: Box::new(ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value: 0 },
+        }),
+    };
+
+    let artifact = CompiledProgramArtifact::compile(program).expect("exactly_one graph compiles");
+    let nodes = artifact.metadata.nodes.as_deref().expect("node catalog");
+    assert!(node(nodes, NodeKindSpec::Input, "exactly_one_left").reachable);
+    assert!(node(nodes, NodeKindSpec::Input, "exactly_one_right").reachable);
+}
+
+#[test]
 fn legacy_artifact_without_contract_loads_without_inventing_annotations() {
     let artifact =
         CompiledProgramArtifact::from_rulespec_str(GRAPH_RULESPEC).expect("legacy source compiles");
@@ -203,6 +254,113 @@ fn declared_outputs_must_be_nonempty_known_and_unique() {
         CompiledProgramArtifact::compile(duplicate),
         Err(CompileError::DuplicateDeclaredOutput { .. })
     ));
+
+    let mut indexed_parameter = annotated_program();
+    indexed_parameter.outputs = Some(vec!["amount_by_size".to_string()]);
+    assert!(matches!(
+        CompiledProgramArtifact::compile(indexed_parameter),
+        Err(CompileError::IndexedDeclaredOutput { .. })
+    ));
+}
+
+#[test]
+fn non_indexed_parameter_outputs_are_reachability_roots() {
+    let mut program = axiom_rules_engine::rulespec::lower_rulespec_str(
+        r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statutes/26/32/j
+outputs:
+  - flat_amount
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "10"
+"#,
+    )
+    .expect("parameter-root RuleSpec lowers");
+    let canonical_id = "us:statutes/26/32/j#flat_amount";
+    program
+        .parameters
+        .iter_mut()
+        .find(|parameter| parameter.name == "flat_amount")
+        .expect("flat parameter")
+        .id = Some(canonical_id.to_string());
+    program.outputs = Some(vec![canonical_id.to_string()]);
+
+    let artifact = CompiledProgramArtifact::compile(program)
+        .expect("non-indexed parameter is a queryable annotation root");
+    let parameter = node(
+        artifact.metadata.nodes.as_deref().expect("node catalog"),
+        NodeKindSpec::Parameter,
+        "flat_amount",
+    );
+    assert!(parameter.reachable);
+    assert_eq!(parameter.id, canonical_id);
+    assert_eq!(parameter.provenance, NodeProvenanceSpec::ProvisionBacked);
+}
+
+#[test]
+fn annotated_rulespec_deduplicates_identical_normalized_parameter_provenance() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statutes/26/32/j
+outputs:
+  - flat_amount
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2026-12-31
+        formula: "10"
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2027-01-01
+        formula: "20"
+"#,
+    )
+    .expect("compatible duplicate declarations normalize with one provenance claim");
+
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "duplicate_parameter_name")
+    );
+    assert_eq!(
+        artifact
+            .program
+            .node_provenance
+            .iter()
+            .filter(|entry| {
+                entry.kind == NodeKindSpec::Parameter && entry.name == "flat_amount"
+            })
+            .count(),
+        1
+    );
+    assert!(
+        node(
+            artifact.metadata.nodes.as_deref().expect("node catalog"),
+            NodeKindSpec::Parameter,
+            "flat_amount",
+        )
+        .reachable
+    );
 }
 
 #[test]
@@ -236,6 +394,7 @@ fn relation_state_declarations_must_cover_exactly_the_runtime_data_relations() {
     let relation = axiom_rules_engine::spec::RelationSpec {
         name: "member_of_household".to_string(),
         arity: 2,
+        slot_entities: Vec::new(),
         derivation: None,
     };
 
@@ -268,20 +427,48 @@ fn relation_state_declarations_must_cover_exactly_the_runtime_data_relations() {
 }
 
 #[test]
-fn duplicate_parameter_and_relation_nodes_are_rejected() {
+fn compatible_parameter_duplicates_are_normalized_and_relation_duplicates_are_rejected() {
     let mut duplicate_parameter = annotated_program();
     duplicate_parameter
         .parameters
         .push(duplicate_parameter.parameters[0].clone());
-    assert!(matches!(
-        CompiledProgramArtifact::compile(duplicate_parameter),
-        Err(CompileError::DuplicateParameterNode { .. })
-    ));
+    let artifact = CompiledProgramArtifact::compile(duplicate_parameter)
+        .expect("compatible parameter duplicates normalize before annotation generation");
+    assert_eq!(
+        artifact
+            .program
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.name == "amount_by_size")
+            .count(),
+        1
+    );
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "duplicate_parameter_name")
+    );
+    assert_eq!(
+        artifact
+            .metadata
+            .nodes
+            .as_deref()
+            .expect("node metadata")
+            .iter()
+            .filter(|node| {
+                node.kind == NodeKindSpec::Parameter && node.name == "amount_by_size"
+            })
+            .count(),
+        1,
+        "normalization must still emit exactly one certified parameter node"
+    );
 
     let mut duplicate_relation = annotated_program();
     let relation = axiom_rules_engine::spec::RelationSpec {
         name: "member_of_household".to_string(),
         arity: 2,
+        slot_entities: Vec::new(),
         derivation: None,
     };
     duplicate_relation.relations.push(relation.clone());
@@ -357,6 +544,7 @@ fn node_provenance_declarations_must_resolve_uniquely() {
         .push(axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         });
     invalid_relation_path
@@ -405,6 +593,7 @@ fn reachability_traverses_relations_and_related_inputs() {
         .push(axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         });
     program
@@ -412,6 +601,7 @@ fn reachability_traverses_relations_and_related_inputs() {
         .push(axiom_rules_engine::spec::RelationSpec {
             name: "future_relation".to_string(),
             arity: 2,
+            slot_entities: Vec::new(),
             derivation: None,
         });
     program.relation_states.insert(

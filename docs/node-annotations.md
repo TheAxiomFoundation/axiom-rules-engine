@@ -31,7 +31,10 @@ relation_states:
   not_yet_encoded_links: pending
 ```
 
-`outputs` is the exact set of derived roots for structural reachability.
+`outputs` is the exact set of queryable roots for structural reachability:
+derived rules and non-indexed parameters, addressed with execution-query
+name/ID resolution. Indexed parameters require a key expression and therefore
+cannot be roots by themselves.
 `input_states` must classify every runtime input slot exactly once whenever
 `outputs` is present. `relation_states` does the same for runtime-supplied data
 relations; the compiler never assumes that relation data is exogenous. Unknown
