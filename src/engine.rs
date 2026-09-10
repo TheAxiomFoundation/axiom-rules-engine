@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use thiserror::Error;
 
 use crate::model::{
@@ -42,6 +42,27 @@ pub(crate) fn shift_calendar_years(
                 "date_add_years result is outside the supported date range".to_string(),
             )
         })
+}
+
+/// Convert signed whole Gregorian calendar-year units, independently of dates
+/// or policy eligibility. Integer/integral Decimal admission is exact; no
+/// fractional truncation, saturation, or floating-point conversion is allowed.
+pub(crate) fn calendar_years_to_months(value: &ScalarValue) -> Result<i64, EvalError> {
+    let years = match value {
+        ScalarValue::Integer(years) => Some(*years),
+        ScalarValue::Decimal(years) if years.fract().is_zero() => years.to_i64(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        EvalError::TypeMismatch(
+            "calendar_years_to_months requires Integer or exactly integral Decimal years within the signed 64-bit range".to_string(),
+        )
+    })?;
+    years.checked_mul(12).ok_or_else(|| {
+        EvalError::TypeMismatch(
+            "calendar_years_to_months result is outside the signed 64-bit range".to_string(),
+        )
+    })
 }
 
 #[derive(Debug, Error)]
@@ -735,6 +756,9 @@ impl<'a> Engine<'a> {
             ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
                 self.eval_decimal(value, entity_id, period)?.floor(),
             )),
+            ScalarExpr::CalendarYearsToMonths { years } => Ok(ScalarValue::Integer(
+                calendar_years_to_months(&self.eval_scalar_expr(years, entity_id, period)?)?,
+            )),
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(period.start)),
             ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(period.end)),
             ScalarExpr::DateAddDays { date, days } => {
@@ -1144,10 +1168,8 @@ impl<'a> Engine<'a> {
                 .get(name)
                 .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
             let version = parameter
-                .versions
-                .iter()
-                .filter(|version| version.applies_at(period.start))
-                .max_by_key(|version| version.effective_from)
+                .version_at(period.start)
+                .map(|(_, version)| version)
                 .ok_or_else(|| EvalError::MissingParameterValue {
                     parameter: name.to_string(),
                     key,
@@ -1333,7 +1355,9 @@ fn collect_scalar_trace_references(
             collect_scalar_trace_references(left, derived, parameters);
             collect_scalar_trace_references(right, derived, parameters);
         }
-        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+        ScalarExpr::Ceil(value)
+        | ScalarExpr::Floor(value)
+        | ScalarExpr::CalendarYearsToMonths { years: value } => {
             collect_scalar_trace_references(value, derived, parameters);
         }
         ScalarExpr::DateAddDays { date, days } => {
