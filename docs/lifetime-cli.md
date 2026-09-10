@@ -55,6 +55,13 @@ period. The existing lifetime evaluator uses that period for outer parameter
 lookups and evaluates reduction expressions in each supplied period. Its
 existing invariance and top-N checks still apply.
 
+`calendar_years_to_months(value)` is an exact unary unit conversion usable
+inside or outside a reduction. For complete calendar-year observations, the
+same integral count used by top-N can supply its month denominator. It does
+not count actual covered months or prove that periods are complete years.
+See [calendar unit conversion](calendar-unit-conversion.md) for the numeric
+contract and partial-year/floating execution limits.
+
 The dense plan's commencement check now runs for **every supplied period**, as
 it does for scalar execution. A history predating any compiled formula's
 commencement fails. This restriction does not introduce separate determination

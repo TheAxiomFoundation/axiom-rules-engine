@@ -310,6 +310,10 @@ pub enum ScalarExpr {
     Min(Vec<ScalarExpr>),
     Ceil(Box<ScalarExpr>),
     Floor(Box<ScalarExpr>),
+    /// Convert whole Gregorian calendar-year units to exact month units.
+    CalendarYearsToMonths {
+        years: Box<ScalarExpr>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -901,7 +905,8 @@ fn collect_scalar_relation_usages(
         | ScalarExpr::PeriodEnd => {}
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => {
+        | ScalarExpr::Floor(index)
+        | ScalarExpr::CalendarYearsToMonths { years: index } => {
             collect_scalar_relation_usages(program, index, entity, citing_rule, usages);
         }
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
@@ -1154,7 +1159,8 @@ fn collect_scalar_derived_entities(
         }
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => {
+        | ScalarExpr::Floor(index)
+        | ScalarExpr::CalendarYearsToMonths { years: index } => {
             collect_scalar_derived_entities(program, index, entities);
         }
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
@@ -1349,7 +1355,9 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_scalar_expr(left, slots);
             collect_input_slots_from_scalar_expr(right, slots);
         }
-        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+        ScalarExpr::Ceil(value)
+        | ScalarExpr::Floor(value)
+        | ScalarExpr::CalendarYearsToMonths { years: value } => {
             collect_input_slots_from_scalar_expr(value, slots);
         }
         ScalarExpr::DateAddDays { date, days } => {

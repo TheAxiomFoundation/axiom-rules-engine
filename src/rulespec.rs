@@ -3137,7 +3137,8 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             rewrite_relation_alias_in_scalar(index, alias, relation_name);
         }
         ScalarExprSpec::Add { items }
@@ -3445,7 +3446,8 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             collect_scalar_relation_names(index, names);
         }
         ScalarExprSpec::Add { items }
@@ -3554,7 +3556,8 @@ fn rewrite_scalar_relation_references(
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             rewrite_scalar_relation_references(
                 index,
                 origin_target,
@@ -3895,7 +3898,8 @@ fn scalar_uses_imported_derived(
         }
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             scalar_uses_imported_derived(index, origin_target, derived_origin_targets)
         }
         ScalarExprSpec::Add { items }
