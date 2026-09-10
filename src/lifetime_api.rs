@@ -1,7 +1,8 @@
 //! Bounded JSON transport for the real Decimal lifetime executor.
 //!
 //! Row identity is caller-declared positional alignment. This interface does
-//! not supply missing periods, infer relations, or add a determination period.
+//! not supply missing periods or infer relations. V2 explicitly binds a legal
+//! calculation period while retaining historical observation dates.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -15,7 +16,8 @@ use thiserror::Error;
 
 use crate::compile::{CompileError, CompiledProgramArtifact};
 use crate::dense::{
-    DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
+    CalculationLifetimePlan, DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram,
+    DenseOutputValue, SelectedVersion,
 };
 use crate::engine::EvalError;
 use crate::model::{Period, PeriodKind};
@@ -206,6 +208,69 @@ pub struct LifetimeExecutionRequest {
     pub output_period: LifetimePeriod,
 }
 
+/// V2 is explicitly fixed-law and accepts completed history only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CalculationRequestSchema {
+    #[serde(rename = "axiom-rules-engine/lifetime-request/v2")]
+    V2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CalculationResponseSchema {
+    #[serde(rename = "axiom-rules-engine/lifetime-response/v2")]
+    V2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CalculationLifetimeRequest {
+    pub schema: CalculationRequestSchema,
+    pub entity: String,
+    #[serde(default)]
+    pub arithmetic: LifetimeArithmetic,
+    pub periods: Vec<LifetimePeriod>,
+    pub batches: Vec<LifetimeBatch>,
+    pub outputs: Vec<String>,
+    pub calculation_period: LifetimePeriod,
+    pub output_period: LifetimePeriod,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LifetimeWireRequest {
+    V1(LifetimeExecutionRequest),
+    V2(CalculationLifetimeRequest),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LifetimeWireResponse {
+    V1(LifetimeExecutionResponse),
+    V2(CalculationLifetimeResponse),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CalculationLifetimeResponse {
+    pub schema: CalculationResponseSchema,
+    pub engine_version: String,
+    pub artifact_format_version: u32,
+    pub arithmetic: LifetimeArithmetic,
+    pub entity: String,
+    pub row_count: usize,
+    pub entity_ids: Vec<String>,
+    pub periods: Vec<LifetimePeriod>,
+    pub calculation_period: LifetimePeriod,
+    pub reference_period: LifetimePeriod,
+    pub output_period: LifetimePeriod,
+    pub selected_versions: Vec<SelectedVersion>,
+    pub outputs: BTreeMap<String, LifetimeOutput>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum JudgmentColumnKind {
@@ -267,6 +332,8 @@ pub enum LifetimeApiError {
     #[error("{0}")]
     Compile(#[from] DenseCompileError),
     #[error("{0}")]
+    Calculation(#[source] DenseCompileError),
+    #[error("{0}")]
     Spec(#[from] SpecError),
     #[error("{0}")]
     Evaluation(#[from] EvalError),
@@ -284,6 +351,12 @@ impl LifetimeApiError {
     pub fn diagnostic(&self) -> Value {
         let category = match self {
             Self::Request { .. } | Self::Json(_) => "invalid_request",
+            Self::Calculation(DenseCompileError::CalculationHistory(_)) => "invalid_request",
+            Self::Calculation(DenseCompileError::Artifact(_)) => "artifact",
+            Self::Calculation(
+                DenseCompileError::Eval(_) | DenseCompileError::MissingParameterVersion { .. },
+            ) => "evaluation",
+            Self::Calculation(_) => "unsupported",
             Self::Unsupported(_) | Self::Compile(_) => "unsupported",
             Self::Artifact(_) => "artifact",
             Self::Spec(_) | Self::Evaluation(_) | Self::Output(_) => "evaluation",
@@ -322,6 +395,83 @@ pub fn parse_lifetime_request(source: &str) -> Result<LifetimeExecutionRequest, 
     Ok(serde_json::from_value(parse_unique_json(source)?)?)
 }
 
+/// Versioned CLI admission. The v1-only parser remains unchanged for callers
+/// whose contract cannot understand the separate calculation-period semantics.
+pub fn parse_lifetime_wire_request(source: &str) -> Result<LifetimeWireRequest, LifetimeApiError> {
+    if source.len() > MAX_REQUEST_BYTES {
+        return Err(LifetimeApiError::invalid(
+            "request",
+            "request exceeds byte limit",
+        ));
+    }
+    let value = parse_unique_json(source)?;
+    match value.get("schema").and_then(Value::as_str) {
+        Some("axiom-rules-engine/lifetime-request/v1") => {
+            Ok(LifetimeWireRequest::V1(serde_json::from_value(value)?))
+        }
+        Some("axiom-rules-engine/lifetime-request/v2") => {
+            Ok(LifetimeWireRequest::V2(serde_json::from_value(value)?))
+        }
+        _ => Err(LifetimeApiError::invalid(
+            "schema",
+            "expected lifetime-request/v1 or lifetime-request/v2",
+        )),
+    }
+}
+
+pub fn execute_lifetime_wire_request(
+    artifact: CompiledProgramArtifact,
+    request: LifetimeWireRequest,
+) -> Result<LifetimeWireResponse, LifetimeApiError> {
+    match request {
+        LifetimeWireRequest::V1(request) => Ok(LifetimeWireResponse::V1(execute_lifetime_request(
+            artifact, request,
+        )?)),
+        LifetimeWireRequest::V2(request) => Ok(LifetimeWireResponse::V2(
+            execute_calculation_lifetime_request(artifact, request)?,
+        )),
+    }
+}
+
+pub fn execute_calculation_lifetime_request(
+    artifact: CompiledProgramArtifact,
+    request: CalculationLifetimeRequest,
+) -> Result<CalculationLifetimeResponse, LifetimeApiError> {
+    let calculation_period = request.calculation_period;
+    if request.output_period != calculation_period {
+        return Err(LifetimeApiError::invalid(
+            "output_period",
+            "must equal calculation_period in v2",
+        ));
+    }
+    let normalized = LifetimeExecutionRequest {
+        schema: LifetimeRequestSchema::V1,
+        entity: request.entity,
+        arithmetic: request.arithmetic,
+        periods: request.periods,
+        batches: request.batches,
+        outputs: request.outputs,
+        output_period: request.output_period,
+    };
+    let (response, selected_versions) =
+        execute_lifetime_internal(artifact, normalized, Some(&calculation_period))?;
+    Ok(CalculationLifetimeResponse {
+        schema: CalculationResponseSchema::V2,
+        engine_version: response.engine_version,
+        artifact_format_version: response.artifact_format_version,
+        arithmetic: response.arithmetic,
+        entity: response.entity,
+        row_count: response.row_count,
+        entity_ids: response.entity_ids,
+        periods: response.periods,
+        calculation_period,
+        reference_period: response.reference_period,
+        output_period: response.output_period,
+        selected_versions,
+        outputs: response.outputs,
+    })
+}
+
 /// Use the standard artifact admission after checking byte and duplicate-key limits.
 pub fn parse_lifetime_artifact(source: &str) -> Result<CompiledProgramArtifact, LifetimeApiError> {
     if source.len() > MAX_ARTIFACT_BYTES {
@@ -338,6 +488,14 @@ pub fn execute_lifetime_request(
     artifact: CompiledProgramArtifact,
     request: LifetimeExecutionRequest,
 ) -> Result<LifetimeExecutionResponse, LifetimeApiError> {
+    Ok(execute_lifetime_internal(artifact, request, None)?.0)
+}
+
+fn execute_lifetime_internal(
+    artifact: CompiledProgramArtifact,
+    request: LifetimeExecutionRequest,
+    calculation_period: Option<&LifetimePeriod>,
+) -> Result<(LifetimeExecutionResponse, Vec<SelectedVersion>), LifetimeApiError> {
     // Public Rust callers can construct artifact structs directly. Re-admit the
     // serialized contract rather than trusting supplied metadata in that case.
     let artifact = parse_lifetime_artifact(&serde_json::to_string(&artifact)?)?;
@@ -360,7 +518,7 @@ pub fn execute_lifetime_request(
             "output count must be in 1..=256",
         ));
     }
-    if request.periods.last() != Some(&request.output_period) {
+    if calculation_period.is_none() && request.periods.last() != Some(&request.output_period) {
         return Err(LifetimeApiError::Unsupported("output_period must equal the final supplied period; a separate determination period is not supported".into()));
     }
     let periods: Vec<Period> = request
@@ -392,7 +550,29 @@ pub fn execute_lifetime_request(
         }
     }
     let program = artifact.program.to_program()?;
-    let dense = DenseCompiledProgram::from_program(&program, Some(&request.entity))?;
+    let calculation = calculation_period
+        .map(|period| {
+            if let LifetimePeriod::Custom { name, .. } = period {
+                check_string(name, "calculation_period.name")?;
+            }
+            Ok::<_, LifetimeApiError>(
+                CalculationLifetimePlan::from_program(&program, &request.entity, period.to_model())
+                    .map_err(LifetimeApiError::Calculation)?,
+            )
+        })
+        .transpose()?;
+    let legacy = if calculation.is_none() {
+        Some(DenseCompiledProgram::from_program(
+            &program,
+            Some(&request.entity),
+        )?)
+    } else {
+        None
+    };
+    let dense = match &calculation {
+        Some(plan) => plan.compiled(),
+        None => legacy.as_ref().expect("legacy plan prepared"),
+    };
     if !dense.relations().is_empty() {
         return Err(LifetimeApiError::Unsupported(
             "relation context is not supported by lifetime JSON v1".into(),
@@ -542,7 +722,16 @@ pub fn execute_lifetime_request(
             relations: HashMap::new(),
         });
     }
-    let execution = dense.execute_lifetime(&periods, batches, &outputs)?;
+    let execution = match &calculation {
+        Some(plan) => plan
+            .execute(&periods, batches, &outputs)
+            .map_err(LifetimeApiError::Calculation)?,
+        None => dense.execute_lifetime(&periods, batches, &outputs)?,
+    };
+    let selected_versions = calculation
+        .as_ref()
+        .map(|plan| plan.selected_versions().to_vec())
+        .unwrap_or_default();
     let mut result = BTreeMap::new();
     for (name, value) in execution.outputs {
         let derived = artifact
@@ -581,19 +770,22 @@ pub fn execute_lifetime_request(
             },
         );
     }
-    Ok(LifetimeExecutionResponse {
-        schema: LifetimeResponseSchema::V1,
-        engine_version: crate::ENGINE_VERSION.into(),
-        artifact_format_version: artifact.artifact_format_version,
-        arithmetic: LifetimeArithmetic::Decimal,
-        entity: request.entity,
-        row_count: execution.row_count,
-        entity_ids,
-        periods: request.periods,
-        reference_period: request.output_period.clone(),
-        output_period: request.output_period,
-        outputs: result,
-    })
+    Ok((
+        LifetimeExecutionResponse {
+            schema: LifetimeResponseSchema::V1,
+            engine_version: crate::ENGINE_VERSION.into(),
+            artifact_format_version: artifact.artifact_format_version,
+            arithmetic: LifetimeArithmetic::Decimal,
+            entity: request.entity,
+            row_count: execution.row_count,
+            entity_ids,
+            periods: request.periods,
+            reference_period: request.output_period.clone(),
+            output_period: request.output_period,
+            outputs: result,
+        },
+        selected_versions,
+    ))
 }
 
 fn parse_unique_json(source: &str) -> Result<Value, serde_json::Error> {

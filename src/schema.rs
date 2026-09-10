@@ -86,6 +86,14 @@ pub fn all_schemas() -> Vec<NamedSchema> {
             file_name: "lifetime-response.v1.schema.json",
             schema: lifetime_response_schema(),
         },
+        NamedSchema {
+            file_name: "lifetime-request.v2.schema.json",
+            schema: calculation_lifetime_request_schema(),
+        },
+        NamedSchema {
+            file_name: "lifetime-response.v2.schema.json",
+            schema: calculation_lifetime_response_schema(),
+        },
     ];
     #[cfg(feature = "unit-derivation")]
     schemas.extend([
@@ -1056,6 +1064,35 @@ pub fn lifetime_response_schema() -> Value {
         "lifetime-response.v1",
         "Axiom lifetime execution response",
         "Canonical Decimal lifetime results with exact decimal strings, public output IDs and caller-declared aligned entity IDs. The reference period is the last supplied period.",
+    );
+    schema
+}
+
+#[cfg(feature = "schema")]
+pub fn calculation_lifetime_request_schema() -> Value {
+    let mut schema =
+        serde_json::to_value(schema_for!(crate::lifetime_api::CalculationLifetimeRequest))
+            .expect("calculation request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "lifetime-request.v2",
+        "Axiom calculation lifetime request",
+        "Decimal completed-history execution under law selected at calculation_period.start. Output period must equal calculation period; every observation ends before calculation starts. Runtime additionally checks canonical IDs, exact decimals, alignment and resource limits.",
+    );
+    schema
+}
+
+#[cfg(feature = "schema")]
+pub fn calculation_lifetime_response_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(
+        crate::lifetime_api::CalculationLifetimeResponse
+    ))
+    .expect("calculation response schema serializes");
+    stamp_meta(
+        &mut schema,
+        "lifetime-response.v2",
+        "Axiom calculation lifetime response",
+        "Exact Decimal results retaining historical observation periods and the separate legal calculation/reference/output period, with original selected version indices and inclusive source ranges. No knowledge-time selection is implied.",
     );
     schema
 }

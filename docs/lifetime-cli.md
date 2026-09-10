@@ -113,3 +113,50 @@ expectations must be quoted. Runtime binding and the fixture harness enforce
 cross-field equality and declared output types. Scalar companion cases keep
 their previous schema. No encoded statutory module or fixture is supplied by
 this transport change.
+
+## Fixed calculation period in v2
+
+The same `run-lifetime` command also accepts the explicit
+`axiom-rules-engine/lifetime-request/v2` schema. V2 adds a required
+`calculation_period`; `output_period` must equal it. Every historical observation
+must end strictly before calculation starts. Observation periods retain their
+same-kind, ordered, non-overlapping contract; calculation may have a different
+kind, such as a monthly calculation over complete annual observations.
+
+V2 selects every compiled derived formula and parameter-table version at
+`calculation_period.start`. Effective bounds are inclusive, and selection keeps
+the existing greatest-start-date and equal-start document-order behavior. No
+active version is an error; explicit versions never fall back to a base formula.
+The whole selected parameter table governs all lookups. A missing historical key
+does not borrow from an older table.
+
+Inputs and date expressions inside reductions retain their actual observation
+periods. Outer parameter lookups use the calculation date, while ambiguous outer
+date expressions still fail. Historical series must use explicit data-year keys
+or supplied history inputs; parameter effective dates describe legal version
+selection in this mode. It does not implement mixed observation-law and
+calculation-law selection, knowledge-time assessment, statutory eligibility,
+partly completed history, missing-period inference, or relation contexts.
+
+The public Rust `dense::CalculationLifetimePlan::from_artifact` re-admits the
+original artifact and prepares an immutable plan for an entity and calculation
+period. The plan exposes canonical Decimal execution only, preserving original
+version definitions. As with the existing dense compiler, every root for the
+selected entity and its syntactic dependencies must be compilable at that legal
+date, including roots not requested in the output list.
+
+The `axiom-rules-engine/lifetime-response/v2` response echoes the observation
+periods and calculation period. Both `reference_period` and `output_period`
+equal the calculation period. Its `selected_versions` array identifies each
+compiled derived or parameter node by name, retained source ID (or null),
+original zero-based version index, and original effective bounds. Genuinely
+unversioned derived nodes have the explicit `unversioned_derived` kind and no
+invented version range. This is execution metadata, not legal proof or source
+admission. The existing error schema remains `lifetime-error/v1`.
+
+V1 callers and its dedicated parser retain their original behavior and reject
+v2 fields. Separate v2 request/response schemas are published by `emit-schemas`.
+The encoder's existing companion-fixture adapter supports v1 only; v2 fixture
+transport requires a separate reviewed encoder extension. The synthetic tests
+in `tests/lifetime_calculation.rs` exercise the actual plan and CLI, including
+version changes, gaps, table-key failures, cache isolation and v1 compatibility.

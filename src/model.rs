@@ -427,11 +427,18 @@ impl Derived {
         if self.versions.is_empty() {
             return Some(&self.semantics);
         }
+        self.version_at(period.start)
+            .map(|(_, version)| &version.semantics)
+    }
+
+    /// Original version index and applicable semantics; equal-start ties retain
+    /// the existing last-in-document selector behavior.
+    pub fn version_at(&self, date: NaiveDate) -> Option<(usize, &DerivedVersion)> {
         self.versions
             .iter()
-            .filter(|version| version.applies_at(period.start))
-            .max_by_key(|version| version.effective_from)
-            .map(|version| &version.semantics)
+            .enumerate()
+            .filter(|(_, version)| version.applies_at(date))
+            .max_by_key(|(_, version)| version.effective_from)
     }
 }
 
@@ -482,6 +489,17 @@ pub struct IndexedParameter {
     /// execution.
     pub corpus_citation_path: Option<String>,
     pub versions: Vec<ParameterVersion>,
+}
+
+impl IndexedParameter {
+    /// Select the whole legal table version before looking up historical keys.
+    pub fn version_at(&self, date: NaiveDate) -> Option<(usize, &ParameterVersion)> {
+        self.versions
+            .iter()
+            .enumerate()
+            .filter(|(_, version)| version.applies_at(date))
+            .max_by_key(|(_, version)| version.effective_from)
+    }
 }
 
 #[derive(Clone, Debug, Default)]

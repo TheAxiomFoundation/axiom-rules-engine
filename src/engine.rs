@@ -1199,10 +1199,8 @@ impl<'a> Engine<'a> {
                 .get(name)
                 .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
             let version = parameter
-                .versions
-                .iter()
-                .filter(|version| version.applies_at(period.start))
-                .max_by_key(|version| version.effective_from)
+                .version_at(period.start)
+                .map(|(_, version)| version)
                 .ok_or_else(|| EvalError::MissingParameterValue {
                     parameter: name.to_string(),
                     key,

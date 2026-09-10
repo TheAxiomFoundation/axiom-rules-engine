@@ -1,0 +1,303 @@
+{
+  "$defs": {
+    "CalculationRequestSchema": {
+      "description": "V2 is explicitly fixed-law and accepts completed history only.",
+      "enum": [
+        "axiom-rules-engine/lifetime-request/v2"
+      ],
+      "type": "string"
+    },
+    "LifetimeArithmetic": {
+      "enum": [
+        "decimal"
+      ],
+      "type": "string"
+    },
+    "LifetimeBatch": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LifetimeColumn"
+          },
+          "type": "object"
+        },
+        "row_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "row_count",
+        "entity_ids",
+        "inputs"
+      ],
+      "type": "object"
+    },
+    "LifetimeColumn": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "boolean"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "decimal",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "date",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimePeriod": {
+      "description": "Same period wire vocabulary as PeriodSpec, with unknown fields refused.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "month",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "benefit_week",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "tax_year",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "custom",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "name",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/lifetime-request.v2.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Decimal completed-history execution under law selected at calculation_period.start. Output period must equal calculation period; every observation ends before calculation starts. Runtime additionally checks canonical IDs, exact decimals, alignment and resource limits.",
+  "properties": {
+    "arithmetic": {
+      "$ref": "#/$defs/LifetimeArithmetic",
+      "default": "decimal"
+    },
+    "batches": {
+      "items": {
+        "$ref": "#/$defs/LifetimeBatch"
+      },
+      "type": "array"
+    },
+    "calculation_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "entity": {
+      "type": "string"
+    },
+    "output_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "outputs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "periods": {
+      "items": {
+        "$ref": "#/$defs/LifetimePeriod"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "$ref": "#/$defs/CalculationRequestSchema"
+    }
+  },
+  "required": [
+    "schema",
+    "entity",
+    "periods",
+    "batches",
+    "outputs",
+    "calculation_period",
+    "output_period"
+  ],
+  "title": "Axiom calculation lifetime request",
+  "type": "object"
+}
