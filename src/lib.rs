@@ -7,6 +7,7 @@ pub mod compile;
 pub mod dense;
 pub mod engine;
 mod formula;
+pub mod lifetime_api;
 pub mod migrate;
 pub mod model;
 pub mod rulespec;

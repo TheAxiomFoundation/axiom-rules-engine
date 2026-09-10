@@ -8,6 +8,10 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
+use axiom_rules_engine::lifetime_api::{
+    LifetimeApiError, MAX_ARTIFACT_BYTES, MAX_REQUEST_BYTES, execute_lifetime_request,
+    parse_lifetime_artifact, parse_lifetime_request,
+};
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
 fn main() {
@@ -22,6 +26,7 @@ enum TopLevelCommand {
     Compile,
     CompileComposed,
     RunCompiled,
+    RunLifetime,
     #[cfg(feature = "unit-derivation")]
     CompileUnitAggregation,
     #[cfg(feature = "unit-derivation")]
@@ -65,6 +70,12 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         name: "run-compiled",
         aliases: &[],
         description: &["Execute a compiled artifact against a JSON request on stdin."],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::RunLifetime,
+        name: "run-lifetime",
+        aliases: &[],
+        description: &["Execute aligned period batches with exact Decimal lifetime reductions."],
     },
     #[cfg(feature = "unit-derivation")]
     CommandMetadata {
@@ -166,6 +177,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TopLevelCommand::Compile => return run_compile(args.collect(), false),
             TopLevelCommand::CompileComposed => return run_compile(args.collect(), true),
             TopLevelCommand::RunCompiled => return run_compiled(args.collect()),
+            TopLevelCommand::RunLifetime => return run_lifetime(args.collect()),
             #[cfg(feature = "unit-derivation")]
             TopLevelCommand::CompileUnitAggregation => {
                 return run_compile_unit_aggregation(args.collect());
@@ -416,6 +428,56 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
         println!("{key}: {value}");
     }
     Ok(())
+}
+
+fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if args == ["--help"] {
+        println!(
+            "usage: axiom-rules-engine run-lifetime --artifact <compiled.json>\nRead one lifetime-request/v1 JSON request from stdin; Decimal only."
+        );
+        return Ok(());
+    }
+    let execute = || -> Result<(), LifetimeApiError> {
+        if args.len() != 2 || args[0] != "--artifact" || args[1].starts_with("--") {
+            return Err(LifetimeApiError::invalid(
+                "arguments",
+                "expected exactly --artifact <compiled.json>",
+            ));
+        }
+        let file = std::fs::File::open(&args[1])
+            .map_err(|error| LifetimeApiError::invalid("artifact", error.to_string()))?;
+        let artifact =
+            parse_lifetime_artifact(&read_lifetime_input(file, MAX_ARTIFACT_BYTES, "artifact")?)?;
+        let request = parse_lifetime_request(&read_lifetime_input(
+            io::stdin().lock(),
+            MAX_REQUEST_BYTES,
+            "request",
+        )?)?;
+        let response = execute_lifetime_request(artifact, request)?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        Ok(())
+    };
+    execute().map_err(|error| {
+        serde_json::to_string(&error.diagnostic())
+            .expect("diagnostic is JSON")
+            .into()
+    })
+}
+
+fn read_lifetime_input(
+    reader: impl Read,
+    limit: usize,
+    field: &str,
+) -> Result<String, LifetimeApiError> {
+    let mut source = String::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_string(&mut source)
+        .map_err(|error| LifetimeApiError::invalid(field, error.to_string()))?;
+    if source.len() > limit {
+        return Err(LifetimeApiError::invalid(field, "input exceeds byte limit"));
+    }
+    Ok(source)
 }
 
 fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {

@@ -778,6 +778,10 @@ impl DenseCompiledProgram {
         let mut bound = Vec::with_capacity(batches.len());
         let mut expected_row_count = None;
         for (index, batch) in batches.into_iter().enumerate() {
+            // Lifetime evaluates each supplied period with this dense plan.
+            // Enforce the same commencement floor as scalar execution; this
+            // does not add a separate determination-period interpretation.
+            self.check_commencement(&periods[index])?;
             let bound_batch = self.bind_batch(batch)?;
             match expected_row_count {
                 None => expected_row_count = Some(bound_batch.row_count),
