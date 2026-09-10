@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
@@ -366,6 +367,14 @@ pub struct DenseExecutionResult {
 #[derive(Debug, Error)]
 pub enum DenseCompileError {
     #[error(transparent)]
+    Artifact(#[from] crate::compile::CompileError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("invalid calculation history: {0}")]
+    CalculationHistory(String),
+    #[error("no active parameter version for `{parameter}` at calculation date {at}")]
+    MissingParameterVersion { parameter: String, at: NaiveDate },
+    #[error(transparent)]
     Eval(#[from] EvalError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
@@ -572,8 +581,143 @@ struct CompiledParameter {
     parameter: IndexedParameter,
 }
 
+/// Exact original version selected while preparing a fixed-law lifetime plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SelectedVersion {
+    UnversionedDerived {
+        name: String,
+        id: Option<String>,
+    },
+    Derived {
+        name: String,
+        id: Option<String>,
+        version_index: usize,
+        effective_from: NaiveDate,
+        effective_to: Option<NaiveDate>,
+    },
+    Parameter {
+        name: String,
+        id: Option<String>,
+        version_index: usize,
+        effective_from: NaiveDate,
+        effective_to: Option<NaiveDate>,
+    },
+}
+
+/// Immutable fixed-law preparation. Historical inputs keep their observation
+/// dates; this plan exposes no scalar, f64, or legacy-lifetime execution method.
+#[derive(Clone, Debug)]
+pub struct CalculationLifetimePlan {
+    compiled: DenseCompiledProgram,
+    calculation_period: Period,
+}
+
+impl CalculationLifetimePlan {
+    pub fn from_artifact(
+        artifact: &CompiledProgramArtifact,
+        entity: &str,
+        calculation_period: Period,
+    ) -> Result<Self, DenseCompileError> {
+        // Public callers can construct artifact structs: re-admit their contract.
+        let artifact = CompiledProgramArtifact::from_json_str(&serde_json::to_string(artifact)?)?;
+        Self::from_program(&artifact.program.to_program()?, entity, calculation_period)
+    }
+
+    pub(crate) fn from_program(
+        program: &Program,
+        entity: &str,
+        calculation_period: Period,
+    ) -> Result<Self, DenseCompileError> {
+        validate_calculation_period(&calculation_period)?;
+        let compiled =
+            DenseCompiledProgram::prepare(program, Some(entity), Some(calculation_period.clone()))?;
+        if !compiled.relations.is_empty() {
+            return Err(DenseCompileError::Unsupported(
+                "relation context in calculation lifetime execution".into(),
+            ));
+        }
+        Ok(Self {
+            compiled,
+            calculation_period,
+        })
+    }
+
+    pub fn calculation_period(&self) -> &Period {
+        &self.calculation_period
+    }
+    pub fn selected_versions(&self) -> &[SelectedVersion] {
+        &self.compiled.selected_versions
+    }
+    pub(crate) fn compiled(&self) -> &DenseCompiledProgram {
+        &self.compiled
+    }
+
+    pub fn execute(
+        &self,
+        periods: &[Period],
+        batches: Vec<DenseBatchSpec>,
+        outputs: &[String],
+    ) -> Result<DenseExecutionResult, DenseCompileError> {
+        for (index, period) in periods.iter().enumerate() {
+            validate_calculation_period(period)?;
+            if period.end >= self.calculation_period.start {
+                return Err(DenseCompileError::CalculationHistory(format!(
+                    "observation {index} must end before calculation starts at {}",
+                    self.calculation_period.start
+                )));
+            }
+            if index > 0
+                && (period.kind != periods[0].kind || period.start <= periods[index - 1].end)
+            {
+                return Err(DenseCompileError::CalculationHistory(format!(
+                    "observation {index} must have the same kind and follow the previous observation without overlap"
+                )));
+            }
+        }
+        for (index, batch) in batches.iter().enumerate() {
+            if !batch.relations.is_empty() {
+                return Err(DenseCompileError::Unsupported(
+                    "relation batches in calculation lifetime execution".into(),
+                ));
+            }
+            for (name, column) in &batch.inputs {
+                if !self.compiled.root_inputs.contains(name) {
+                    return Err(DenseCompileError::CalculationHistory(format!(
+                        "unknown input `{name}` in observation {index}"
+                    )));
+                }
+                if matches!(column, DenseColumn::Float(_)) {
+                    return Err(DenseCompileError::CalculationHistory(format!(
+                        "Float input `{name}` in observation {index}; exact input columns required"
+                    )));
+                }
+            }
+        }
+        // The wrapper validates completed history; the shared executor checks
+        // commencement at the bound legal date only for this private plan.
+        Ok(self
+            .compiled
+            .execute_lifetime_with::<Decimal>(periods, batches, outputs)?)
+    }
+}
+
+fn validate_calculation_period(period: &Period) -> Result<(), DenseCompileError> {
+    if period.start > period.end
+        || matches!(&period.kind, crate::model::PeriodKind::Custom(name) if name.is_empty())
+    {
+        return Err(DenseCompileError::CalculationHistory(
+            "period must have ordered dates and a nonempty custom name".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct DenseCompiledProgram {
+    calculation_period: Option<Period>,
+    selected_versions: Vec<SelectedVersion>,
     root_entity: String,
     root_inputs: Vec<String>,
     /// Set of root input indices that are only ever referenced via
@@ -600,6 +744,14 @@ impl DenseCompiledProgram {
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,
+    ) -> Result<Self, DenseCompileError> {
+        Self::prepare(program, entity, None)
+    }
+
+    fn prepare(
+        program: &Program,
+        entity: Option<&str>,
+        calculation_period: Option<Period>,
     ) -> Result<Self, DenseCompileError> {
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
@@ -633,7 +785,7 @@ impl DenseCompiledProgram {
             return Err(DenseCompileError::UnknownEntity(root_entity));
         }
 
-        let mut compiler = DenseCompiler::new(program, root_entity.clone())?;
+        let mut compiler = DenseCompiler::new(program, root_entity.clone(), calculation_period)?;
         for name in available {
             compiler.compile_derived(&name)?;
         }
@@ -686,7 +838,12 @@ impl DenseCompiledProgram {
     /// before any of their commencement dates has no lawful answer. The generic executor
     /// reports that per rule as `MissingDerivedFormulaVersion`; report it identically here
     /// rather than computing a pre-commencement number (#84).
+    fn parameter_period<'a>(&'a self, observation: &'a Period) -> &'a Period {
+        self.calculation_period.as_ref().unwrap_or(observation)
+    }
+
     fn check_commencement(&self, period: &Period) -> Result<(), EvalError> {
+        let period = self.parameter_period(period);
         for derived in &self.derived {
             if let Some(effective_from) = derived.effective_from
                 && period.start < effective_from
@@ -814,7 +971,17 @@ impl DenseCompiledProgram {
             // Enforce the same commencement floor as scalar execution; this
             // does not add a separate determination-period interpretation.
             self.check_commencement(&periods[index])?;
-            let bound_batch = self.bind_batch(batch)?;
+            let bound_batch = self.bind_batch(batch).map_err(|error| match error {
+                EvalError::MissingInput {
+                    name, entity_id, ..
+                } if self.calculation_period.is_some() => EvalError::MissingInput {
+                    name,
+                    entity_id,
+                    period_start: periods[index].start,
+                    period_end: periods[index].end,
+                },
+                error => error,
+            })?;
             match expected_row_count {
                 None => expected_row_count = Some(bound_batch.row_count),
                 Some(expected) if bound_batch.row_count != expected => {
@@ -1086,6 +1253,8 @@ impl DenseCompiledProgram {
 }
 
 struct DenseCompiler<'a> {
+    calculation_period: Option<Period>,
+    selected_versions: Vec<SelectedVersion>,
     program: &'a Program,
     root_entity: String,
     root_inputs: Vec<String>,
@@ -1108,8 +1277,14 @@ struct DenseCompiler<'a> {
 }
 
 impl<'a> DenseCompiler<'a> {
-    fn new(program: &'a Program, root_entity: String) -> Result<Self, DenseCompileError> {
+    fn new(
+        program: &'a Program,
+        root_entity: String,
+        calculation_period: Option<Period>,
+    ) -> Result<Self, DenseCompileError> {
         Ok(Self {
+            calculation_period,
+            selected_versions: Vec::new(),
             program,
             root_entity,
             root_inputs: Vec::new(),
@@ -1127,8 +1302,16 @@ impl<'a> DenseCompiler<'a> {
         })
     }
 
-    fn finish(self) -> DenseCompiledProgram {
+    fn finish(mut self) -> DenseCompiledProgram {
+        self.selected_versions
+            .sort_by_key(|selection| match selection {
+                SelectedVersion::UnversionedDerived { name, .. }
+                | SelectedVersion::Derived { name, .. } => (0, name.clone()),
+                SelectedVersion::Parameter { name, .. } => (1, name.clone()),
+            });
         DenseCompiledProgram {
+            calculation_period: self.calculation_period,
+            selected_versions: self.selected_versions,
             root_entity: self.root_entity,
             root_inputs: self.root_inputs,
             optional_root_inputs: self.optional_root_inputs,
@@ -1160,13 +1343,42 @@ impl<'a> DenseCompiler<'a> {
         // and its commencement enforced at execution time. Genuinely multi-version or
         // end-bounded rules still need per-period selection the dense plan cannot express, and
         // are still routed to the generic API.
-        let versioned_semantics = match derived.versions.as_slice() {
-            [] => None,
-            [only] if only.effective_to.is_none() => Some((&only.semantics, only.effective_from)),
-            _ => {
-                return Err(DenseCompileError::Unsupported(format!(
-                    "versioned derived formulas in `{name}`; use generic API execution"
-                )));
+        let versioned_semantics = if let Some(period) = &self.calculation_period {
+            if derived.versions.is_empty() {
+                self.selected_versions
+                    .push(SelectedVersion::UnversionedDerived {
+                        name: derived.name.clone(),
+                        id: derived.id.clone(),
+                    });
+                None
+            } else {
+                let (version_index, version) =
+                    derived.version_at(period.start).ok_or_else(|| {
+                        EvalError::MissingDerivedFormulaVersion {
+                            derived: name.to_string(),
+                            at: period.start,
+                        }
+                    })?;
+                self.selected_versions.push(SelectedVersion::Derived {
+                    name: derived.name.clone(),
+                    id: derived.id.clone(),
+                    version_index,
+                    effective_from: version.effective_from,
+                    effective_to: version.effective_to,
+                });
+                Some((&version.semantics, version.effective_from))
+            }
+        } else {
+            match derived.versions.as_slice() {
+                [] => None,
+                [only] if only.effective_to.is_none() => {
+                    Some((&only.semantics, only.effective_from))
+                }
+                _ => {
+                    return Err(DenseCompileError::Unsupported(format!(
+                        "versioned derived formulas in `{name}`; use generic API execution"
+                    )));
+                }
             }
         };
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
@@ -1965,6 +2177,21 @@ impl<'a> DenseCompiler<'a> {
             self.program.parameters.get(name).ok_or_else(|| {
                 DenseCompileError::Unsupported(format!("unknown parameter `{name}`"))
             })?;
+        if let Some(period) = &self.calculation_period {
+            let (version_index, version) = parameter.version_at(period.start).ok_or_else(|| {
+                DenseCompileError::MissingParameterVersion {
+                    parameter: name.to_string(),
+                    at: period.start,
+                }
+            })?;
+            self.selected_versions.push(SelectedVersion::Parameter {
+                name: parameter.name.clone(),
+                id: parameter.id.clone(),
+                version_index,
+                effective_from: version.effective_from,
+                effective_to: version.effective_to,
+            });
+        }
         let index = self.parameters.len();
         self.parameters.push(CompiledParameter {
             parameter: parameter.clone(),
@@ -2068,7 +2295,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 lookup_parameter_dense::<N>(
                     &self.program.parameters[*parameter].parameter,
                     &keys,
-                    self.period,
+                    self.program.parameter_period(self.period),
                 )
             }
             CompiledScalarExpr::Add(items) => {
@@ -2405,7 +2632,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 lookup_parameter_dense::<N>(
                     &self.program.parameters[*parameter].parameter,
                     &keys,
-                    self.period,
+                    self.program.parameter_period(self.period),
                 )
             }
             CompiledRelatedScalarExpr::Add(items) => {
@@ -2723,7 +2950,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 lookup_parameter_dense::<N>(
                     &self.program.parameters[*parameter].parameter,
                     &keys,
-                    self.period_executors[self.reference_period].period,
+                    self.program
+                        .parameter_period(self.period_executors[self.reference_period].period),
                 )
             }
             CompiledScalarExpr::Add(items) => {
@@ -3467,10 +3695,8 @@ fn lookup_parameter_dense<N: DenseNum>(
     period: &Period,
 ) -> Result<DenseColumn, EvalError> {
     let version = parameter
-        .versions
-        .iter()
-        .filter(|version| version.applies_at(period.start))
-        .max_by_key(|version| version.effective_from)
+        .version_at(period.start)
+        .map(|(_, version)| version)
         .ok_or_else(|| EvalError::MissingParameterValue {
             parameter: parameter.name.clone(),
             key: keys.first().copied().unwrap_or_default(),

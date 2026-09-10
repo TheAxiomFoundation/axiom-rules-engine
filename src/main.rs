@@ -9,8 +9,8 @@ use axiom_rules_engine::compile::{
     ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
 };
 use axiom_rules_engine::lifetime_api::{
-    LifetimeApiError, MAX_ARTIFACT_BYTES, MAX_REQUEST_BYTES, execute_lifetime_request,
-    parse_lifetime_artifact, parse_lifetime_request,
+    LifetimeApiError, MAX_ARTIFACT_BYTES, MAX_REQUEST_BYTES, execute_lifetime_wire_request,
+    parse_lifetime_artifact, parse_lifetime_wire_request,
 };
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
@@ -433,7 +433,7 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
 fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if args == ["--help"] {
         println!(
-            "usage: axiom-rules-engine run-lifetime --artifact <compiled.json>\nRead one lifetime-request/v1 JSON request from stdin; Decimal only."
+            "usage: axiom-rules-engine run-lifetime --artifact <compiled.json>\nRead one lifetime-request/v1 or lifetime-request/v2 JSON request from stdin; Decimal only."
         );
         return Ok(());
     }
@@ -448,12 +448,12 @@ fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|error| LifetimeApiError::invalid("artifact", error.to_string()))?;
         let artifact =
             parse_lifetime_artifact(&read_lifetime_input(file, MAX_ARTIFACT_BYTES, "artifact")?)?;
-        let request = parse_lifetime_request(&read_lifetime_input(
+        let request = parse_lifetime_wire_request(&read_lifetime_input(
             io::stdin().lock(),
             MAX_REQUEST_BYTES,
             "request",
         )?)?;
-        let response = execute_lifetime_request(artifact, request)?;
+        let response = execute_lifetime_wire_request(artifact, request)?;
         println!("{}", serde_json::to_string_pretty(&response)?);
         Ok(())
     };
