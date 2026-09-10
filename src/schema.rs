@@ -78,6 +78,14 @@ pub fn all_schemas() -> Vec<NamedSchema> {
             file_name: "compiled-artifact.v2.schema.json",
             schema: compiled_artifact_schema(),
         },
+        NamedSchema {
+            file_name: "lifetime-request.v1.schema.json",
+            schema: lifetime_request_schema(),
+        },
+        NamedSchema {
+            file_name: "lifetime-response.v1.schema.json",
+            schema: lifetime_response_schema(),
+        },
     ];
     #[cfg(feature = "unit-derivation")]
     schemas.extend([
@@ -976,6 +984,43 @@ pub fn rulespec_test_schema() -> Value {
             }
         }
     });
+    // Scalar cases retain their complete historical schema. Lifetime cases
+    // have a separate strict shape; no scalar input, tables or oracle inputs
+    // can be silently ignored by a lifetime-aware encoder harness.
+    let wire = lifetime_request_schema();
+    let properties = &wire["properties"];
+    let lifetime = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entity", "periods", "batches"],
+        "properties": {
+            "entity": properties["entity"],
+            "periods": properties["periods"],
+            "batches": properties["batches"],
+            "arithmetic": properties["arithmetic"]
+        }
+    });
+    let expected = json!({"type": ["string", "integer", "boolean"]});
+    let mut scalar_case = schema["items"].take();
+    scalar_case["not"] = json!({"required": ["lifetime"]});
+    schema["items"] = json!({"oneOf": [scalar_case, {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "period", "output", "lifetime"],
+        "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "period": properties["output_period"],
+            "lifetime": lifetime,
+            "output": {
+                "type": "object", "minProperties": 1,
+                "additionalProperties": {"oneOf": [expected, {"type": "array", "items": expected}]}
+            }
+        }
+    }]});
+    if let Some(definitions) = wire.get("$defs") {
+        schema["$defs"] = definitions.clone();
+    }
     stamp_meta(
         &mut schema,
         "rulespec-test.v1",
@@ -983,6 +1028,34 @@ pub fn rulespec_test_schema() -> Value {
         "A companion `*.test.yaml` case list: named cases with a period, \
          inputs, and expected outputs, run against a RuleSpec module by the \
          jurisdiction-repo and axiom-encode test harnesses.",
+    );
+    schema
+}
+
+#[cfg(feature = "schema")]
+pub fn lifetime_request_schema() -> Value {
+    let mut schema =
+        serde_json::to_value(schema_for!(crate::lifetime_api::LifetimeExecutionRequest))
+            .expect("lifetime request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "lifetime-request.v1",
+        "Axiom lifetime execution request",
+        "Typed positional period batches for Decimal lifetime execution. Runtime checks bind public IDs, row alignment, non-overlapping periods, exact decimals, resource limits and output_period equal to the final supplied period.",
+    );
+    schema
+}
+
+#[cfg(feature = "schema")]
+pub fn lifetime_response_schema() -> Value {
+    let mut schema =
+        serde_json::to_value(schema_for!(crate::lifetime_api::LifetimeExecutionResponse))
+            .expect("lifetime response schema serializes");
+    stamp_meta(
+        &mut schema,
+        "lifetime-response.v1",
+        "Axiom lifetime execution response",
+        "Canonical Decimal lifetime results with exact decimal strings, public output IDs and caller-declared aligned entity IDs. The reference period is the last supplied period.",
     );
     schema
 }
