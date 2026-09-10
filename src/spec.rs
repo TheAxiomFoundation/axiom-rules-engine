@@ -988,6 +988,10 @@ pub enum ScalarExprSpec {
     Floor {
         value: Box<ScalarExprSpec>,
     },
+    /// Exact whole Gregorian calendar-year units to month units.
+    CalendarYearsToMonths {
+        years: Box<ScalarExprSpec>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -1115,6 +1119,9 @@ impl ScalarExprSpec {
             )),
             Self::Ceil { value } => Ok(ScalarExpr::Ceil(Box::new(value.to_model()?))),
             Self::Floor { value } => Ok(ScalarExpr::Floor(Box::new(value.to_model()?))),
+            Self::CalendarYearsToMonths { years } => Ok(ScalarExpr::CalendarYearsToMonths {
+                years: Box::new(years.to_model()?),
+            }),
             Self::PeriodStart => Ok(ScalarExpr::PeriodStart),
             Self::PeriodEnd => Ok(ScalarExpr::PeriodEnd),
             Self::DateAddDays { date, days } => Ok(ScalarExpr::DateAddDays {

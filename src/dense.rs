@@ -25,6 +25,32 @@ pub enum DenseColumn {
     Date(Vec<chrono::NaiveDate>),
 }
 
+fn calendar_years_to_months_column(column: DenseColumn) -> Result<DenseColumn, EvalError> {
+    let months = match column {
+        DenseColumn::Integer(years) => years
+            .into_iter()
+            .map(|years| crate::engine::calendar_years_to_months(&ScalarValue::Integer(years)))
+            .collect::<Result<Vec<_>, _>>()?,
+        DenseColumn::Decimal(years) => years
+            .into_iter()
+            .map(|years| crate::engine::calendar_years_to_months(&ScalarValue::Decimal(years)))
+            .collect::<Result<Vec<_>, _>>()?,
+        DenseColumn::Float(_) => {
+            return Err(EvalError::TypeMismatch(
+                "calendar_years_to_months does not accept Float years; use exact Decimal execution"
+                    .to_string(),
+            ));
+        }
+        _ => {
+            return Err(EvalError::TypeMismatch(
+                "calendar_years_to_months requires Integer or exactly integral Decimal years"
+                    .to_string(),
+            ));
+        }
+    };
+    Ok(DenseColumn::Integer(months))
+}
+
 impl DenseColumn {
     pub fn len(&self) -> usize {
         match self {
@@ -389,6 +415,9 @@ enum CompiledScalarExpr {
     Min(Vec<CompiledScalarExpr>),
     Ceil(Box<CompiledScalarExpr>),
     Floor(Box<CompiledScalarExpr>),
+    CalendarYearsToMonths {
+        years: Box<CompiledScalarExpr>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -462,6 +491,9 @@ enum CompiledRelatedScalarExpr {
     Min(Vec<CompiledRelatedScalarExpr>),
     Ceil(Box<CompiledRelatedScalarExpr>),
     Floor(Box<CompiledRelatedScalarExpr>),
+    CalendarYearsToMonths {
+        years: Box<CompiledRelatedScalarExpr>,
+    },
     PeriodStart,
     PeriodEnd,
     DateAddDays {
@@ -883,7 +915,9 @@ impl DenseCompiledProgram {
                 self.scalar_reduces_over_periods(left, visiting)
                     || self.scalar_reduces_over_periods(right, visiting)
             }
-            CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+            CompiledScalarExpr::Ceil(value)
+            | CompiledScalarExpr::Floor(value)
+            | CompiledScalarExpr::CalendarYearsToMonths { years: value } => {
                 self.scalar_reduces_over_periods(value, visiting)
             }
             CompiledScalarExpr::DateAddDays { date, days } => {
@@ -1239,6 +1273,11 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
                 self.compile_scalar_expr(derived_name, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_scalar_expr(derived_name, years)?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
@@ -1557,6 +1596,11 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledRelatedScalarExpr::Floor(Box::new(
                 self.compile_related_scalar(relation_index, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledRelatedScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_related_scalar(relation_index, years)?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledRelatedScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledRelatedScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledRelatedScalarExpr::DateAddDays {
@@ -1684,6 +1728,15 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
                 self.compile_current_scalar_expr(derived_name, entity, value)?,
             ))),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                Ok(CompiledScalarExpr::CalendarYearsToMonths {
+                    years: Box::new(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        years,
+                    )?),
+                })
+            }
             ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
             ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
@@ -2100,6 +2153,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     .map(|value| value.floor())
                     .collect(),
             )),
+            CompiledScalarExpr::CalendarYearsToMonths { years } => {
+                calendar_years_to_months_column(self.eval_scalar_expr(years)?)
+            }
             CompiledScalarExpr::PeriodStart => Ok(DenseColumn::Date(vec![
                 self.period.start;
                 self.batch.row_count
@@ -2436,6 +2492,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     .map(|value| value.floor())
                     .collect(),
             )),
+            CompiledRelatedScalarExpr::CalendarYearsToMonths { years } => {
+                calendar_years_to_months_column(self.resolve_related_scalar(relation, years)?)
+            }
             CompiledRelatedScalarExpr::PeriodStart => {
                 Ok(DenseColumn::Date(vec![self.period.start; length]))
             }
@@ -2752,6 +2811,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let then_values = self.eval_scalar(then_expr)?;
                 let else_values = self.eval_scalar(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
+            }
+            CompiledScalarExpr::CalendarYearsToMonths { years } => {
+                calendar_years_to_months_column(self.eval_scalar(years)?)
             }
             // A bare input outside a reduction has no single period in general,
             // but a per-person-constant input (a birth / age-attainment year —
@@ -3216,7 +3278,9 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Div(left, right) => {
             nested_over_periods_kind(left).or_else(|| nested_over_periods_kind(right))
         }
-        CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+        CompiledScalarExpr::Ceil(value)
+        | CompiledScalarExpr::Floor(value)
+        | CompiledScalarExpr::CalendarYearsToMonths { years: value } => {
             nested_over_periods_kind(value)
         }
         CompiledScalarExpr::DateAddDays { date, days } => {
