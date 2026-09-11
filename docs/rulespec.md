@@ -202,6 +202,16 @@ applies the parent filter before the child filter. Optimized execution paths may
 still reject membership predicates that aggregate another relation from inside a
 current/root predicate.
 
+Inside a derived-relation predicate, a referenced scalar rule uses its declared
+entity to select the current or related record, just as a referenced judgment
+does. For example, a related record's key can be compared with the current
+group's key without copying the group value onto each record. This scope is
+preserved through arithmetic, parameter indices, date expressions and scalar
+conditionals, including dependency traces. Bare input references still read the
+related record; use an entity-scoped scalar rule for a current-record value.
+Conditional scalar membership operands can use the generic explain fallback
+when fast execution cannot compile them; the response metadata records it.
+
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Every import is an exact absolute canonical
 target, optionally followed by one `#rule_fragment`:
