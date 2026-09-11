@@ -4548,3 +4548,131 @@ rules:
         "error should name the rejected field, got: {message}"
     );
 }
+
+#[test]
+fn file_derived_relations_resolve_local_sources_before_execution() {
+    let root = unique_test_root();
+    let program_file = root.join("rulespec-de/de/policies/test/relation-namespace.yaml");
+    fs::create_dir_all(program_file.parent().unwrap()).unwrap();
+    for (module, output) in [("first", "first_count"), ("second", "second_count")] {
+        let file = root.join(format!("rulespec-de/de/policies/test/{module}.yaml"));
+        fs::write(
+            &file,
+            format!(
+                r#"
+format: rulespec/v1
+rules:
+  - name: record_of_group
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Record, Group]
+  - name: {module}_records
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: record_of_group
+      slot_entities: [Record, Group]
+    versions:
+      - effective_from: 2025-01-01
+        formula: record_of_group
+  - name: {module}_retained_records
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: {module}_records
+      slot_entities: [Record, Group]
+    versions:
+      - effective_from: 2025-01-01
+        formula: {module}_records
+  - name: {output}
+    kind: derived
+    entity: Group
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2025-01-01
+        formula: len({module}_retained_records)
+"#
+            ),
+        )
+        .unwrap();
+    }
+    fs::write(&program_file, "format: rulespec/v1\nimports:\n  - de:policies/test/first\n  - de:policies/test/second\nrules: []\n").unwrap();
+    let artifact =
+        compile_rulespec_file(&program_file).expect("namespaced derived sources compile");
+    for module in ["first", "second"] {
+        let prefix = format!("de:policies/test/{module}#relation.");
+        for (name, source) in [
+            (format!("{module}_records"), "record_of_group".to_string()),
+            (
+                format!("{module}_retained_records"),
+                format!("{module}_records"),
+            ),
+        ] {
+            let relation = artifact
+                .program
+                .relations
+                .iter()
+                .find(|r| r.name == format!("{prefix}{name}"))
+                .unwrap();
+            assert_eq!(
+                relation.derivation.as_ref().unwrap().source_relation,
+                format!("{prefix}{source}")
+            );
+        }
+    }
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2025-01-01".parse().unwrap(),
+        end: "2025-12-31".parse().unwrap(),
+    };
+    let mut relations = Vec::new();
+    for (module, count) in [("first", 1), ("second", 2)] {
+        for number in 0..count {
+            relations.push(RelationRecordSpec {
+                name: format!("de:policies/test/{module}#relation.record_of_group"),
+                tuple: vec![format!("record-{number}"), "group-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            });
+        }
+    }
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: artifact.program.clone(),
+            dataset: DatasetSpec {
+                inputs: vec![],
+                relations: relations.clone(),
+            },
+            queries: vec![ExecutionQuery {
+                assessment_date: None,
+                entity_id: "group-1".to_string(),
+                period: period.clone(),
+                outputs: vec![
+                    "de:policies/test/first#first_count".to_string(),
+                    "de:policies/test/second#second_count".to_string(),
+                ],
+            }],
+        })
+        .expect("independent module relations execute");
+        assert_eq!(response.metadata.actual_mode, mode);
+        for (module, expected) in [("first", 1), ("second", 2)] {
+            let OutputValue::Scalar {
+                value: ScalarValueSpec::Integer { value },
+                ..
+            } = response.results[0]
+                .outputs
+                .get(&format!("de:policies/test/{module}#{module}_count"))
+                .unwrap()
+            else {
+                panic!("expected integer")
+            };
+            assert_eq!(*value, expected);
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}

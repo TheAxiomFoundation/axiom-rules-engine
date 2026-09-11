@@ -2056,9 +2056,11 @@ impl RulesDocument {
         diagnostics
             .extend(self.validate_data_relation_arguments(&mut explicit_relations, &program)?);
         self.apply_rule_ids(&mut program);
+        // Derived relation bodies must be present when their local source and
+        // predicate references are resolved against the declaring module.
+        append_missing_relations(&mut program, &explicit_relations)?;
         rewrite_relation_references(&mut program, &relation_rewrites, &explicit_relations)?;
         append_missing_units(&mut program, &self.units);
-        append_missing_relations(&mut program, &explicit_relations)?;
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
         // Carried for tooling and artifact pass-through only; nothing in
