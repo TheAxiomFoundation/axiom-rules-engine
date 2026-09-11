@@ -4575,7 +4575,7 @@ rules:
       slot_entities: [Record, Group]
     versions:
       - effective_from: 2025-01-01
-        formula: record_of_group
+        formula: record_of_group and {module}_included
   - name: {module}_retained_records
     kind: derived_relation
     derived_relation:
@@ -4628,8 +4628,21 @@ rules:
         end: "2025-12-31".parse().unwrap(),
     };
     let mut relations = Vec::new();
-    for (module, count) in [("first", 1), ("second", 2)] {
-        for number in 0..count {
+    let mut inputs = Vec::new();
+    for module in ["first", "second"] {
+        for number in 0..2 {
+            inputs.push(InputRecordSpec {
+                name: format!("de:policies/test/{module}#input.{module}_included"),
+                entity: "Record".to_string(),
+                entity_id: format!("record-{number}"),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool {
+                    value: module == "second" || number == 0,
+                },
+            });
             relations.push(RelationRecordSpec {
                 name: format!("de:policies/test/{module}#relation.record_of_group"),
                 tuple: vec![format!("record-{number}"), "group-1".to_string()],
@@ -4645,7 +4658,7 @@ rules:
             mode: mode.clone(),
             program: artifact.program.clone(),
             dataset: DatasetSpec {
-                inputs: vec![],
+                inputs: inputs.clone(),
                 relations: relations.clone(),
             },
             queries: vec![ExecutionQuery {
@@ -4673,6 +4686,30 @@ rules:
             };
             assert_eq!(*value, expected);
         }
+    }
+    // Neither another imported module nor the importing module owns this slot.
+    for invalid in [
+        "first_included",
+        "de:policies/test/second#input.first_included",
+        "de:policies/test/relation-namespace#input.first_included",
+    ] {
+        let mut forged_inputs = inputs.clone();
+        forged_inputs[0].name = invalid.to_string();
+        let error = execute_request(ExecutionRequest {
+            mode: ExecutionMode::Explain,
+            program: artifact.program.clone(),
+            dataset: DatasetSpec {
+                inputs: forged_inputs,
+                relations: relations.clone(),
+            },
+            queries: vec![],
+        })
+        .expect_err("a wrong owner cannot supply a relation-predicate input");
+        assert!(
+            error
+                .to_string()
+                .contains("must use an absolute legal RuleSpec reference")
+        );
     }
     fs::remove_dir_all(root).unwrap();
 }
