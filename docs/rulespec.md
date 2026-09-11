@@ -149,6 +149,10 @@ validation.
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides
 which candidate tuples remain in the filtered relation.
+Local source and predicate references resolve within the declaring module,
+including when that module is imported. Inputs used only by a relation predicate
+use the declaring module’s canonical `#input.<slot>` reference; an importing
+module cannot supply them under its own identity.
 
 ```yaml
 rules:

@@ -704,6 +704,26 @@ impl Program {
                     .insert(request_name);
             }
         }
+        // A relation predicate can be the only consumer of an input slot.
+        // Bind that slot to the relation's owner just like a derived rule's
+        // direct inputs; callers must not borrow an importing module's id.
+        for relation in self.relations.values() {
+            let Some(derivation) = &relation.derivation else {
+                continue;
+            };
+            let mut slots = HashSet::new();
+            collect_input_slots_from_judgment_expr(&derivation.predicate, &mut slots);
+            for slot in slots {
+                let request_name = public_rule_target(&relation.name).map_or_else(
+                    || slot.to_string(),
+                    |target| format!("{target}#input.{slot}"),
+                );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
+            }
+        }
         for parameter in self.parameters.values() {
             let Some(slot) = parameter.indexed_by.as_deref() else {
                 continue;
