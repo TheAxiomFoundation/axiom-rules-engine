@@ -567,16 +567,26 @@ impl<'a> Engine<'a> {
         expr: &ScalarExpr,
         entity_id: &str,
         period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
         reason: TraceSkipReason,
     ) {
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_scalar_trace_references(expr, &mut derived, &mut parameters);
         for name in derived {
+            let target_entity_id = self
+                .program
+                .derived
+                .get(&name)
+                .and_then(|dependency| {
+                    relation_context.and_then(|context| context.entity_id_for(&dependency.entity))
+                })
+                .unwrap_or(entity_id)
+                .to_string();
             self.record_skipped_dependency(SkippedTraceDependency::Derived {
                 key: CacheKey {
                     derived: name,
-                    entity_id: entity_id.to_string(),
+                    entity_id: target_entity_id,
                     period: period.clone(),
                 },
                 reason,
@@ -644,6 +654,16 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
+        self.eval_scalar_expr_inner(expr, entity_id, period, None)
+    }
+
+    fn eval_scalar_expr_inner(
+        &mut self,
+        expr: &ScalarExpr,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Result<ScalarValue, EvalError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(value.clone()),
             ScalarExpr::Input(name) => self.lookup_input(name, entity_id, period),
@@ -655,16 +675,20 @@ impl<'a> Engine<'a> {
                 }
             }
             ScalarExpr::Derived(name) => {
+                let derived = self.get_derived(name)?;
+                let target_entity_id = relation_context
+                    .and_then(|context| context.entity_id_for(&derived.entity))
+                    .unwrap_or(entity_id);
                 self.record_evaluated_dependency(CacheKey {
                     derived: name.clone(),
-                    entity_id: entity_id.to_string(),
+                    entity_id: target_entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.evaluate_scalar(name, entity_id, period)
+                self.evaluate_scalar(name, target_entity_id, period)
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 let lookup_key = self
-                    .eval_scalar_expr(index, entity_id, period)?
+                    .eval_scalar_expr_inner(index, entity_id, period, relation_context)?
                     .as_index()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(format!(
@@ -676,25 +700,25 @@ impl<'a> Engine<'a> {
             ScalarExpr::Add(items) => {
                 let mut total = Decimal::ZERO;
                 for item in items {
-                    total += self.eval_decimal(item, entity_id, period)?;
+                    total += self.eval_decimal(item, entity_id, period, relation_context)?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
             ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period)?
-                    - self.eval_decimal(right, entity_id, period)?,
+                self.eval_decimal(left, entity_id, period, relation_context)?
+                    - self.eval_decimal(right, entity_id, period, relation_context)?,
             )),
             ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period)?
-                    * self.eval_decimal(right, entity_id, period)?,
+                self.eval_decimal(left, entity_id, period, relation_context)?
+                    * self.eval_decimal(right, entity_id, period, relation_context)?,
             )),
             ScalarExpr::Div(left, right) => {
-                let divisor = self.eval_decimal(right, entity_id, period)?;
+                let divisor = self.eval_decimal(right, entity_id, period, relation_context)?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
                 Ok(ScalarValue::Decimal(
-                    self.eval_decimal(left, entity_id, period)? / divisor,
+                    self.eval_decimal(left, entity_id, period, relation_context)? / divisor,
                 ))
             }
             ScalarExpr::Max(items) => {
@@ -704,9 +728,9 @@ impl<'a> Engine<'a> {
                         "max() requires at least one operand".to_string(),
                     ));
                 };
-                let mut best = self.eval_decimal(first, entity_id, period)?;
+                let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
-                    let candidate = self.eval_decimal(item, entity_id, period)?;
+                    let candidate = self.eval_decimal(item, entity_id, period, relation_context)?;
                     if candidate > best {
                         best = candidate;
                     }
@@ -720,9 +744,9 @@ impl<'a> Engine<'a> {
                         "min() requires at least one operand".to_string(),
                     ));
                 };
-                let mut best = self.eval_decimal(first, entity_id, period)?;
+                let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
-                    let candidate = self.eval_decimal(item, entity_id, period)?;
+                    let candidate = self.eval_decimal(item, entity_id, period, relation_context)?;
                     if candidate < best {
                         best = candidate;
                     }
@@ -730,16 +754,18 @@ impl<'a> Engine<'a> {
                 Ok(ScalarValue::Decimal(best))
             }
             ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(value, entity_id, period)?.ceil(),
+                self.eval_decimal(value, entity_id, period, relation_context)?
+                    .ceil(),
             )),
             ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(value, entity_id, period)?.floor(),
+                self.eval_decimal(value, entity_id, period, relation_context)?
+                    .floor(),
             )),
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(period.start)),
             ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(period.end)),
             ScalarExpr::DateAddDays { date, days } => {
                 let base = self
-                    .eval_scalar_expr(date, entity_id, period)?
+                    .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
                     .as_date()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -747,7 +773,7 @@ impl<'a> Engine<'a> {
                         )
                     })?;
                 let offset = self
-                    .eval_scalar_expr(days, entity_id, period)?
+                    .eval_scalar_expr_inner(days, entity_id, period, relation_context)?
                     .as_index()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -758,7 +784,7 @@ impl<'a> Engine<'a> {
             }
             ScalarExpr::DateAddMonths { date, months } => {
                 let base = self
-                    .eval_scalar_expr(date, entity_id, period)?
+                    .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
                     .as_date()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -766,7 +792,7 @@ impl<'a> Engine<'a> {
                         )
                     })?;
                 let offset = self
-                    .eval_scalar_expr(months, entity_id, period)?
+                    .eval_scalar_expr_inner(months, entity_id, period, relation_context)?
                     .as_index()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -778,7 +804,7 @@ impl<'a> Engine<'a> {
             }
             ScalarExpr::DateAddYears { date, years } => {
                 let base = self
-                    .eval_scalar_expr(date, entity_id, period)?
+                    .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
                     .as_date()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -786,7 +812,7 @@ impl<'a> Engine<'a> {
                         )
                     })?;
                 let offset = self
-                    .eval_scalar_expr(years, entity_id, period)?
+                    .eval_scalar_expr_inner(years, entity_id, period, relation_context)?
                     .as_index()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -797,7 +823,7 @@ impl<'a> Engine<'a> {
             }
             ScalarExpr::DaysBetween { from, to } => {
                 let a = self
-                    .eval_scalar_expr(from, entity_id, period)?
+                    .eval_scalar_expr_inner(from, entity_id, period, relation_context)?
                     .as_date()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch(
@@ -805,7 +831,7 @@ impl<'a> Engine<'a> {
                         )
                     })?;
                 let b = self
-                    .eval_scalar_expr(to, entity_id, period)?
+                    .eval_scalar_expr_inner(to, entity_id, period, relation_context)?
                     .as_date()
                     .ok_or_else(|| {
                         EvalError::TypeMismatch("days_between expects a date for `to`".to_string())
@@ -872,24 +898,26 @@ impl<'a> Engine<'a> {
                 else_expr,
             } => {
                 if self
-                    .eval_judgment_expr(condition, entity_id, period)?
+                    .eval_judgment_expr_inner(condition, entity_id, period, relation_context)?
                     .is_holds()
                 {
                     self.record_skipped_scalar_dependencies(
                         else_expr,
                         entity_id,
                         period,
+                        relation_context,
                         TraceSkipReason::BranchNotSelected,
                     );
-                    self.eval_scalar_expr(then_expr, entity_id, period)
+                    self.eval_scalar_expr_inner(then_expr, entity_id, period, relation_context)
                 } else {
                     self.record_skipped_scalar_dependencies(
                         then_expr,
                         entity_id,
                         period,
+                        relation_context,
                         TraceSkipReason::BranchNotSelected,
                     );
-                    self.eval_scalar_expr(else_expr, entity_id, period)
+                    self.eval_scalar_expr_inner(else_expr, entity_id, period, relation_context)
                 }
             }
             // Cross-period reductions are only defined when a batch is supplied
@@ -919,8 +947,10 @@ impl<'a> Engine<'a> {
     ) -> Result<JudgmentOutcome, EvalError> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
-                let left_value = self.eval_scalar_expr(left, entity_id, period)?;
-                let right_value = self.eval_scalar_expr(right, entity_id, period)?;
+                let left_value =
+                    self.eval_scalar_expr_inner(left, entity_id, period, relation_context)?;
+                let right_value =
+                    self.eval_scalar_expr_inner(right, entity_id, period, relation_context)?;
                 Ok(
                     if self.compare_scalar_values(&left_value, *op, &right_value)? {
                         JudgmentOutcome::Holds
@@ -1065,8 +1095,9 @@ impl<'a> Engine<'a> {
         expr: &ScalarExpr,
         entity_id: &str,
         period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
     ) -> Result<Decimal, EvalError> {
-        self.eval_scalar_expr(expr, entity_id, period)?
+        self.eval_scalar_expr_inner(expr, entity_id, period, relation_context)?
             .as_decimal()
             .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))
     }
