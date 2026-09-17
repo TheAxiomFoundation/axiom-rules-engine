@@ -61,4 +61,4 @@ compiles and accepts.
 ## Provenance
 
 Published from CI with npm provenance attestations; the workflow, the crate,
-and the engine source are one repository. Apache-2.0.
+and the engine source are one repository. MIT.

@@ -2,7 +2,7 @@
 name = "axiom-rules-engine-wasm"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 description = "Browser/wasm bindings for the Axiom Rules Engine: compile and execute RuleSpec programs over a JSON boundary"
 
 [lib]

@@ -2,7 +2,7 @@
 name = "axiom-rules-engine"
 version = "0.2.2"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 description = "Temporal-relational runtime for compiling and executing Axiom RuleSpec (experimental API)."
 repository = "https://github.com/TheAxiomFoundation/axiom-rules-engine"
 keywords = ["rules-engine", "rules-as-code", "legal", "policy", "rulespec"]

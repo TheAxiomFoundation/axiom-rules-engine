@@ -65,7 +65,7 @@ writeFileSync(
       version,
       description:
         "The Axiom rules engine compiled to WebAssembly: compile and execute RuleSpec law encodings in the browser or Node, no server involved.",
-      license: "Apache-2.0",
+      license: "MIT",
       repository: {
         type: "git",
         url: "git+https://github.com/TheAxiomFoundation/axiom-rules-engine.git",
