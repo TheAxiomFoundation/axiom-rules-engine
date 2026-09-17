@@ -219,6 +219,8 @@ rules:
 | `floor(x)` | 1 | round down to an integer |
 | `days_between(from, to)` | 2 | day count between two dates |
 | `date_add_days(date, days)` | 2 | shift a date by a day count |
+| `date_add_months(date, months)` | 2 | shift by an integer number of calendar months; clamp a missing target day to month end |
+| `date_add_years(date, years)` | 2 | shift by calendar years using the same month-end clamping |
 | `len(relation)` | 1 | count of related entities |
 | `sum(relation.field)` | 1 | sum a field over related entities |
 | `count_where(relation, predicate_field)` | 2 | count related entities whose Boolean `predicate_field` holds |
@@ -230,7 +232,7 @@ rules:
 
 The `_where` predicate names a Boolean input or a derived judgment computed
 on the related entity. The lowerer enforces the fixed arities (`ceil`,
-`floor`, `days_between`, `date_add_days`, `count_where`, `sum_where`, and
+`floor`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`, `count_where`, `sum_where`, and
 the reductions); `max` and `min` accept any argument list unchecked,
 including an empty one. The `*_over_periods` reductions are meaningful only
 under the lifetime execution surface; per-period execution paths reject
@@ -296,7 +298,8 @@ JSON Schemas give exact field shapes.
 
 Scalar kinds: `literal`, `input`, `input_or_else`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
-`floor`, `period_start`, `period_end`, `date_add_days`, `days_between`,
+`floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
+`date_add_years`, `days_between`,
 `count_related`, `sum_related`, `if`, `over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
@@ -311,3 +314,11 @@ nested `if` comparisons, unary minus lowers into `0 - x`, chained `and`/`or`
 operators nest as binary pairs while some sugar lowers n-ary, and Boolean
 facts lower into `== true` comparisons. Consumers should target this
 vocabulary, not the formula text.
+
+Calendar shifts accept negative and zero offsets. For example, adding one
+month to 2025-01-31 yields 2025-02-28; adding one year to 2024-02-29 yields
+2025-02-28. Shifts outside the supported date range return an evaluation
+error. These are date operations, not jurisdictional age or deadline rules:
+encode statutory inclusion, exclusion and expiry semantics explicitly.
+As with date_add_days, generic dense and explain execution support calendar
+shifts; the specialized bulk path reports them as unsupported.

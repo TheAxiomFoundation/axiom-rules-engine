@@ -176,6 +176,14 @@ impl<'a> PhaseTwoEngine<'a> {
                 from: left,
                 to: right,
             }
+            | ScalarExpr::DateAddYears {
+                date: left,
+                years: right,
+            }
+            | ScalarExpr::DateAddMonths {
+                date: left,
+                months: right,
+            }
             | ScalarExpr::DateAddDays {
                 date: left,
                 days: right,

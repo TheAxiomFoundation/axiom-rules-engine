@@ -600,6 +600,12 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::DateAddDays { .. } => Err(EvalError::TypeMismatch(
                 "bulk fast mode does not yet support date_add_days".to_string(),
             )),
+            ScalarExpr::DateAddMonths { .. } => Err(EvalError::TypeMismatch(
+                "bulk fast mode does not yet support date_add_months".to_string(),
+            )),
+            ScalarExpr::DateAddYears { .. } => Err(EvalError::TypeMismatch(
+                "bulk fast mode does not yet support date_add_years".to_string(),
+            )),
             ScalarExpr::DaysBetween { .. } => Err(EvalError::TypeMismatch(
                 "bulk fast mode does not yet support days_between".to_string(),
             )),
@@ -1133,6 +1139,8 @@ impl<'a> BulkEvaluator<'a> {
                 Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
             }
             ScalarExpr::DateAddDays { .. }
+            | ScalarExpr::DateAddMonths { .. }
+            | ScalarExpr::DateAddYears { .. }
             | ScalarExpr::DaysBetween { .. }
             | ScalarExpr::CountRelated { .. }
             | ScalarExpr::SumRelated { .. }

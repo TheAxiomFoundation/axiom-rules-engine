@@ -731,6 +731,20 @@ fn format_scalar_expression(
                 format_scalar_expression(program, days)
             )
         }
+        ScalarExpr::DateAddMonths { date, months } => {
+            format!(
+                "date_add_months({}, {})",
+                format_scalar_expression(program, date),
+                format_scalar_expression(program, months)
+            )
+        }
+        ScalarExpr::DateAddYears { date, years } => {
+            format!(
+                "date_add_years({}, {})",
+                format_scalar_expression(program, date),
+                format_scalar_expression(program, years)
+            )
+        }
         ScalarExpr::DaysBetween { from, to } => {
             format!(
                 "days_between({}, {})",

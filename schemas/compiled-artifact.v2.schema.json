@@ -1456,6 +1456,64 @@
             }
           ],
           "properties": {
+            "date": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            },
+            "kind": {
+              "const": "date_add_months",
+              "type": "string"
+            },
+            "months": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "date",
+            "months"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "properties": {
+            "date": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            },
+            "kind": {
+              "const": "date_add_years",
+              "type": "string"
+            },
+            "years": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "date",
+            "years"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "properties": {
             "from": {
               "$ref": "#/$defs/ScalarExprSpec"
             },

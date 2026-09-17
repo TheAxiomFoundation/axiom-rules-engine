@@ -1512,6 +1512,28 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     days: Box::new(lower_to_scalar(&args[1], ctx)?),
                 }
             }
+            "date_add_months" => {
+                if args.len() != 2 {
+                    return Err(FormulaError::lower(
+                        "date_add_months takes 2 args".to_string(),
+                    ));
+                }
+                ScalarExprSpec::DateAddMonths {
+                    date: Box::new(lower_to_scalar(&args[0], ctx)?),
+                    months: Box::new(lower_to_scalar(&args[1], ctx)?),
+                }
+            }
+            "date_add_years" => {
+                if args.len() != 2 {
+                    return Err(FormulaError::lower(
+                        "date_add_years takes 2 args".to_string(),
+                    ));
+                }
+                ScalarExprSpec::DateAddYears {
+                    date: Box::new(lower_to_scalar(&args[0], ctx)?),
+                    years: Box::new(lower_to_scalar(&args[1], ctx)?),
+                }
+            }
             // Over-periods reductions: reduce the inner expression across an
             // entity's own period axis. Meaningful only under the lifetime
             // execution surface; the per-period execution paths reject them.

@@ -1,0 +1,364 @@
+{
+  "mode": "fast",
+  "program": {
+    "relations": [
+      {
+        "name": "record_of_group",
+        "arity": 2,
+        "slot_entities": [
+          "Record",
+          "Group"
+        ]
+      },
+      {
+        "name": "matching_records",
+        "arity": 2,
+        "slot_entities": [
+          "Record",
+          "Group"
+        ],
+        "derivation": {
+          "source_relation": "record_of_group",
+          "current_slot": 1,
+          "related_slot": 0,
+          "entity": "MatchingGroup",
+          "member_relation": "matches",
+          "slot_entities": [
+            "Record",
+            "Group"
+          ],
+          "predicate": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "record_key"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "derived",
+              "name": "group_key"
+            }
+          }
+        }
+      }
+    ],
+    "derived": [
+      {
+        "name": "record_key",
+        "entity": "Record",
+        "dtype": "integer",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "observed_record_key"
+        }
+      },
+      {
+        "name": "group_key",
+        "entity": "Group",
+        "dtype": "integer",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "observed_group_key"
+        }
+      },
+      {
+        "name": "match_count",
+        "entity": "Group",
+        "dtype": "integer",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "matching_records",
+          "current_slot": 1,
+          "related_slot": 0
+        }
+      },
+      {
+        "name": "record_count",
+        "entity": "Group",
+        "dtype": "integer",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "record_of_group",
+          "current_slot": 1,
+          "related_slot": 0
+        }
+      },
+      {
+        "name": "all_records_match",
+        "entity": "Group",
+        "dtype": "judgment",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "record_count"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "match_count"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "derived",
+                "name": "record_count"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "dataset": {
+    "inputs": [
+      {
+        "entity": "Group",
+        "entity_id": "g1",
+        "name": "observed_group_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 10
+        }
+      },
+      {
+        "entity": "Group",
+        "entity_id": "g2",
+        "name": "observed_group_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 20
+        }
+      },
+      {
+        "entity": "Group",
+        "entity_id": "g3",
+        "name": "observed_group_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 30
+        }
+      },
+      {
+        "entity": "Record",
+        "entity_id": "r1",
+        "name": "observed_record_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 10
+        }
+      },
+      {
+        "entity": "Record",
+        "entity_id": "r2",
+        "name": "observed_record_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 10
+        }
+      },
+      {
+        "entity": "Record",
+        "entity_id": "r3",
+        "name": "observed_record_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 20
+        }
+      },
+      {
+        "entity": "Record",
+        "entity_id": "r4",
+        "name": "observed_record_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": 99
+        }
+      },
+      {
+        "entity": "Group",
+        "entity_id": "g4",
+        "name": "observed_group_key",
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        },
+        "value": {
+          "kind": "integer",
+          "value": -20
+        }
+      }
+    ],
+    "relations": [
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r1",
+          "g1"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      },
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r2",
+          "g1"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      },
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r3",
+          "g2"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      },
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r4",
+          "g2"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      },
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r1",
+          "g4"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      },
+      {
+        "name": "record_of_group",
+        "tuple": [
+          "r1",
+          "g1"
+        ],
+        "interval": {
+          "start": "2025-01-01",
+          "end": "2025-01-01"
+        }
+      }
+    ]
+  },
+  "queries": [
+    {
+      "entity_id": "g1",
+      "period": {
+        "period_kind": "custom",
+        "name": "day",
+        "start": "2025-01-01",
+        "end": "2025-01-01"
+      },
+      "outputs": [
+        "match_count",
+        "record_count",
+        "all_records_match"
+      ]
+    },
+    {
+      "entity_id": "g2",
+      "period": {
+        "period_kind": "custom",
+        "name": "day",
+        "start": "2025-01-01",
+        "end": "2025-01-01"
+      },
+      "outputs": [
+        "match_count",
+        "record_count",
+        "all_records_match"
+      ]
+    },
+    {
+      "entity_id": "g3",
+      "period": {
+        "period_kind": "custom",
+        "name": "day",
+        "start": "2025-01-01",
+        "end": "2025-01-01"
+      },
+      "outputs": [
+        "match_count",
+        "record_count",
+        "all_records_match"
+      ]
+    },
+    {
+      "entity_id": "g4",
+      "period": {
+        "period_kind": "custom",
+        "name": "day",
+        "start": "2025-01-01",
+        "end": "2025-01-01"
+      },
+      "outputs": [
+        "match_count",
+        "record_count",
+        "all_records_match"
+      ]
+    }
+  ]
+}

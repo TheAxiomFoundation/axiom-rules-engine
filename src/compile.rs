@@ -1121,6 +1121,20 @@ fn collect_fast_blockers_from_scalar_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, days, blockers);
         }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            blockers.push(format!(
+                "{derived_name}: bulk fast mode does not yet support date_add_months; explain mode and the generic dense path do"
+            ));
+            collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, months, blockers);
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            blockers.push(format!(
+                "{derived_name}: bulk fast mode does not yet support date_add_years; explain mode and the generic dense path do"
+            ));
+            collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, years, blockers);
+        }
         ScalarExprSpec::DaysBetween { from, to } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support days_between; explain mode and the generic dense path do"
@@ -1341,6 +1355,14 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(date, dependencies, relation_dependencies);
             collect_scalar_dependencies(days, dependencies, relation_dependencies);
         }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            collect_scalar_dependencies(date, dependencies, relation_dependencies);
+            collect_scalar_dependencies(months, dependencies, relation_dependencies);
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            collect_scalar_dependencies(date, dependencies, relation_dependencies);
+            collect_scalar_dependencies(years, dependencies, relation_dependencies);
+        }
         ScalarExprSpec::DaysBetween { from, to } => {
             collect_scalar_dependencies(from, dependencies, relation_dependencies);
             collect_scalar_dependencies(to, dependencies, relation_dependencies);
@@ -1435,6 +1457,14 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
         ScalarExprSpec::DateAddDays { date, days } => {
             collect_relation_members_from_scalar(date, relations);
             collect_relation_members_from_scalar(days, relations);
+        }
+        ScalarExprSpec::DateAddMonths { date, months } => {
+            collect_relation_members_from_scalar(date, relations);
+            collect_relation_members_from_scalar(months, relations);
+        }
+        ScalarExprSpec::DateAddYears { date, years } => {
+            collect_relation_members_from_scalar(date, relations);
+            collect_relation_members_from_scalar(years, relations);
         }
         ScalarExprSpec::DaysBetween { from, to } => {
             collect_relation_members_from_scalar(from, relations);

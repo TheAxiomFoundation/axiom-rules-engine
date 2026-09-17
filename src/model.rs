@@ -316,6 +316,14 @@ pub enum ScalarExpr {
         date: Box<ScalarExpr>,
         days: Box<ScalarExpr>,
     },
+    DateAddMonths {
+        date: Box<ScalarExpr>,
+        months: Box<ScalarExpr>,
+    },
+    DateAddYears {
+        date: Box<ScalarExpr>,
+        years: Box<ScalarExpr>,
+    },
     DaysBetween {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
@@ -696,6 +704,26 @@ impl Program {
                     .insert(request_name);
             }
         }
+        // A relation predicate can be the only consumer of an input slot.
+        // Bind that slot to the relation's owner just like a derived rule's
+        // direct inputs; callers must not borrow an importing module's id.
+        for relation in self.relations.values() {
+            let Some(derivation) = &relation.derivation else {
+                continue;
+            };
+            let mut slots = HashSet::new();
+            collect_input_slots_from_judgment_expr(&derivation.predicate, &mut slots);
+            for slot in slots {
+                let request_name = public_rule_target(&relation.name).map_or_else(
+                    || slot.to_string(),
+                    |target| format!("{target}#input.{slot}"),
+                );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
+            }
+        }
         for parameter in self.parameters.values() {
             let Some(slot) = parameter.indexed_by.as_deref() else {
                 continue;
@@ -910,6 +938,14 @@ fn collect_scalar_relation_usages(
         ScalarExpr::DateAddDays { date, days } => {
             collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
             collect_scalar_relation_usages(program, days, entity, citing_rule, usages);
+        }
+        ScalarExpr::DateAddMonths { date, months } => {
+            collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
+            collect_scalar_relation_usages(program, months, entity, citing_rule, usages);
+        }
+        ScalarExpr::DateAddYears { date, years } => {
+            collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
+            collect_scalar_relation_usages(program, years, entity, citing_rule, usages);
         }
         ScalarExpr::DaysBetween { from, to } => {
             collect_scalar_relation_usages(program, from, entity, citing_rule, usages);
@@ -1156,6 +1192,14 @@ fn collect_scalar_derived_entities(
             collect_scalar_derived_entities(program, date, entities);
             collect_scalar_derived_entities(program, days, entities);
         }
+        ScalarExpr::DateAddMonths { date, months } => {
+            collect_scalar_derived_entities(program, date, entities);
+            collect_scalar_derived_entities(program, months, entities);
+        }
+        ScalarExpr::DateAddYears { date, years } => {
+            collect_scalar_derived_entities(program, date, entities);
+            collect_scalar_derived_entities(program, years, entities);
+        }
         ScalarExpr::DaysBetween { from, to } => {
             collect_scalar_derived_entities(program, from, entities);
             collect_scalar_derived_entities(program, to, entities);
@@ -1331,6 +1375,14 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         ScalarExpr::DateAddDays { date, days } => {
             collect_input_slots_from_scalar_expr(date, slots);
             collect_input_slots_from_scalar_expr(days, slots);
+        }
+        ScalarExpr::DateAddMonths { date, months } => {
+            collect_input_slots_from_scalar_expr(date, slots);
+            collect_input_slots_from_scalar_expr(months, slots);
+        }
+        ScalarExpr::DateAddYears { date, years } => {
+            collect_input_slots_from_scalar_expr(date, slots);
+            collect_input_slots_from_scalar_expr(years, slots);
         }
         ScalarExpr::DaysBetween { from, to } => {
             collect_input_slots_from_scalar_expr(from, slots);

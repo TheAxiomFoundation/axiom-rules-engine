@@ -395,6 +395,14 @@ enum CompiledScalarExpr {
         date: Box<CompiledScalarExpr>,
         days: Box<CompiledScalarExpr>,
     },
+    DateAddMonths {
+        date: Box<CompiledScalarExpr>,
+        months: Box<CompiledScalarExpr>,
+    },
+    DateAddYears {
+        date: Box<CompiledScalarExpr>,
+        years: Box<CompiledScalarExpr>,
+    },
     DaysBetween {
         from: Box<CompiledScalarExpr>,
         to: Box<CompiledScalarExpr>,
@@ -459,6 +467,14 @@ enum CompiledRelatedScalarExpr {
     DateAddDays {
         date: Box<CompiledRelatedScalarExpr>,
         days: Box<CompiledRelatedScalarExpr>,
+    },
+    DateAddMonths {
+        date: Box<CompiledRelatedScalarExpr>,
+        months: Box<CompiledRelatedScalarExpr>,
+    },
+    DateAddYears {
+        date: Box<CompiledRelatedScalarExpr>,
+        years: Box<CompiledRelatedScalarExpr>,
     },
     DaysBetween {
         from: Box<CompiledRelatedScalarExpr>,
@@ -870,6 +886,14 @@ impl DenseCompiledProgram {
                 self.scalar_reduces_over_periods(date, visiting)
                     || self.scalar_reduces_over_periods(days, visiting)
             }
+            CompiledScalarExpr::DateAddMonths { date, months } => {
+                self.scalar_reduces_over_periods(date, visiting)
+                    || self.scalar_reduces_over_periods(months, visiting)
+            }
+            CompiledScalarExpr::DateAddYears { date, years } => {
+                self.scalar_reduces_over_periods(date, visiting)
+                    || self.scalar_reduces_over_periods(years, visiting)
+            }
             CompiledScalarExpr::DaysBetween { from, to } => {
                 self.scalar_reduces_over_periods(from, visiting)
                     || self.scalar_reduces_over_periods(to, visiting)
@@ -1217,6 +1241,14 @@ impl<'a> DenseCompiler<'a> {
                 date: Box::new(self.compile_scalar_expr(derived_name, date)?),
                 days: Box::new(self.compile_scalar_expr(derived_name, days)?),
             }),
+            ScalarExpr::DateAddMonths { date, months } => Ok(CompiledScalarExpr::DateAddMonths {
+                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
+                months: Box::new(self.compile_scalar_expr(derived_name, months)?),
+            }),
+            ScalarExpr::DateAddYears { date, years } => Ok(CompiledScalarExpr::DateAddYears {
+                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
+                years: Box::new(self.compile_scalar_expr(derived_name, years)?),
+            }),
             ScalarExpr::DaysBetween { from, to } => Ok(CompiledScalarExpr::DaysBetween {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
@@ -1527,6 +1559,18 @@ impl<'a> DenseCompiler<'a> {
                 date: Box::new(self.compile_related_scalar(relation_index, date)?),
                 days: Box::new(self.compile_related_scalar(relation_index, days)?),
             }),
+            ScalarExpr::DateAddMonths { date, months } => {
+                Ok(CompiledRelatedScalarExpr::DateAddMonths {
+                    date: Box::new(self.compile_related_scalar(relation_index, date)?),
+                    months: Box::new(self.compile_related_scalar(relation_index, months)?),
+                })
+            }
+            ScalarExpr::DateAddYears { date, years } => {
+                Ok(CompiledRelatedScalarExpr::DateAddYears {
+                    date: Box::new(self.compile_related_scalar(relation_index, date)?),
+                    years: Box::new(self.compile_related_scalar(relation_index, years)?),
+                })
+            }
             ScalarExpr::DaysBetween { from, to } => Ok(CompiledRelatedScalarExpr::DaysBetween {
                 from: Box::new(self.compile_related_scalar(relation_index, from)?),
                 to: Box::new(self.compile_related_scalar(relation_index, to)?),
@@ -1641,6 +1685,14 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
                 date: Box::new(self.compile_current_scalar_expr(derived_name, entity, date)?),
                 days: Box::new(self.compile_current_scalar_expr(derived_name, entity, days)?),
+            }),
+            ScalarExpr::DateAddMonths { date, months } => Ok(CompiledScalarExpr::DateAddMonths {
+                date: Box::new(self.compile_current_scalar_expr(derived_name, entity, date)?),
+                months: Box::new(self.compile_current_scalar_expr(derived_name, entity, months)?),
+            }),
+            ScalarExpr::DateAddYears { date, years } => Ok(CompiledScalarExpr::DateAddYears {
+                date: Box::new(self.compile_current_scalar_expr(derived_name, entity, date)?),
+                years: Box::new(self.compile_current_scalar_expr(derived_name, entity, years)?),
             }),
             ScalarExpr::DaysBetween { from, to } => Ok(CompiledScalarExpr::DaysBetween {
                 from: Box::new(self.compile_current_scalar_expr(derived_name, entity, from)?),
@@ -2062,6 +2114,26 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                         .collect(),
                 ))
             }
+            CompiledScalarExpr::DateAddMonths { date, months } => {
+                let base = self.eval_scalar_expr(date)?.as_date_vec()?;
+                let offset = self.eval_scalar_expr(months)?.as_index_vec()?;
+                Ok(DenseColumn::Date(
+                    base.into_iter()
+                        .zip(offset)
+                        .map(|(base, offset)| crate::engine::shift_calendar_months(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
+            CompiledScalarExpr::DateAddYears { date, years } => {
+                let base = self.eval_scalar_expr(date)?.as_date_vec()?;
+                let offset = self.eval_scalar_expr(years)?.as_index_vec()?;
+                Ok(DenseColumn::Date(
+                    base.into_iter()
+                        .zip(offset)
+                        .map(|(base, offset)| crate::engine::shift_calendar_years(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
             CompiledScalarExpr::DaysBetween { from, to } => {
                 let a = self.eval_scalar_expr(from)?.as_date_vec()?;
                 let b = self.eval_scalar_expr(to)?.as_date_vec()?;
@@ -2378,6 +2450,30 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                         .collect(),
                 ))
             }
+            CompiledRelatedScalarExpr::DateAddMonths { date, months } => {
+                let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
+                let offset = self
+                    .resolve_related_scalar(relation, months)?
+                    .as_index_vec()?;
+                Ok(DenseColumn::Date(
+                    base.into_iter()
+                        .zip(offset)
+                        .map(|(base, offset)| crate::engine::shift_calendar_months(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
+            CompiledRelatedScalarExpr::DateAddYears { date, years } => {
+                let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
+                let offset = self
+                    .resolve_related_scalar(relation, years)?
+                    .as_index_vec()?;
+                Ok(DenseColumn::Date(
+                    base.into_iter()
+                        .zip(offset)
+                        .map(|(base, offset)| crate::engine::shift_calendar_years(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
             CompiledRelatedScalarExpr::DaysBetween { from, to } => {
                 let a = self.resolve_related_scalar(relation, from)?.as_date_vec()?;
                 let b = self.resolve_related_scalar(relation, to)?.as_date_vec()?;
@@ -2678,6 +2774,12 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledScalarExpr::DateAddDays { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
                 "date_add_days".to_string(),
+            )),
+            CompiledScalarExpr::DateAddMonths { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "date_add_months".to_string(),
+            )),
+            CompiledScalarExpr::DateAddYears { .. } => Err(EvalError::LifetimeAmbiguousLeaf(
+                "date_add_years".to_string(),
             )),
             CompiledScalarExpr::DaysBetween { .. } => {
                 Err(EvalError::LifetimeAmbiguousLeaf("days_between".to_string()))
@@ -3115,6 +3217,12 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         }
         CompiledScalarExpr::DateAddDays { date, days } => {
             nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
+        }
+        CompiledScalarExpr::DateAddMonths { date, months } => {
+            nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(months))
+        }
+        CompiledScalarExpr::DateAddYears { date, years } => {
+            nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(years))
         }
         CompiledScalarExpr::DaysBetween { from, to } => {
             nested_over_periods_kind(from).or_else(|| nested_over_periods_kind(to))
