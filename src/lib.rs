@@ -9,6 +9,7 @@ pub mod engine;
 mod formula;
 pub mod migrate;
 pub mod model;
+mod relation_direction;
 pub mod rulespec;
 #[cfg(feature = "schema")]
 pub mod schema;
