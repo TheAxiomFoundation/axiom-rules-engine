@@ -2063,6 +2063,7 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
+        crate::relation_direction::resolve(&mut program);
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();

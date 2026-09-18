@@ -267,6 +267,15 @@ rules:
         formula: sum_where(member_of_household, earned_income, is_countable_member)
 ```
 
+For a two-slot relation with declared `arguments`, aggregates use the slot matching
+the enclosing rule’s `entity` as the current entity and the other slot as the
+related entity. Both `[Person, Household]` and `[Household, Person]` work when
+dataset tuples follow the declared order. Untyped or ambiguous declarations
+retain the legacy direction (current slot 1, related slot 0). This applies when
+compiling RuleSpec; loading an existing compiled artifact does not rewrite it.
+Recompile artifacts to adopt corrected directions, and ensure dataset tuples
+follow their declared argument order.
+
 ## Judgment position
 
 A `dtype: Judgment` formula composes:

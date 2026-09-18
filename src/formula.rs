@@ -1316,8 +1316,8 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
 ///
 /// Formula lowering has no entity-kind context, so it cannot infer direction
 /// from a relation's declared argument entities here. RuleSpec later carries
-/// those declarations into the relation schema, but changing this convention
-/// would also require a compatibility strategy for existing dataset tuples.
+/// those declarations into the relation schema and resolves unambiguous
+/// aggregation directions after relation aliases have been rewritten.
 fn infer_slots(_relation: &str) -> (usize, usize) {
     // Preserve the established runtime convention: current entity in slot 1,
     // related entity in slot 0.

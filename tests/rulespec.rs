@@ -2354,8 +2354,27 @@ rules:
 
 #[test]
 fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_mode() {
-    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
-        .expect("orientation mismatch is warning-ratcheted by default");
+    // Existing artifacts with inconsistent slots still warn and fail strict loading.
+    let mut program = lower_rulespec_str(ORIENTATION_MISMATCH_RULESPEC).unwrap();
+    for rule in &mut program.derived {
+        for semantics in std::iter::once(&mut rule.semantics)
+            .chain(rule.versions.iter_mut().map(|v| &mut v.semantics))
+        {
+            if let DerivedSemanticsSpec::Scalar {
+                expr:
+                    ScalarExprSpec::CountRelated {
+                        current_slot,
+                        related_slot,
+                        ..
+                    },
+            } = semantics
+            {
+                *current_slot = 1;
+                *related_slot = 0;
+            }
+        }
+    }
+    let artifact = CompiledProgramArtifact::compile(program).expect("legacy artifact compiles");
     assert_eq!(
         artifact.program.relations[0].slot_entities,
         vec!["TaxUnit", "Person"],
@@ -2397,19 +2416,6 @@ fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_m
             .to_string()
             .contains("relation_orientation_mismatch"),
         "{reload_error}"
-    );
-
-    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
-        ORIENTATION_MISMATCH_RULESPEC,
-        CompileOptions {
-            strict_relation_entities: true,
-            ..CompileOptions::default()
-        },
-    )
-    .expect_err("strict relation entity compilation rejects executable orientation mismatch");
-    assert!(
-        error.to_string().contains("relation_orientation_mismatch"),
-        "{error}"
     );
 }
 
@@ -2695,7 +2701,7 @@ fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
         }],
     };
 
-    let working = dataset_with_tuple(["related-0", "case"]);
+    let working = dataset_with_tuple(["case", "related-0"]);
     let working_outcome = working
         .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
         .expect("working order binds");
@@ -2704,7 +2710,7 @@ fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
         "the count-producing order must not receive a kind warning"
     );
 
-    let broken = dataset_with_tuple(["case", "related-0"]);
+    let broken = dataset_with_tuple(["related-0", "case"]);
     let broken_outcome = broken
         .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
         .expect("broken order remains compatible under the warning ratchet");
@@ -2714,11 +2720,11 @@ fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
         "both reversed concrete kinds must be diagnosed"
     );
     assert_eq!(broken_outcome.diagnostics[0].slot, 0);
-    assert_eq!(broken_outcome.diagnostics[0].expected_entity, "Person");
-    assert_eq!(broken_outcome.diagnostics[0].actual_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[0].expected_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[0].actual_entity, "Person");
     assert_eq!(broken_outcome.diagnostics[1].slot, 1);
-    assert_eq!(broken_outcome.diagnostics[1].expected_entity, "TaxUnit");
-    assert_eq!(broken_outcome.diagnostics[1].actual_entity, "Person");
+    assert_eq!(broken_outcome.diagnostics[1].expected_entity, "Person");
+    assert_eq!(broken_outcome.diagnostics[1].actual_entity, "TaxUnit");
 }
 
 #[test]
@@ -4712,4 +4718,85 @@ rules:
         );
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn declared_relation_order_drives_count_for_each_tax_unit() {
+    for declaration in ["[TaxUnit, Person]", "[Person, TaxUnit]"] {
+        let source = ORIENTATION_MISMATCH_RULESPEC.replace("[TaxUnit, Person]", declaration);
+        let artifact = CompiledProgramArtifact::from_rulespec_str_with_options(
+            &source,
+            CompileOptions {
+                strict_relation_entities: true,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !artifact
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "relation_orientation_mismatch")
+        );
+        let interval = IntervalSpec {
+            start: "2026-01-01".parse().unwrap(),
+            end: "2027-01-01".parse().unwrap(),
+        };
+        let period = PeriodSpec {
+            kind: PeriodKindSpec::TaxYear,
+            start: interval.start,
+            end: interval.end,
+        };
+        let inputs = [("child", true), ("adult", false), ("other-child", true)]
+            .iter()
+            .map(|(id, eligible)| InputRecordSpec {
+                name: "is_eligible".into(),
+                entity: "Person".into(),
+                entity_id: (*id).into(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: *eligible },
+            })
+            .collect();
+        let relations = [
+            ("unit-1", "child"),
+            ("unit-1", "adult"),
+            ("unit-2", "other-child"),
+        ]
+        .iter()
+        .map(|(unit, person)| RelationRecordSpec {
+            name: "qualifying_child_of_tax_unit".into(),
+            tuple: if declaration.starts_with("[TaxUnit") {
+                vec![(*unit).into(), (*person).into()]
+            } else {
+                vec![(*person).into(), (*unit).into()]
+            },
+            interval: interval.clone(),
+        })
+        .collect();
+        let response = execute_request(ExecutionRequest {
+            mode: ExecutionMode::Explain,
+            program: artifact.program,
+            dataset: DatasetSpec { inputs, relations },
+            queries: ["unit-1", "unit-2", "empty-unit"]
+                .iter()
+                .map(|id| ExecutionQuery {
+                    assessment_date: None,
+                    entity_id: (*id).into(),
+                    period: period.clone(),
+                    outputs: vec!["eitc_child_count".into()],
+                })
+                .collect(),
+        })
+        .unwrap();
+        for (index, expected) in [1, 1, 0].into_iter().enumerate() {
+            let OutputValue::Scalar {
+                value: ScalarValueSpec::Integer { value },
+                ..
+            } = &response.results[index].outputs["eitc_child_count"]
+            else {
+                panic!("expected integer count")
+            };
+            assert_eq!(*value, expected, "{declaration}, query {index}");
+        }
+    }
 }
