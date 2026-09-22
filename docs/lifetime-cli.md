@@ -35,7 +35,29 @@ observations; it requires an artifact whose public input and output IDs match.
 `integer` takes signed 64-bit integers; `bool`, `text`, and `date` take booleans,
 strings, and ISO date strings. Nulls, floating-point numbers, duplicate JSON
 keys, and unknown fields are refused. Declared optional input defaults still
-use the engine's existing `InputOrElse` semantics; missing required inputs fail.
+use the engine's existing `InputOrElse` semantics; missing root inputs fail when
+an evaluated expression reads them.
+
+Dense and lifetime scalar conditionals evaluate only the selected branch when
+every row in a nonempty batch selects that branch. An input used only by the
+other branch can be absent in that observation. For example, a history formula
+can index earlier amounts with a denominator while carrying later amounts
+unchanged, without supplying a denominator for those later observations.
+The condition still evaluates normally; `holds` selects the then branch and
+all other judgment outcomes select the else branch, as before. `InputOrElse`
+retains its default at that reference; a selected ordinary input reference to
+the same absent column still fails. Supplied columns must have valid lengths
+even when no expression reads them.
+
+This is whole-column conditional evaluation. Mixed-row conditions still
+evaluate both branches over all rows: a missing column needed by any selected
+row fails, and numeric errors can still arise in a row whose branch is
+unselected. Empty batches keep their existing two-branch evaluation and type
+resolution. Related-input and relation binding is unchanged. A uniform
+conditional returns the selected branch's native column type without inspecting
+the other branch's dtype; mixed and empty batches retain existing type promotion
+and compatibility checks. The lifetime wire contract still widens Integer
+results declared Decimal exactly and rejects other output dtype mismatches.
 
 Every batch must contain the same unique, nonempty string `entity_ids` in the
 same order. Each input column length equals `row_count`. These IDs declare row

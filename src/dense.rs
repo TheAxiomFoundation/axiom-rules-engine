@@ -346,8 +346,8 @@ struct DenseRelationBatch {
 #[derive(Clone, Debug)]
 struct DenseBoundBatch {
     row_count: usize,
-    /// None entries indicate an optional root input that the caller did not
-    /// supply; the executor will fall back to its per-reference default.
+    /// Missing root columns stay absent until accessed: Input errors and
+    /// InputOrElse uses its per-reference default.
     inputs: Vec<Option<DenseColumn>>,
     relations: Vec<DenseRelationBatch>,
 }
@@ -720,10 +720,6 @@ pub struct DenseCompiledProgram {
     selected_versions: Vec<SelectedVersion>,
     root_entity: String,
     root_inputs: Vec<String>,
-    /// Set of root input indices that are only ever referenced via
-    /// `input_or_else`. These may be omitted at execution time — the
-    /// per-reference default is inlined by the executor.
-    optional_root_inputs: HashSet<usize>,
     relations: Vec<DenseRelationSchema>,
     /// Per-relation: indices of related inputs that are only ever referenced
     /// via `input_or_else` inside a `where` predicate.
@@ -1149,21 +1145,15 @@ impl DenseCompiledProgram {
             }
         }
 
+        // Missing root columns are resolved when an expression reads them,
+        // not when binding the union of every derived rule's dependencies.
+        // A wholly unselected if() branch need not have inputs at this period;
+        // Input still errors on access and InputOrElse retains its own default.
         let bound_inputs = self
             .root_inputs
             .iter()
-            .enumerate()
-            .map(|(index, name)| match batch.inputs.get(name).cloned() {
-                Some(column) => Ok(Some(column)),
-                None if self.optional_root_inputs.contains(&index) => Ok(None),
-                None => Err(EvalError::MissingInput {
-                    name: name.clone(),
-                    entity_id: self.root_entity.clone(),
-                    period_start: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                    period_end: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                }),
-            })
-            .collect::<Result<Vec<Option<DenseColumn>>, EvalError>>()?;
+            .map(|name| batch.inputs.get(name).cloned())
+            .collect();
 
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for (relation_index, relation) in self.relations.iter().enumerate() {
@@ -1259,10 +1249,6 @@ struct DenseCompiler<'a> {
     root_entity: String,
     root_inputs: Vec<String>,
     root_input_index: HashMap<String, usize>,
-    /// Root input indices that have only ever been referenced via
-    /// `input_or_else`. If a bare `input` reference lands later, the index
-    /// is evicted.
-    optional_root_inputs: HashSet<usize>,
     relations: Vec<DenseRelationSchema>,
     relation_index: HashMap<DenseRelationKey, usize>,
     relation_input_index: HashMap<(usize, String), usize>,
@@ -1289,7 +1275,6 @@ impl<'a> DenseCompiler<'a> {
             root_entity,
             root_inputs: Vec::new(),
             root_input_index: HashMap::new(),
-            optional_root_inputs: HashSet::new(),
             relations: Vec::new(),
             relation_index: HashMap::new(),
             relation_input_index: HashMap::new(),
@@ -1314,7 +1299,6 @@ impl<'a> DenseCompiler<'a> {
             selected_versions: self.selected_versions,
             root_entity: self.root_entity,
             root_inputs: self.root_inputs,
-            optional_root_inputs: self.optional_root_inputs,
             relations: self.relations,
             optional_related_inputs: self.optional_related_inputs,
             parameters: self.parameters,
@@ -1423,9 +1407,9 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledScalarExpr, DenseCompileError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
-            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name, false))),
+            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
-                input: self.root_input(name, true),
+                input: self.root_input(name),
                 default: default.clone(),
             }),
             ScalarExpr::Derived(name) => {
@@ -1861,9 +1845,9 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledScalarExpr, DenseCompileError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
-            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name, false))),
+            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
-                input: self.root_input(name, true),
+                input: self.root_input(name),
                 default: default.clone(),
             }),
             ScalarExpr::Derived(name) => {
@@ -2056,19 +2040,13 @@ impl<'a> DenseCompiler<'a> {
         }
     }
 
-    fn root_input(&mut self, name: &str, optional: bool) -> usize {
+    fn root_input(&mut self, name: &str) -> usize {
         if let Some(&index) = self.root_input_index.get(name) {
-            if !optional {
-                self.optional_root_inputs.remove(&index);
-            }
             return index;
         }
         let index = self.root_inputs.len();
         self.root_inputs.push(name.to_string());
         self.root_input_index.insert(name.to_string(), index);
-        if optional {
-            self.optional_root_inputs.insert(index);
-        }
         index
     }
 
@@ -2489,6 +2467,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 else_expr,
             } => {
                 let condition = self.eval_judgment_expr(condition)?;
+                if let Some(take_then) = uniform_dense_condition(&condition) {
+                    return self.eval_scalar_expr(if take_then { then_expr } else { else_expr });
+                }
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
@@ -3053,6 +3034,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 else_expr,
             } => {
                 let condition = self.eval_judgment(condition)?;
+                if let Some(take_then) = uniform_dense_condition(&condition) {
+                    return self.eval_scalar(if take_then { then_expr } else { else_expr });
+                }
                 let then_values = self.eval_scalar(then_expr)?;
                 let else_values = self.eval_scalar(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
@@ -3838,6 +3822,39 @@ fn select_related_scalar_column<N: DenseNum>(
         })
         .collect();
     select_dense_scalar_column::<N>(condition, then_values, else_values)
+}
+
+/// Skip a branch only if no row selects it. Use the existing selector's
+/// is_holds() semantics: Undetermined, like NotHolds, selects the else branch.
+/// Empty batches retain two-branch evaluation/type resolution; mixed batches
+/// remain eager (there is no per-row masking of arithmetic or missing inputs).
+fn uniform_dense_condition(condition: &[JudgmentOutcome]) -> Option<bool> {
+    let first = condition.first()?.is_holds();
+    condition
+        .iter()
+        .all(|value| value.is_holds() == first)
+        .then_some(first)
+}
+
+#[cfg(test)]
+mod conditional_selection_tests {
+    use super::{JudgmentOutcome, uniform_dense_condition};
+
+    #[test]
+    fn uniform_condition_preserves_non_holds_and_empty_semantics() {
+        use JudgmentOutcome::{Holds, NotHolds, Undetermined};
+        assert_eq!(uniform_dense_condition(&[]), None);
+        assert_eq!(uniform_dense_condition(&[Holds, Holds]), Some(true));
+        assert_eq!(
+            uniform_dense_condition(&[NotHolds, Undetermined]),
+            Some(false)
+        );
+        assert_eq!(
+            uniform_dense_condition(&[Undetermined, Undetermined]),
+            Some(false)
+        );
+        assert_eq!(uniform_dense_condition(&[Holds, Undetermined]), None);
+    }
 }
 
 fn select_dense_scalar_column<N: DenseNum>(
