@@ -594,6 +594,9 @@ impl<'a> BulkEvaluator<'a> {
                     .map(|value| value.floor())
                     .collect(),
             )),
+            ScalarExpr::CalendarYearsToMonths { .. } => Err(EvalError::TypeMismatch(
+                "bulk fast mode does not yet support calendar_years_to_months".to_string(),
+            )),
             ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => Err(EvalError::TypeMismatch(
                 "bulk fast mode does not yet support period_start / period_end".to_string(),
             )),
@@ -1138,7 +1141,8 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::OverPeriods { kind, .. } => {
                 Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
             }
-            ScalarExpr::DateAddDays { .. }
+            ScalarExpr::CalendarYearsToMonths { .. }
+            | ScalarExpr::DateAddDays { .. }
             | ScalarExpr::DateAddMonths { .. }
             | ScalarExpr::DateAddYears { .. }
             | ScalarExpr::DaysBetween { .. }

@@ -722,6 +722,10 @@ fn format_scalar_expression(
             };
             format!("{function}({})", format_scalar_expression(program, value))
         }
+        ScalarExpr::CalendarYearsToMonths { years } => format!(
+            "calendar_years_to_months({})",
+            format_scalar_expression(program, years)
+        ),
         ScalarExpr::PeriodStart => "period_start".to_string(),
         ScalarExpr::PeriodEnd => "period_end".to_string(),
         ScalarExpr::DateAddDays { date, days } => {

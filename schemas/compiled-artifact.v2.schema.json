@@ -1384,6 +1384,32 @@
               }
             }
           ],
+          "description": "Exact whole Gregorian calendar-year units to month units.",
+          "properties": {
+            "kind": {
+              "const": "calendar_years_to_months",
+              "type": "string"
+            },
+            "years": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "years"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "kind": {
               "const": "period_start",

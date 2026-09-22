@@ -1,127 +1,270 @@
 {
+  "$defs": {
+    "LifetimeArithmetic": {
+      "enum": [
+        "decimal"
+      ],
+      "type": "string"
+    },
+    "LifetimeBatch": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LifetimeColumn"
+          },
+          "type": "object"
+        },
+        "row_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "row_count",
+        "entity_ids",
+        "inputs"
+      ],
+      "type": "object"
+    },
+    "LifetimeColumn": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "boolean"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "decimal",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "date",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimePeriod": {
+      "description": "Same period wire vocabulary as PeriodSpec, with unknown fields refused.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "month",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "benefit_week",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "tax_year",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "custom",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "name",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimeRequestSchema": {
+      "enum": [
+        "axiom-rules-engine/lifetime-request/v1"
+      ],
+      "type": "string"
+    }
+  },
   "$id": "https://schemas.axiom-foundation.org/rules-engine/rulespec-test.v1.schema.json",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "A companion `*.test.yaml` case list: named cases with a period, inputs, and expected outputs, run against a RuleSpec module by the jurisdiction-repo and axiom-encode test harnesses.",
   "items": {
-    "additionalProperties": true,
-    "properties": {
-      "description": {
-        "type": "string"
-      },
-      "input": {
-        "additionalProperties": {
-          "oneOf": [
-            {
-              "type": [
-                "string",
-                "number",
-                "boolean",
-                "null"
-              ]
-            },
-            {
-              "items": {
-                "oneOf": [
-                  {
-                    "type": [
-                      "string",
-                      "number",
-                      "boolean",
-                      "null"
-                    ]
-                  },
-                  {
-                    "additionalProperties": true,
-                    "type": "object"
-                  }
-                ]
-              },
-              "type": "array"
-            },
-            {
-              "additionalProperties": true,
-              "type": "object"
-            }
+    "oneOf": [
+      {
+        "additionalProperties": true,
+        "not": {
+          "required": [
+            "lifetime"
           ]
         },
-        "description": "Input/flag values keyed by durable id. Scalars, or lists (of scalars or related-entity objects).",
-        "type": "object"
-      },
-      "name": {
-        "type": "string"
-      },
-      "oracle_inputs": {
-        "additionalProperties": {
-          "additionalProperties": true,
-          "type": "object"
-        },
-        "description": "Cross-engine validation inputs keyed by oracle name (e.g. policyengine).",
-        "type": "object"
-      },
-      "output": {
-        "additionalProperties": {
-          "oneOf": [
-            {
-              "type": [
-                "string",
-                "number",
-                "boolean",
-                "null"
-              ]
-            },
-            {
-              "items": {
-                "type": [
-                  "string",
-                  "number",
-                  "boolean",
-                  "null"
-                ]
-              },
-              "type": "array"
-            },
-            {
-              "additionalProperties": true,
-              "type": "object"
-            }
-          ]
-        },
-        "description": "Expected outputs keyed by output name or durable id. Amounts, dates, or judgment outcomes (holds/not_holds/undetermined), optionally single-element-list-wrapped.",
-        "type": "object"
-      },
-      "period": {
-        "description": "A full period object, or a shorthand string such as `2026-01`.",
-        "oneOf": [
-          {
+        "properties": {
+          "description": {
             "type": "string"
           },
-          {
-            "additionalProperties": true,
-            "properties": {
-              "end": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              },
-              "period_kind": {
-                "description": "e.g. month, tax_year, benefit_week, custom. When custom, `name` gives the label.",
-                "type": "string"
-              },
-              "start": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "period_kind"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "tables": {
-        "additionalProperties": {
-          "items": {
+          "input": {
             "additionalProperties": {
               "oneOf": [
                 {
@@ -157,20 +300,211 @@
                 }
               ]
             },
+            "description": "Input/flag values keyed by durable id. Scalars, or lists (of scalars or related-entity objects).",
             "type": "object"
           },
-          "type": "array"
+          "name": {
+            "type": "string"
+          },
+          "oracle_inputs": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "description": "Cross-engine validation inputs keyed by oracle name (e.g. policyengine).",
+            "type": "object"
+          },
+          "output": {
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "type": "array"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "description": "Expected outputs keyed by output name or durable id. Amounts, dates, or judgment outcomes (holds/not_holds/undetermined), optionally single-element-list-wrapped.",
+            "type": "object"
+          },
+          "period": {
+            "description": "A full period object, or a shorthand string such as `2026-01`.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "properties": {
+                  "end": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "period_kind": {
+                    "description": "e.g. month, tax_year, benefit_week, custom. When custom, `name` gives the label.",
+                    "type": "string"
+                  },
+                  "start": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "period_kind"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "tables": {
+            "additionalProperties": {
+              "items": {
+                "additionalProperties": {
+                  "oneOf": [
+                    {
+                      "type": [
+                        "string",
+                        "number",
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    {
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": [
+                              "string",
+                              "number",
+                              "boolean",
+                              "null"
+                            ]
+                          },
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "description": "Related-entity rows keyed by entity name (e.g. Payment): a list of input-row objects.",
+            "type": "object"
+          }
         },
-        "description": "Related-entity rows keyed by entity name (e.g. Payment): a list of input-row objects.",
+        "required": [
+          "name",
+          "period",
+          "output"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "lifetime": {
+            "additionalProperties": false,
+            "properties": {
+              "arithmetic": {
+                "$ref": "#/$defs/LifetimeArithmetic",
+                "default": "decimal"
+              },
+              "batches": {
+                "items": {
+                  "$ref": "#/$defs/LifetimeBatch"
+                },
+                "type": "array"
+              },
+              "entity": {
+                "type": "string"
+              },
+              "periods": {
+                "items": {
+                  "$ref": "#/$defs/LifetimePeriod"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "entity",
+              "periods",
+              "batches"
+            ],
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": [
+                    "string",
+                    "integer",
+                    "boolean"
+                  ]
+                },
+                {
+                  "items": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "boolean"
+                    ]
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "minProperties": 1,
+            "type": "object"
+          },
+          "period": {
+            "$ref": "#/$defs/LifetimePeriod"
+          }
+        },
+        "required": [
+          "name",
+          "period",
+          "output",
+          "lifetime"
+        ],
         "type": "object"
       }
-    },
-    "required": [
-      "name",
-      "period",
-      "output"
-    ],
-    "type": "object"
+    ]
   },
   "title": "Axiom RuleSpec companion test",
   "type": "array"

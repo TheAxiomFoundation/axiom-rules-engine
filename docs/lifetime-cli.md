@@ -1,0 +1,206 @@
+# Lifetime execution over supplied periods
+
+`axiom-rules-engine run-lifetime --artifact compiled.json` reads one JSON request
+from standard input and runs the compiled artifact through
+[`DenseCompiledProgram::execute_lifetime`](../src/dense.rs), using Decimal
+arithmetic. The command and [Rust API](../src/lifetime_api.rs) share validation.
+The existing `run-compiled` command keeps its scalar request format.
+
+The request uses the following shape. This example describes two invented
+observations; it requires an artifact whose public input and output IDs match.
+
+```json
+{
+  "schema": "axiom-rules-engine/lifetime-request/v1",
+  "entity": "Worker",
+  "periods": [
+    {"period_kind": "tax_year", "start": "2001-01-01", "end": "2001-12-31"},
+    {"period_kind": "tax_year", "start": "2002-01-01", "end": "2002-12-31"}
+  ],
+  "batches": [
+    {"row_count": 1, "entity_ids": ["worker-001"], "inputs": {
+      "us:statutes/99/1#input.amount": {"kind": "decimal", "values": ["0.1"]}
+    }},
+    {"row_count": 1, "entity_ids": ["worker-001"], "inputs": {
+      "us:statutes/99/1#input.amount": {"kind": "decimal", "values": ["0.2"]}
+    }}
+  ],
+  "outputs": ["us:statutes/99/1#history_total"],
+  "output_period": {"period_kind": "tax_year", "start": "2002-01-01", "end": "2002-12-31"}
+}
+```
+
+`arithmetic` may be omitted or set to `"decimal"`. Input columns have `kind` and
+`values`: `decimal` takes quoted strings exactly representable by Rust Decimal;
+`integer` takes signed 64-bit integers; `bool`, `text`, and `date` take booleans,
+strings, and ISO date strings. Nulls, floating-point numbers, duplicate JSON
+keys, and unknown fields are refused. Declared optional input defaults still
+use the engine's existing `InputOrElse` semantics; missing root inputs fail when
+an evaluated expression reads them.
+
+Dense and lifetime root scalar conditionals evaluate each branch only for the
+rows selecting it. An input used only by a wholly unselected branch can be
+absent in that observation. For example, a history formula
+can index earlier amounts with a denominator while carrying later amounts
+unchanged, without supplying a denominator for those later observations.
+The condition still evaluates normally; `holds` selects the then branch and
+all other judgment outcomes select the else branch, as before. `InputOrElse`
+retains its default at that reference; a selected ordinary input reference to
+the same absent column still fails. Supplied columns must have valid lengths
+even when no expression reads them.
+
+Mixed-row conditions use separate selected-row batches and caches, then restore
+the original row order. An outer lifetime condition preserves every observation
+of its selected entities, including the invariance checks for reduced top-N
+counts. Arithmetic errors in unselected rows do not reject the selected results;
+a missing column or an arithmetic error needed by any selected row still fails.
+Empty batches keep their existing two-branch evaluation and type resolution.
+Related-input and relation binding is unchanged. Root branch selection retains
+each selected parent's complete related ranges, but conditionals *inside* a
+related-row expression and logical And/Or expressions retain their existing
+eager evaluation. Input parsing and binding validation still apply to supplied
+columns; inactive rows do not make malformed or type-invalid wire values valid.
+A uniform conditional returns the selected branch's native column type without inspecting
+the other branch's dtype; mixed and empty batches retain existing type promotion
+and compatibility checks. The lifetime wire contract still widens Integer
+results declared Decimal exactly and rejects other output dtype mismatches.
+
+Every batch must contain the same unique, nonempty string `entity_ids` in the
+same order. Each input column length equals `row_count`. These IDs declare row
+alignment; the engine does not authenticate identity or infer links. Zero rows
+remain zero rows. Input names must appear in the artifact's
+[input catalog](../src/model.rs) and belong to the selected dense entity;
+computed output or parameter IDs cannot substitute for input IDs. Input and
+output references must be full durable public IDs, even for originless rules;
+bare names are refused by this new interface. Two supplied names resolving to
+one input or output are rejected.
+
+Periods must be nonempty, ascending, non-overlapping, and of the same kind.
+Allowed kinds are `month`, `benefit_week`, `tax_year`, and `custom`; only `custom`
+has a required nonempty `name`. Their start/end dates are explicit. Gaps are
+permitted and are never filled. `output_period` must equal the final supplied
+period. The existing lifetime evaluator uses that period for outer parameter
+lookups and evaluates reduction expressions in each supplied period. Its
+existing invariance and top-N checks still apply.
+
+The count in `sum_top_n_over_periods(value, n)` can itself use a lifetime
+reduction, directly or through derived rules. For example, an invented
+observation model can use `count_over_periods(credit)` to choose a separate
+number of amounts for each entity. The count scans the same supplied history;
+it does not create observations or fill missing years. The value being selected
+still evaluates per observation and cannot contain a lifetime reduction.
+
+For a reduction-bearing count, bare inputs and parameter lookups outside its
+inner reductions must be invariant across observation contexts. A parameter
+inside an inner reduction retains its observation context. V2 applies its fixed
+calculation-law selection in both places. A varying outer parameter is refused
+even when its variation cancels elsewhere in the count expression. Ordinary
+counts keep their existing per-observation invariance check. The existing
+fractional-count truncation is unchanged; a whole-year denominator should use
+`calendar_years_to_months`, which rejects fractional quantities.
+
+`calendar_years_to_months(value)` is an exact unary unit conversion usable
+inside or outside a reduction. For complete calendar-year observations, the
+same integral count used by top-N can supply its month denominator. It does
+not count actual covered months or prove that periods are complete years.
+See [calendar unit conversion](calendar-unit-conversion.md) for the numeric
+contract and partial-year/floating execution limits.
+
+The dense plan's commencement check now runs for **every supplied period**, as
+it does for scalar execution. A history predating any compiled formula's
+commencement fails. This restriction does not introduce separate determination
+date semantics or make pre-commencement histories executable under later law.
+Versioned or end-bounded derived formulas unsupported by the dense compiler
+remain unsupported. Every requested output must contain an over-periods
+reduction. Relation contexts are explicitly unsupported by JSON v1.
+
+Success writes one `axiom-rules-engine/lifetime-response/v1` JSON object. It
+contains `engine_version`, integer `artifact_format_version`, `arithmetic`,
+`entity`, `row_count`, `entity_ids`, `periods`, `reference_period`,
+`output_period`, and an `outputs` map. Both reference and output periods equal
+the final supplied period. Dates are serialized in their canonical date form.
+Each output entry contains `id` (the retained full public ID), internal `name`, declared
+`dtype`, `unit` (string or null), and `column: {kind, values}`. Decimal results
+are normalized quoted strings, with no binary-float conversion. Judgment values
+are `holds`, `not_holds`, or `undetermined`; other column kinds match the input
+vocabulary. The metadata describes the admitted rule and the column preserves
+the executor's value type. Integer results of a rule declared Decimal are
+widened exactly to Decimal strings. Other declared/evaluated type mismatches
+fail; Decimal results are never truncated into integers.
+
+Handled validation and execution errors return exit status 1, no result on
+standard output, and a JSON
+diagnostic on standard error: `schema` is
+`axiom-rules-engine/lifetime-error/v1`, `category` is `invalid_request`,
+`unsupported`, `artifact`, or `evaluation`, `field` is a string or null, and
+`message` is bounded. The Rust error retains the underlying typed error as its
+source. These are execution diagnostics, not legal validation verdicts. The
+existing numeric executor can panic on arithmetic overflow even when each
+input is representable. Such an unexpected process failure can have non-JSON
+standard error. Hosts must treat every nonzero exit or invalid response as
+failure; no partial result or substitute arithmetic is returned. This change
+does not alter those numeric kernels.
+
+The transport limits a request to 16 MiB, an artifact to 64 MiB, a history to
+512 periods, a batch to 100,000 rows and 256 input columns, requested outputs to
+256, and individual supplied strings to 4,096 bytes. Supplied row-ID and input
+cells together are limited to 2,000,000; output cells have the same separate
+limit. These bounds do not replace a host's execution timeout or memory limit
+for a complex artifact. Standard compiled-artifact admission remains in force.
+
+`emit-schemas` publishes request and response schemas alongside the existing
+schemas. The companion test schema adds a strict `lifetime` case: top-level
+`name`, optional `description`, `period`, `output`, and `lifetime`; the nested
+object contains `entity`, `periods`, `batches`, and optional `arithmetic`.
+Expected outputs may be scalars for one row or arrays in row order. Decimal
+expectations must be quoted. Runtime binding and the fixture harness enforce
+cross-field equality and declared output types. Scalar companion cases keep
+their previous schema. No encoded statutory module or fixture is supplied by
+this transport change.
+
+## Fixed calculation period in v2
+
+The same `run-lifetime` command also accepts the explicit
+`axiom-rules-engine/lifetime-request/v2` schema. V2 adds a required
+`calculation_period`; `output_period` must equal it. Every historical observation
+must end strictly before calculation starts. Observation periods retain their
+same-kind, ordered, non-overlapping contract; calculation may have a different
+kind, such as a monthly calculation over complete annual observations.
+
+V2 selects every compiled derived formula and parameter-table version at
+`calculation_period.start`. Effective bounds are inclusive, and selection keeps
+the existing greatest-start-date and equal-start document-order behavior. No
+active version is an error; explicit versions never fall back to a base formula.
+The whole selected parameter table governs all lookups. A missing historical key
+does not borrow from an older table.
+
+Inputs and date expressions inside reductions retain their actual observation
+periods. Outer parameter lookups use the calculation date, while ambiguous outer
+date expressions still fail. Historical series must use explicit data-year keys
+or supplied history inputs; parameter effective dates describe legal version
+selection in this mode. It does not implement mixed observation-law and
+calculation-law selection, knowledge-time assessment, statutory eligibility,
+partly completed history, missing-period inference, or relation contexts.
+
+The public Rust `dense::CalculationLifetimePlan::from_artifact` re-admits the
+original artifact and prepares an immutable plan for an entity and calculation
+period. The plan exposes canonical Decimal execution only, preserving original
+version definitions. As with the existing dense compiler, every root for the
+selected entity and its syntactic dependencies must be compilable at that legal
+date, including roots not requested in the output list.
+
+The `axiom-rules-engine/lifetime-response/v2` response echoes the observation
+periods and calculation period. Both `reference_period` and `output_period`
+equal the calculation period. Its `selected_versions` array identifies each
+compiled derived or parameter node by name, retained source ID (or null),
+original zero-based version index, and original effective bounds. Genuinely
+unversioned derived nodes have the explicit `unversioned_derived` kind and no
+invented version range. This is execution metadata, not legal proof or source
+admission. The existing error schema remains `lifetime-error/v1`.
+
+V1 callers and its dedicated parser retain their original behavior and reject
+v2 fields. Separate v2 request/response schemas are published by `emit-schemas`.
+The encoder's existing companion-fixture adapter supports v1 only; v2 fixture
+transport requires a separate reviewed encoder extension. The synthetic tests
+in `tests/lifetime_calculation.rs` exercise the actual plan and CLI, including
+version changes, gaps, table-key failures, cache isolation and v1 compatibility.

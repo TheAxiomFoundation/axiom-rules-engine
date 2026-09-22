@@ -609,19 +609,34 @@ fn rejects_directly_nested_over_periods_at_compile_time() {
 }
 
 #[test]
-fn rejects_nested_over_periods_in_the_n_argument() {
-    // The `n` of sum_top_n is also an argument that consumes no period axis;
-    // a reduction there is likewise rejected.
+fn direct_lifetime_count_can_select_top_n() {
     let module = single_rule_module(
-        "nested_n",
+        "selected",
         "Money",
-        "sum_top_n_over_periods(earnings, count_over_periods(earnings))",
+        "sum_top_n_over_periods(earnings, count_over_periods(credit))",
     );
-    let message = try_compile_error(&module, "Worker");
-    assert!(
-        message.contains("cannot be nested") && message.contains("count_over_periods"),
-        "unexpected error: {message}"
-    );
+    let program = compile(&module, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    let batches = vec![
+        batch_multi(
+            2,
+            &[("earnings", vec![10.0, 40.0]), ("credit", vec![1.0, 1.0])],
+        ),
+        batch_multi(
+            2,
+            &[("earnings", vec![30.0, 20.0]), ("credit", vec![0.0, 1.0])],
+        ),
+        batch_multi(
+            2,
+            &[("earnings", vec![20.0, 10.0]), ("credit", vec![1.0, 1.0])],
+        ),
+    ];
+    for result in [
+        program.execute_lifetime(&periods, batches.clone(), &["selected".into()]),
+        program.execute_lifetime_f64(&periods, batches, &["selected".into()]),
+    ] {
+        assert_eq!(scalar_f64(&result.unwrap(), "selected"), vec![50.0, 70.0]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,4 +1139,200 @@ fn unknown_over_periods_reduction_fails_to_parse() {
         message.contains("avg_over_periods") && message.contains("over-periods reduction"),
         "unexpected error: {message}"
     );
+}
+
+// Generic invented observations: these exercise executor contexts, not a
+// statutory benefit or an admitted worker history.
+fn reduced_count_module(count_formula: &str) -> String {
+    format!(
+        r#"
+format: rulespec/v1
+rules:
+  - name: adjustment
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '1960-01-01'
+        formula: '1'
+      - effective_from: '2003-01-01'
+        formula: '2'
+      - effective_from: '2026-01-01'
+        formula: '1'
+  - name: keep_count
+    kind: derived
+    entity: Worker
+    dtype: Decimal
+    versions:
+      - effective_from: '1960-01-01'
+        formula: '{count_formula}'
+  - name: selected
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '1960-01-01'
+        formula: 'sum_top_n_over_periods(earnings, keep_count)'
+  - name: mean
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '1960-01-01'
+        formula: 'selected / keep_count'
+"#
+    )
+}
+
+fn reduced_count_batches() -> Vec<DenseBatchSpec> {
+    [
+        (["0.1", "1.1"], [1, 1]),
+        (["0.4", "1.2"], [0, 1]),
+        (["0.2", "1.3"], [1, 0]),
+        (["0.3", "1.4"], [0, 1]),
+    ]
+    .into_iter()
+    .map(|(amounts, credit)| DenseBatchSpec {
+        row_count: 2,
+        inputs: HashMap::from([
+            (
+                "earnings".into(),
+                DenseColumn::Decimal(amounts.map(|v| v.parse().unwrap()).to_vec()),
+            ),
+            ("credit".into(), DenseColumn::Integer(credit.to_vec())),
+        ]),
+        relations: HashMap::new(),
+    })
+    .collect()
+}
+
+#[test]
+fn derived_lifetime_count_keeps_selector_divisor_and_person_rows_consistent() {
+    let program = compile(
+        &reduced_count_module("count_over_periods(credit)"),
+        "Worker",
+    );
+    let periods = (2001..=2004).map(year).collect::<Vec<_>>();
+    // Request the count both before and after the dependent outputs to exercise
+    // cache-order independence; all amounts are exact Decimal inputs.
+    for outputs in [
+        vec!["keep_count", "mean", "selected"],
+        vec!["selected", "mean", "keep_count"],
+    ] {
+        let result = program
+            .execute_lifetime(
+                &periods,
+                reduced_count_batches(),
+                &outputs.into_iter().map(String::from).collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(scalar_f64(&result, "keep_count"), vec![2.0, 3.0]);
+        for (name, expected) in [
+            ("selected", vec![Decimal::new(7, 1), Decimal::new(39, 1)]),
+            ("mean", vec![Decimal::new(35, 2), Decimal::new(13, 1)]),
+        ] {
+            match &result.outputs[name] {
+                DenseOutputValue::Scalar(DenseColumn::Decimal(values)) => {
+                    assert_eq!(values, &expected)
+                }
+                other => panic!("expected exact Decimal {name}, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn reduced_count_does_not_hide_a_varying_outer_parameter_or_reuse_its_cache() {
+    let periods = (2001..=2004).map(year).collect::<Vec<_>>();
+    for formula in [
+        "count_over_periods(credit) + adjustment - 1",
+        "count_over_periods(credit) * 0 + adjustment",
+    ] {
+        let program = compile(&reduced_count_module(formula), "Worker");
+        for outputs in [vec!["selected"], vec!["keep_count", "selected"]] {
+            let error = program
+                .execute_lifetime(
+                    &periods,
+                    reduced_count_batches(),
+                    &outputs.into_iter().map(String::from).collect::<Vec<_>>(),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    axiom_rules_engine::engine::EvalError::OverPeriodsTopNPeriodVarying { .. }
+                ),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reduced_count_retains_observation_parameters_inside_the_inner_reduction() {
+    let module = reduced_count_module("count_over_periods(credit * (adjustment - 1))");
+    let program = compile(&module, "Worker");
+    let periods = (2001..=2004).map(year).collect::<Vec<_>>();
+    let result = program
+        .execute_lifetime(&periods, reduced_count_batches(), &["selected".into()])
+        .unwrap();
+    // Only the two later observations have adjustment=2. Each person has one
+    // nonzero credit among those observations, so keep exactly one amount.
+    assert_eq!(scalar_f64(&result, "selected"), vec![0.4, 1.4]);
+}
+
+#[test]
+fn reduced_count_retains_outer_input_invariance_and_count_bounds() {
+    let periods = (2001..=2004).map(year).collect::<Vec<_>>();
+    for formula in [
+        "count_over_periods(credit) * 0",
+        "count_over_periods(credit) + 4",
+    ] {
+        let program = compile(&reduced_count_module(formula), "Worker");
+        let error = program
+            .execute_lifetime(&periods, reduced_count_batches(), &["selected".into()])
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                axiom_rules_engine::engine::EvalError::OverPeriodsTopNOutOfRange { .. }
+            ),
+            "{error}"
+        );
+    }
+    let program = compile(
+        &reduced_count_module("count_over_periods(credit) + credit"),
+        "Worker",
+    );
+    let error = program
+        .execute_lifetime(&periods, reduced_count_batches(), &["selected".into()])
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            axiom_rules_engine::engine::EvalError::LifetimePeriodVaryingInput { .. }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn reduced_count_uses_calculation_law_without_changing_observation_dates() {
+    use axiom_rules_engine::dense::CalculationLifetimePlan;
+    // Exclude credits in leap-year observations. Relabeling every observation
+    // with 2026 would wrongly retain the last person's 2004 credit. Historical
+    // rather than calculation law for adjustment must also stay distinguishable.
+    let module = reduced_count_module(
+        "count_over_periods(if days_between(period_start, period_end) < 365: credit else: 0) + adjustment - 1",
+    );
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&module).unwrap();
+    let plan = CalculationLifetimePlan::from_artifact(&artifact, "Worker", year(2026)).unwrap();
+    let result = plan
+        .execute(
+            &(2001..=2004).map(year).collect::<Vec<_>>(),
+            reduced_count_batches(),
+            &["selected".into(), "mean".into()],
+        )
+        .unwrap();
+    assert_eq!(scalar_f64(&result, "selected"), vec![0.7, 2.7]);
+    assert_eq!(scalar_f64(&result, "mean"), vec![0.35, 1.35]);
 }

@@ -159,7 +159,8 @@ impl<'a> PhaseTwoEngine<'a> {
             }
             ScalarExpr::ParameterLookup { index, .. }
             | ScalarExpr::Ceil(index)
-            | ScalarExpr::Floor(index) => {
+            | ScalarExpr::Floor(index)
+            | ScalarExpr::CalendarYearsToMonths { years: index } => {
                 self.collect_scalar_reduction_reasons(index, entity_id, period, visiting, reasons)
             }
             ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
