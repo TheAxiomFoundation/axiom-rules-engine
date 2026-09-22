@@ -38,9 +38,9 @@ keys, and unknown fields are refused. Declared optional input defaults still
 use the engine's existing `InputOrElse` semantics; missing root inputs fail when
 an evaluated expression reads them.
 
-Dense and lifetime scalar conditionals evaluate only the selected branch when
-every row in a nonempty batch selects that branch. An input used only by the
-other branch can be absent in that observation. For example, a history formula
+Dense and lifetime root scalar conditionals evaluate each branch only for the
+rows selecting it. An input used only by a wholly unselected branch can be
+absent in that observation. For example, a history formula
 can index earlier amounts with a denominator while carrying later amounts
 unchanged, without supplying a denominator for those later observations.
 The condition still evaluates normally; `holds` selects the then branch and
@@ -49,12 +49,18 @@ retains its default at that reference; a selected ordinary input reference to
 the same absent column still fails. Supplied columns must have valid lengths
 even when no expression reads them.
 
-This is whole-column conditional evaluation. Mixed-row conditions still
-evaluate both branches over all rows: a missing column needed by any selected
-row fails, and numeric errors can still arise in a row whose branch is
-unselected. Empty batches keep their existing two-branch evaluation and type
-resolution. Related-input and relation binding is unchanged. A uniform
-conditional returns the selected branch's native column type without inspecting
+Mixed-row conditions use separate selected-row batches and caches, then restore
+the original row order. An outer lifetime condition preserves every observation
+of its selected entities, including the invariance checks for reduced top-N
+counts. Arithmetic errors in unselected rows do not reject the selected results;
+a missing column or an arithmetic error needed by any selected row still fails.
+Empty batches keep their existing two-branch evaluation and type resolution.
+Related-input and relation binding is unchanged. Root branch selection retains
+each selected parent's complete related ranges, but conditionals *inside* a
+related-row expression and logical And/Or expressions retain their existing
+eager evaluation. Input parsing and binding validation still apply to supplied
+columns; inactive rows do not make malformed or type-invalid wire values valid.
+A uniform conditional returns the selected branch's native column type without inspecting
 the other branch's dtype; mixed and empty batches retain existing type promotion
 and compatibility checks. The lifetime wire contract still widens Integer
 results declared Decimal exactly and rejects other output dtype mismatches.

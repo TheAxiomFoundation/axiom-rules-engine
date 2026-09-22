@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
     CalculationLifetimePlan, DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram,
-    DenseExecutionResult, DenseOutputValue,
+    DenseExecutionResult, DenseOutputValue, DenseRelationBatchSpec,
 };
 use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::lifetime_api::{
@@ -207,7 +207,7 @@ fn lifetime_outer_uniform_masks_are_lazy_and_mixed_masks_still_require_inputs() 
 }
 
 #[test]
-fn uniform_numeric_branch_is_lazy_but_mixed_rows_keep_eager_arithmetic() {
+fn uniform_and_mixed_numeric_branches_skip_unselected_arithmetic() {
     let program = compile("if flag: amount / denominator else: amount");
     let inputs = batch(
         2,
@@ -223,9 +223,8 @@ fn uniform_numeric_branch_is_lazy_but_mixed_rows_keep_eager_arithmetic() {
             .unwrap(),
         &["4", "8"],
     );
-    // Row 1 selects the safe else branch, but mixed-column evaluation still
-    // evaluates its zero denominator. Per-row numeric masking is not supported.
-    let inputs = batch(
+    // Row 1 selects the safe else branch and must not divide by zero.
+    let mut inputs = batch(
         2,
         &[
             ("flag", DenseColumn::Bool(vec![true, false])),
@@ -233,10 +232,540 @@ fn uniform_numeric_branch_is_lazy_but_mixed_rows_keep_eager_arithmetic() {
             ("denominator", decimals(&["2", "0"])),
         ],
     );
+    assert_decimals(
+        &program
+            .execute(&year(2025), inputs.clone(), &["result".into()])
+            .unwrap(),
+        &["2", "8"],
+    );
+    inputs
+        .inputs
+        .insert("flag".into(), DenseColumn::Bool(vec![true, true]));
     assert!(matches!(
         program.execute(&year(2025), inputs, &["result".into()]),
         Err(EvalError::DivisionByZero)
     ));
+}
+
+#[test]
+fn nested_mixed_branches_match_singletons_and_permuted_rows() {
+    let program =
+        compile("if first: (if second: amount / denominator else: amount) else: amount / other");
+    let rows = [
+        (true, true, "4", "2", "0"),
+        (true, false, "8", "0", "0"),
+        (false, true, "9", "0", "3"),
+    ];
+    for order in [[0, 1, 2], [2, 0, 1]] {
+        let make = |indices: &[usize]| {
+            batch(
+                indices.len(),
+                &[
+                    (
+                        "first",
+                        DenseColumn::Bool(indices.iter().map(|&i| rows[i].0).collect()),
+                    ),
+                    (
+                        "second",
+                        DenseColumn::Bool(indices.iter().map(|&i| rows[i].1).collect()),
+                    ),
+                    (
+                        "amount",
+                        decimals(&indices.iter().map(|&i| rows[i].2).collect::<Vec<_>>()),
+                    ),
+                    (
+                        "denominator",
+                        decimals(&indices.iter().map(|&i| rows[i].3).collect::<Vec<_>>()),
+                    ),
+                    (
+                        "other",
+                        decimals(&indices.iter().map(|&i| rows[i].4).collect::<Vec<_>>()),
+                    ),
+                ],
+            )
+        };
+        let result = program
+            .execute(&year(2025), make(&order), &["result".into()])
+            .unwrap();
+        let DenseColumn::Decimal(values) = scalar(&result) else {
+            panic!("Decimal expected")
+        };
+        for (row, &index) in order.iter().enumerate() {
+            let single = program
+                .execute(&year(2025), make(&[index]), &["result".into()])
+                .unwrap();
+            let DenseColumn::Decimal(single) = scalar(&single) else {
+                panic!("Decimal expected")
+            };
+            assert_eq!(values[row], single[0]);
+        }
+        let fast = program
+            .execute_f64(&year(2025), make(&order), &["result".into()])
+            .unwrap();
+        let DenseColumn::Float(fast) = scalar(&fast) else {
+            panic!("Float expected")
+        };
+        assert_eq!(*fast, order.map(|i| [2.0, 8.0, 3.0][i]).to_vec());
+    }
+}
+
+fn cached_branch_artifact() -> CompiledProgramArtifact {
+    CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: quotient
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: amount / denominator
+  - name: guarded
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: 'if flag: quotient else: amount'
+  - name: result
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: sum_over_periods(guarded)
+  - name: outer
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: 'if flag: sum_over_periods(quotient) else: sum_over_periods(amount)'
+  - name: unguarded
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: sum_over_periods(quotient)
+"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn lifetime_mixed_branches_preserve_whole_histories_and_isolate_caches() {
+    let source = cached_branch_artifact();
+    let program = DenseCompiledProgram::from_artifact(&source, Some("Worker")).unwrap();
+    let make = |flags: Vec<bool>, amounts: &[&str]| {
+        batch(
+            2,
+            &[
+                ("flag", DenseColumn::Bool(flags)),
+                ("amount", decimals(amounts)),
+                ("denominator", decimals(&["2", "0"])),
+            ],
+        )
+    };
+    let first = make(vec![true, false], &["4", "8"]);
+    let second = make(vec![true, false], &["6", "10"]);
+    let periods = [year(2024), year(2025)];
+    for plan_result in [
+        program
+            .execute_lifetime(
+                &periods,
+                vec![first.clone(), second.clone()],
+                &["result".into(), "outer".into()],
+            )
+            .unwrap(),
+        CalculationLifetimePlan::from_artifact(&source, "Worker", year(2026))
+            .unwrap()
+            .execute(
+                &periods,
+                vec![first.clone(), second.clone()],
+                &["result".into(), "outer".into()],
+            )
+            .unwrap(),
+    ] {
+        assert_decimals(&plan_result, &["5", "18"]);
+        let DenseOutputValue::Scalar(DenseColumn::Decimal(values)) = &plan_result.outputs["outer"]
+        else {
+            panic!("Decimal expected")
+        };
+        assert_eq!(*values, vec![Decimal::from(5), Decimal::from(18)]);
+    }
+    // A cached partial quotient must never satisfy a later full-column read.
+    assert!(matches!(
+        program.execute(
+            &year(2025),
+            first.clone(),
+            &["guarded".into(), "quotient".into()]
+        ),
+        Err(EvalError::DivisionByZero)
+    ));
+    for first_output in ["result", "outer"] {
+        assert!(matches!(
+            program.execute_lifetime(
+                &periods,
+                vec![first.clone(), second.clone()],
+                &[first_output.into(), "unguarded".into()]
+            ),
+            Err(EvalError::DivisionByZero)
+        ));
+    }
+    // Per-observation masks may change; each period still contributes one value per person.
+    let third = batch(
+        2,
+        &[
+            ("flag", DenseColumn::Bool(vec![false, true])),
+            ("amount", decimals(&["6", "10"])),
+            ("denominator", decimals(&["0", "2"])),
+        ],
+    );
+    assert_decimals(
+        &program
+            .execute_lifetime(&periods, vec![first, third], &["result".into()])
+            .unwrap(),
+        &["8", "13"],
+    );
+}
+
+#[test]
+fn mixed_branch_dtype_merge_preserves_exact_integer_and_numeric_promotion() {
+    let program = compile("if flag: left else: right");
+    let result = program
+        .execute(
+            &year(2025),
+            batch(
+                2,
+                &[
+                    ("flag", DenseColumn::Bool(vec![true, false])),
+                    ("left", DenseColumn::Integer(vec![9_007_199_254_740_993, 0])),
+                    ("right", decimals(&["0", "0.2"])),
+                ],
+            ),
+            &["result".into()],
+        )
+        .unwrap();
+    assert_decimals(&result, &["9007199254740993", "0.2"]);
+    for (left, right, expected) in [
+        (
+            DenseColumn::Integer(vec![1, 2]),
+            DenseColumn::Integer(vec![3, 4]),
+            "Integer([1, 4])",
+        ),
+        (
+            DenseColumn::Bool(vec![true, false]),
+            DenseColumn::Bool(vec![true, false]),
+            "Bool([true, false])",
+        ),
+        (
+            DenseColumn::Text(vec!["a".into(), "b".into()]),
+            DenseColumn::Text(vec!["c".into(), "d".into()]),
+            "Text([\"a\", \"d\"])",
+        ),
+        (
+            DenseColumn::Date(vec![year(2024).start, year(2024).end]),
+            DenseColumn::Date(vec![year(2025).start, year(2025).end]),
+            "Date([2024-01-01, 2025-12-31])",
+        ),
+    ] {
+        let result = program
+            .execute(
+                &year(2025),
+                batch(
+                    2,
+                    &[
+                        ("flag", DenseColumn::Bool(vec![true, false])),
+                        ("left", left),
+                        ("right", right),
+                    ],
+                ),
+                &["result".into()],
+            )
+            .unwrap();
+        assert_eq!(format!("{:?}", scalar(&result)), expected);
+    }
+}
+
+#[test]
+fn mixed_lifetime_count_branches_keep_invariant_context() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: adjustment
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2024-01-01'
+        formula: '1'
+      - effective_from: '2025-01-01'
+        formula: '2'
+      - effective_from: '2026-01-01'
+        formula: '1'
+  - name: n
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2024-01-01'
+        formula: 'if group: count_over_periods(flag) + adjustment else: count_over_periods(flag)'
+  - name: result
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '2024-01-01'
+        formula: sum_top_n_over_periods(amount, n)
+"#;
+    let source = CompiledProgramArtifact::from_rulespec_str(source).unwrap();
+    let program = DenseCompiledProgram::from_artifact(&source, Some("Worker")).unwrap();
+    let inputs = batch(
+        2,
+        &[
+            ("group", DenseColumn::Bool(vec![true, false])),
+            ("flag", DenseColumn::Bool(vec![false, true])),
+            ("amount", decimals(&["4", "8"])),
+        ],
+    );
+    let periods = [year(2024), year(2025)];
+    for outputs in [vec!["result".into()], vec!["n".into(), "result".into()]] {
+        assert!(matches!(
+            program.execute_lifetime(&periods, vec![inputs.clone(), inputs.clone()], &outputs),
+            Err(EvalError::OverPeriodsTopNPeriodVarying { .. })
+        ));
+    }
+    // The v2 fixed calculation law makes adjustment invariant, retaining each person's N.
+    assert_decimals(
+        &CalculationLifetimePlan::from_artifact(&source, "Worker", year(2026))
+            .unwrap()
+            .execute(&periods, vec![inputs.clone(), inputs], &["result".into()])
+            .unwrap(),
+        &["4", "16"],
+    );
+}
+
+#[test]
+fn lifetime_outer_branch_skips_unselected_invalid_reduced_counts() {
+    let program = compile(
+        "if group: sum_top_n_over_periods(amount, count_over_periods(flag)) else: sum_over_periods(amount)",
+    );
+    let make = |flags| {
+        batch(
+            2,
+            &[
+                ("group", DenseColumn::Bool(vec![true, false])),
+                ("flag", DenseColumn::Bool(flags)),
+                ("amount", decimals(&["4", "8"])),
+            ],
+        )
+    };
+    let first = make(vec![true, false]);
+    let second = make(vec![false, false]);
+    assert_decimals(
+        &program
+            .execute_lifetime(
+                &[year(2024), year(2025)],
+                vec![first, second],
+                &["result".into()],
+            )
+            .unwrap(),
+        &["4", "16"],
+    );
+}
+
+#[test]
+fn lifetime_wire_promotes_mixed_integer_and_decimal_branches_exactly() {
+    let mut source = artifact(
+        "if count_over_periods(flag) > 0: 9007199254740993 else: sum_over_periods(amount)",
+    )
+    .program;
+    let output = "us:statutes/99/9#result";
+    source.derived[0].id = Some(output.into());
+    let artifact = CompiledProgramArtifact::compile(source).unwrap();
+    let request = json!({
+        "schema":"axiom-rules-engine/lifetime-request/v2", "entity":"Worker",
+        "periods":[{"period_kind":"tax_year","start":"2025-01-01","end":"2025-12-31"}],
+        "calculation_period":{"period_kind":"tax_year","start":"2026-01-01","end":"2026-12-31"},
+        "output_period":{"period_kind":"tax_year","start":"2026-01-01","end":"2026-12-31"},
+        "outputs":[output],
+        "batches":[{"row_count":2,"entity_ids":["toy-a", "toy-b"],"inputs":{
+            "us:statutes/99/9#input.flag":{"kind":"bool","values":[true,false]},
+            "us:statutes/99/9#input.amount":{"kind":"decimal","values":["0", "0.2"]}
+        }}]
+    });
+    let result = execute_lifetime_wire_request(
+        artifact,
+        parse_lifetime_wire_request(&request.to_string()).unwrap(),
+    )
+    .unwrap();
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        result["outputs"][output]["column"],
+        json!({"kind":"decimal","values":["9007199254740993","0.2"]})
+    );
+}
+
+#[test]
+fn mixed_branches_select_related_parent_ranges_and_root_projections() {
+    let source = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      slot_entities: [Child, Family]
+  - name: parent_bonus
+    kind: derived
+    entity: Family
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: bonus
+  - name: child_value
+    kind: derived
+    entity: Child
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: child_amount / denominator + parent_bonus
+  - name: result
+    kind: derived
+    entity: Family
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: 'if flag: sum(members.child_value) else: fallback'
+"#,
+    )
+    .unwrap();
+    let program = DenseCompiledProgram::from_artifact(&source, Some("Family")).unwrap();
+    let mut inputs = batch(
+        4,
+        &[
+            ("flag", DenseColumn::Bool(vec![true, false, true, true])),
+            ("bonus", decimals(&["10", "20", "30", "100"])),
+            ("fallback", decimals(&["0", "5", "0", "0"])),
+        ],
+    );
+    for relation in program.relations() {
+        inputs.relations.insert(
+            relation.key.clone(),
+            DenseRelationBatchSpec {
+                offsets: vec![0, 2, 3, 3, 4],
+                inputs: HashMap::from([
+                    ("child_amount".into(), decimals(&["6", "8", "9", "12"])),
+                    ("denominator".into(), decimals(&["2", "4", "0", "3"])),
+                ]),
+            },
+        );
+    }
+    assert_decimals(
+        &program
+            .execute(&year(2025), inputs.clone(), &["result".into()])
+            .unwrap(),
+        &["25", "5", "0", "104"],
+    );
+    inputs.inputs.insert(
+        "flag".into(),
+        DenseColumn::Bool(vec![true, true, false, true]),
+    );
+    assert!(matches!(
+        program.execute(&year(2025), inputs, &["result".into()]),
+        Err(EvalError::DivisionByZero)
+    ));
+}
+
+#[test]
+fn mixed_branches_keep_filtered_relation_chains_aligned() {
+    let source = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: membership
+    kind: data_relation
+    data_relation: {arity: 2}
+  - name: eligible
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    versions:
+      - effective_from: '2000-01-01'
+        formula: allowed
+  - name: adult
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    versions:
+      - effective_from: '2000-01-01'
+        formula: age >= 18
+  - name: eligible_group
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: membership
+      entity: EligibleGroup
+      member_relation: eligible_members
+      slot_entities: [Child, Family]
+    versions:
+      - effective_from: '2000-01-01'
+        formula: eligible
+  - name: adult_group
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: eligible_group
+      entity: AdultGroup
+      member_relation: adult_members
+      slot_entities: [Child, Family]
+    versions:
+      - effective_from: '2000-01-01'
+        formula: adult
+  - name: result
+    kind: derived
+    entity: AdultGroup
+    dtype: Money
+    versions:
+      - effective_from: '2000-01-01'
+        formula: 'if flag: len(adult_members) else: fallback'
+"#,
+    )
+    .unwrap();
+    let program = DenseCompiledProgram::from_artifact(&source, Some("AdultGroup")).unwrap();
+    let mut inputs = batch(
+        4,
+        &[
+            ("flag", DenseColumn::Bool(vec![true, false, true, true])),
+            ("fallback", decimals(&["0", "7", "0", "0"])),
+        ],
+    );
+    for relation in program.relations() {
+        inputs.relations.insert(
+            relation.key.clone(),
+            DenseRelationBatchSpec {
+                offsets: vec![0, 3, 4, 4, 6],
+                inputs: HashMap::from([
+                    (
+                        "allowed".into(),
+                        DenseColumn::Bool(vec![true, false, true, true, true, false]),
+                    ),
+                    (
+                        "age".into(),
+                        DenseColumn::Integer(vec![30, 40, 12, 50, 21, 25]),
+                    ),
+                ]),
+            },
+        );
+    }
+    assert_decimals(
+        &program
+            .execute(&year(2025), inputs, &["result".into()])
+            .unwrap(),
+        &["1", "7", "0", "1"],
+    );
 }
 
 #[test]

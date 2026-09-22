@@ -53,6 +53,20 @@ fn calendar_years_to_months_column(column: DenseColumn) -> Result<DenseColumn, E
 }
 
 impl DenseColumn {
+    fn select_rows(&self, rows: &[usize]) -> Self {
+        fn select<T: Clone>(values: &[T], rows: &[usize]) -> Vec<T> {
+            rows.iter().map(|&row| values[row].clone()).collect()
+        }
+        match self {
+            Self::Bool(values) => Self::Bool(select(values, rows)),
+            Self::Integer(values) => Self::Integer(select(values, rows)),
+            Self::Decimal(values) => Self::Decimal(select(values, rows)),
+            Self::Float(values) => Self::Float(select(values, rows)),
+            Self::Text(values) => Self::Text(select(values, rows)),
+            Self::Date(values) => Self::Date(select(values, rows)),
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Self::Bool(values) => values.len(),
@@ -350,6 +364,49 @@ struct DenseBoundBatch {
     /// InputOrElse uses its per-reference default.
     inputs: Vec<Option<DenseColumn>>,
     relations: Vec<DenseRelationBatch>,
+}
+
+impl DenseBoundBatch {
+    /// Select complete root rows, including their related ranges. Every bound
+    /// relation is indexed by root row, including filtered relation chains.
+    /// Preserve their ordering/alignment and rebase offsets for the child batch.
+    fn select_rows(&self, rows: &[usize]) -> Self {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|column| column.as_ref().map(|column| column.select_rows(rows)))
+            .collect();
+        let relations = self
+            .relations
+            .iter()
+            .map(|relation| {
+                let mut offsets = vec![0];
+                let mut related_rows = Vec::new();
+                for &row in rows {
+                    related_rows.extend(relation.offsets[row]..relation.offsets[row + 1]);
+                    offsets.push(related_rows.len());
+                }
+                DenseRelationBatch {
+                    offsets,
+                    related_count: related_rows.len(),
+                    inputs: relation
+                        .inputs
+                        .iter()
+                        .map(|column| {
+                            column
+                                .as_ref()
+                                .map(|column| column.select_rows(&related_rows))
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        Self {
+            row_count: rows.len(),
+            inputs,
+            relations,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2470,6 +2527,30 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 if let Some(take_then) = uniform_dense_condition(&condition) {
                     return self.eval_scalar_expr(if take_then { then_expr } else { else_expr });
                 }
+                if !condition.is_empty() {
+                    let (then_rows, else_rows) = partition_condition_rows(&condition);
+                    // Branch caches belong to their selected rows, never the
+                    // parent batch or the other branch. In particular a later
+                    // independent read of a derived must still evaluate all rows.
+                    let then_values = Self::new(
+                        self.program,
+                        self.period,
+                        self.batch.select_rows(&then_rows),
+                    )
+                    .eval_scalar_expr(then_expr)?;
+                    let else_values = Self::new(
+                        self.program,
+                        self.period,
+                        self.batch.select_rows(&else_rows),
+                    )
+                    .eval_scalar_expr(else_expr)?;
+                    return merge_dense_scalar_columns::<N>(
+                        condition,
+                        then_values,
+                        else_values,
+                        true,
+                    );
+                }
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
@@ -2856,6 +2937,31 @@ struct LifetimeExecutor<'a, N: DenseNum> {
 }
 
 impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
+    /// Keep every period of the selected entities, with fresh caches at both
+    /// levels. A branch inside a reduced top-N count must retain its stricter
+    /// invariant-input/parameter context rather than reverting to ordinary mode.
+    fn select_rows(&self, rows: &[usize]) -> Self {
+        Self {
+            program: self.program,
+            period_executors: self
+                .period_executors
+                .iter()
+                .map(|executor| {
+                    DenseExecutor::new(
+                        executor.program,
+                        executor.period,
+                        executor.batch.select_rows(rows),
+                    )
+                })
+                .collect(),
+            reference_period: self.reference_period,
+            row_count: rows.len(),
+            scalar_cache: vec![None; self.program.derived.len()],
+            judgment_cache: vec![None; self.program.derived.len()],
+            invariant_count_context: self.invariant_count_context,
+        }
+    }
+
     fn new(
         program: &'a DenseCompiledProgram,
         periods: &'a [Period],
@@ -3036,6 +3142,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let condition = self.eval_judgment(condition)?;
                 if let Some(take_then) = uniform_dense_condition(&condition) {
                     return self.eval_scalar(if take_then { then_expr } else { else_expr });
+                }
+                if !condition.is_empty() {
+                    let (then_rows, else_rows) = partition_condition_rows(&condition);
+                    let then_values = self.select_rows(&then_rows).eval_scalar(then_expr)?;
+                    let else_values = self.select_rows(&else_rows).eval_scalar(else_expr)?;
+                    return merge_dense_scalar_columns::<N>(
+                        condition,
+                        then_values,
+                        else_values,
+                        true,
+                    );
                 }
                 let then_values = self.eval_scalar(then_expr)?;
                 let else_values = self.eval_scalar(else_expr)?;
@@ -3826,8 +3943,8 @@ fn select_related_scalar_column<N: DenseNum>(
 
 /// Skip a branch only if no row selects it. Use the existing selector's
 /// is_holds() semantics: Undetermined, like NotHolds, selects the else branch.
-/// Empty batches retain two-branch evaluation/type resolution; mixed batches
-/// remain eager (there is no per-row masking of arithmetic or missing inputs).
+/// Empty batches retain two-branch evaluation/type resolution; mixed root
+/// conditions evaluate branches on separate selected-row batches.
 fn uniform_dense_condition(condition: &[JudgmentOutcome]) -> Option<bool> {
     let first = condition.first()?.is_holds();
     condition
@@ -3857,70 +3974,85 @@ mod conditional_selection_tests {
     }
 }
 
+fn partition_condition_rows(condition: &[JudgmentOutcome]) -> (Vec<usize>, Vec<usize>) {
+    (0..condition.len()).partition(|&row| condition[row].is_holds())
+}
+
 fn select_dense_scalar_column<N: DenseNum>(
     condition: Vec<JudgmentOutcome>,
     then_values: DenseColumn,
     else_values: DenseColumn,
 ) -> Result<DenseColumn, EvalError> {
+    merge_dense_scalar_columns::<N>(condition, then_values, else_values, false)
+}
+
+/// Merge either two full columns (the empty/related paths) or two compact
+/// branch columns. Both forms share exactly the same dtype promotion rules.
+fn merge_dense_scalar_columns<N: DenseNum>(
+    condition: Vec<JudgmentOutcome>,
+    then_values: DenseColumn,
+    else_values: DenseColumn,
+    partitioned: bool,
+) -> Result<DenseColumn, EvalError> {
+    let then_len = if partitioned {
+        condition.iter().filter(|value| value.is_holds()).count()
+    } else {
+        condition.len()
+    };
+    let else_len = if partitioned {
+        condition.len() - then_len
+    } else {
+        condition.len()
+    };
+    if then_values.len() != then_len || else_values.len() != else_len {
+        return Err(EvalError::TypeMismatch(
+            "dense if() branch row counts do not match condition".into(),
+        ));
+    }
+    fn merge<T>(
+        condition: Vec<JudgmentOutcome>,
+        then_values: Vec<T>,
+        else_values: Vec<T>,
+        partitioned: bool,
+    ) -> Vec<T> {
+        let mut then_values = then_values.into_iter();
+        let mut else_values = else_values.into_iter();
+        condition
+            .into_iter()
+            .map(|condition| {
+                // Full columns consume both values at every row; compact columns
+                // consume only the selected branch. Lengths were checked above.
+                let then_value = if !partitioned || condition.is_holds() {
+                    then_values.next()
+                } else {
+                    None
+                };
+                let else_value = if !partitioned || !condition.is_holds() {
+                    else_values.next()
+                } else {
+                    None
+                };
+                if condition.is_holds() {
+                    then_value.expect("validated then row count")
+                } else {
+                    else_value.expect("validated else row count")
+                }
+            })
+            .collect()
+    }
     match (then_values, else_values) {
-        (DenseColumn::Integer(then_values), DenseColumn::Integer(else_values)) => {
-            Ok(DenseColumn::Integer(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
+        (DenseColumn::Integer(a), DenseColumn::Integer(b)) => {
+            Ok(DenseColumn::Integer(merge(condition, a, b, partitioned)))
         }
-        (DenseColumn::Bool(then_values), DenseColumn::Bool(else_values)) => Ok(DenseColumn::Bool(
-            condition
-                .into_iter()
-                .zip(then_values)
-                .zip(else_values)
-                .map(|((condition, then_value), else_value)| {
-                    if condition.is_holds() {
-                        then_value
-                    } else {
-                        else_value
-                    }
-                })
-                .collect(),
-        )),
-        (DenseColumn::Text(then_values), DenseColumn::Text(else_values)) => Ok(DenseColumn::Text(
-            condition
-                .into_iter()
-                .zip(then_values)
-                .zip(else_values)
-                .map(|((condition, then_value), else_value)| {
-                    if condition.is_holds() {
-                        then_value
-                    } else {
-                        else_value
-                    }
-                })
-                .collect(),
-        )),
-        (DenseColumn::Date(then_values), DenseColumn::Date(else_values)) => Ok(DenseColumn::Date(
-            condition
-                .into_iter()
-                .zip(then_values)
-                .zip(else_values)
-                .map(|((condition, then_value), else_value)| {
-                    if condition.is_holds() {
-                        then_value
-                    } else {
-                        else_value
-                    }
-                })
-                .collect(),
-        )),
+        (DenseColumn::Bool(a), DenseColumn::Bool(b)) => {
+            Ok(DenseColumn::Bool(merge(condition, a, b, partitioned)))
+        }
+        (DenseColumn::Text(a), DenseColumn::Text(b)) => {
+            Ok(DenseColumn::Text(merge(condition, a, b, partitioned)))
+        }
+        (DenseColumn::Date(a), DenseColumn::Date(b)) => {
+            Ok(DenseColumn::Date(merge(condition, a, b, partitioned)))
+        }
         (then_values, else_values) => {
             let then_values = N::vec_from_column(&then_values).map_err(|_| {
                 EvalError::TypeMismatch("dense if() branches must have the same dtype".to_string())
@@ -3928,20 +4060,12 @@ fn select_dense_scalar_column<N: DenseNum>(
             let else_values = N::vec_from_column(&else_values).map_err(|_| {
                 EvalError::TypeMismatch("dense if() branches must have the same dtype".to_string())
             })?;
-            Ok(N::into_column(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
+            Ok(N::into_column(merge(
+                condition,
+                then_values,
+                else_values,
+                partitioned,
+            )))
         }
     }
 }
