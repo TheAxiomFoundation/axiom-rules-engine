@@ -55,6 +55,22 @@ period. The existing lifetime evaluator uses that period for outer parameter
 lookups and evaluates reduction expressions in each supplied period. Its
 existing invariance and top-N checks still apply.
 
+The count in `sum_top_n_over_periods(value, n)` can itself use a lifetime
+reduction, directly or through derived rules. For example, an invented
+observation model can use `count_over_periods(credit)` to choose a separate
+number of amounts for each entity. The count scans the same supplied history;
+it does not create observations or fill missing years. The value being selected
+still evaluates per observation and cannot contain a lifetime reduction.
+
+For a reduction-bearing count, bare inputs and parameter lookups outside its
+inner reductions must be invariant across observation contexts. A parameter
+inside an inner reduction retains its observation context. V2 applies its fixed
+calculation-law selection in both places. A varying outer parameter is refused
+even when its variation cancels elsewhere in the count expression. Ordinary
+counts keep their existing per-observation invariance check. The existing
+fractional-count truncation is unchanged; a whole-year denominator should use
+`calendar_years_to_months`, which rejects fractional quantities.
+
 `calendar_years_to_months(value)` is an exact unary unit conversion usable
 inside or outside a reduction. For complete calendar-year observations, the
 same integral count used by top-N can supply its month denominator. It does

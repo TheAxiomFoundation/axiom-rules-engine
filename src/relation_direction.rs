@@ -95,6 +95,7 @@ fn scalar(expr: &mut ScalarExprSpec, entity: &str, slots: &Slots) {
         }
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index }
         | ScalarExprSpec::Floor { value: index } => scalar(index, entity, slots),
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             scalar(value, entity, slots);

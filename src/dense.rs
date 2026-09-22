@@ -1567,13 +1567,10 @@ impl<'a> DenseCompiler<'a> {
                     .as_ref()
                     .map(|inner| self.compile_scalar_expr(derived_name, inner).map(Box::new))
                     .transpose()?;
-                // A reduction reduces the period axis away, so nesting another
-                // reduction directly in its argument is meaningless. Reject it at
-                // compile time with a precise message rather than letting the
-                // inner reduction surface an opaque per-period error at run time.
-                if let Some(inner) = nested_over_periods_kind(&value)
-                    .or_else(|| n.as_deref().and_then(nested_over_periods_kind))
-                {
+                // The value is evaluated per observation and cannot itself
+                // consume the period axis. The top-N count is different: it can
+                // use a lifetime reduction to choose how many observations to keep.
+                if let Some(inner) = nested_over_periods_kind(&value) {
                     return Err(DenseCompileError::NestedOverPeriods {
                         outer: kind.as_call_name(),
                         inner: inner.as_call_name(),
@@ -2871,6 +2868,10 @@ struct LifetimeExecutor<'a, N: DenseNum> {
     /// applied before caching, mirroring the per-period path.
     scalar_cache: Vec<Option<DenseColumn>>,
     judgment_cache: Vec<Option<Vec<JudgmentOutcome>>>,
+    // A reduced top-N count must not silently pin an otherwise varying
+    // parameter to the reference period. Its caches are isolated from ordinary
+    // lifetime evaluation so an earlier output cannot bypass this check.
+    invariant_count_context: bool,
 }
 
 impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
@@ -2892,6 +2893,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             row_count,
             scalar_cache: vec![None; program.derived.len()],
             judgment_cache: vec![None; program.derived.len()],
+            invariant_count_context: false,
         }
     }
 
@@ -2947,12 +2949,27 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 // expression is itself lifetime-evaluated (typically a literal
                 // or derived), then used as integer keys.
                 let keys = self.eval_scalar(index)?.as_index_vec()?;
-                lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
-                    &keys,
-                    self.program
-                        .parameter_period(self.period_executors[self.reference_period].period),
-                )
+                if self.invariant_count_context {
+                    let columns = self
+                        .period_executors
+                        .iter()
+                        .map(|executor| {
+                            lookup_parameter_dense::<N>(
+                                &self.program.parameters[*parameter].parameter,
+                                &keys,
+                                self.program.parameter_period(executor.period),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.invariant_top_n_column(columns)
+                } else {
+                    lookup_parameter_dense::<N>(
+                        &self.program.parameters[*parameter].parameter,
+                        &keys,
+                        self.program
+                            .parameter_period(self.period_executors[self.reference_period].period),
+                    )
+                }
             }
             CompiledScalarExpr::Add(items) => {
                 let mut total = vec![N::ZERO; self.row_count];
@@ -3176,16 +3193,11 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         Ok(N::into_column(result))
     }
 
-    /// Resolve the `n` of `sum_top_n_over_periods` into a per-row count under the
-    /// strict n contract. `n` is evaluated under EVERY period's executor and must
-    /// resolve to the same value in every period (parameter- and input-sourced n
-    /// are held to the identical contract — a period-varying parameter n is a
-    /// data error, not a silent pin to the reference period). The reference
-    /// period's column is then truncated toward zero to an exact `i64`; a
-    /// non-finite or out-of-range value (`try_to_i64_trunc` -> `None`) and any
-    /// `n` outside `1 <= n <= period_count` both raise typed errors — never a
-    /// clamp to `i64::MAX`, never a silent pin, never a pad past the period count
-    /// (which would be an arithmetic no-op masking the bad count).
+    /// Resolve top-N's per-row count. Ordinary counts retain their historical
+    /// per-observation evaluation and invariance check. Reduction-bearing counts
+    /// instead evaluate in a lifetime context; their outer inputs and parameters
+    /// must be invariant, while inputs/parameters inside reductions retain each
+    /// observation's context (or fixed calculation-law selection in v2).
     fn eval_top_n_counts(
         &mut self,
         n: Option<&CompiledScalarExpr>,
@@ -3195,48 +3207,30 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             EvalError::TypeMismatch("sum_top_n_over_periods requires an n argument".to_string())
         })?;
         let reduction = OverPeriodsKind::SumTopN.as_call_name();
+        let reference = if self
+            .program
+            .scalar_reduces_over_periods(n, &mut HashSet::new())
+        {
+            self.eval_lifetime_top_n(n)?
+        } else {
+            let columns = self
+                .period_executors
+                .iter_mut()
+                .map(|executor| executor.eval_scalar_expr(n))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.invariant_top_n_column(columns)?
+        };
 
-        // Evaluate `n` under each period's executor: one column per period,
-        // positionally aligned by row. A parameter-sourced n indexes each
-        // period's date, so a year-varying parameter yields different columns and
-        // is caught below; an n derived from period-invariant inputs (the
-        // 42 USC 415(b) computation-year count) is identical in every period and
-        // passes.
-        let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
-        for executor in &mut self.period_executors {
-            per_period.push(executor.eval_scalar_expr(n)?);
-        }
-        let (reference, others) = per_period
-            .split_last()
-            .expect("lifetime execution guarantees at least one period");
-        // Reject a period-varying n: compare every earlier period against the
-        // reference (chronologically-last) period, in each column's own dtype.
-        for (index, column) in others.iter().enumerate() {
-            if let Some(row) = first_differing_row(reference, column) {
-                return Err(EvalError::OverPeriodsTopNPeriodVarying {
-                    reduction,
-                    first_period: period_label(self.period_executors[index].period),
-                    first_value: dense_value_label(column, row),
-                    second_period: period_label(
-                        self.period_executors[self.reference_period].period,
-                    ),
-                    second_value: dense_value_label(reference, row),
-                });
-            }
-        }
-
-        // n is period-invariant: truncate the reference column toward zero to an
-        // exact i64 and enforce 1 <= n <= period_count per row.
-        let raw = N::vec_from_column(reference)?;
+        // Preserve the existing numeric contract: truncate toward zero, refuse
+        // non-finite/out-of-range counts, and never pad missing observations.
+        let raw = N::vec_from_column(&reference)?;
         raw.into_iter()
             .enumerate()
             .map(|(row, value)| {
                 let as_i64 = value.try_to_i64_trunc().ok_or_else(|| {
-                    // Non-finite or beyond the i64 range: a garbage n, reported
-                    // as out of range rather than saturated to a clamp.
                     EvalError::OverPeriodsTopNOutOfRange {
                         reduction,
-                        n: dense_value_label(reference, row),
+                        n: dense_value_label(&reference, row),
                         period_count,
                     }
                 })?;
@@ -3251,6 +3245,52 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 }
             })
             .collect()
+    }
+
+    fn eval_lifetime_top_n(&mut self, n: &CompiledScalarExpr) -> Result<DenseColumn, EvalError> {
+        if self.invariant_count_context {
+            return self.eval_scalar(n);
+        }
+        // Do not seed ordinary per-period caches with lifetime results, or reuse
+        // an ordinary lifetime cache whose parameter lookups used only the last
+        // period. Restore the original context on both success and failure.
+        let scalar_cache = std::mem::replace(
+            &mut self.scalar_cache,
+            vec![None; self.program.derived.len()],
+        );
+        let judgment_cache = std::mem::replace(
+            &mut self.judgment_cache,
+            vec![None; self.program.derived.len()],
+        );
+        self.invariant_count_context = true;
+        let result = self.eval_scalar(n);
+        self.invariant_count_context = false;
+        self.scalar_cache = scalar_cache;
+        self.judgment_cache = judgment_cache;
+        result
+    }
+
+    fn invariant_top_n_column(
+        &self,
+        mut columns: Vec<DenseColumn>,
+    ) -> Result<DenseColumn, EvalError> {
+        let reference = columns
+            .pop()
+            .expect("lifetime execution guarantees at least one period");
+        for (index, column) in columns.iter().enumerate() {
+            if let Some(row) = first_differing_row(&reference, column) {
+                return Err(EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction: OverPeriodsKind::SumTopN.as_call_name(),
+                    first_period: period_label(self.period_executors[index].period),
+                    first_value: dense_value_label(column, row),
+                    second_period: period_label(
+                        self.period_executors[self.reference_period].period,
+                    ),
+                    second_value: dense_value_label(&reference, row),
+                });
+            }
+        }
+        Ok(reference)
     }
 
     /// Bind a bare input evaluated OUTSIDE any reduction, when — and only when —
