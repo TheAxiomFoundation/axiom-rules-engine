@@ -421,6 +421,16 @@ enum CompiledScalarExpr {
         then_expr: Box<CompiledScalarExpr>,
         else_expr: Box<CompiledScalarExpr>,
     },
+    /// The innermost arm of a `match` without `_` (an `if` whose `else` is the
+    /// model's `NoMatch`): `value` for every row whose `subject` equals one of
+    /// `patterns`, and explain's error for the first row that equals none.
+    /// Rows that took an outer arm discard `value`.
+    MatchGuard {
+        subject: Box<CompiledScalarExpr>,
+        patterns: Vec<CompiledScalarExpr>,
+        value: Box<CompiledScalarExpr>,
+        labels: MatchLabels,
+    },
     /// Cross-period reduction, evaluated only by the lifetime executor. `value`
     /// is compiled as an ordinary per-period scalar (evaluated once per supplied
     /// period); `n` (SumTopN only) is compiled likewise and read at the
@@ -485,7 +495,51 @@ enum CompiledRelatedScalarExpr {
         then_expr: Box<CompiledRelatedScalarExpr>,
         else_expr: Box<CompiledRelatedScalarExpr>,
     },
+    /// Related-row form of [`CompiledScalarExpr::MatchGuard`].
+    MatchGuard {
+        subject: Box<CompiledRelatedScalarExpr>,
+        patterns: Vec<CompiledRelatedScalarExpr>,
+        value: Box<CompiledRelatedScalarExpr>,
+        labels: MatchLabels,
+    },
 }
+
+/// How a failed `match` names its subject and arms, rendered at compile time
+/// from the model expressions the dense plan no longer carries.
+#[derive(Clone, Debug)]
+struct MatchLabels {
+    subject: String,
+    patterns: String,
+}
+
+impl MatchLabels {
+    fn new(subject: &ScalarExpr, patterns: &[ScalarExpr]) -> Self {
+        Self {
+            subject: crate::engine::describe_match_operand(subject),
+            patterns: patterns
+                .iter()
+                .map(crate::engine::describe_match_operand)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+
+    /// Explain's error for the first row of `covered` that no pattern covers.
+    fn check(&self, subject: &DenseColumn, covered: &[bool]) -> Result<(), EvalError> {
+        match covered.iter().position(|covered| !covered) {
+            Some(row) => Err(EvalError::NoMatchingArm {
+                rule: String::new(),
+                subject: self.subject.clone(),
+                value: dense_value_label(subject, row),
+                patterns: self.patterns.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+const NO_MATCH_OUTSIDE_CHAIN: &str =
+    "a `match` fallback outside its comparison chain is not supported in dense execution";
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
@@ -910,6 +964,18 @@ impl DenseCompiledProgram {
                     || self.scalar_reduces_over_periods(then_expr, visiting)
                     || self.scalar_reduces_over_periods(else_expr, visiting)
             }
+            CompiledScalarExpr::MatchGuard {
+                subject,
+                patterns,
+                value,
+                ..
+            } => {
+                self.scalar_reduces_over_periods(subject, visiting)
+                    || patterns
+                        .iter()
+                        .any(|pattern| self.scalar_reduces_over_periods(pattern, visiting))
+                    || self.scalar_reduces_over_periods(value, visiting)
+            }
         }
     }
 
@@ -1301,11 +1367,27 @@ impl<'a> DenseCompiler<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => Ok(CompiledScalarExpr::If {
-                condition: Box::new(self.compile_judgment_expr(derived_name, condition)?),
-                then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
-                else_expr: Box::new(self.compile_scalar_expr(derived_name, else_expr)?),
-            }),
+            } => {
+                if let ScalarExpr::NoMatch { subject, patterns } = else_expr.as_ref() {
+                    return Ok(CompiledScalarExpr::MatchGuard {
+                        subject: Box::new(self.compile_scalar_expr(derived_name, subject)?),
+                        patterns: patterns
+                            .iter()
+                            .map(|pattern| self.compile_scalar_expr(derived_name, pattern))
+                            .collect::<Result<_, _>>()?,
+                        value: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
+                        labels: MatchLabels::new(subject, patterns),
+                    });
+                }
+                Ok(CompiledScalarExpr::If {
+                    condition: Box::new(self.compile_judgment_expr(derived_name, condition)?),
+                    then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
+                    else_expr: Box::new(self.compile_scalar_expr(derived_name, else_expr)?),
+                })
+            }
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_CHAIN.to_string(),
+            )),
             ScalarExpr::OverPeriods { kind, value, n } => {
                 let value = self.compile_scalar_expr(derived_name, value)?;
                 let n = n
@@ -1579,11 +1661,27 @@ impl<'a> DenseCompiler<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => Ok(CompiledRelatedScalarExpr::If {
-                condition: Box::new(self.compile_related_predicate(relation_index, condition)?),
-                then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
-                else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
-            }),
+            } => {
+                if let ScalarExpr::NoMatch { subject, patterns } = else_expr.as_ref() {
+                    return Ok(CompiledRelatedScalarExpr::MatchGuard {
+                        subject: Box::new(self.compile_related_scalar(relation_index, subject)?),
+                        patterns: patterns
+                            .iter()
+                            .map(|pattern| self.compile_related_scalar(relation_index, pattern))
+                            .collect::<Result<_, _>>()?,
+                        value: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
+                        labels: MatchLabels::new(subject, patterns),
+                    });
+                }
+                Ok(CompiledRelatedScalarExpr::If {
+                    condition: Box::new(self.compile_related_predicate(relation_index, condition)?),
+                    then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
+                    else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
+                })
+            }
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_CHAIN.to_string(),
+            )),
             ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
@@ -1702,23 +1800,49 @@ impl<'a> DenseCompiler<'a> {
                 condition,
                 then_expr,
                 else_expr,
-            } => Ok(CompiledScalarExpr::If {
-                condition: Box::new(self.compile_current_judgment_expr(
-                    derived_name,
-                    entity,
-                    condition,
-                )?),
-                then_expr: Box::new(self.compile_current_scalar_expr(
-                    derived_name,
-                    entity,
-                    then_expr,
-                )?),
-                else_expr: Box::new(self.compile_current_scalar_expr(
-                    derived_name,
-                    entity,
-                    else_expr,
-                )?),
-            }),
+            } => {
+                if let ScalarExpr::NoMatch { subject, patterns } = else_expr.as_ref() {
+                    return Ok(CompiledScalarExpr::MatchGuard {
+                        subject: Box::new(self.compile_current_scalar_expr(
+                            derived_name,
+                            entity,
+                            subject,
+                        )?),
+                        patterns: patterns
+                            .iter()
+                            .map(|pattern| {
+                                self.compile_current_scalar_expr(derived_name, entity, pattern)
+                            })
+                            .collect::<Result<_, _>>()?,
+                        value: Box::new(self.compile_current_scalar_expr(
+                            derived_name,
+                            entity,
+                            then_expr,
+                        )?),
+                        labels: MatchLabels::new(subject, patterns),
+                    });
+                }
+                Ok(CompiledScalarExpr::If {
+                    condition: Box::new(self.compile_current_judgment_expr(
+                        derived_name,
+                        entity,
+                        condition,
+                    )?),
+                    then_expr: Box::new(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        then_expr,
+                    )?),
+                    else_expr: Box::new(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        else_expr,
+                    )?),
+                })
+            }
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_CHAIN.to_string(),
+            )),
             ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
                 Err(DenseCompileError::Unsupported(
                     "current-entity derived relation predicates cannot aggregate another relation"
@@ -1945,7 +2069,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             // cloning the tree.
             let program = self.program;
             let mut column = match &program.derived[derived_index].semantics {
-                CompiledSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
+                CompiledSemantics::Scalar(expr) => self
+                    .eval_scalar_expr(expr)
+                    .map_err(|error| error.within_rule(&program.derived[derived_index].name))?,
                 CompiledSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(
                         program.derived[derived_index].name.clone(),
@@ -1972,7 +2098,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         if self.judgment_cache[derived_index].is_none() {
             let program = self.program;
             let values = match &program.derived[derived_index].semantics {
-                CompiledSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
+                CompiledSemantics::Judgment(expr) => self
+                    .eval_judgment_expr(expr)
+                    .map_err(|error| error.within_rule(&program.derived[derived_index].name))?,
                 CompiledSemantics::Scalar(_) => {
                     return Err(EvalError::ExpectedJudgment(
                         program.derived[derived_index].name.clone(),
@@ -2208,6 +2336,28 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
+            }
+            CompiledScalarExpr::MatchGuard {
+                subject,
+                patterns,
+                value,
+                labels,
+            } => {
+                let subject_values = self.eval_scalar_expr(subject)?;
+                let mut covered = vec![false; subject_values.len()];
+                for pattern in patterns {
+                    let pattern_values = self.eval_scalar_expr(pattern)?;
+                    let matched = compare_dense_columns::<N>(
+                        subject_values.clone(),
+                        ComparisonOp::Eq,
+                        pattern_values,
+                    )?;
+                    for (row, outcome) in matched.into_iter().enumerate() {
+                        covered[row] |= outcome.is_holds();
+                    }
+                }
+                labels.check(&subject_values, &covered)?;
+                self.eval_scalar_expr(value)
             }
             // Cross-period reductions require a batch per period; they are
             // evaluated by the lifetime executor, never here.
@@ -2494,6 +2644,28 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let else_values = self.resolve_related_scalar(relation, else_expr)?;
                 select_related_scalar_column::<N>(&condition, then_values, else_values)
             }
+            CompiledRelatedScalarExpr::MatchGuard {
+                subject,
+                patterns,
+                value,
+                labels,
+            } => {
+                let subject_values = self.resolve_related_scalar(relation, subject)?;
+                let mut covered = vec![false; subject_values.len()];
+                for pattern in patterns {
+                    let pattern_values = self.resolve_related_scalar(relation, pattern)?;
+                    let matched = compare_related_columns::<N>(
+                        &subject_values,
+                        ComparisonOp::Eq,
+                        &pattern_values,
+                    )?;
+                    for (row, matched) in matched.into_iter().enumerate() {
+                        covered[row] |= matched;
+                    }
+                }
+                labels.check(&subject_values, &covered)?;
+                self.resolve_related_scalar(relation, value)
+            }
         }
     }
 
@@ -2609,7 +2781,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         if self.scalar_cache[derived_index].is_none() {
             let program = self.program;
             let mut column = match &program.derived[derived_index].semantics {
-                CompiledSemantics::Scalar(expr) => self.eval_scalar(expr)?,
+                CompiledSemantics::Scalar(expr) => self
+                    .eval_scalar(expr)
+                    .map_err(|error| error.within_rule(&program.derived[derived_index].name))?,
                 CompiledSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(
                         program.derived[derived_index].name.clone(),
@@ -2631,7 +2805,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         if self.judgment_cache[derived_index].is_none() {
             let program = self.program;
             let values = match &program.derived[derived_index].semantics {
-                CompiledSemantics::Judgment(expr) => self.eval_judgment(expr)?,
+                CompiledSemantics::Judgment(expr) => self
+                    .eval_judgment(expr)
+                    .map_err(|error| error.within_rule(&program.derived[derived_index].name))?,
                 CompiledSemantics::Scalar(_) => {
                     return Err(EvalError::ExpectedJudgment(
                         program.derived[derived_index].name.clone(),
@@ -2748,6 +2924,28 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let then_values = self.eval_scalar(then_expr)?;
                 let else_values = self.eval_scalar(else_expr)?;
                 select_dense_scalar_column::<N>(condition, then_values, else_values)
+            }
+            CompiledScalarExpr::MatchGuard {
+                subject,
+                patterns,
+                value,
+                labels,
+            } => {
+                let subject_values = self.eval_scalar(subject)?;
+                let mut covered = vec![false; subject_values.len()];
+                for pattern in patterns {
+                    let pattern_values = self.eval_scalar(pattern)?;
+                    let matched = compare_dense_columns::<N>(
+                        subject_values.clone(),
+                        ComparisonOp::Eq,
+                        pattern_values,
+                    )?;
+                    for (row, outcome) in matched.into_iter().enumerate() {
+                        covered[row] |= outcome.is_holds();
+                    }
+                }
+                labels.check(&subject_values, &covered)?;
+                self.eval_scalar(value)
             }
             // A bare input outside a reduction has no single period in general,
             // but a per-person-constant input (a birth / age-attainment year —
@@ -3232,6 +3430,14 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
             else_expr,
             ..
         } => nested_over_periods_kind(then_expr).or_else(|| nested_over_periods_kind(else_expr)),
+        CompiledScalarExpr::MatchGuard {
+            subject,
+            patterns,
+            value,
+            ..
+        } => nested_over_periods_kind(subject)
+            .or_else(|| patterns.iter().find_map(nested_over_periods_kind))
+            .or_else(|| nested_over_periods_kind(value)),
     }
 }
 

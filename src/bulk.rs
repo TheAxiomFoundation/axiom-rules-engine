@@ -51,6 +51,16 @@ impl ScalarColumn {
         }
     }
 
+    /// The value at `index` in the column's own kind.
+    fn value_at(&self, index: usize) -> ScalarValue {
+        match self {
+            Self::Bool(values) => ScalarValue::Bool(values[index]),
+            Self::Integer(values) => ScalarValue::Integer(values[index]),
+            Self::Decimal(values) => ScalarValue::Decimal(values[index]),
+            Self::Text(values) => ScalarValue::Text(values[index].clone()),
+        }
+    }
+
     fn scalar_value_at(&self, index: usize, dtype: &DType) -> ScalarValue {
         match (self, dtype) {
             (Self::Bool(values), _) => ScalarValue::Bool(values[index]),
@@ -331,7 +341,9 @@ impl<'a> BulkEvaluator<'a> {
                 }
             })?;
             let mut column = match semantics {
-                DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
+                DerivedSemantics::Scalar(expr) => self
+                    .eval_scalar_expr(expr)
+                    .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(name)))?,
                 DerivedSemantics::Judgment(_) => {
                     return Err(EvalError::ExpectedScalar(name.to_string()));
                 }
@@ -357,7 +369,9 @@ impl<'a> BulkEvaluator<'a> {
                 }
             })?;
             let column = match semantics {
-                DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
+                DerivedSemantics::Judgment(expr) => self
+                    .eval_judgment_expr(expr)
+                    .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(name)))?,
                 DerivedSemantics::Scalar(_) => {
                     return Err(EvalError::ExpectedJudgment(name.to_string()));
                 }
@@ -711,11 +725,57 @@ impl<'a> BulkEvaluator<'a> {
                 then_expr,
                 else_expr,
             } => {
+                // A `match` without `_` lowers to a comparison chain whose
+                // innermost `else` is NoMatch. Bulk evaluates both branches of
+                // every `if`, so this innermost `if` cannot tell a row that
+                // matched an outer arm from one that matched nothing: ask the
+                // NoMatch node which rows no pattern covers, and fail if any
+                // does, as explain would for that row. Otherwise every row
+                // took some arm; rows that took an outer arm discard this
+                // value, so the last arm's value serves all of them.
+                if let ScalarExpr::NoMatch { subject, patterns } = else_expr.as_ref() {
+                    self.check_match_coverage(subject, patterns)?;
+                    return self.eval_scalar_expr(then_expr);
+                }
                 let condition = self.eval_judgment_expr(condition)?;
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_scalar_column(condition, then_values, else_values)
             }
+            ScalarExpr::NoMatch { subject, patterns } => {
+                self.check_match_coverage(subject, patterns)?;
+                Err(EvalError::TypeMismatch(
+                    "bulk fast mode does not yet support a `match` fallback outside its comparison chain"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Fail with explain's error for the first row whose `match` subject
+    /// equals none of `patterns`, compared as the lowered arms compare it.
+    fn check_match_coverage(
+        &mut self,
+        subject: &ScalarExpr,
+        patterns: &[ScalarExpr],
+    ) -> Result<(), EvalError> {
+        let subject_values = self.eval_scalar_expr(subject)?;
+        let mut covered = vec![false; self.entity_ids.len()];
+        for pattern in patterns {
+            let pattern_values = self.eval_scalar_expr(pattern)?;
+            let matched =
+                compare_columns(subject_values.clone(), ComparisonOp::Eq, pattern_values)?;
+            for (row, outcome) in matched.into_iter().enumerate() {
+                covered[row] |= outcome.is_holds();
+            }
+        }
+        match covered.iter().position(|covered| !covered) {
+            Some(row) => Err(crate::engine::no_matching_arm(
+                subject,
+                &subject_values.value_at(row),
+                patterns,
+            )),
+            None => Ok(()),
         }
     }
 
@@ -1144,7 +1204,8 @@ impl<'a> BulkEvaluator<'a> {
             | ScalarExpr::DaysBetween { .. }
             | ScalarExpr::CountRelated { .. }
             | ScalarExpr::SumRelated { .. }
-            | ScalarExpr::If { .. } => Err(EvalError::TypeMismatch(
+            | ScalarExpr::If { .. }
+            | ScalarExpr::NoMatch { .. } => Err(EvalError::TypeMismatch(
                 "bulk fast mode does not yet support this related scalar expression".to_string(),
             )),
         }

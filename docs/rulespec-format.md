@@ -188,7 +188,10 @@ rules:
 `match subject:` selects by equality against literal patterns, one
 `pattern => result` arm per line. A final `_ => result` arm is the explicit
 fallback; matches without `_` are a compatibility-mode warning and a
-strict-mode error, so always write the fallback arm.
+strict-mode error, so always write the fallback arm. When a match without `_`
+does compile, a subject that equals none of its patterns is an evaluation
+error naming the rule, the subject and its value, in every execution mode; it
+never takes the last arm's value.
 
 ```yaml
 format: rulespec/v1
@@ -309,7 +312,7 @@ Scalar kinds: `literal`, `input`, `input_or_else`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
 `floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
 `date_add_years`, `days_between`,
-`count_related`, `sum_related`, `if`, `over_periods`.
+`count_related`, `sum_related`, `if`, `no_match`, `over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
 `eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`,
@@ -319,7 +322,8 @@ Literal values carry their own `kind`: `bool`, `integer`, `decimal`, `text`,
 or `date`.
 
 Formula surface and lowered form do not map one-to-one: `match` lowers into
-nested `if` comparisons, unary minus lowers into `0 - x`, chained `and`/`or`
+nested `if` comparisons (a match without `_` ends in a `no_match` node carrying
+the subject and every pattern, which evaluates to an error), unary minus lowers into `0 - x`, chained `and`/`or`
 operators nest as binary pairs while some sugar lowers n-ary, and Boolean
 facts lower into `== true` comparisons. Consumers should target this
 vocabulary, not the formula text.

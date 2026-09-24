@@ -346,6 +346,15 @@ pub enum ScalarExpr {
         then_expr: Box<ScalarExpr>,
         else_expr: Box<ScalarExpr>,
     },
+    /// The fallback of a `match` without a `_ =>` arm: an error naming the
+    /// subject's value. Lowering places it as the innermost `else` of the
+    /// match's comparison chain, so explain reaches it only when no pattern
+    /// matched; `patterns` lets bulk and dense, which evaluate both branches,
+    /// find the rows that reach it.
+    NoMatch {
+        subject: Box<ScalarExpr>,
+        patterns: Vec<ScalarExpr>,
+    },
     /// Reduction over an entity's own period axis (lifetime execution only).
     /// `value` is the inner per-period expression, evaluated once per supplied
     /// period; `n` is present only for [`OverPeriodsKind::SumTopN`] and gives
@@ -1023,6 +1032,12 @@ fn collect_scalar_relation_usages(
             collect_scalar_relation_usages(program, then_expr, entity, citing_rule, usages);
             collect_scalar_relation_usages(program, else_expr, entity, citing_rule, usages);
         }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_relation_usages(program, subject, entity, citing_rule, usages);
+            for pattern in patterns {
+                collect_scalar_relation_usages(program, pattern, entity, citing_rule, usages);
+            }
+        }
         ScalarExpr::OverPeriods { value, n, .. } => {
             collect_scalar_relation_usages(program, value, entity, citing_rule, usages);
             if let Some(n) = n {
@@ -1217,6 +1232,12 @@ fn collect_scalar_derived_entities(
             collect_referenced_derived_entities(program, condition, entities);
             collect_scalar_derived_entities(program, then_expr, entities);
             collect_scalar_derived_entities(program, else_expr, entities);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_derived_entities(program, subject, entities);
+            for pattern in patterns {
+                collect_scalar_derived_entities(program, pattern, entities);
+            }
         }
         ScalarExpr::OverPeriods { value, n, .. } => {
             collect_scalar_derived_entities(program, value, entities);
@@ -1413,6 +1434,12 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_judgment_expr(condition, slots);
             collect_input_slots_from_scalar_expr(then_expr, slots);
             collect_input_slots_from_scalar_expr(else_expr, slots);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_input_slots_from_scalar_expr(subject, slots);
+            for pattern in patterns {
+                collect_input_slots_from_scalar_expr(pattern, slots);
+            }
         }
         ScalarExpr::OverPeriods { value, n, .. } => {
             collect_input_slots_from_scalar_expr(value, slots);

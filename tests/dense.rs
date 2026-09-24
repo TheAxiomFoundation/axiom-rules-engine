@@ -316,6 +316,64 @@ fn dense_flat_tax_matches_explain_mode() {
     }
 }
 
+/// A `match` without `_` errors in dense execution exactly where explain
+/// does: a batch whose rows take different arms is covered, and a row whose
+/// subject no arm lists fails with explain's message instead of taking the
+/// last arm's value.
+#[test]
+fn dense_non_exhaustive_match_rejects_only_uncovered_subjects() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              1 => 10
+              2 => 20
+"#,
+    )
+    .expect("a match without `_` still compiles");
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("TaxUnit"))
+        .expect("dense compilation succeeds");
+    let period = month_period().to_model().expect("period converts");
+    let run = |statuses: Vec<i64>| {
+        dense.execute(
+            &period,
+            DenseBatchSpec {
+                row_count: statuses.len(),
+                inputs: HashMap::from([(
+                    "filing_status".to_string(),
+                    DenseColumn::Integer(statuses),
+                )]),
+                relations: HashMap::new(),
+            },
+            &["filing_credit".to_string()],
+        )
+    };
+
+    let covered = run(vec![1, 2, 1]).expect("covered subjects evaluate");
+    match covered.outputs.get("filing_credit") {
+        Some(DenseOutputValue::Scalar(DenseColumn::Integer(values))) => {
+            assert_eq!(values, &vec![10, 20, 10])
+        }
+        other => panic!("unexpected dense output: {other:?}"),
+    }
+
+    let error = run(vec![1, 9, 2])
+        .expect_err("an uncovered subject is an error, not the last arm")
+        .to_string();
+    assert_eq!(
+        error,
+        "no `match` arm in `filing_credit` covers `filing_status` = 9 (arms: 1, 2); add an arm for it or a final `_ =>` arm"
+    );
+}
+
 #[test]
 fn dense_family_allowance_matches_explain_mode() {
     let period = month_period();
