@@ -50,6 +50,10 @@ For repo-backed RuleSpec files, public execution requests must use durable
 legal IDs for queried outputs and dataset input/relation names. Bare local names
 remain local formula symbols only.
 
+On release/v0.1, requests reject unsupported `pins` and conflicting input
+spells. See [request inputs](docs/request-inputs.md) for validation and
+latest-start precedence in explain and fast modes.
+
 ## Commands
 
 Compile a RuleSpec file:

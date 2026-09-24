@@ -23,6 +23,14 @@ pub enum EvalError {
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
     },
+    #[error(
+        "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values; merge or split the spells so one value applies at each start date"
+    )]
+    AmbiguousInput {
+        name: String,
+        entity_id: String,
+        effective_from: chrono::NaiveDate,
+    },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
     #[error("type mismatch: {0}")]
@@ -107,6 +115,61 @@ pub enum EvalError {
         second_period: String,
         second_value: String,
     },
+}
+
+/// Reject conflicting values at the same canonical fact, entity, and start.
+/// Equal duplicates are harmless; neither record order nor interval length
+/// resolves a tie between different values.
+pub(crate) fn validate_input_spells(data: &DataSet) -> Result<(), EvalError> {
+    let mut values_by_start: HashMap<(&str, &str, chrono::NaiveDate), &ScalarValue> =
+        HashMap::new();
+    for record in &data.inputs {
+        let key = (
+            record.name.as_str(),
+            record.entity_id.as_str(),
+            record.interval.start,
+        );
+        if let Some(existing) = values_by_start.get(&key) {
+            if *existing != &record.value {
+                return Err(EvalError::AmbiguousInput {
+                    name: record.name.clone(),
+                    entity_id: record.entity_id.clone(),
+                    effective_from: record.interval.start,
+                });
+            }
+        } else {
+            values_by_start.insert(key, &record.value);
+        }
+    }
+    Ok(())
+}
+
+/// Give Fast the same latest-start covering inputs that Explain selects,
+/// including inputs on related entities.
+pub(crate) fn resolve_inputs_for_period(data: &DataSet, period: &Period) -> DataSet {
+    let mut selected_by_fact: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut inputs = Vec::new();
+
+    for record in &data.inputs {
+        if !record.interval.contains_period(period) {
+            continue;
+        }
+        let key = (record.name.as_str(), record.entity_id.as_str());
+        if let Some(&selected_index) = selected_by_fact.get(&key) {
+            let selected: &crate::model::InputRecord = &inputs[selected_index];
+            if record.interval.start > selected.interval.start {
+                inputs[selected_index] = record.clone();
+            }
+        } else {
+            selected_by_fact.insert(key, inputs.len());
+            inputs.push(record.clone());
+        }
+    }
+
+    DataSet {
+        inputs,
+        relations: data.relations.clone(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
