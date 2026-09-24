@@ -129,22 +129,63 @@ CompiledProgramArtifact::from_rulespec_str_with_options(
 )
 ```
 
-This compile option is independent of binding strictness. During dataset
-binding, the engine derives an opaque entity id's kind from dataset input
-records that carry both `entity_id` and `entity`. For a relation used by the
-program, expected tuple positions come from executable usage; unresolved or
-conflicting positions are skipped. Only an unused relation falls back to its
-declared position order. This prevents validation from recommending an order
-that the engine indexes as an empty lookup. A known mismatch emits
-`warning[relation_slot_entity_mismatch]` by default; ids absent from input
-records, or ids used with more than one kind, remain unknown and are skipped.
-Rust callers can promote these warnings to errors with
-`DatasetSpec::to_dataset_for_program_with_options(program,
-DatasetBindingOptions::strict())`. The existing
-`DatasetSpec::to_dataset_for_program` entry point retains compatibility mode.
-This strict knob is intentionally on the program-aware binder; lower-level
-callers that construct a `DataSet` or `Engine` directly bypass wire-dataset
-validation.
+This compile option is independent of binding strictness. Dataset binding is
+strict by default: a known mismatch between a tuple slot's expected entity kind
+and the supplied entity id's kind is an error before execution. The error names
+the relation, slot, entity id, and expected and supplied kinds so callers can
+correct the tuple and input entity labels.
+
+The engine derives an opaque entity id's kind from dataset input records that
+carry both `entity_id` and `entity`. For a relation used by the program, expected
+tuple positions come from executable usage; unresolved or conflicting positions
+are skipped. Only an unused relation falls back to its declared position order.
+This preserves the orientation encoded in existing compiled artifacts. Ids
+absent from input records, or ids used with more than one kind, remain unknown
+and are skipped. `Entity` is an ordinary supplied kind, not a wildcard for
+`Person`, `TaxUnit`, or another expected kind.
+
+Both `ExecutionRequest` and `CompiledExecutionRequest` accept a top-level
+`"relation_binding": "strict"` or `"relation_binding": "lenient"` field; omitting
+it selects `strict`. This applies to `api::execute_request`,
+`api::execute_compiled_request`, CLI execution, and wasm `execute`. Successful
+responses echo the selected policy in `metadata.relation_binding`.
+The [self-contained request](../schemas/execution-request.v1.schema.json),
+[compiled request](../schemas/compiled-execution-request.v1.schema.json), and
+[response](../schemas/execution-response.v1.schema.json) schemas describe this
+wire contract.
+
+New served responses always echo the binding policy. When reading a historical
+response without `metadata.relation_binding`, the policy remains unknown; the
+reader must not infer that strict validation occurred. Lower-level bulk execution
+that bypasses dataset binding likewise omits the policy.
+
+Callers migrating an existing dataset can explicitly select lenient binding:
+
+```sh
+axiom-rules-engine run --relation-binding lenient < request.json
+axiom-rules-engine run-compiled --artifact compiled.json --relation-binding lenient < request.json
+```
+
+The CLI flag overrides the request field. Requests supplied directly on stdin
+without a subcommand can select the same policy through the JSON field.
+The CLI emits a stderr notice for lenient binding and retains
+`warning[relation_slot_entity_mismatch]` diagnostics. It does not reorder tuples
+or correct their kinds: a reversed relation can still return a zero count or
+credit. Correcting the dataset lets callers return to the strict default.
+
+Rust callers using `DatasetSpec::to_dataset_for_program` also get strict
+binding. An explicit `DatasetBindingOptions::lenient()` passed to
+`to_dataset_for_program_with_options` opts out. Lower-level callers that
+construct a `DataSet` or `Engine` directly bypass wire-dataset validation. The
+Python extension's dense execution methods take arrays rather than a wire
+`DatasetSpec`, so this request policy does not apply to those methods.
+
+When upgrading or recompiling RuleSpec, ensure tuple order follows declared
+arguments and that input records carry the correct kinds. Old compiled
+artifacts without `program.relations[].slot_entities` cannot validate tuple
+entity kinds; strict binding does not infer missing declarations or rewrite
+their executable slots. Recompile from typed RuleSpec to carry the declarations.
+This binding policy does not change the artifact format version.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides

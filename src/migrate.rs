@@ -588,6 +588,7 @@ pub fn gate_rewrite(
             relations: vec![],
         };
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program,
             dataset,

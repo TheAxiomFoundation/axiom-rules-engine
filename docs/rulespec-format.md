@@ -276,6 +276,15 @@ compiling RuleSpec; loading an existing compiled artifact does not rewrite it.
 Recompile artifacts to adopt corrected directions, and ensure dataset tuples
 follow their declared argument order.
 
+Wire dataset binding rejects known tuple entity-kind mismatches by default.
+For example, a relation declared `[TaxUnit, Person]` expects the tax unit id
+first and the person id second after RuleSpec compilation. Input records must
+also label those ids `TaxUnit` and `Person`; `Entity` is not a wildcard. A
+request can explicitly set `"relation_binding": "lenient"` during migration,
+but leniency does not reorder the tuple and may still produce a zero count.
+See [dataset binding in RuleSpec](rulespec.md#semantics) for the CLI override,
+response metadata, and limits for unknown ids and older compiled artifacts.
+
 ## Judgment position
 
 A `dtype: Judgment` formula composes:

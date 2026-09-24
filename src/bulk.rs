@@ -225,6 +225,7 @@ fn empty_response() -> ExecutionResponse {
 
 fn fast_mode_metadata() -> ExecutionMetadata {
     ExecutionMetadata {
+        relation_binding: None,
         requested_mode: ExecutionMode::Fast,
         actual_mode: ExecutionMode::Fast,
         fallback_reason: None,

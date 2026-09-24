@@ -231,13 +231,26 @@ fn validate_citation_path(location: &str, value: &str) -> Result<(), SpecError> 
 }
 
 /// Options for binding a wire [`DatasetSpec`] to a compiled [`Program`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DatasetBindingOptions {
-    /// Promote relation tuple entity-kind warnings to a binding error.
+    /// Reject relation tuple entity-kind mismatches (enabled by default).
     pub strict_relation_entities: bool,
 }
 
+impl Default for DatasetBindingOptions {
+    fn default() -> Self {
+        Self::strict()
+    }
+}
+
 impl DatasetBindingOptions {
+    /// Accept mismatched tuples unchanged and return their diagnostics.
+    pub const fn lenient() -> Self {
+        Self {
+            strict_relation_entities: false,
+        }
+    }
+
     pub const fn strict() -> Self {
         Self {
             strict_relation_entities: true,
@@ -273,7 +286,7 @@ impl std::fmt::Display for DatasetBindingDiagnostic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records; strict relation entity mode treats this warning as an error",
+            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records; reorder the tuple to match the program's relation slots and supply the corresponding entity kinds",
             self.relation, self.slot, self.entity_id, self.expected_entity, self.actual_entity
         )
     }
@@ -363,7 +376,7 @@ impl DatasetSpec {
     }
 }
 
-fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
+pub(crate) fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
     for diagnostic in diagnostics {
         eprintln!("warning[{}]: {diagnostic}", diagnostic.code.as_str());
     }
