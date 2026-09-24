@@ -9,10 +9,10 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
-    DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec,
-    PeriodSpec, ProgramSpec, RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec,
-    ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    DerivedSpec, DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec,
+    PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec, RelationRecordSpec,
+    ScalarExprSpec, ScalarValueSpec,
 };
 use rust_decimal::Decimal;
 
@@ -2329,6 +2329,335 @@ fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
         matches!(&error, ApiError::UnknownPinnedRule { rule } if rule == "no_such_rule"),
         "got {error:?}"
     );
+}
+
+#[test]
+fn dataset_binding_rejects_derived_ids_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#adjusted_amount";
+            add_dataset_binding_input(&mut request, reference);
+
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a derived legal id is not a dataset input");
+            assert_derived_dataset_input_error(&error.to_string(), reference);
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_rejects_parameter_ids_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#base_amount";
+            add_dataset_binding_input(&mut request, reference);
+
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a parameter legal id is not a dataset input");
+            assert_parameter_dataset_input_error(&error.to_string(), reference);
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_identifies_bare_derived_names_with_and_without_public_ids() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode, public_ids);
+                add_dataset_binding_input(&mut request, "adjusted_amount");
+
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("a bare derived name is not a dataset input");
+                assert_derived_dataset_input_error(&error.to_string(), "adjusted_amount");
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_identifies_bare_parameter_names_with_and_without_public_ids() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode, public_ids);
+                add_dataset_binding_input(&mut request, "base_amount");
+
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("a bare parameter name is not a dataset input");
+                assert_parameter_dataset_input_error(&error.to_string(), "base_amount");
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_refuses_computed_inputs_with_default_and_strict_options() {
+    for strict_relation_entities in [false, true] {
+        for (reference, derived) in [
+            ("us:statutes/26/24#adjusted_amount", true),
+            ("us:statutes/26/24#base_amount", false),
+        ] {
+            let mut request = dataset_binding_request(ExecutionMode::Explain, true);
+            add_dataset_binding_input(&mut request, reference);
+            let program = request
+                .program
+                .to_program()
+                .expect("fixture model converts");
+            let error = request
+                .dataset
+                .to_dataset_for_program_with_options(
+                    &program,
+                    DatasetBindingOptions {
+                        strict_relation_entities,
+                    },
+                )
+                .expect_err("binding options cannot allow a computed input");
+            if derived {
+                assert_derived_dataset_input_error(&error.to_string(), reference);
+            } else {
+                assert_parameter_dataset_input_error(&error.to_string(), reference);
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_pins_do_not_allow_derived_dataset_inputs() {
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let mut request = dataset_binding_request(mode, true);
+        let reference = "us:statutes/26/24#adjusted_amount";
+        add_dataset_binding_input(&mut request, reference);
+        let artifact =
+            CompiledProgramArtifact::compile(request.program).expect("fixture program compiles");
+        let error = execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: request.mode,
+                dataset: request.dataset,
+                queries: request.queries,
+                pins: vec![RulePin {
+                    rule: "adjusted_amount".to_string(),
+                    value: decimal_value("99"),
+                }],
+            },
+        )
+        .expect_err("a pin does not make a derived rule a dataset input");
+        assert_derived_dataset_input_error(&error.to_string(), reference);
+    }
+}
+
+#[test]
+fn dataset_binding_resolver_does_not_expose_computed_ids_as_input_slots() {
+    let request = dataset_binding_request(ExecutionMode::Explain, true);
+    let program = request
+        .program
+        .to_program()
+        .expect("fixture model converts");
+    for reference in [
+        "us:statutes/26/24#adjusted_amount",
+        "us:statutes/26/24#base_amount",
+    ] {
+        assert_eq!(
+            program.resolve_input_name(reference),
+            None,
+            "computed reference {reference} must not resolve to an input slot"
+        );
+    }
+    assert_eq!(
+        program.resolve_input_name("us:statutes/26/24#input.amount"),
+        Some("amount".to_string())
+    );
+}
+
+#[test]
+fn dataset_binding_accepts_real_canonical_inputs_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let request = dataset_binding_request(mode.clone(), true);
+            let response = execute_dataset_binding_request(request, compiled)
+                .expect("a canonical catalog input remains accepted");
+            assert_eq!(response.metadata.actual_mode, mode);
+            for (result, expected) in response.results.iter().zip(["25", "30"]) {
+                assert_eq!(
+                    decimal_output(
+                        result
+                            .outputs
+                            .get("us:statutes/26/24#adjusted_amount")
+                            .expect("derived output exists")
+                    ),
+                    decimal(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_unknown_inputs_and_derived_relation_names_remain_invalid() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            for reference in ["no_such_input", "us:statutes/26/24#input.no_such_input"] {
+                let mut request = dataset_binding_request(mode.clone(), true);
+                add_dataset_binding_input(&mut request, reference);
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("unknown input is rejected");
+                assert!(
+                    matches!(error, ApiError::Spec(axiom_rules_engine::spec::SpecError::InvalidDatasetInputReference { reference: rejected }) if rejected == reference)
+                );
+            }
+
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#adjusted_amount";
+            request.dataset.relations.push(RelationRecordSpec {
+                name: reference.to_string(),
+                tuple: vec!["household-1".to_string()],
+                interval: request.dataset.inputs[0].interval.clone(),
+            });
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a derived id is not a relation");
+            assert!(
+                matches!(error, ApiError::Spec(axiom_rules_engine::spec::SpecError::InvalidDatasetRelationReference { reference: rejected }) if rejected == reference)
+            );
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_accepts_explicit_input_slots_sharing_computed_rule_names() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode.clone(), public_ids);
+                let expression = DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::Add {
+                        items: vec![
+                            ScalarExprSpec::Input {
+                                name: "adjusted_amount".to_string(),
+                            },
+                            ScalarExprSpec::Input {
+                                name: "base_amount".to_string(),
+                            },
+                        ],
+                    },
+                };
+                let derived = &mut request.program.derived[0];
+                derived.semantics = expression.clone();
+                for version in &mut derived.versions {
+                    version.semantics = expression.clone();
+                }
+                request.dataset.inputs.clear();
+                let period = simple_period();
+                for (name, value) in [("adjusted_amount", "90"), ("base_amount", "9")] {
+                    request.dataset.inputs.push(InputRecordSpec {
+                        name: if public_ids {
+                            format!("us:statutes/26/24#input.{name}")
+                        } else {
+                            name.to_string()
+                        },
+                        entity: "Household".to_string(),
+                        entity_id: "household-1".to_string(),
+                        interval: IntervalSpec {
+                            start: period.start,
+                            end: period.end,
+                        },
+                        value: decimal_value(value),
+                    });
+                }
+                request.queries.truncate(1);
+                let output_name = request.queries[0].outputs[0].clone();
+                let response = execute_dataset_binding_request(request, compiled)
+                    .expect("explicit input slots take precedence over computed names");
+                assert_eq!(response.metadata.actual_mode, mode);
+                assert_eq!(
+                    decimal_output(
+                        response.results[0]
+                            .outputs
+                            .get(&output_name)
+                            .expect("derived output exists")
+                    ),
+                    decimal("99")
+                );
+            }
+        }
+    }
+}
+
+fn dataset_binding_request(mode: ExecutionMode, public_ids: bool) -> ExecutionRequest {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    let mut request = simple_execution_request(mode, program);
+    if public_ids {
+        for derived in &mut request.program.derived {
+            derived.id = Some(format!("us:statutes/26/24#{}", derived.name));
+        }
+        for parameter in &mut request.program.parameters {
+            parameter.id = Some(format!("us:statutes/26/24#{}", parameter.name));
+        }
+        for input in &mut request.dataset.inputs {
+            input.name = format!("us:statutes/26/24#input.{}", input.name);
+        }
+        for query in &mut request.queries {
+            query.outputs = vec!["us:statutes/26/24#adjusted_amount".to_string()];
+        }
+    }
+    request
+}
+
+fn add_dataset_binding_input(request: &mut ExecutionRequest, reference: &str) {
+    let mut input = request.dataset.inputs[0].clone();
+    input.name = reference.to_string();
+    input.value = decimal_value("999");
+    request.dataset.inputs.push(input);
+}
+
+fn execute_dataset_binding_request(
+    request: ExecutionRequest,
+    compiled: bool,
+) -> Result<ExecutionResponse, ApiError> {
+    if compiled {
+        let artifact =
+            CompiledProgramArtifact::compile(request.program).expect("fixture program compiles");
+        execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: request.mode,
+                dataset: request.dataset,
+                queries: request.queries,
+                pins: Vec::new(),
+            },
+        )
+    } else {
+        execute_request(request)
+    }
+}
+
+fn assert_derived_dataset_input_error(message: &str, reference: &str) {
+    assert!(
+        message.contains(&format!("dataset input `{reference}`")),
+        "{message}"
+    );
+    assert!(
+        message.contains("derived rule `adjusted_amount`"),
+        "{message}"
+    );
+    assert!(message.contains("pins"), "{message}");
+    assert!(
+        message.contains("\"rule\": \"adjusted_amount\""),
+        "{message}"
+    );
+}
+
+fn assert_parameter_dataset_input_error(message: &str, reference: &str) {
+    assert!(
+        message.contains(&format!("dataset input `{reference}`")),
+        "{message}"
+    );
+    assert!(message.contains("parameter `base_amount`"), "{message}");
+    assert!(message.contains("law"), "{message}");
+    assert!(message.contains("program parameter"), "{message}");
 }
 
 #[test]
