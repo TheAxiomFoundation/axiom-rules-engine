@@ -1593,10 +1593,12 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
 }
 
 /// A household program whose outputs fail in fast mode in different ways:
-/// `household_income` aggregates a related derived value, which bulk does not
-/// support (fallback); `guarded_amount` never takes its `else` branch, but
+/// `household_income` aggregates a related derived value and `period_start_date`
+/// reads the period start, two constructs bulk does not support (fallback, each
+/// with its own reason); `guarded_amount` never takes its `else` branch, but
 /// bulk evaluates it anyway and finds `absent_amount` missing; `reads_first`
-/// and `reads_second` read genuinely missing inputs.
+/// and `reads_second` read genuinely missing inputs, and both `shares_failure`
+/// rules depend on `reads_first`.
 fn fast_outcome_program() -> ProgramSpec {
     let household_rule = |name: &str, expr: ScalarExprSpec| DerivedSpec {
         id: None,
@@ -1653,6 +1655,32 @@ fn fast_outcome_program() -> ProgramSpec {
             ),
             household_rule("reads_first", input("absent_first")),
             household_rule("reads_second", input("absent_second")),
+            DerivedSpec {
+                dtype: DTypeSpec::Date,
+                ..household_rule("period_start_date", ScalarExprSpec::PeriodStart)
+            },
+            household_rule(
+                "shares_failure_a",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(1),
+                    ],
+                },
+            ),
+            household_rule(
+                "shares_failure_b",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(2),
+                    ],
+                },
+            ),
         ],
         ..ProgramSpec::default()
     }
@@ -1691,9 +1719,9 @@ fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionReque
 }
 
 /// Fast mode's outcome is a function of the request, not of the process.
-/// Each run below builds fresh hash sets with fresh random seeds, so an
-/// outcome that depends on hash iteration order varies across the 64 runs of
-/// each output order (2^-63 chance of hiding it). When any requested output
+/// Each run below builds fresh hash sets, each with its own hasher keys, so an
+/// outcome that depended on hash iteration order would vary across the 64
+/// runs of each output order. When any requested output
 /// needs explain, the whole request falls back, whichever output is listed
 /// first: `guarded_amount`'s missing input comes from a branch explain never
 /// evaluates, so explain answers 7 where the fast path alone would fail.
@@ -1740,18 +1768,47 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
     }
 }
 
+/// When several outputs need explain for different reasons, the first of
+/// them in request order supplies the fallback reason, in either order.
+#[test]
+fn fast_mode_fallback_reason_is_the_first_in_request_order() {
+    const RELATED: &str = "bulk execution does not yet support aggregating related derived values";
+    const PERIOD: &str = "bulk fast mode does not yet support period_start / period_end";
+    for (outputs, reason) in [
+        (["household_income", "period_start_date"], RELATED),
+        (["period_start_date", "household_income"], PERIOD),
+        (["guarded_amount", "period_start_date"], PERIOD),
+    ] {
+        for run in 0..16 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| panic!("run {run} with outputs {outputs:?}: {error}"));
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+            assert_eq!(
+                fast.metadata.fallback_reason.as_deref(),
+                Some(reason),
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
 /// With no output needing explain, fast mode reports the first failing output
 /// in request order on every run, the same error explain reports.
 #[test]
 fn fast_mode_reports_the_first_failing_output_in_request_order() {
     for (outputs, missing) in [
-        (["reads_first", "reads_second"], "absent_first"),
-        (["reads_second", "reads_first"], "absent_second"),
+        (["reads_first", "reads_second"], "`absent_first`"),
+        (["reads_second", "reads_first"], "`absent_second`"),
+        // Two outputs sharing one failing dependency report its error.
+        (["shares_failure_a", "shares_failure_b"], "`absent_first`"),
+        // An unknown output is an error in its place in request order.
+        (["reads_first", "no_such_output"], "`absent_first`"),
+        (["no_such_output", "reads_first"], "no_such_output"),
     ] {
         let explain = execute_request(fast_outcome_request(ExecutionMode::Explain, &outputs))
             .expect_err("explain fails on the first missing input");
         assert!(
-            explain.to_string().contains(&format!("`{missing}`")),
+            explain.to_string().contains(missing),
             "explain reported {explain}"
         );
         for run in 0..64 {

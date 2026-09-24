@@ -44,7 +44,7 @@ pub(crate) fn shift_calendar_years(
         })
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
     UnknownDerived(String),
