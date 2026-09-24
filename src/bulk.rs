@@ -106,7 +106,12 @@ pub fn try_execute(
 
     let mut evaluator = BulkEvaluator::new(program, data, period, entity_ids);
     let mut results = Vec::with_capacity(queries.len());
-    let mut requested = HashSet::new();
+    // Requested outputs in first-seen request order. The warm-up below stops
+    // at the first unsupported output, so its order decides which fallback
+    // reason is reported; a HashSet's per-process random order made one
+    // request fail on some runs and fall back to explain on others.
+    let mut requested = Vec::new();
+    let mut seen = HashSet::new();
     for query in queries {
         for output_reference in &query.outputs {
             let Some(output_name) = program.resolve_derived_name(output_reference) else {
@@ -121,28 +126,44 @@ pub fn try_execute(
                 }
                 return Err(EvalError::UnknownDerived(output_reference.clone()));
             };
-            requested.insert(output_name.to_string());
+            if seen.insert(output_name.clone()) {
+                requested.push(output_name);
+            }
         }
     }
 
+    // Warm every requested output before surfacing an error. Bulk evaluates
+    // both branches of a conditional, so an error here may come from a branch
+    // explain never takes; when any output needs explain anyway, fall back
+    // for the whole request rather than report an error that depends on which
+    // output happened to be warmed first. Otherwise the first error in request
+    // order is the result.
+    let mut first_error = None;
     for output in &requested {
-        let derived = evaluator.get_derived(output)?;
-        let semantics = derived.semantics_at(&evaluator.period).ok_or_else(|| {
-            EvalError::MissingDerivedFormulaVersion {
-                derived: output.clone(),
-                at: evaluator.period.start,
+        let warmup = evaluator.get_derived(output).and_then(|derived| {
+            match derived.semantics_at(&evaluator.period) {
+                Some(DerivedSemantics::Scalar(_)) => Ok(true),
+                Some(DerivedSemantics::Judgment(_)) => Ok(false),
+                None => Err(EvalError::MissingDerivedFormulaVersion {
+                    derived: output.clone(),
+                    at: evaluator.period.start,
+                }),
             }
-        })?;
-        let warmup = match semantics {
-            DerivedSemantics::Scalar(_) => evaluator.evaluate_scalar(output).map(|_| ()),
-            DerivedSemantics::Judgment(_) => evaluator.evaluate_judgment(output).map(|_| ()),
+        });
+        let warmup = match warmup {
+            Ok(true) => evaluator.evaluate_scalar(output).map(|_| ()),
+            Ok(false) => evaluator.evaluate_judgment(output).map(|_| ()),
+            Err(error) => Err(error),
         };
         if let Err(error) = warmup {
             if let Some(reason) = unsupported_reason(&error) {
                 return Ok(FastPathResult::Unsupported { reason });
             }
-            return Err(error);
+            first_error.get_or_insert(error);
         }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
 
     for (row_index, query) in queries.iter().enumerate() {
