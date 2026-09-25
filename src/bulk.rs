@@ -1,3 +1,7 @@
+// rust_decimal and chrono operators panic on overflow. Evaluator arithmetic
+// uses the checked helpers in engine.rs instead (see clippy.toml).
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rust_decimal::Decimal;
@@ -6,7 +10,7 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
 };
-use crate::engine::EvalError;
+use crate::engine::{EvalError, checked_add, checked_div, checked_mul, checked_sub};
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, JudgmentExpr,
     JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
@@ -108,9 +112,9 @@ pub fn try_execute(
     let mut results = Vec::with_capacity(queries.len());
     // Resolve every requested output before evaluating any. A parameter
     // output or an unknown one sends the whole request to explain before bulk
-    // evaluates anything: bulk evaluates both branches of every conditional,
-    // so its arithmetic can fail, or overflow and panic, on a branch explain
-    // never takes.
+    // evaluates anything: bulk evaluates both branches of a conditional its
+    // rows disagree on, so its arithmetic can fail (overflow, or divide by
+    // zero) on a branch explain never takes.
     let mut requested = Vec::new();
     let mut seen = HashSet::new();
     for output_reference in queries.iter().flat_map(|query| &query.outputs) {
@@ -552,8 +556,8 @@ impl<'a> BulkEvaluator<'a> {
                 let mut total = vec![Decimal::ZERO; self.entity_ids.len()];
                 for item in items {
                     let values = self.eval_scalar_expr(item)?.as_decimal_vec()?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        total[index] += value;
+                    for (total, value) in total.iter_mut().zip(values) {
+                        *total = checked_add(*total, value)?;
                     }
                 }
                 Ok(ScalarColumn::Decimal(total))
@@ -564,8 +568,8 @@ impl<'a> BulkEvaluator<'a> {
                 Ok(ScalarColumn::Decimal(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left - right)
-                        .collect(),
+                        .map(|(left, right)| checked_sub(left, right))
+                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
                 ))
             }
             ScalarExpr::Mul(left, right) => {
@@ -574,8 +578,8 @@ impl<'a> BulkEvaluator<'a> {
                 Ok(ScalarColumn::Decimal(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left * right)
-                        .collect(),
+                        .map(|(left, right)| checked_mul(left, right))
+                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
                 ))
             }
             ScalarExpr::Div(left, right) => {
@@ -584,13 +588,7 @@ impl<'a> BulkEvaluator<'a> {
                 Ok(ScalarColumn::Decimal(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| {
-                            if right.is_zero() {
-                                Err(EvalError::DivisionByZero)
-                            } else {
-                                Ok(left / right)
-                            }
-                        })
+                        .map(|(left, right)| checked_div(left, right))
                         .collect::<Result<Vec<Decimal>, EvalError>>()?,
                 ))
             }
@@ -667,7 +665,7 @@ impl<'a> BulkEvaluator<'a> {
                     let related_ids =
                         self.related_ids(relation, *current_slot, *related_slot, row_index)?;
                     let current_id = self.entity_ids[row_index].clone();
-                    let mut count = 0_i64;
+                    let mut count = 0_usize;
                     for related_id in &related_ids {
                         if let Some(predicate) = where_clause {
                             if !self
@@ -685,7 +683,8 @@ impl<'a> BulkEvaluator<'a> {
                         }
                         count += 1;
                     }
-                    values.push(count);
+                    // A count of related entities fits in i64 on every supported target.
+                    values.push(count as i64);
                 }
                 Ok(ScalarColumn::Integer(values))
             }
@@ -734,11 +733,12 @@ impl<'a> BulkEvaluator<'a> {
                                         period_start: self.period.start,
                                         period_end: self.period.end,
                                     })?;
-                                total += scalar.as_decimal().ok_or_else(|| {
+                                let value = scalar.as_decimal().ok_or_else(|| {
                                     EvalError::TypeMismatch(
                                         "related aggregation requires numeric values".to_string(),
                                     )
                                 })?;
+                                total = checked_add(total, value)?;
                             }
                         }
                         RelatedValueRef::Derived(_) => return Err(EvalError::TypeMismatch(
@@ -1102,96 +1102,72 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::Add(items) => {
                 let mut total = Decimal::ZERO;
                 for item in items {
-                    total += self
-                        .eval_related_scalar_expr(
+                    total = checked_add(
+                        total,
+                        self.eval_related_decimal(
                             item,
                             current_id,
                             related_id,
                             current_entity,
                             related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?;
+                        )?,
+                    )?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
-            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
+            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(checked_sub(
+                self.eval_related_decimal(
                     left,
                     current_id,
                     related_id,
                     current_entity,
                     related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    - self
-                        .eval_related_scalar_expr(
-                            right,
-                            current_id,
-                            related_id,
-                            current_entity,
-                            related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?,
-            )),
-            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
+                )?,
+                self.eval_related_decimal(
+                    right,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?,
+            )?)),
+            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(checked_mul(
+                self.eval_related_decimal(
                     left,
                     current_id,
                     related_id,
                     current_entity,
                     related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    * self
-                        .eval_related_scalar_expr(
-                            right,
-                            current_id,
-                            related_id,
-                            current_entity,
-                            related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?,
-            )),
+                )?,
+                self.eval_related_decimal(
+                    right,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?,
+            )?)),
             ScalarExpr::Div(left, right) => {
-                let divisor = self
-                    .eval_related_scalar_expr(
-                        right,
-                        current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )?
-                    .as_decimal()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch("expected numeric scalar".to_string())
-                    })?;
+                let divisor = self.eval_related_decimal(
+                    right,
+                    current_id,
+                    related_id,
+                    current_entity,
+                    related_entity,
+                )?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
-                Ok(ScalarValue::Decimal(
-                    self.eval_related_scalar_expr(
+                Ok(ScalarValue::Decimal(checked_div(
+                    self.eval_related_decimal(
                         left,
                         current_id,
                         related_id,
                         current_entity,
                         related_entity,
-                    )?
-                    .as_decimal()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch("expected numeric scalar".to_string())
-                    })? / divisor,
-                ))
+                    )?,
+                    divisor,
+                )?))
             }
             ScalarExpr::Max(_) | ScalarExpr::Min(_) | ScalarExpr::ParameterLookup { .. } => {
                 Err(EvalError::TypeMismatch(
@@ -1200,27 +1176,23 @@ impl<'a> BulkEvaluator<'a> {
                 ))
             }
             ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
+                self.eval_related_decimal(
                     value,
                     current_id,
                     related_id,
                     current_entity,
                     related_entity,
                 )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                 .ceil(),
             )),
             ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
+                self.eval_related_decimal(
                     value,
                     current_id,
                     related_id,
                     current_entity,
                     related_entity,
                 )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
                 .floor(),
             )),
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(self.period.start)),
@@ -1238,6 +1210,19 @@ impl<'a> BulkEvaluator<'a> {
                 "bulk fast mode does not yet support this related scalar expression".to_string(),
             )),
         }
+    }
+
+    fn eval_related_decimal(
+        &mut self,
+        expr: &ScalarExpr,
+        current_id: &str,
+        related_id: &str,
+        current_entity: Option<&str>,
+        related_entity: Option<&str>,
+    ) -> Result<Decimal, EvalError> {
+        self.eval_related_scalar_expr(expr, current_id, related_id, current_entity, related_entity)?
+            .as_decimal()
+            .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))
     }
 
     fn lookup_entity_input(&self, name: &str, entity_id: &str) -> Result<ScalarValue, EvalError> {

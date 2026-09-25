@@ -1,3 +1,7 @@
+// rust_decimal and chrono operators panic on overflow. Evaluator arithmetic
+// uses the checked helpers in engine.rs instead (see clippy.toml).
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
@@ -6,7 +10,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
-use crate::engine::EvalError;
+use crate::engine::{EvalError, checked_add, checked_div, checked_mul, checked_sub};
 use crate::model::{
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
     OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
@@ -95,19 +99,20 @@ impl DenseColumn {
 /// Numeric type the dense executor evaluates arithmetic in. `Decimal` is the
 /// canonical mode (exact, matches the sparse engine); `f64` trades exactness
 /// for roughly an order of magnitude in throughput for bulk microsimulation.
-trait DenseNum:
-    Copy
-    + PartialOrd
-    + std::ops::Add<Output = Self>
-    + std::ops::AddAssign
-    + std::ops::Sub<Output = Self>
-    + std::ops::Mul<Output = Self>
-    + std::ops::Div<Output = Self>
-{
+trait DenseNum: Copy + PartialOrd {
     const ZERO: Self;
     const MIN: Self;
     const MAX: Self;
 
+    /// Arithmetic. The trait deliberately has no `std::ops` bounds, so generic
+    /// code cannot reach rust_decimal's panicking operators. `Decimal` reports
+    /// a result outside its range as `ArithmeticOverflow` and a zero divisor as
+    /// `DivisionByZero`, the same errors as the explain and bulk paths; `f64`
+    /// follows IEEE 754 except that a zero divisor is `DivisionByZero` here too.
+    fn try_add(self, other: Self) -> Result<Self, EvalError>;
+    fn try_sub(self, other: Self) -> Result<Self, EvalError>;
+    fn try_mul(self, other: Self) -> Result<Self, EvalError>;
+    fn try_div(self, other: Self) -> Result<Self, EvalError>;
     fn from_decimal(value: &Decimal) -> Self;
     fn ceil(self) -> Self;
     fn floor(self) -> Self;
@@ -116,12 +121,17 @@ trait DenseNum:
     /// consistent with this mode being for throughput, not exact legal
     /// determinations.
     fn round_to(self, rounding: Rounding) -> Self;
-    fn is_zero(self) -> bool;
     /// Truncate toward zero to an exact `i64`, or `None` when the value is
     /// non-finite or lies beyond the `i64` range. Used to read the `n` of
     /// `sum_top_n_over_periods`: `None` (and any out-of-range integer) is a hard
     /// error under the strict n contract, never a silent saturation.
     fn try_to_i64_trunc(self) -> Option<i64>;
+    /// A total order for ranking period values (`sum_top_n_over_periods`).
+    /// `f64` ranks NaN above every number, so a NaN value is always selected
+    /// and poisons the sum, as it does `sum_over_periods`; ordering it with
+    /// `partial_cmp` made the sort's comparator inconsistent, which lets
+    /// `sort_by` panic.
+    fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
     /// Read any numeric column as this mode's working vector.
@@ -132,6 +142,22 @@ impl DenseNum for Decimal {
     const ZERO: Self = Decimal::ZERO;
     const MIN: Self = Decimal::MIN;
     const MAX: Self = Decimal::MAX;
+
+    fn try_add(self, other: Self) -> Result<Self, EvalError> {
+        checked_add(self, other)
+    }
+
+    fn try_sub(self, other: Self) -> Result<Self, EvalError> {
+        checked_sub(self, other)
+    }
+
+    fn try_mul(self, other: Self) -> Result<Self, EvalError> {
+        checked_mul(self, other)
+    }
+
+    fn try_div(self, other: Self) -> Result<Self, EvalError> {
+        checked_div(self, other)
+    }
 
     fn from_decimal(value: &Decimal) -> Self {
         *value
@@ -149,8 +175,8 @@ impl DenseNum for Decimal {
         rounding.apply(self)
     }
 
-    fn is_zero(self) -> bool {
-        self == Decimal::ZERO
+    fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.cmp(other)
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
@@ -192,6 +218,29 @@ impl DenseNum for f64 {
     const MIN: Self = f64::MIN;
     const MAX: Self = f64::MAX;
 
+    #[inline]
+    fn try_add(self, other: Self) -> Result<Self, EvalError> {
+        Ok(self + other)
+    }
+
+    #[inline]
+    fn try_sub(self, other: Self) -> Result<Self, EvalError> {
+        Ok(self - other)
+    }
+
+    #[inline]
+    fn try_mul(self, other: Self) -> Result<Self, EvalError> {
+        Ok(self * other)
+    }
+
+    #[inline]
+    fn try_div(self, other: Self) -> Result<Self, EvalError> {
+        if other == 0.0 {
+            return Err(EvalError::DivisionByZero);
+        }
+        Ok(self / other)
+    }
+
     fn from_decimal(value: &Decimal) -> Self {
         value.to_f64().unwrap_or(f64::NAN)
     }
@@ -222,8 +271,13 @@ impl DenseNum for f64 {
         rounded / scale
     }
 
-    fn is_zero(self) -> bool {
-        self == 0.0
+    fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.is_nan(), other.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => self.total_cmp(other),
+        }
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
@@ -2018,8 +2072,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let mut total = vec![N::ZERO; self.batch.row_count];
                 for item in items {
                     let values = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        total[index] += value;
+                    for (total, value) in total.iter_mut().zip(values) {
+                        *total = total.try_add(value)?;
                     }
                 }
                 Ok(N::into_column(total))
@@ -2030,8 +2084,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left - right)
-                        .collect(),
+                        .map(|(left, right)| left.try_sub(right))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledScalarExpr::Mul(left, right) => {
@@ -2040,8 +2094,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left * right)
-                        .collect(),
+                        .map(|(left, right)| left.try_mul(right))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledScalarExpr::Div(left, right) => {
@@ -2050,13 +2104,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| {
-                            if right.is_zero() {
-                                Err(EvalError::DivisionByZero)
-                            } else {
-                                Ok(left / right)
-                            }
-                        })
+                        .map(|(left, right)| left.try_div(right))
                         .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
@@ -2110,8 +2158,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
-                        .map(|(base, offset)| base + chrono::Duration::days(offset))
-                        .collect(),
+                        .map(|(base, offset)| crate::engine::shift_calendar_days(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
                 ))
             }
             CompiledScalarExpr::DateAddMonths { date, months } => {
@@ -2140,7 +2188,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(DenseColumn::Integer(
                     a.into_iter()
                         .zip(b)
-                        .map(|(a, b)| (b - a).num_days())
+                        .map(|(a, b)| b.signed_duration_since(a).num_days())
                         .collect(),
                 ))
             }
@@ -2185,13 +2233,13 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                         Some(mask) => {
                             for (offset, value) in values[start..end].iter().enumerate() {
                                 if mask[start + offset] {
-                                    total += *value;
+                                    total = total.try_add(*value)?;
                                 }
                             }
                         }
                         None => {
                             for value in &values[start..end] {
-                                total += *value;
+                                total = total.try_add(*value)?;
                             }
                         }
                     }
@@ -2352,8 +2400,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let mut total = vec![N::ZERO; length];
                 for item in items {
                     let values = N::vec_from_column(&self.resolve_related_scalar(relation, item)?)?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        total[index] += value;
+                    for (total, value) in total.iter_mut().zip(values) {
+                        *total = total.try_add(value)?;
                     }
                 }
                 Ok(N::into_column(total))
@@ -2364,8 +2412,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left - right)
-                        .collect(),
+                        .map(|(left, right)| left.try_sub(right))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledRelatedScalarExpr::Mul(left, right) => {
@@ -2374,8 +2422,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| left * right)
-                        .collect(),
+                        .map(|(left, right)| left.try_mul(right))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledRelatedScalarExpr::Div(left, right) => {
@@ -2384,13 +2432,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(left, right)| {
-                            if right.is_zero() {
-                                Err(EvalError::DivisionByZero)
-                            } else {
-                                Ok(left / right)
-                            }
-                        })
+                        .map(|(left, right)| left.try_div(right))
                         .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
@@ -2446,8 +2488,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
-                        .map(|(base, offset)| base + chrono::Duration::days(offset))
-                        .collect(),
+                        .map(|(base, offset)| crate::engine::shift_calendar_days(base, offset))
+                        .collect::<Result<Vec<_>, _>>()?,
                 ))
             }
             CompiledRelatedScalarExpr::DateAddMonths { date, months } => {
@@ -2480,7 +2522,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(DenseColumn::Integer(
                     a.into_iter()
                         .zip(b)
-                        .map(|(a, b)| (b - a).num_days())
+                        .map(|(a, b)| b.signed_duration_since(a).num_days())
                         .collect(),
                 ))
             }
@@ -2667,8 +2709,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let mut total = vec![N::ZERO; self.row_count];
                 for item in items {
                     let values = N::vec_from_column(&self.eval_scalar(item)?)?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        total[index] += value;
+                    for (total, value) in total.iter_mut().zip(values) {
+                        *total = total.try_add(value)?;
                     }
                 }
                 Ok(N::into_column(total))
@@ -2677,14 +2719,20 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let left = N::vec_from_column(&self.eval_scalar(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar(right)?)?;
                 Ok(N::into_column(
-                    left.into_iter().zip(right).map(|(l, r)| l - r).collect(),
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(l, r)| l.try_sub(r))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledScalarExpr::Mul(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar(right)?)?;
                 Ok(N::into_column(
-                    left.into_iter().zip(right).map(|(l, r)| l * r).collect(),
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(l, r)| l.try_mul(r))
+                        .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
             CompiledScalarExpr::Div(left, right) => {
@@ -2693,13 +2741,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok(N::into_column(
                     left.into_iter()
                         .zip(right)
-                        .map(|(l, r)| {
-                            if r.is_zero() {
-                                Err(EvalError::DivisionByZero)
-                            } else {
-                                Ok(l / r)
-                            }
-                        })
+                        .map(|(l, r)| l.try_div(r))
                         .collect::<Result<Vec<N>, EvalError>>()?,
                 ))
             }
@@ -2812,12 +2854,15 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         // periods had a nonzero `x`". A Bool/judgment-shaped inner value counts
         // `true`; every numeric variant counts `!= 0`.
         if kind == OverPeriodsKind::Count {
-            let mut counts = vec![0_i64; self.row_count];
+            let mut counts = vec![0_usize; self.row_count];
             for executor in &mut self.period_executors {
                 let column = executor.eval_scalar_expr(value)?;
                 accumulate_nonzero_counts(&column, &mut counts)?;
             }
-            return Ok(DenseColumn::Integer(counts));
+            // A count of periods fits in i64 on every supported target.
+            return Ok(DenseColumn::Integer(
+                counts.into_iter().map(|count| count as i64).collect(),
+            ));
         }
 
         // period-major: per_period[p][r] is entity r's inner value in period p.
@@ -2834,11 +2879,11 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 .map(|row| {
                     let mut total = N::ZERO;
                     for period in &per_period {
-                        total += period[row];
+                        total = total.try_add(period[row])?;
                     }
-                    total
+                    Ok(total)
                 })
-                .collect::<Vec<N>>(),
+                .collect::<Result<Vec<N>, EvalError>>()?,
             OverPeriodsKind::Max => (0..self.row_count)
                 .map(|row| {
                     // period_count >= 1 is guaranteed by the caller.
@@ -2862,21 +2907,18 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                     .map(|row| {
                         let mut values: Vec<N> =
                             per_period.iter().map(|period| period[row]).collect();
-                        // Descending sort. N is Decimal or f64; per-period inner
-                        // values are finite in practice, so a total order via
-                        // partial_cmp is safe here.
-                        values
-                            .sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                        // Descending sort.
+                        values.sort_by(|a, b| b.rank_cmp(a));
                         // n is bounded by the period count, so this takes a
                         // genuine prefix of the sorted values (no zero padding).
                         let take = counts[row];
                         let mut total = N::ZERO;
                         for value in &values[..take] {
-                            total += *value;
+                            total = total.try_add(*value)?;
                         }
-                        total
+                        Ok(total)
                     })
-                    .collect::<Vec<N>>()
+                    .collect::<Result<Vec<N>, EvalError>>()?
             }
         };
         Ok(N::into_column(result))
@@ -3096,7 +3138,7 @@ fn dense_value_label(column: &DenseColumn, row: usize) -> String {
 /// Numeric variants count `!= 0`; a `Bool` column counts `true`; `Date`/`Text`
 /// columns have no zero and cannot be produced by an arithmetic inner value, so
 /// they are rejected rather than silently counted.
-fn accumulate_nonzero_counts(column: &DenseColumn, counts: &mut [i64]) -> Result<(), EvalError> {
+fn accumulate_nonzero_counts(column: &DenseColumn, counts: &mut [usize]) -> Result<(), EvalError> {
     if column.len() != counts.len() {
         return Err(EvalError::TypeMismatch(format!(
             "count_over_periods inner value produced {} rows but the batch has {}",

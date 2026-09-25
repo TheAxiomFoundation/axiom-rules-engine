@@ -152,7 +152,7 @@ fn calendar_shifts_match_exact_dates_in_explain_fast_fallback_and_dense() {
 
 #[test]
 fn calendar_shifts_reject_fractional_offsets_and_overflow_without_panicking() {
-    for function in ["date_add_months", "date_add_years"] {
+    for function in ["date_add_days", "date_add_months", "date_add_years"] {
         let artifact = artifact(function);
         for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
             for (base, offset) in [
@@ -170,40 +170,59 @@ fn calendar_shifts_reject_fractional_offsets_and_overflow_without_panicking() {
                     date("2025-01-31"),
                     ScalarValueSpec::Integer { value: i64::MIN },
                 ),
+                // The smallest day count chrono's TimeDelta cannot hold.
+                (
+                    date("2025-01-31"),
+                    ScalarValueSpec::Integer {
+                        value: 106_751_991_168,
+                    },
+                ),
                 (NaiveDate::MAX, ScalarValueSpec::Integer { value: 1 }),
                 (NaiveDate::MIN, ScalarValueSpec::Integer { value: -1 }),
             ] {
+                let error = execute_request(request(
+                    &artifact,
+                    mode.clone(),
+                    ScalarValueSpec::Date { value: base },
+                    offset,
+                ))
+                .expect_err("an out-of-range shift is an error");
+                let message = error.to_string();
                 assert!(
-                    execute_request(request(
-                        &artifact,
-                        mode.clone(),
-                        ScalarValueSpec::Date { value: base },
-                        offset
-                    ))
-                    .is_err()
+                    message.contains(&format!("{function} expects an integer"))
+                        || message.contains(&format!(
+                            "{function} result is outside the supported date range"
+                        )),
+                    "{function} in {mode:?}: {message}"
                 );
             }
         }
         let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Person")).unwrap();
-        for offset in [i64::MIN, i64::MAX] {
-            assert!(
-                dense
-                    .execute(
-                        &period().to_model().unwrap(),
-                        DenseBatchSpec {
-                            row_count: 1,
-                            inputs: HashMap::from([
-                                (
-                                    "base_date".to_string(),
-                                    DenseColumn::Date(vec![date("2025-01-31")])
-                                ),
-                                ("offset".to_string(), DenseColumn::Integer(vec![offset])),
-                            ]),
-                            relations: HashMap::new(),
-                        },
-                        &["shifted_date".to_string()]
-                    )
-                    .is_err()
+        for (base, offset) in [
+            (date("2025-01-31"), i64::MIN),
+            (date("2025-01-31"), i64::MAX),
+            (date("2025-01-31"), 106_751_991_168),
+            (NaiveDate::MAX, 1),
+            (NaiveDate::MIN, -1),
+        ] {
+            let error = dense
+                .execute(
+                    &period().to_model().unwrap(),
+                    DenseBatchSpec {
+                        row_count: 1,
+                        inputs: HashMap::from([
+                            ("base_date".to_string(), DenseColumn::Date(vec![base])),
+                            ("offset".to_string(), DenseColumn::Integer(vec![offset])),
+                        ]),
+                        relations: HashMap::new(),
+                    },
+                    &["shifted_date".to_string()],
+                )
+                .expect_err("an out-of-range shift is an error");
+            assert_eq!(
+                error.to_string(),
+                format!("type mismatch: {function} result is outside the supported date range"),
+                "{function} from {base} by {offset}"
             );
         }
     }
@@ -329,4 +348,107 @@ rules:
             other => panic!("unexpected related dense output {other:?}"),
         }
     }
+}
+
+#[test]
+fn date_add_days_overflow_inside_related_rules_is_an_error_in_every_mode() {
+    use axiom_rules_engine::dense::{DenseRelationBatchSpec, DenseRelationKey};
+    use axiom_rules_engine::spec::RelationRecordSpec;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_family
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: shifted_date
+    kind: derived
+    entity: Person
+    dtype: Date
+    period: Month
+    versions:
+      - effective_from: '2025-01-01'
+        formula: date_add_days(base_date, 1)
+  - name: shifted_day_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2025-01-01'
+        formula: days_between(base_date, shifted_date)
+  - name: family_day_count
+    kind: derived
+    entity: Family
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2025-01-01'
+        formula: sum(member_of_family.shifted_day_count)
+"#,
+    )
+    .unwrap();
+    let expected = "type mismatch: date_add_days result is outside the supported date range";
+    let interval = IntervalSpec {
+        start: period().start,
+        end: period().end,
+    };
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let error = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: artifact.program.clone(),
+            dataset: DatasetSpec {
+                inputs: vec![InputRecordSpec {
+                    name: "base_date".into(),
+                    entity: "Person".into(),
+                    entity_id: "p".into(),
+                    interval: interval.clone(),
+                    value: ScalarValueSpec::Date {
+                        value: NaiveDate::MAX,
+                    },
+                }],
+                relations: vec![RelationRecordSpec {
+                    name: "member_of_family".into(),
+                    tuple: vec!["p".into(), "f".into()],
+                    interval: interval.clone(),
+                }],
+                ..Default::default()
+            },
+            queries: vec![ExecutionQuery {
+                assessment_date: None,
+                entity_id: "f".into(),
+                period: period(),
+                outputs: vec!["family_day_count".into()],
+            }],
+        })
+        .expect_err("a member's out-of-range date is an error");
+        assert_eq!(error.to_string(), expected, "{mode:?}");
+    }
+    let error = DenseCompiledProgram::from_artifact(&artifact, Some("Family"))
+        .unwrap()
+        .execute(
+            &period().to_model().unwrap(),
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    DenseRelationKey {
+                        name: "member_of_family".into(),
+                        current_slot: 1,
+                        related_slot: 0,
+                    },
+                    DenseRelationBatchSpec {
+                        offsets: vec![0, 1],
+                        inputs: HashMap::from([(
+                            "base_date".into(),
+                            DenseColumn::Date(vec![NaiveDate::MAX]),
+                        )]),
+                    },
+                )]),
+            },
+            &["family_day_count".into()],
+        )
+        .expect_err("a member's out-of-range date is an error");
+    assert_eq!(error.to_string(), expected);
 }

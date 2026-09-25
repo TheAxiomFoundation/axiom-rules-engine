@@ -1,0 +1,6 @@
+# src/engine.rs, src/bulk.rs and src/dense.rs deny
+# clippy::arithmetic_side_effects: rust_decimal and chrono operators panic on
+# overflow, so evaluator arithmetic goes through the checked helpers in
+# src/engine.rs and returns an EvalError instead. usize is exempt: it only
+# indexes rows, offsets and items of in-memory collections.
+arithmetic-side-effects-allowed = ["usize"]
