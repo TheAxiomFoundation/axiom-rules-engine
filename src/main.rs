@@ -771,9 +771,10 @@ fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
                 }
             }
             other => {
-                return Err(
-                    format!("unknown migrate artifact argument `{other}`\n\nusage: {MIGRATE_ARTIFACT_USAGE}").into(),
-                );
+                return Err(format!(
+                    "unknown migrate artifact argument `{other}`\n\nusage: {MIGRATE_ARTIFACT_USAGE}"
+                )
+                .into());
             }
         }
     }
@@ -781,9 +782,8 @@ fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let shown = artifact_path.display().to_string();
     let source = std::fs::read_to_string(&artifact_path)
         .map_err(|error| format!("failed to read `{shown}`: {error}"))?;
-    let migration = axiom_rules_engine::migrate::migrate_artifact_relation_typing(
-        &source, &shown, &overrides,
-    )?;
+    let migration =
+        axiom_rules_engine::migrate::migrate_artifact_relation_typing(&source, &shown, &overrides)?;
     if let Some(output_path) = &output_path {
         std::fs::write(
             output_path,

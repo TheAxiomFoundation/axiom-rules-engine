@@ -2912,7 +2912,9 @@ fn type_inferred_relations(
                     relation: relation.name.clone(),
                     declarations: declarations
                         .into_iter()
-                        .map(|(kinds, names)| format!("[{}] by {}", kinds.join(", "), names.join(", ")))
+                        .map(|(kinds, names)| {
+                            format!("[{}] by {}", kinds.join(", "), names.join(", "))
+                        })
                         .collect::<Vec<_>>()
                         .join("; "),
                 });

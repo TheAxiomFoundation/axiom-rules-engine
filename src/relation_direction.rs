@@ -209,7 +209,8 @@ impl Resolver<'_> {
                 where_clause,
                 ..
             } => {
-                let related_entity = self.aggregate(relation, current_slot, related_slot, entity)?;
+                let related_entity =
+                    self.aggregate(relation, current_slot, related_slot, entity)?;
                 if let Some(predicate) = where_clause {
                     self.judgment(predicate, &related_entity, None)?;
                 }

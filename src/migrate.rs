@@ -674,9 +674,13 @@ pub enum ArtifactRelationMigrationError {
     Compile(#[from] crate::compile::CompileError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
-    #[error("--relation-entities names relation `{relation}`, which the artifact does not declare as a data relation{hint}")]
+    #[error(
+        "--relation-entities names relation `{relation}`, which the artifact does not declare as a data relation{hint}"
+    )]
     UnknownRelation { relation: String, hint: String },
-    #[error("--relation-entities gives relation `{relation}` {found} kinds, but its arity is {arity}")]
+    #[error(
+        "--relation-entities gives relation `{relation}` {found} kinds, but its arity is {arity}"
+    )]
     OverrideArity {
         relation: String,
         arity: usize,
@@ -703,7 +707,9 @@ pub enum ArtifactRelationMigrationError {
         "cannot infer every slot kind from executable usage; pass `--relation-entities <relation>=<Kind>,<Kind>` (kinds in tuple order) for:\n{0}"
     )]
     Uninferable(String),
-    #[error("the migrated artifact still fails relation entity typing; recompile it from source:\n{0}")]
+    #[error(
+        "the migrated artifact still fails relation entity typing; recompile it from source:\n{0}"
+    )]
     StillIllTyped(crate::relation_typing::RelationTypingReport),
 }
 
@@ -790,7 +796,9 @@ pub fn migrate_artifact_relation_typing(
         if relation.derivation.is_some() {
             continue;
         }
-        let usage = executed.get(&relation.name).map(|usage| &usage.slot_entities);
+        let usage = executed
+            .get(&relation.name)
+            .map(|usage| &usage.slot_entities);
         if let Some(kinds) = resolved_overrides.get(&relation.name) {
             if kinds.len() != relation.arity {
                 return Err(ArtifactRelationMigrationError::OverrideArity {
@@ -804,12 +812,14 @@ pub fn migrate_artifact_relation_typing(
                     if let Some(executed) = executed
                         && executed != given
                     {
-                        return Err(ArtifactRelationMigrationError::OverrideContradictsExecution {
-                            relation: relation.name.clone(),
-                            slot,
-                            given: given.clone(),
-                            executed: executed.clone(),
-                        });
+                        return Err(
+                            ArtifactRelationMigrationError::OverrideContradictsExecution {
+                                relation: relation.name.clone(),
+                                slot,
+                                given: given.clone(),
+                                executed: executed.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -834,11 +844,13 @@ pub fn migrate_artifact_relation_typing(
                 .zip(usage)
                 .any(|(declared, executed)| executed.as_ref().is_some_and(|e| e != declared));
             if contradicts {
-                return Err(ArtifactRelationMigrationError::DeclarationContradictsExecution {
-                    relation: relation.name.clone(),
-                    declared: relation.slot_entities.clone(),
-                    executed: format_executed(usage),
-                });
+                return Err(
+                    ArtifactRelationMigrationError::DeclarationContradictsExecution {
+                        relation: relation.name.clone(),
+                        declared: relation.slot_entities.clone(),
+                        executed: format_executed(usage),
+                    },
+                );
             }
             continue;
         }

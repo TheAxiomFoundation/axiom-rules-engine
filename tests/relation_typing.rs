@@ -222,8 +222,10 @@ fn untyped_rulespec_relation_used_in_aggregation_fails_to_compile() {
 
 #[test]
 fn both_declared_orders_count_members_when_tuples_follow_the_declaration() {
-    for (arguments, member_first) in [("[Person, Household]", true), ("[Household, Person]", false)]
-    {
+    for (arguments, member_first) in [
+        ("[Person, Household]", true),
+        ("[Household, Person]", false),
+    ] {
         let program = snap_program(arguments);
         let relations = ["p1", "p2"]
             .iter()
@@ -299,7 +301,9 @@ fn queried_household_id_is_kind_evidence_for_reversed_tuples_without_inputs() {
         )
         .expect_err("strict binding refuses the reversed tuples");
     assert!(
-        error.to_string().contains("from the dataset input records or the queries"),
+        error
+            .to_string()
+            .contains("from the dataset input records or the queries"),
         "{error}"
     );
 
@@ -376,7 +380,10 @@ fn no_orientation_of_member_tuples_yields_a_silent_wrong_count() {
             }
         }
     }
-    assert_eq!(cases, 8, "every all-forward case executed (4 sizes x 2 label modes)");
+    assert_eq!(
+        cases, 8,
+        "every all-forward case executed (4 sizes x 2 label modes)"
+    );
 }
 
 #[test]
@@ -661,8 +668,8 @@ rules:
 /// A pre-typing artifact: the typed SNAP program with its relation's
 /// `slot_entities` removed, as engines before relation typing wrote them.
 fn legacy_artifact_json(arguments: &str) -> String {
-    let artifact = CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(arguments))
-        .unwrap();
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(arguments)).unwrap();
     let mut value = serde_json::to_value(&artifact).unwrap();
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         relation.as_object_mut().unwrap().remove("slot_entities");
@@ -672,8 +679,9 @@ fn legacy_artifact_json(arguments: &str) -> String {
 
 #[test]
 fn loading_a_pre_typing_artifact_names_the_migration() {
-    let error = CompiledProgramArtifact::from_json_str(&legacy_artifact_json("[Person, Household]"))
-        .expect_err("an artifact executing an untyped relation must not load");
+    let error =
+        CompiledProgramArtifact::from_json_str(&legacy_artifact_json("[Person, Household]"))
+            .expect_err("an artifact executing an untyped relation must not load");
     assert!(
         matches!(error, CompileError::LegacyArtifactRelationTyping { .. }),
         "{error}"
@@ -727,10 +735,9 @@ fn migration_types_an_artifact_as_it_executes() {
         vec!["Person", "Household"]
     );
     // Migration types the artifact; it does not change what it computes.
-    let original = CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(
-        "[Person, Household]",
-    ))
-    .unwrap();
+    let original =
+        CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership("[Person, Household]"))
+            .unwrap();
     assert_eq!(
         serde_json::to_value(&reloaded).unwrap(),
         serde_json::to_value(&original).unwrap()
@@ -838,7 +845,10 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
     let dry_run = engine()
         .args(["migrate", "artifact", "--artifact"])
         .arg(&legacy_path)
-        .args(["--relation-entities", "member_of_household=Person,Household"])
+        .args([
+            "--relation-entities",
+            "member_of_household=Person,Household",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -852,7 +862,10 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
     let migrated = engine()
         .args(["migrate", "artifact", "--artifact"])
         .arg(&legacy_path)
-        .args(["--relation-entities", "member_of_household=Person,Household"])
+        .args([
+            "--relation-entities",
+            "member_of_household=Person,Household",
+        ])
         .arg("--output")
         .arg(&typed_path)
         .output()

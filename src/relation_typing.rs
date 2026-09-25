@@ -111,7 +111,11 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
         let semantics = if derived.versions.is_empty() {
             vec![&derived.semantics]
         } else {
-            derived.versions.iter().map(|version| &version.semantics).collect()
+            derived
+                .versions
+                .iter()
+                .map(|version| &version.semantics)
+                .collect()
         };
         for semantics in semantics {
             let context = Context {
@@ -209,13 +213,7 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn push(
-        &mut self,
-        code: RelationTypingCode,
-        relation: &str,
-        citing: &str,
-        message: String,
-    ) {
+    fn push(&mut self, code: RelationTypingCode, relation: &str, citing: &str, message: String) {
         self.violations.insert(RelationTypingViolation {
             code,
             relation: relation.to_string(),
@@ -281,7 +279,8 @@ impl<'a> Checker<'a> {
         // explain and the bulk path read different positions.
         let (current, related) = match derivation {
             Some(derivation) => {
-                if (current_slot, related_slot) != (derivation.current_slot, derivation.related_slot)
+                if (current_slot, related_slot)
+                    != (derivation.current_slot, derivation.related_slot)
                 {
                     self.push(
                         RelationTypingCode::DerivedRelationSlotsDiverge,
@@ -313,7 +312,8 @@ impl<'a> Checker<'a> {
             } else {
                 let current_kind = kinds[current].as_str();
                 related_entity = Some(kinds[related].clone());
-                let filtered_entity = derivation.and_then(|derivation| derivation.entity.as_deref());
+                let filtered_entity =
+                    derivation.and_then(|derivation| derivation.entity.as_deref());
                 if let Some(entity) = context.entity
                     && entity != current_kind
                     && filtered_entity != Some(entity)
@@ -441,7 +441,8 @@ impl<'a> Checker<'a> {
                 else {
                     continue;
                 };
-                self.used_relations.insert(derivation.source_relation.clone());
+                self.used_relations
+                    .insert(derivation.source_relation.clone());
                 let source_kinds = self.typed_slots(&derivation.source_relation, &name);
                 if let Some(source_kinds) = source_kinds.as_ref()
                     && !derivation.slot_entities.is_empty()
