@@ -72,27 +72,6 @@ rules:
         formula: sum(member_of_household.income)
 "#;
 
-const MEMBER_PREDICATE_COUNT: &str = r#"
-format: rulespec/v1
-rules:
-  - name: doubled_income_is_positive
-    kind: derived
-    entity: Person
-    dtype: Judgment
-    period: Month
-    versions:
-      - effective_from: 2026-01-01
-        formula: income * 2 > 0
-  - name: result
-    kind: derived
-    entity: Household
-    dtype: Integer
-    period: Month
-    versions:
-      - effective_from: 2026-01-01
-        formula: count_where(member_of_household, doubled_income_is_positive)
-"#;
-
 const MAX: &str = "79228162514264337593543950335";
 
 fn household_formula(formula: &str) -> String {
@@ -600,61 +579,118 @@ fn related_aggregation_overflow_is_an_error_in_every_mode() {
     );
 }
 
+fn member_predicate_count(predicate: &str) -> String {
+    format!(
+        r#"
+format: rulespec/v1
+rules:
+  - name: counted_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: {predicate}
+  - name: result
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: count_where(member_of_household, counted_member)
+"#
+    )
+}
+
 #[test]
 fn arithmetic_in_a_related_members_predicate_reports_overflow_in_every_mode() {
     // Bulk evaluates the member predicate through its related-row evaluator,
     // dense through its related-column evaluator.
-    assert_overflows_in_explain_and_fast(
-        |mode| {
-            member_request(
+    for (predicate, operation) in [
+        ("income + income > 0", "addition"),
+        ("income - (0 - income) > 0", "subtraction"),
+        ("income * 2 > 0", "multiplication"),
+        ("income / 0.5 > 0", "division"),
+    ] {
+        let rulespec = member_predicate_count(predicate);
+        assert_overflows_in_explain_and_fast(
+            |mode| member_request(mode, &rulespec, &[("household-a", &["1", MAX])]),
+            operation,
+        );
+        assert_dense_overflow(dense_members(&rulespec, &[&["1", MAX]]), operation);
+
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let response = execute_request(member_request(
                 mode,
-                MEMBER_PREDICATE_COUNT,
-                &[("household-a", &["1", MAX])],
-            )
-        },
-        "multiplication",
-    );
-    assert_dense_overflow(
-        dense_members(MEMBER_PREDICATE_COUNT, &[&["1", MAX]]),
-        "multiplication",
-    );
-    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
-        let response = execute_request(member_request(
-            mode,
-            MEMBER_PREDICATE_COUNT,
-            &[("household-a", &["1", "-1", "2"])],
-        ))
-        .expect("count answers");
-        assert_eq!(results(&response), [decimal("2")]);
+                &rulespec,
+                &[("household-a", &["1", "-1", "2"])],
+            ))
+            .expect("count answers");
+            assert_eq!(results(&response), [decimal("2")], "{predicate}");
+        }
+        assert_eq!(
+            dense_members(&rulespec, &[&["1", "-1", "2"]]).expect("dense answers"),
+            [decimal("2")],
+            "{predicate}"
+        );
     }
-    assert_eq!(
-        dense_members(MEMBER_PREDICATE_COUNT, &[&["1", "-1", "2"]]).expect("dense answers"),
-        [decimal("2")]
-    );
 }
 
 #[test]
-fn lifetime_reductions_report_overflow() {
-    let year = |y: i32| Period {
-        kind: PeriodKind::TaxYear,
-        start: chrono::NaiveDate::from_ymd_opt(y, 1, 1).expect("date"),
-        end: chrono::NaiveDate::from_ymd_opt(y, 12, 31).expect("date"),
-    };
-    let batch = |value: &str| DenseBatchSpec {
-        row_count: 1,
-        inputs: HashMap::from([(
-            "earnings".to_string(),
-            DenseColumn::Decimal(vec![decimal(value)]),
-        )]),
-        relations: HashMap::new(),
-    };
-    for formula in [
-        "sum_over_periods(earnings)",
-        "sum_top_n_over_periods(earnings, 2)",
-    ] {
-        let program = dense_program(
-            &format!(
-                r#"
+fn filtered_related_aggregation_overflow_is_an_error_in_every_mode() {
+    // sum_where sums only the members its predicate selects; dense takes a
+    // separate, masked path for it.
+    const RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: earning_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: income > 0
+  - name: result
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum_where(member_of_household, income, earning_member)
+"#;
+    assert_overflows_in_explain_and_fast(
+        |mode| member_request(mode, RULESPEC, &[("household-a", &[MAX, "-5", "1"])]),
+        "addition",
+    );
+    assert_dense_overflow(dense_members(RULESPEC, &[&[MAX, "-5", "1"]]), "addition");
+
+    // A member the predicate excludes is not summed, so its value cannot
+    // overflow the total.
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(member_request(
+            mode,
+            RULESPEC,
+            &[("household-a", &[MAX, "-1"])],
+        ))
+        .expect("the filtered sum answers");
+        assert_eq!(results(&response), [decimal(MAX)]);
+    }
+    assert_eq!(
+        dense_members(RULESPEC, &[&[MAX, "-1"]]).expect("dense answers"),
+        [decimal(MAX)]
+    );
+}
+
+/// Dense decimal lifetime execution of `total = <formula>` for one worker
+/// whose `earnings` in consecutive years are given.
+fn lifetime_total(formula: &str, earnings: &[&str]) -> Result<Vec<Decimal>, EvalError> {
+    let program = dense_program(
+        &format!(
+            r#"
 format: rulespec/v1
 rules:
   - name: total
@@ -666,30 +702,71 @@ rules:
       - effective_from: '2000-01-01'
         formula: {formula}
 "#
-            ),
-            "Worker",
-        );
-        let error = program
-            .execute_lifetime(
-                &[year(2001), year(2002)],
-                vec![batch(MAX), batch("1")],
-                &["total".to_string()],
-            )
-            .expect_err("the lifetime sum overflows");
-        assert!(
-            matches!(error, EvalError::ArithmeticOverflow("addition")),
-            "{formula}: {error:?}"
-        );
-        let result = program
-            .execute_lifetime(
-                &[year(2001), year(2002)],
-                vec![batch(MAX), batch("-1")],
-                &["total".to_string()],
-            )
-            .expect("an in-range lifetime sum answers");
+        ),
+        "Worker",
+    );
+    let periods = (2001..)
+        .take(earnings.len())
+        .map(|year| Period {
+            kind: PeriodKind::TaxYear,
+            start: chrono::NaiveDate::from_ymd_opt(year, 1, 1).expect("date"),
+            end: chrono::NaiveDate::from_ymd_opt(year, 12, 31).expect("date"),
+        })
+        .collect::<Vec<_>>();
+    let batches = earnings
+        .iter()
+        .map(|value| DenseBatchSpec {
+            row_count: 1,
+            inputs: HashMap::from([(
+                "earnings".to_string(),
+                DenseColumn::Decimal(vec![decimal(value)]),
+            )]),
+            relations: HashMap::new(),
+        })
+        .collect();
+    let result = program.execute_lifetime(&periods, batches, &["total".to_string()])?;
+    Ok(dense_decimals(&result.outputs["total"]))
+}
+
+#[test]
+fn lifetime_reductions_report_overflow() {
+    for formula in [
+        "sum_over_periods(earnings)",
+        "sum_top_n_over_periods(earnings, 2)",
+    ] {
+        assert_dense_overflow(lifetime_total(formula, &[MAX, "1"]), "addition");
         assert_eq!(
-            dense_decimals(&result.outputs["total"]),
+            lifetime_total(formula, &[MAX, "-1"]).expect("an in-range sum answers"),
             [decimal(MAX) - Decimal::ONE],
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_on_lifetime_reductions_reports_overflow() {
+    // The lifetime executor evaluates the arithmetic around its reductions
+    // itself, apart from the per-period executors.
+    for (formula, operation, in_range) in [
+        (
+            "sum_over_periods(earnings) + sum_over_periods(earnings)",
+            "addition",
+            "8",
+        ),
+        (
+            "0 - sum_over_periods(earnings) - sum_over_periods(earnings)",
+            "subtraction",
+            "-8",
+        ),
+        ("sum_over_periods(earnings) * 2", "multiplication", "8"),
+        ("sum_over_periods(earnings) / 0.5", "division", "8"),
+    ] {
+        // The reduction itself stays in range (MAX - 1); the operation on it
+        // does not.
+        assert_dense_overflow(lifetime_total(formula, &[MAX, "-1"]), operation);
+        assert_eq!(
+            lifetime_total(formula, &["3", "1"]).expect("in range"),
+            [decimal(in_range)],
             "{formula}"
         );
     }
