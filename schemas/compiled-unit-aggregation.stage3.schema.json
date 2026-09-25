@@ -2185,6 +2185,30 @@
           "type": "object"
         },
         {
+          "description": "The fallback of a `match` without a `_ =>` arm, reached only when the\nsubject equals none of `patterns`; evaluating it is an error, never a\nvalue. It carries the subject and every listed pattern so evaluators\nthat compute both branches of a conditional can tell which rows reach\nit.",
+          "properties": {
+            "kind": {
+              "const": "no_match",
+              "type": "string"
+            },
+            "patterns": {
+              "items": {
+                "$ref": "#/$defs/ScalarExprSpec"
+              },
+              "type": "array"
+            },
+            "subject": {
+              "$ref": "#/$defs/ScalarExprSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "subject",
+            "patterns"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Reduction over an entity's own period axis (lifetime execution only).\n`n` is present only for the `sum_top_n` reduction. Expression-level,\nadditive to the serialized surface — no artifact-format-version bump.",
           "properties": {
             "kind": {
