@@ -139,7 +139,10 @@ chain; parenthesize whenever a formula's grouping matters to a reader):
 | 6 (tightest) | unary `-`, `not` | scalar / judgment |
 
 Literals: integers (`3`), decimals (`0.3`), booleans (`true` / `false`),
-and double- or single-quoted strings. `#` starts a comment that runs to the
+and double- or single-quoted strings. Inside a string, `\n`, `\r`, and `\t`
+stand for a newline, carriage return, and tab; a backslash before any other
+character, including `\\`, `\"`, `\'`, or a non-ASCII character such as
+`\é`, stands for that character. `#` starts a comment that runs to the
 end of the line. Date literals are not part of the expression grammar —
 dates come from inputs, parameters, the reserved `period_start` /
 `period_end` identifiers, or the version envelope.
