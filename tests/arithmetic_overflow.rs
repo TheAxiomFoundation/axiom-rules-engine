@@ -583,7 +583,7 @@ fn division_reports_the_same_error_as_explain_in_every_mode() {
 }
 
 #[test]
-fn division_in_member_predicates_and_lifetime_formulas_rejects_zero_first() {
+fn division_order_in_member_predicates_and_lifetime_formulas() {
     // Related-row division follows explain's order too.
     let rulespec = member_predicate_count("(income + 1) / (income - income) > 0");
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
@@ -598,11 +598,12 @@ fn division_in_member_predicates_and_lifetime_formulas_rejects_zero_first() {
     let error = dense_members(&rulespec, &[&[MAX]]).expect_err("the division fails");
     assert_eq!(error.to_string(), "division by zero");
 
-    // Lifetime formulas have no explain counterpart; they divide in the same
-    // order.
+    // Lifetime formulas have no explain counterpart and keep evaluating the
+    // dividend first, so a `sum_top_n` dividend reports its n-contract error
+    // ahead of the divisor's (python/tests/test_dense_lifetime.py).
     let error = lifetime_total("(sum_over_periods(earnings) + 1) / 0", &[MAX])
         .expect_err("the division fails");
-    assert_eq!(error.to_string(), "division by zero");
+    assert_eq!(error.to_string(), overflow_message("addition"));
 }
 
 #[test]

@@ -2707,9 +2707,11 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 elementwise(left, right, N::try_mul)
             }
             CompiledScalarExpr::Div(left, right) => {
-                let divisor = N::vec_from_column(&self.eval_scalar(right)?)?;
-                reject_zero_divisor(&divisor)?;
+                // Lifetime formulas have no explain counterpart, so division
+                // keeps evaluating the dividend first: a `sum_top_n` dividend
+                // then reports its n-contract error before the divisor's.
                 let dividend = N::vec_from_column(&self.eval_scalar(left)?)?;
+                let divisor = N::vec_from_column(&self.eval_scalar(right)?)?;
                 elementwise(dividend, divisor, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
