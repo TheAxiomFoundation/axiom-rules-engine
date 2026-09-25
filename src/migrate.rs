@@ -649,3 +649,223 @@ fn probe_module(formula: &str) -> String {
          2026-01-01\n        formula: |-\n{body}\n"
     )
 }
+
+/// One relation whose declared slot kinds the artifact migration set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RelationTypingChange {
+    pub relation: String,
+    /// Declared kinds before migration; empty for an untyped relation.
+    pub previous: Vec<String>,
+    pub slot_entities: Vec<String>,
+    /// `inferred` from executable usage, or `override` from the caller.
+    pub source: &'static str,
+}
+
+/// An artifact typed by [`migrate_artifact_relation_typing`].
+#[derive(Debug, Clone)]
+pub struct ArtifactRelationMigration {
+    pub artifact: crate::compile::CompiledProgramArtifact,
+    pub changes: Vec<RelationTypingChange>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactRelationMigrationError {
+    #[error(transparent)]
+    Compile(#[from] crate::compile::CompileError),
+    #[error(transparent)]
+    Spec(#[from] crate::spec::SpecError),
+    #[error("--relation-entities names relation `{relation}`, which the artifact does not declare as a data relation{hint}")]
+    UnknownRelation { relation: String, hint: String },
+    #[error("--relation-entities gives relation `{relation}` {found} kinds, but its arity is {arity}")]
+    OverrideArity {
+        relation: String,
+        arity: usize,
+        found: usize,
+    },
+    #[error(
+        "--relation-entities gives relation `{relation}` slot {slot} kind `{given}`, but the artifact's executable nodes read `{executed}` ids there; the migration types an artifact as it executes and never reorders its slots, so recompile from source to change the orientation"
+    )]
+    OverrideContradictsExecution {
+        relation: String,
+        slot: usize,
+        given: String,
+        executed: String,
+    },
+    #[error(
+        "relation `{relation}` declares slot kinds {declared:?}, but the artifact's executable nodes read {executed}; pass `--relation-entities {relation}=<Kind>,...` in executed order to type the artifact as it runs, or recompile from source so the slots follow the declaration"
+    )]
+    DeclarationContradictsExecution {
+        relation: String,
+        declared: Vec<String>,
+        executed: String,
+    },
+    #[error(
+        "cannot infer every slot kind from executable usage; pass `--relation-entities <relation>=<Kind>,<Kind>` (kinds in tuple order) for:\n{0}"
+    )]
+    Uninferable(String),
+    #[error("the migrated artifact still fails relation entity typing; recompile it from source:\n{0}")]
+    StillIllTyped(crate::relation_typing::RelationTypingReport),
+}
+
+/// Type the relations of a compiled artifact the loader rejects because it
+/// executes untyped relations.
+///
+/// Each untyped data relation an executable node reads is stamped with the
+/// slot kinds its executable usage determines: the evaluating rule's entity
+/// on the slot the node keys on, and the entity of the rules its predicate
+/// or value read on the other. `overrides` (relation name, or its unique
+/// short name, to kinds in tuple order) supply slots usage leaves open and
+/// retype relations whose declaration contradicts how the artifact executes.
+/// The migration never moves an aggregate's slots, so datasets that bound
+/// correctly before still bind; datasets in the other orientation now fail
+/// binding instead of aggregating nothing. The result must pass the same
+/// typing check the loader enforces.
+pub fn migrate_artifact_relation_typing(
+    source: &str,
+    path: &str,
+    overrides: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<ArtifactRelationMigration, ArtifactRelationMigrationError> {
+    let mut artifact =
+        crate::compile::CompiledProgramArtifact::from_json_str_for_relation_migration(
+            source, path,
+        )?;
+    let model = artifact.program.to_program()?;
+    let executed = crate::model::relation_usage_orientations(&model);
+
+    let mut resolved_overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (name, kinds) in overrides {
+        let data_relations = artifact
+            .program
+            .relations
+            .iter()
+            .filter(|relation| relation.derivation.is_none())
+            .map(|relation| relation.name.as_str())
+            .collect::<Vec<_>>();
+        let resolved = if data_relations.contains(&name.as_str()) {
+            name.clone()
+        } else {
+            let suffix = format!("#relation.{name}");
+            let matches = data_relations
+                .iter()
+                .filter(|relation| relation.ends_with(&suffix))
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [only] => (**only).to_string(),
+                [] => {
+                    return Err(ArtifactRelationMigrationError::UnknownRelation {
+                        relation: name.clone(),
+                        hint: String::new(),
+                    });
+                }
+                many => {
+                    return Err(ArtifactRelationMigrationError::UnknownRelation {
+                        relation: name.clone(),
+                        hint: format!(
+                            " uniquely; it matches {}",
+                            many.iter()
+                                .map(|relation| format!("`{relation}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    });
+                }
+            }
+        };
+        resolved_overrides.insert(resolved, kinds.clone());
+    }
+
+    let format_executed = |slots: &[Option<String>]| {
+        format!(
+            "[{}]",
+            slots
+                .iter()
+                .map(|slot| slot.as_deref().unwrap_or("?"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut changes = Vec::new();
+    let mut uninferable = Vec::new();
+    for relation in &mut artifact.program.relations {
+        if relation.derivation.is_some() {
+            continue;
+        }
+        let usage = executed.get(&relation.name).map(|usage| &usage.slot_entities);
+        if let Some(kinds) = resolved_overrides.get(&relation.name) {
+            if kinds.len() != relation.arity {
+                return Err(ArtifactRelationMigrationError::OverrideArity {
+                    relation: relation.name.clone(),
+                    arity: relation.arity,
+                    found: kinds.len(),
+                });
+            }
+            if let Some(usage) = usage {
+                for (slot, (given, executed)) in kinds.iter().zip(usage).enumerate() {
+                    if let Some(executed) = executed
+                        && executed != given
+                    {
+                        return Err(ArtifactRelationMigrationError::OverrideContradictsExecution {
+                            relation: relation.name.clone(),
+                            slot,
+                            given: given.clone(),
+                            executed: executed.clone(),
+                        });
+                    }
+                }
+            }
+            if &relation.slot_entities != kinds {
+                changes.push(RelationTypingChange {
+                    relation: relation.name.clone(),
+                    previous: relation.slot_entities.clone(),
+                    slot_entities: kinds.clone(),
+                    source: "override",
+                });
+                relation.slot_entities = kinds.clone();
+            }
+            continue;
+        }
+        let Some(usage) = usage else {
+            continue;
+        };
+        if !relation.slot_entities.is_empty() {
+            let contradicts = relation
+                .slot_entities
+                .iter()
+                .zip(usage)
+                .any(|(declared, executed)| executed.as_ref().is_some_and(|e| e != declared));
+            if contradicts {
+                return Err(ArtifactRelationMigrationError::DeclarationContradictsExecution {
+                    relation: relation.name.clone(),
+                    declared: relation.slot_entities.clone(),
+                    executed: format_executed(usage),
+                });
+            }
+            continue;
+        }
+        if usage.len() == relation.arity && usage.iter().all(Option::is_some) {
+            let kinds = usage.iter().flatten().cloned().collect::<Vec<_>>();
+            changes.push(RelationTypingChange {
+                relation: relation.name.clone(),
+                previous: Vec::new(),
+                slot_entities: kinds.clone(),
+                source: "inferred",
+            });
+            relation.slot_entities = kinds;
+        } else {
+            uninferable.push(format!(
+                "  {} (arity {}; executable usage determines {})",
+                relation.name,
+                relation.arity,
+                format_executed(usage)
+            ));
+        }
+    }
+    if !uninferable.is_empty() {
+        return Err(ArtifactRelationMigrationError::Uninferable(
+            uninferable.join("\n"),
+        ));
+    }
+    crate::relation_typing::check_program(&artifact.program.to_program()?)
+        .map_err(ArtifactRelationMigrationError::StillIllTyped)?;
+    Ok(ArtifactRelationMigration { artifact, changes })
+}

@@ -11,7 +11,6 @@ use crate::model::{
     InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
     Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
     RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
-    relation_usage_orientations,
 };
 
 #[derive(Debug, Error)]
@@ -58,6 +57,14 @@ pub enum SpecError {
         relation: String,
         arity: usize,
         slot_count: usize,
+    },
+    #[error(
+        "dataset relation `{relation}` has arity {arity}, but a tuple lists {found} entity ids"
+    )]
+    RelationTupleArity {
+        relation: String,
+        arity: usize,
+        found: usize,
     },
     #[error("strict dataset relation entity validation failed:\n{0}")]
     StrictDatasetBindingDiagnostics(DatasetBindingDiagnosticReport),
@@ -332,7 +339,7 @@ impl std::fmt::Display for DatasetBindingDiagnostic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records; strict relation entity mode treats this warning as an error",
+            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records or the queries; strict relation entity mode treats this warning as an error",
             self.relation, self.slot, self.entity_id, self.expected_entity, self.actual_entity
         )
     }
@@ -398,6 +405,34 @@ impl DatasetSpec {
         program: &Program,
         options: DatasetBindingOptions,
     ) -> Result<DatasetBindingOutcome, SpecError> {
+        self.to_dataset_for_queries_with_options(program, &[], options)
+    }
+
+    /// Bind for a request whose queries evaluate the given `(entity_id,
+    /// entity)` pairs. A query evaluates each output rule on its entity id, so
+    /// that id has the rule's entity kind: this is kind evidence even for an
+    /// id no input record labels, such as a household that has members but
+    /// no household-level inputs.
+    pub fn to_dataset_for_queries(
+        &self,
+        program: &Program,
+        query_entities: &[(String, String)],
+    ) -> Result<DataSet, SpecError> {
+        let outcome = self.to_dataset_for_queries_with_options(
+            program,
+            query_entities,
+            DatasetBindingOptions::default(),
+        )?;
+        emit_dataset_binding_diagnostics(&outcome.diagnostics);
+        Ok(outcome.dataset)
+    }
+
+    pub fn to_dataset_for_queries_with_options(
+        &self,
+        program: &Program,
+        query_entities: &[(String, String)],
+        options: DatasetBindingOptions,
+    ) -> Result<DatasetBindingOutcome, SpecError> {
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -409,7 +444,8 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
-        let diagnostics = relation_slot_entity_diagnostics(program, &inputs, &relations);
+        let diagnostics =
+            relation_slot_entity_diagnostics(program, &inputs, query_entities, &relations);
         if options.strict_relation_entities && !diagnostics.is_empty() {
             return Err(SpecError::StrictDatasetBindingDiagnostics(
                 DatasetBindingDiagnosticReport { diagnostics },
@@ -431,51 +467,58 @@ fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
 fn relation_slot_entity_diagnostics(
     program: &Program,
     inputs: &[InputRecord],
+    query_entities: &[(String, String)],
     relations: &[RelationRecord],
 ) -> Vec<DatasetBindingDiagnostic> {
     // Program schemas say what each slot expects, but program metadata cannot
-    // assign opaque runtime IDs to kinds. Dataset input records are the only
-    // binding-time authority carrying both `entity_id` and `entity`. If an ID
+    // assign opaque runtime IDs to kinds. Two binding-time authorities can:
+    // input records carry both `entity_id` and `entity`, and each query
+    // evaluates its output rules' entity on its `entity_id`. A filtered
+    // entity (a derived relation's `entity`, e.g. `SnapUnit`) is queried with
+    // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds(program);
+    let canonical = |entity: &str| {
+        filtered_kinds
+            .get(entity)
+            .cloned()
+            .unwrap_or_else(|| entity.to_string())
+    };
     let mut entity_by_id = BTreeMap::<String, Option<String>>::new();
-    for input in inputs {
+    let evidence = inputs
+        .iter()
+        .map(|input| (input.entity_id.as_str(), input.entity.as_str()))
+        .chain(
+            query_entities
+                .iter()
+                .map(|(entity_id, entity)| (entity_id.as_str(), entity.as_str())),
+        );
+    for (entity_id, entity) in evidence {
+        let entity = canonical(entity);
         entity_by_id
-            .entry(input.entity_id.clone())
+            .entry(entity_id.to_string())
             .and_modify(|known| {
-                if known.as_deref() != Some(input.entity.as_str()) {
+                if known.as_deref() != Some(entity.as_str()) {
                     *known = None;
                 }
             })
-            .or_insert_with(|| Some(input.entity.clone()));
+            .or_insert_with(|| Some(entity));
     }
 
-    let usage_orientations = relation_usage_orientations(program);
     let mut diagnostics = Vec::new();
     for record in relations {
-        let schema = program
-            .relations
-            .get(&record.name)
-            .expect("bound relation names resolve to a program schema");
-        if schema.slot_entities.is_empty() {
+        // Executed relations are entity-typed (`relation_typing`), and
+        // execution reads each slot by its declared kind, so the declaration
+        // is the expected tuple order. An untyped relation no rule executes
+        // has no expectation to check.
+        let Some(expected_entities) =
+            crate::relation_typing::effective_slot_entities(program, &record.name)
+        else {
             continue;
-        }
-        // Used relations follow the orientation encoded in executable
-        // count/sum/membership nodes. Raw declaration order is positional
-        // authority only for a relation with no program use.
-        let expected_entities = usage_orientations.get(&record.name).map_or_else(
-            || {
-                schema
-                    .slot_entities
-                    .iter()
-                    .cloned()
-                    .map(Some)
-                    .collect::<Vec<_>>()
-            },
-            |orientation| orientation.slot_entities.clone(),
-        );
+        };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
-            let Some(expected_entity) = expected_entities.get(slot).and_then(Option::as_ref) else {
+            let Some(expected_entity) = expected_entities.get(slot) else {
                 continue;
             };
             let Some(Some(actual_entity)) = entity_by_id.get(entity_id) else {
@@ -1551,6 +1594,17 @@ impl RelationRecordSpec {
                 reference: self.name.clone(),
             }
         })?;
+        // A short tuple has no id at the slot a lookup reads, so it would be
+        // dropped without a trace; a long one carries ids nothing reads.
+        if let Some(schema) = program.relations.get(&name)
+            && self.tuple.len() != schema.arity
+        {
+            return Err(SpecError::RelationTupleArity {
+                relation: self.name.clone(),
+                arity: schema.arity,
+                found: self.tuple.len(),
+            });
+        }
         Ok(RelationRecord {
             name,
             tuple: self.tuple.clone(),
