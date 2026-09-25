@@ -979,6 +979,14 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::
     Ok(())
 }
 
+/// Check that a program's derived-rule and relation-derivation graphs are
+/// closed and acyclic, as compilation does. The evaluators recurse through
+/// this graph, so a request carrying a raw `ProgramSpec` must pass this check
+/// before execution; a cycle would otherwise recurse until the stack overflows.
+pub(crate) fn validate_dependency_graph(program: &ProgramSpec) -> Result<(), CompileError> {
+    evaluation_order(program).map(|_| ())
+}
+
 fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> {
     let mut derived_names = HashSet::new();
     for derived in &program.derived {

@@ -233,6 +233,10 @@ pub enum ApiError {
         assessment_date: NaiveDate,
         period_start: NaiveDate,
     },
+    /// The program's dependency graph is not executable (a cycle, a dangling
+    /// derived reference, or a duplicate rule).
+    #[error(transparent)]
+    InvalidProgram(#[from] crate::compile::CompileError),
     #[error("pinned rule `{rule}` does not exist in the program")]
     UnknownPinnedRule { rule: String },
     #[error("rule `{rule}` is a judgment and cannot be pinned to a scalar value")]
@@ -259,6 +263,9 @@ fn validate_assessment_dates(queries: &[ExecutionQuery]) -> Result<(), ApiError>
 
 pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, ApiError> {
     validate_assessment_dates(&request.queries)?;
+    // Compiled artifacts are checked when loaded; a raw ProgramSpec is checked
+    // here, before any evaluator recurses through its dependency graph.
+    crate::compile::validate_dependency_graph(&request.program)?;
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
     let dataset = request.dataset.to_dataset_for_program(&program)?;
