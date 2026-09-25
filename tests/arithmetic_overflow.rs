@@ -601,9 +601,13 @@ fn division_order_in_member_predicates_and_lifetime_formulas() {
     // Lifetime formulas have no explain counterpart and keep evaluating the
     // dividend first, so a `sum_top_n` dividend reports its n-contract error
     // ahead of the divisor's (python/tests/test_dense_lifetime.py).
-    let error = lifetime_total("(sum_over_periods(earnings) + 1) / 0", &[MAX])
-        .expect_err("the division fails");
-    assert_eq!(error.to_string(), overflow_message("addition"));
+    for formula in [
+        "(sum_over_periods(earnings) + 1) / 0",
+        "(sum_over_periods(earnings) + 1) / (sum_over_periods(earnings) * 2)",
+    ] {
+        let error = lifetime_total(formula, &[MAX]).expect_err("the division fails");
+        assert_eq!(error.to_string(), overflow_message("addition"), "{formula}");
+    }
 }
 
 #[test]
