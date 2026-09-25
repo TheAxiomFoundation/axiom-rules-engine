@@ -2890,6 +2890,173 @@ fn amount_compared(op: ComparisonOpSpec, value: i64) -> axiom_rules_engine::spec
 /// the first operand that decides the row. Fast mode matches it when every
 /// row in the batch decides the same way: branches and operands that no row
 /// reaches are not evaluated, so their errors cannot fail the batch.
+/// Ask each query for `output` alone, in explain and in fast mode, and return
+/// each mode's values, asserting fast answered natively rather than by
+/// falling back to explain.
+fn explain_and_fast_values(
+    program: &ProgramSpec,
+    dataset: &DatasetSpec,
+    queries: &[ExecutionQuery],
+    output: &str,
+) -> [Vec<Decimal>; 2] {
+    let queries: Vec<ExecutionQuery> = queries
+        .iter()
+        .map(|query| ExecutionQuery {
+            outputs: vec![output.to_string()],
+            ..query.clone()
+        })
+        .collect();
+    [ExecutionMode::Explain, ExecutionMode::Fast].map(|mode| {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: queries.clone(),
+        })
+        .unwrap_or_else(|error| panic!("{mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode, "{mode:?} fell back");
+        response
+            .results
+            .iter()
+            .map(|result| decimal_output(&result.outputs[output]))
+            .collect()
+    })
+}
+
+/// A request may query one entity more than once. Bulk used to fill each
+/// entity's inputs into its last query row only, so an earlier row read an
+/// optional input as absent: fast answered [0, 15] where explain answers
+/// [15, 15].
+#[test]
+fn fast_mode_gives_every_query_of_an_entity_its_inputs() {
+    let program = ProgramSpec {
+        derived: vec![household_decimal_rule(
+            "optional_amount",
+            ScalarExprSpec::InputOrElse {
+                name: "amount".to_string(),
+                default: decimal_value("0"),
+            },
+        )],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let query = simple_queries(&period).remove(0);
+    let values = explain_and_fast_values(
+        &program,
+        &simple_dataset(&period),
+        &[query.clone(), query],
+        "optional_amount",
+    );
+    assert_eq!(values[0], vec![decimal("15"), decimal("15")]);
+    assert_eq!(values[1], values[0]);
+}
+
+/// With a relation of more than two slots, one related entity can appear in
+/// several tuples. Explain counts and sums each related entity once; bulk
+/// used to count tuples, so fast answered 2 and 10 where explain answers 1
+/// and 5.
+#[test]
+fn fast_mode_counts_and_sums_each_related_entity_once() {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "household_member_role".to_string(),
+            arity: 3,
+            slot_entities: Vec::new(),
+            derivation: None,
+        }],
+        derived: vec![
+            household_decimal_rule(
+                "member_count",
+                ScalarExprSpec::CountRelated {
+                    relation: "household_member_role".to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    where_clause: None,
+                },
+            ),
+            household_decimal_rule(
+                "member_income",
+                ScalarExprSpec::SumRelated {
+                    relation: "household_member_role".to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    value: RelatedValueRefSpec::Input {
+                        name: "income".to_string(),
+                    },
+                    where_clause: None,
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![InputRecordSpec {
+            name: "income".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "person-1".to_string(),
+            interval: interval.clone(),
+            value: decimal_value("5"),
+        }],
+        relations: ["head", "earner"]
+            .into_iter()
+            .map(|role| RelationRecordSpec {
+                name: "household_member_role".to_string(),
+                tuple: vec![
+                    "household-1".to_string(),
+                    "person-1".to_string(),
+                    role.to_string(),
+                ],
+                interval: interval.clone(),
+            })
+            .collect(),
+    };
+    let queries = [ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["member_count".to_string(), "member_income".to_string()],
+    }];
+    for (output, expected) in [("member_count", "1"), ("member_income", "5")] {
+        let values = explain_and_fast_values(&program, &dataset, &queries, output);
+        assert_eq!(values[0], vec![decimal(expected)], "{output}");
+        assert_eq!(values[1], values[0], "{output}");
+    }
+}
+
+/// The mirror of the uniformly true case below: when no row selects the
+/// `then` branch, fast mode must not evaluate it either.
+#[test]
+fn fast_mode_skips_a_then_branch_no_row_selects() {
+    let program = ProgramSpec {
+        derived: vec![household_decimal_rule(
+            "guarded_ratio",
+            ScalarExprSpec::If {
+                condition: Box::new(amount_compared(ComparisonOpSpec::Gt, 100)),
+                then_expr: Box::new(ScalarExprSpec::Div {
+                    left: Box::new(input_expr("amount")),
+                    right: Box::new(decimal_literal(0)),
+                }),
+                else_expr: Box::new(input_expr("amount")),
+            },
+        )],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let values = explain_and_fast_values(
+        &program,
+        &simple_dataset(&period),
+        &simple_queries(&period),
+        "guarded_ratio",
+    );
+    assert_eq!(values[0], vec![decimal("15"), decimal("20")]);
+    assert_eq!(values[1], values[0]);
+}
+
 #[test]
 fn fast_mode_skips_branches_and_operands_no_row_reaches() {
     use axiom_rules_engine::spec::JudgmentExprSpec;

@@ -277,21 +277,31 @@ impl<'a> BulkEvaluator<'a> {
         period: Period,
         entity_ids: Vec<String>,
     ) -> Self {
-        let query_index = entity_ids
+        // An entity may be queried more than once; every one of its rows gets
+        // its inputs and relations, not only the last.
+        let mut rows_by_entity: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, entity_id) in entity_ids.iter().enumerate() {
+            rows_by_entity
+                .entry(entity_id.clone())
+                .or_default()
+                .push(index);
+        }
+        let query_index = rows_by_entity
             .iter()
-            .enumerate()
-            .map(|(index, entity_id)| (entity_id.clone(), index))
+            .map(|(entity_id, rows)| (entity_id.clone(), rows[0]))
             .collect::<HashMap<String, usize>>();
 
         let mut query_input_cells: HashMap<String, Vec<Option<ScalarValue>>> = HashMap::new();
         let mut related_input_index = HashMap::new();
         for record in &data.inputs {
             if record.interval.contains_period(&period) {
-                if let Some(&query_row) = query_index.get(&record.entity_id) {
-                    query_input_cells
+                if let Some(query_rows) = rows_by_entity.get(&record.entity_id) {
+                    let cells = query_input_cells
                         .entry(record.name.clone())
-                        .or_insert_with(|| vec![None; entity_ids.len()])[query_row] =
-                        Some(record.value.clone());
+                        .or_insert_with(|| vec![None; entity_ids.len()]);
+                    for &query_row in query_rows {
+                        cells[query_row] = Some(record.value.clone());
+                    }
                 } else {
                     related_input_index.insert(
                         (record.name.clone(), record.entity_id.clone()),
@@ -305,11 +315,13 @@ impl<'a> BulkEvaluator<'a> {
         for record in &data.relations {
             if record.interval.contains_period(&period) {
                 for (slot, value) in record.tuple.iter().enumerate() {
-                    if let Some(&query_row) = query_index.get(value) {
-                        relation_adjacency
+                    if let Some(query_rows) = rows_by_entity.get(value) {
+                        let adjacency = relation_adjacency
                             .entry((record.name.clone(), slot))
-                            .or_insert_with(|| vec![Vec::new(); entity_ids.len()])[query_row]
-                            .push(record.tuple.clone());
+                            .or_insert_with(|| vec![Vec::new(); entity_ids.len()]);
+                        for &query_row in query_rows {
+                            adjacency[query_row].push(record.tuple.clone());
+                        }
                     }
                 }
             }
@@ -634,13 +646,11 @@ impl<'a> BulkEvaluator<'a> {
             } => {
                 let mut values = Vec::with_capacity(self.entity_ids.len());
                 for row_index in 0..self.entity_ids.len() {
-                    let related = self.related_rows(relation, *current_slot, row_index)?;
+                    let related_ids =
+                        self.related_ids(relation, *current_slot, *related_slot, row_index)?;
                     let current_id = self.entity_ids[row_index].clone();
                     let mut count = 0_i64;
-                    for tuple in related {
-                        let Some(related_id) = tuple.get(*related_slot) else {
-                            continue;
-                        };
+                    for related_id in &related_ids {
                         if let Some(predicate) = where_clause {
                             if !self
                                 .eval_related_judgment_expr(
@@ -671,11 +681,8 @@ impl<'a> BulkEvaluator<'a> {
                 let mut totals = Vec::with_capacity(self.entity_ids.len());
                 for row_index in 0..self.entity_ids.len() {
                     let current_id = self.entity_ids[row_index].clone();
-                    let related_ids = self
-                        .related_rows(relation, *current_slot, row_index)?
-                        .iter()
-                        .filter_map(|tuple| tuple.get(*related_slot).cloned())
-                        .collect::<Vec<String>>();
+                    let related_ids =
+                        self.related_ids(relation, *current_slot, *related_slot, row_index)?;
                     let mut total = Decimal::ZERO;
                     match value {
                         RelatedValueRef::Input(name) => {
@@ -875,6 +882,27 @@ impl<'a> BulkEvaluator<'a> {
         rows.sort();
         rows.dedup();
         Ok(rows)
+    }
+
+    /// The distinct entities in `related_slot` of the tuples whose
+    /// `current_slot` is this row's entity, as explain's
+    /// `related_entity_ids` counts them: a relation with more slots can list
+    /// one related entity in several tuples, and it counts once.
+    fn related_ids(
+        &mut self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        row_index: usize,
+    ) -> Result<Vec<String>, EvalError> {
+        let mut related_ids = self
+            .related_rows(relation, current_slot, row_index)?
+            .into_iter()
+            .filter_map(|tuple| tuple.get(related_slot).cloned())
+            .collect::<Vec<String>>();
+        related_ids.sort();
+        related_ids.dedup();
+        Ok(related_ids)
     }
 
     fn eval_related_judgment_expr(
