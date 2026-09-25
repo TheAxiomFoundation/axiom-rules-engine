@@ -55,6 +55,10 @@ For repo-backed RuleSpec files, public execution requests must use durable
 legal IDs for queried outputs and dataset input/relation names. Bare local names
 remain local formula symbols only.
 
+Dataset inputs must name slots in the compiled input catalog. Derived rules
+and parameters are rejected as dataset inputs. Use request `pins` to override
+a scalar derived rule; see [dataset binding and pins](docs/rulespec.md).
+
 ## Commands
 
 To install and verify a published executable, see [Install a released binary](docs/install.md).

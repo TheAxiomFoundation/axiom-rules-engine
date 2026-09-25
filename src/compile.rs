@@ -995,7 +995,11 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
 
     for derived in &program.derived {
-        let dependencies = derived_dependencies(derived, &relation_dependencies);
+        // Sorted, so a rule with several unknown dependencies always reports
+        // the same one.
+        let dependencies = derived_dependencies(derived, &relation_dependencies)
+            .into_iter()
+            .collect::<BTreeSet<String>>();
         incoming_counts.insert(derived.name.clone(), dependencies.len());
 
         for dependency in dependencies {
@@ -1040,6 +1044,8 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
         let cycle = incoming_counts
             .into_iter()
             .filter_map(|(name, count)| (count > 0).then_some(name))
+            .collect::<BTreeSet<String>>()
+            .into_iter()
             .collect::<Vec<String>>()
             .join(", ");
         return Err(CompileError::CyclicDependency { cycle });
@@ -1206,7 +1212,9 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         .iter()
         .map(|relation| relation.name.clone())
         .collect::<HashSet<String>>();
-    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+    // Ordered, so the unknown dependency or cycle reported is the same on
+    // every run.
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for relation in &program.relations {
         let Some(derivation) = &relation.derivation else {
@@ -1215,6 +1223,7 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         let mut dependencies = HashSet::new();
         dependencies.insert(derivation.source_relation.clone());
         collect_relation_members_from_judgment(&derivation.predicate, &mut dependencies);
+        let dependencies = dependencies.into_iter().collect::<BTreeSet<String>>();
 
         for dependency in &dependencies {
             if !relation_names.contains(dependency) {
@@ -1237,7 +1246,7 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
 
 fn detect_relation_cycle(
     relation: &str,
-    graph: &HashMap<String, HashSet<String>>,
+    graph: &BTreeMap<String, BTreeSet<String>>,
     visiting: &mut HashSet<String>,
     visited: &mut HashSet<String>,
 ) -> Result<(), CompileError> {
@@ -1274,13 +1283,17 @@ fn relation_derivation_dependencies(
         };
         let mut dependencies = HashSet::new();
         collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
-        for dependency in &dependencies {
-            if !derived_names.contains(dependency) {
-                return Err(CompileError::UnknownDerivedDependency {
-                    derived: relation.name.clone(),
-                    dependency: dependency.clone(),
-                });
-            }
+        // The smallest name, so a predicate naming several unknown rules
+        // always reports the same one.
+        if let Some(dependency) = dependencies
+            .iter()
+            .filter(|dependency| !derived_names.contains(*dependency))
+            .min()
+        {
+            return Err(CompileError::UnknownDerivedDependency {
+                derived: relation.name.clone(),
+                dependency: dependency.clone(),
+            });
         }
         dependencies_by_relation.insert(relation.name.clone(), dependencies);
     }

@@ -9,10 +9,10 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
-    DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec, PeriodKindSpec,
-    PeriodSpec, ProgramSpec, RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec,
-    ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    DerivedSpec, DerivedVersionSpec, InputRecordSpec, IntervalSpec, JudgmentOutcomeSpec,
+    PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec, RelationRecordSpec,
+    ScalarExprSpec, ScalarValueSpec,
 };
 use rust_decimal::Decimal;
 
@@ -1674,7 +1674,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
+        mode: ExecutionMode::Explain,
         program,
         dataset,
         queries,
@@ -1683,6 +1683,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
 
     assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
     assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
     assert!(
         fast.metadata
             .fallback_reason
@@ -1696,6 +1697,517 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         serde_json::to_value(&fast.results).expect("fast results serialise"),
         serde_json::to_value(&explain.results).expect("explain results serialise")
     );
+}
+
+/// A household program whose outputs fail in fast mode in different ways:
+/// `household_income` aggregates a related derived value and `period_start_date`
+/// reads the period start, two constructs bulk does not support (fallback, each
+/// with its own reason); `guarded_amount` never takes its `else` branch,
+/// which reads the missing `absent_amount` (bulk skips it too, since every row
+/// agrees on the condition); `reads_first` and `reads_second` read genuinely
+/// missing inputs, and both `shares_failure` rules depend on `reads_first`.
+fn fast_outcome_program() -> ProgramSpec {
+    let household_rule = |name: &str, expr: ScalarExprSpec| DerivedSpec {
+        id: None,
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        dtype: DTypeSpec::Decimal,
+        unit: None,
+        rounding: None,
+        source: None,
+        period: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics: DerivedSemanticsSpec::Scalar { expr },
+        versions: vec![],
+    };
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            slot_entities: Vec::new(),
+            derivation: None,
+        }],
+        derived: vec![
+            DerivedSpec {
+                entity: "Person".to_string(),
+                ..household_rule("person_income", input("income"))
+            },
+            household_rule(
+                "household_income",
+                ScalarExprSpec::SumRelated {
+                    relation: "member_of_household".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Derived {
+                        name: "person_income".to_string(),
+                    },
+                    where_clause: None,
+                },
+            ),
+            household_rule(
+                "guarded_amount",
+                ScalarExprSpec::If {
+                    condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                        left: Box::new(decimal_literal(0)),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(decimal_literal(0)),
+                    }),
+                    then_expr: Box::new(decimal_literal(7)),
+                    else_expr: Box::new(input("absent_amount")),
+                },
+            ),
+            household_rule("reads_first", input("absent_first")),
+            household_rule("reads_second", input("absent_second")),
+            DerivedSpec {
+                dtype: DTypeSpec::Date,
+                ..household_rule("period_start_date", ScalarExprSpec::PeriodStart)
+            },
+            household_rule(
+                "shares_failure_a",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(1),
+                    ],
+                },
+            ),
+            household_rule(
+                "shares_failure_b",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(2),
+                    ],
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    }
+}
+
+fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionRequest {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    ExecutionRequest {
+        mode,
+        program: fast_outcome_program(),
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: decimal_value("100"),
+            }],
+            relations: vec![RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval,
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: outputs.iter().map(|output| output.to_string()).collect(),
+        }],
+    }
+}
+
+/// Fast mode's outcome is a function of the request, not of the process.
+/// Each run below builds fresh hash sets, each with its own hasher keys, so an
+/// outcome that depended on hash iteration order would vary across the 64
+/// runs of each output order. When any requested output
+/// needs explain, the whole request falls back, whichever output is listed
+/// first, and answers `guarded_amount` as explain does (7).
+#[test]
+fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
+    let explain = execute_request(fast_outcome_request(
+        ExecutionMode::Explain,
+        &["household_income", "guarded_amount"],
+    ))
+    .expect("explain answers both outputs");
+    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["guarded_amount"]),
+        decimal("7")
+    );
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["household_income"]),
+        decimal("100")
+    );
+
+    for outputs in [
+        ["household_income", "guarded_amount"],
+        ["guarded_amount", "household_income"],
+    ] {
+        for run in 0..64 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "run {run} with outputs {outputs:?} failed instead of falling back: {error}"
+                    )
+                });
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+            assert_eq!(
+                fast.metadata.fallback_reason.as_deref(),
+                Some("bulk execution does not yet support aggregating related derived values"),
+                "run {run} with outputs {outputs:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(&fast.results).expect("results serialise"),
+                explain_results,
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// When several outputs need explain for different reasons, the first of
+/// them in request order supplies the fallback reason, in either order, also
+/// after an output bulk answers.
+#[test]
+fn fast_mode_fallback_reason_is_the_first_in_request_order() {
+    const RELATED: &str = "bulk execution does not yet support aggregating related derived values";
+    const PERIOD: &str = "bulk fast mode does not yet support period_start / period_end";
+    for (outputs, reason) in [
+        (["household_income", "period_start_date"], RELATED),
+        (["period_start_date", "household_income"], PERIOD),
+        (["guarded_amount", "period_start_date"], PERIOD),
+    ] {
+        for run in 0..16 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| panic!("run {run} with outputs {outputs:?}: {error}"));
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+            assert_eq!(
+                fast.metadata.fallback_reason.as_deref(),
+                Some(reason),
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// With no output needing explain, fast mode reports the first failing output
+/// in request order on every run, the same error explain reports.
+#[test]
+fn fast_mode_reports_the_first_failing_output_in_request_order() {
+    for (outputs, missing) in [
+        (["reads_first", "reads_second"], "`absent_first`"),
+        (["reads_second", "reads_first"], "`absent_second`"),
+        // Two outputs sharing one failing dependency report its error.
+        (["shares_failure_a", "shares_failure_b"], "`absent_first`"),
+        // An unknown output is an error in its place in request order.
+        (["reads_first", "no_such_output"], "`absent_first`"),
+        (["no_such_output", "reads_first"], "no_such_output"),
+    ] {
+        let explain = execute_request(fast_outcome_request(ExecutionMode::Explain, &outputs))
+            .expect_err("explain fails on the first missing input");
+        assert!(
+            explain.to_string().contains(missing),
+            "explain reported {explain}"
+        );
+        for run in 0..64 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .expect_err("fast fails on the first missing input");
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// A household rule reading one input, and a batch request over several
+/// households that supplies `inputs` as (input name, household, value).
+fn batch_request(
+    mode: ExecutionMode,
+    rules: Vec<(&str, ScalarExprSpec)>,
+    inputs: &[(&str, &str, &str)],
+    queries: &[(&str, &[&str])],
+) -> ExecutionRequest {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    ExecutionRequest {
+        mode,
+        program: ProgramSpec {
+            derived: rules
+                .into_iter()
+                .map(|(name, expr)| DerivedSpec {
+                    id: None,
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    dtype: DTypeSpec::Decimal,
+                    unit: None,
+                    rounding: None,
+                    source: None,
+                    period: None,
+                    source_url: None,
+                    corpus_citation_path: None,
+                    semantics: DerivedSemanticsSpec::Scalar { expr },
+                    versions: vec![],
+                })
+                .collect(),
+            ..ProgramSpec::default()
+        },
+        dataset: DatasetSpec {
+            inputs: inputs
+                .iter()
+                .map(|(name, entity_id, value)| InputRecordSpec {
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: interval.clone(),
+                    value: decimal_value(value),
+                })
+                .collect(),
+            relations: Vec::new(),
+        },
+        queries: queries
+            .iter()
+            .map(|(entity_id, outputs)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: outputs.iter().map(|output| output.to_string()).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Bulk warms each output over every row at once, so across a multi-query
+/// batch its first error can belong to a later query than explain's (which
+/// works query by query). Fast mode therefore lets explain decide any request
+/// bulk fails on, and reports explain's error.
+#[test]
+fn fast_mode_reports_explains_error_across_a_multi_query_batch() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![
+            ("amount_output", input("amount")),
+            ("other_output", input("absent_other")),
+        ]
+    };
+    // `amount` is supplied for household-a only, so warming `amount_output`
+    // fails on household-b before either later output of household-a is
+    // reached.
+    for first_query_outputs in [
+        &["amount_output", "no_such_output"][..],
+        &["amount_output", "other_output"][..],
+    ] {
+        let request = |mode| {
+            batch_request(
+                mode,
+                rules(),
+                &[("amount", "household-a", "5")],
+                &[
+                    ("household-a", first_query_outputs),
+                    ("household-b", &["amount_output"]),
+                ],
+            )
+        };
+        let explain = execute_request(request(ExecutionMode::Explain))
+            .expect_err("explain fails on household-a's second output");
+        assert!(
+            !explain.to_string().contains("household-b"),
+            "explain reported {explain}"
+        );
+        for run in 0..32 {
+            let fast = execute_request(request(ExecutionMode::Fast))
+                .expect_err("fast fails as explain does");
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "run {run} with first query outputs {first_query_outputs:?}"
+            );
+        }
+    }
+}
+
+/// Bulk evaluates both branches of a conditional for every row. When the rows
+/// disagree, the branch a row does not take can fail for that row; explain
+/// never evaluates it, so the request succeeds through explain.
+#[test]
+fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![(
+            "flagged_or_amount",
+            ScalarExprSpec::If {
+                condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                    left: Box::new(input("flag")),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(decimal_literal(1)),
+                }),
+                then_expr: Box::new(decimal_literal(7)),
+                else_expr: Box::new(input("amount")),
+            },
+        )]
+    };
+    // household-a takes the `then` branch and has no `amount`; household-b
+    // takes the `else` branch and has one.
+    let request = |mode| {
+        batch_request(
+            mode,
+            rules(),
+            &[
+                ("flag", "household-a", "1"),
+                ("flag", "household-b", "0"),
+                ("amount", "household-b", "5"),
+            ],
+            &[
+                ("household-a", &["flagged_or_amount"]),
+                ("household-b", &["flagged_or_amount"]),
+            ],
+        )
+    };
+    let explain = execute_request(request(ExecutionMode::Explain)).expect("explain answers");
+    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["flagged_or_amount"]),
+        decimal("7")
+    );
+    assert_eq!(
+        decimal_output(&explain.results[1].outputs["flagged_or_amount"]),
+        decimal("5")
+    );
+    for run in 0..16 {
+        let fast = execute_request(request(ExecutionMode::Fast))
+            .unwrap_or_else(|error| panic!("run {run} failed instead of falling back: {error}"));
+        assert_eq!(
+            fast.metadata.actual_mode,
+            ExecutionMode::Explain,
+            "run {run}"
+        );
+        assert!(
+            fast.metadata
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("`amount`")),
+            "run {run}: {:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&fast.results).expect("results serialise"),
+            explain_results,
+            "run {run}"
+        );
+    }
+}
+
+/// A parameter output anywhere in the request sends it to explain before
+/// bulk evaluates anything. Bulk evaluates both branches of `guarded` for
+/// every row, and household-a's untaken branch overflows (a panic, since
+/// arithmetic is unchecked), so warming `guarded` before seeing `rate` would
+/// crash a request that explain answers.
+#[test]
+fn fast_mode_sends_a_parameter_request_to_explain_before_evaluating_anything() {
+    const RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: rate
+    kind: parameter
+    dtype: Decimal
+    versions:
+      - effective_from: 2026-01-01
+        formula: "3"
+  - name: guarded
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          if flag == 1: 0
+          else: amount * 2
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(RULESPEC).expect("RuleSpec lowers");
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let input = |name: &str, entity_id: &str, value: &str| InputRecordSpec {
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        entity_id: entity_id.to_string(),
+        interval: interval.clone(),
+        value: decimal_value(value),
+    };
+    let request = |mode, first_outputs: &[&str]| ExecutionRequest {
+        mode,
+        program: program.clone(),
+        dataset: DatasetSpec {
+            inputs: vec![
+                input("flag", "household-a", "1"),
+                input("amount", "household-a", &Decimal::MAX.to_string()),
+                input("flag", "household-b", "0"),
+                input("amount", "household-b", "1"),
+            ],
+            relations: Vec::new(),
+        },
+        queries: [
+            ("household-a", first_outputs),
+            ("household-b", &["guarded"][..]),
+        ]
+        .into_iter()
+        .map(|(entity_id, outputs)| ExecutionQuery {
+            assessment_date: None,
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+            outputs: outputs.iter().map(|output| output.to_string()).collect(),
+        })
+        .collect(),
+    };
+    for first_outputs in [&["guarded", "rate"][..], &["rate", "guarded"][..]] {
+        let explain = execute_request(request(ExecutionMode::Explain, first_outputs))
+            .expect("explain answers");
+        assert_eq!(
+            decimal_output(&explain.results[0].outputs["guarded"]),
+            decimal("0")
+        );
+        assert_eq!(
+            decimal_output(&explain.results[1].outputs["guarded"]),
+            decimal("2")
+        );
+        let fast = execute_request(request(ExecutionMode::Fast, first_outputs))
+            .expect("fast answers through explain");
+        assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+        assert!(
+            fast.metadata
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("parameter output `rate`")),
+            "{:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&fast.results).expect("results serialise"),
+            serde_json::to_value(&explain.results).expect("results serialise"),
+            "outputs {first_outputs:?}"
+        );
+    }
 }
 
 #[test]
@@ -2415,6 +2927,196 @@ fn pinned_versioned_rule_evaluates_to_the_pin_in_every_mode() {
 }
 
 #[test]
+fn pinned_rule_needs_none_of_its_original_inputs_in_any_mode() {
+    // The pin replaces adjusted_amount's value, so its formula's `amount`
+    // input need not be supplied. Fast mode used to evaluate the original
+    // formula anyway and fail with a missing input.
+    let period = simple_period();
+    for mode in [ExecutionMode::Fast, ExecutionMode::Explain] {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+            .expect("RuleSpec module compiles from YAML");
+        let response = execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: mode.clone(),
+                dataset: DatasetSpec {
+                    inputs: Vec::new(),
+                    relations: Vec::new(),
+                },
+                queries: simple_queries(&period),
+                pins: vec![RulePin {
+                    rule: "adjusted_amount".to_string(),
+                    value: decimal_value("99"),
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("pinned {mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode);
+        assert_eq!(response.metadata.fallback_reason, None);
+        for result in &response.results {
+            assert_eq!(
+                decimal_output(&result.outputs["adjusted_amount"]),
+                decimal("99")
+            );
+        }
+    }
+}
+
+fn household_decimal_rule(name: &str, expr: ScalarExprSpec) -> DerivedSpec {
+    DerivedSpec {
+        id: None,
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        dtype: DTypeSpec::Decimal,
+        unit: None,
+        rounding: None,
+        source: None,
+        period: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics: DerivedSemanticsSpec::Scalar { expr },
+        versions: vec![],
+    }
+}
+
+fn input_expr(name: &str) -> ScalarExprSpec {
+    ScalarExprSpec::Input {
+        name: name.to_string(),
+    }
+}
+
+fn amount_compared(op: ComparisonOpSpec, value: i64) -> axiom_rules_engine::spec::JudgmentExprSpec {
+    axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+        left: Box::new(input_expr("amount")),
+        op,
+        right: Box::new(decimal_literal(value)),
+    }
+}
+
+/// Explain evaluates only the branch a row selects and stops `and` / `or` at
+/// the first operand that decides the row. Fast mode matches it when every
+/// row in the batch decides the same way: branches and operands that no row
+/// reaches are not evaluated, so their errors cannot fail the batch.
+#[test]
+fn fast_mode_skips_branches_and_operands_no_row_reaches() {
+    use axiom_rules_engine::spec::JudgmentExprSpec;
+
+    let program = ProgramSpec {
+        derived: vec![
+            // Guarded division: every household has amount 15 or 20, so no
+            // row takes the branch that divides by a zero input.
+            household_decimal_rule(
+                "guarded_ratio",
+                ScalarExprSpec::If {
+                    condition: Box::new(amount_compared(ComparisonOpSpec::Gt, 0)),
+                    then_expr: Box::new(input_expr("amount")),
+                    else_expr: Box::new(ScalarExprSpec::Div {
+                        left: Box::new(input_expr("amount")),
+                        right: Box::new(input_expr("zero")),
+                    }),
+                },
+            ),
+            // Every row fails the first operand, so neither mode reads
+            // `absent_flag`.
+            household_decimal_rule(
+                "and_short_circuit",
+                ScalarExprSpec::If {
+                    condition: Box::new(JudgmentExprSpec::And {
+                        items: vec![
+                            amount_compared(ComparisonOpSpec::Gt, 100),
+                            JudgmentExprSpec::Comparison {
+                                left: Box::new(input_expr("absent_flag")),
+                                op: ComparisonOpSpec::Gt,
+                                right: Box::new(decimal_literal(0)),
+                            },
+                        ],
+                    }),
+                    then_expr: Box::new(decimal_literal(1)),
+                    else_expr: Box::new(decimal_literal(2)),
+                },
+            ),
+            // Every row satisfies the first operand.
+            household_decimal_rule(
+                "or_short_circuit",
+                ScalarExprSpec::If {
+                    condition: Box::new(JudgmentExprSpec::Or {
+                        items: vec![
+                            amount_compared(ComparisonOpSpec::Gt, 10),
+                            JudgmentExprSpec::Comparison {
+                                left: Box::new(input_expr("absent_flag")),
+                                op: ComparisonOpSpec::Gt,
+                                right: Box::new(decimal_literal(0)),
+                            },
+                        ],
+                    }),
+                    then_expr: Box::new(decimal_literal(3)),
+                    else_expr: Box::new(decimal_literal(4)),
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let mut dataset = simple_dataset(&period);
+    for entity_id in ["household-1", "household-2"] {
+        dataset.inputs.push(InputRecordSpec {
+            name: "zero".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.to_string(),
+            interval: IntervalSpec {
+                start: period.start,
+                end: period.end,
+            },
+            value: decimal_value("0"),
+        });
+    }
+    let queries: Vec<ExecutionQuery> = simple_queries(&period)
+        .into_iter()
+        .map(|query| ExecutionQuery {
+            outputs: vec![
+                "guarded_ratio".to_string(),
+                "and_short_circuit".to_string(),
+                "or_short_circuit".to_string(),
+            ],
+            ..query
+        })
+        .collect();
+
+    let mut responses = Vec::new();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: queries.clone(),
+        })
+        .unwrap_or_else(|error| panic!("{mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode);
+        let values: Vec<[Decimal; 3]> = response
+            .results
+            .iter()
+            .map(|result| {
+                [
+                    decimal_output(&result.outputs["guarded_ratio"]),
+                    decimal_output(&result.outputs["and_short_circuit"]),
+                    decimal_output(&result.outputs["or_short_circuit"]),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                [decimal("15"), decimal("2"), decimal("3")],
+                [decimal("20"), decimal("2"), decimal("3")],
+            ],
+            "{mode:?}"
+        );
+        responses.push(values);
+    }
+    assert_eq!(responses[0], responses[1]);
+}
+
+#[test]
 fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
@@ -2436,6 +3138,335 @@ fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
         matches!(&error, ApiError::UnknownPinnedRule { rule } if rule == "no_such_rule"),
         "got {error:?}"
     );
+}
+
+#[test]
+fn dataset_binding_rejects_derived_ids_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#adjusted_amount";
+            add_dataset_binding_input(&mut request, reference);
+
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a derived legal id is not a dataset input");
+            assert_derived_dataset_input_error(&error.to_string(), reference);
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_rejects_parameter_ids_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#base_amount";
+            add_dataset_binding_input(&mut request, reference);
+
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a parameter legal id is not a dataset input");
+            assert_parameter_dataset_input_error(&error.to_string(), reference);
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_identifies_bare_derived_names_with_and_without_public_ids() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode, public_ids);
+                add_dataset_binding_input(&mut request, "adjusted_amount");
+
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("a bare derived name is not a dataset input");
+                assert_derived_dataset_input_error(&error.to_string(), "adjusted_amount");
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_identifies_bare_parameter_names_with_and_without_public_ids() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode, public_ids);
+                add_dataset_binding_input(&mut request, "base_amount");
+
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("a bare parameter name is not a dataset input");
+                assert_parameter_dataset_input_error(&error.to_string(), "base_amount");
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_refuses_computed_inputs_with_default_and_strict_options() {
+    for strict_relation_entities in [false, true] {
+        for (reference, derived) in [
+            ("us:statutes/26/24#adjusted_amount", true),
+            ("us:statutes/26/24#base_amount", false),
+        ] {
+            let mut request = dataset_binding_request(ExecutionMode::Explain, true);
+            add_dataset_binding_input(&mut request, reference);
+            let program = request
+                .program
+                .to_program()
+                .expect("fixture model converts");
+            let error = request
+                .dataset
+                .to_dataset_for_program_with_options(
+                    &program,
+                    DatasetBindingOptions {
+                        strict_relation_entities,
+                    },
+                )
+                .expect_err("binding options cannot allow a computed input");
+            if derived {
+                assert_derived_dataset_input_error(&error.to_string(), reference);
+            } else {
+                assert_parameter_dataset_input_error(&error.to_string(), reference);
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_pins_do_not_allow_derived_dataset_inputs() {
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let mut request = dataset_binding_request(mode, true);
+        let reference = "us:statutes/26/24#adjusted_amount";
+        add_dataset_binding_input(&mut request, reference);
+        let artifact =
+            CompiledProgramArtifact::compile(request.program).expect("fixture program compiles");
+        let error = execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: request.mode,
+                dataset: request.dataset,
+                queries: request.queries,
+                pins: vec![RulePin {
+                    rule: "adjusted_amount".to_string(),
+                    value: decimal_value("99"),
+                }],
+            },
+        )
+        .expect_err("a pin does not make a derived rule a dataset input");
+        assert_derived_dataset_input_error(&error.to_string(), reference);
+    }
+}
+
+#[test]
+fn dataset_binding_resolver_does_not_expose_computed_ids_as_input_slots() {
+    let request = dataset_binding_request(ExecutionMode::Explain, true);
+    let program = request
+        .program
+        .to_program()
+        .expect("fixture model converts");
+    for reference in [
+        "us:statutes/26/24#adjusted_amount",
+        "us:statutes/26/24#base_amount",
+    ] {
+        assert_eq!(
+            program.resolve_input_name(reference),
+            None,
+            "computed reference {reference} must not resolve to an input slot"
+        );
+    }
+    assert_eq!(
+        program.resolve_input_name("us:statutes/26/24#input.amount"),
+        Some("amount".to_string())
+    );
+}
+
+#[test]
+fn dataset_binding_accepts_real_canonical_inputs_in_every_request_path_and_mode() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let request = dataset_binding_request(mode.clone(), true);
+            let response = execute_dataset_binding_request(request, compiled)
+                .expect("a canonical catalog input remains accepted");
+            assert_eq!(response.metadata.actual_mode, mode);
+            for (result, expected) in response.results.iter().zip(["25", "30"]) {
+                assert_eq!(
+                    decimal_output(
+                        result
+                            .outputs
+                            .get("us:statutes/26/24#adjusted_amount")
+                            .expect("derived output exists")
+                    ),
+                    decimal(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_unknown_inputs_and_derived_relation_names_remain_invalid() {
+    for compiled in [false, true] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            for reference in ["no_such_input", "us:statutes/26/24#input.no_such_input"] {
+                let mut request = dataset_binding_request(mode.clone(), true);
+                add_dataset_binding_input(&mut request, reference);
+                let error = execute_dataset_binding_request(request, compiled)
+                    .expect_err("unknown input is rejected");
+                assert!(
+                    matches!(error, ApiError::Spec(axiom_rules_engine::spec::SpecError::InvalidDatasetInputReference { reference: rejected }) if rejected == reference)
+                );
+            }
+
+            let mut request = dataset_binding_request(mode, true);
+            let reference = "us:statutes/26/24#adjusted_amount";
+            request.dataset.relations.push(RelationRecordSpec {
+                name: reference.to_string(),
+                tuple: vec!["household-1".to_string()],
+                interval: request.dataset.inputs[0].interval.clone(),
+            });
+            let error = execute_dataset_binding_request(request, compiled)
+                .expect_err("a derived id is not a relation");
+            assert!(
+                matches!(error, ApiError::Spec(axiom_rules_engine::spec::SpecError::InvalidDatasetRelationReference { reference: rejected }) if rejected == reference)
+            );
+        }
+    }
+}
+
+#[test]
+fn dataset_binding_accepts_explicit_input_slots_sharing_computed_rule_names() {
+    for public_ids in [false, true] {
+        for compiled in [false, true] {
+            for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+                let mut request = dataset_binding_request(mode.clone(), public_ids);
+                let expression = DerivedSemanticsSpec::Scalar {
+                    expr: ScalarExprSpec::Add {
+                        items: vec![
+                            ScalarExprSpec::Input {
+                                name: "adjusted_amount".to_string(),
+                            },
+                            ScalarExprSpec::Input {
+                                name: "base_amount".to_string(),
+                            },
+                        ],
+                    },
+                };
+                let derived = &mut request.program.derived[0];
+                derived.semantics = expression.clone();
+                for version in &mut derived.versions {
+                    version.semantics = expression.clone();
+                }
+                request.dataset.inputs.clear();
+                let period = simple_period();
+                for (name, value) in [("adjusted_amount", "90"), ("base_amount", "9")] {
+                    request.dataset.inputs.push(InputRecordSpec {
+                        name: if public_ids {
+                            format!("us:statutes/26/24#input.{name}")
+                        } else {
+                            name.to_string()
+                        },
+                        entity: "Household".to_string(),
+                        entity_id: "household-1".to_string(),
+                        interval: IntervalSpec {
+                            start: period.start,
+                            end: period.end,
+                        },
+                        value: decimal_value(value),
+                    });
+                }
+                request.queries.truncate(1);
+                let output_name = request.queries[0].outputs[0].clone();
+                let response = execute_dataset_binding_request(request, compiled)
+                    .expect("explicit input slots take precedence over computed names");
+                assert_eq!(response.metadata.actual_mode, mode);
+                assert_eq!(
+                    decimal_output(
+                        response.results[0]
+                            .outputs
+                            .get(&output_name)
+                            .expect("derived output exists")
+                    ),
+                    decimal("99")
+                );
+            }
+        }
+    }
+}
+
+fn dataset_binding_request(mode: ExecutionMode, public_ids: bool) -> ExecutionRequest {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    let mut request = simple_execution_request(mode, program);
+    if public_ids {
+        for derived in &mut request.program.derived {
+            derived.id = Some(format!("us:statutes/26/24#{}", derived.name));
+        }
+        for parameter in &mut request.program.parameters {
+            parameter.id = Some(format!("us:statutes/26/24#{}", parameter.name));
+        }
+        for input in &mut request.dataset.inputs {
+            input.name = format!("us:statutes/26/24#input.{}", input.name);
+        }
+        for query in &mut request.queries {
+            query.outputs = vec!["us:statutes/26/24#adjusted_amount".to_string()];
+        }
+    }
+    request
+}
+
+fn add_dataset_binding_input(request: &mut ExecutionRequest, reference: &str) {
+    let mut input = request.dataset.inputs[0].clone();
+    input.name = reference.to_string();
+    input.value = decimal_value("999");
+    request.dataset.inputs.push(input);
+}
+
+fn execute_dataset_binding_request(
+    request: ExecutionRequest,
+    compiled: bool,
+) -> Result<ExecutionResponse, ApiError> {
+    if compiled {
+        let artifact =
+            CompiledProgramArtifact::compile(request.program).expect("fixture program compiles");
+        execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: request.mode,
+                dataset: request.dataset,
+                queries: request.queries,
+                pins: Vec::new(),
+            },
+        )
+    } else {
+        execute_request(request)
+    }
+}
+
+fn assert_derived_dataset_input_error(message: &str, reference: &str) {
+    assert!(
+        message.contains(&format!("dataset input `{reference}`")),
+        "{message}"
+    );
+    assert!(
+        message.contains("derived rule `adjusted_amount`"),
+        "{message}"
+    );
+    assert!(message.contains("pins"), "{message}");
+    assert!(
+        message.contains("\"rule\": \"adjusted_amount\""),
+        "{message}"
+    );
+}
+
+fn assert_parameter_dataset_input_error(message: &str, reference: &str) {
+    assert!(
+        message.contains(&format!("dataset input `{reference}`")),
+        "{message}"
+    );
+    assert!(message.contains("parameter `base_amount`"), "{message}");
+    assert!(message.contains("law"), "{message}");
+    assert!(message.contains("program parameter"), "{message}");
 }
 
 #[test]
