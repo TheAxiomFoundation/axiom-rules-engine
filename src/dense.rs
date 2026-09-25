@@ -11,12 +11,13 @@ use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::{
-    ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+    ArithmeticError, CalendarUnit, EvalError, calendar_count_error, checked_add, checked_div,
+    checked_mul, checked_sub, empty_extremum_error, parameter_key_error,
 };
 use crate::model::{
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
     OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
-    ScalarExpr, ScalarValue,
+    ScalarExpr, ScalarValue, decimal_as_index, f64_as_index,
 };
 
 #[derive(Clone, Debug)]
@@ -43,34 +44,16 @@ impl DenseColumn {
         }
     }
 
-    fn as_index_vec(&self) -> Result<Vec<i64>, EvalError> {
+    /// Read every row as an integer operand, or `None` when any row is not
+    /// an exact integer in the `i64` range. As in explain, a fractional value
+    /// is refused, never truncated, and an out-of-range `f64` is refused, never
+    /// saturated; the caller reports explain's error for its construct.
+    fn as_index_vec(&self) -> Option<Vec<i64>> {
         match self {
-            Self::Integer(values) => Ok(values.clone()),
-            Self::Decimal(values) => values
-                .iter()
-                .map(|value| {
-                    value.to_i64().ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "parameter key for dense lookup must be integral".to_string(),
-                        )
-                    })
-                })
-                .collect(),
-            Self::Float(values) => values
-                .iter()
-                .map(|value| {
-                    if value.is_finite() && value.fract() == 0.0 {
-                        Ok(*value as i64)
-                    } else {
-                        Err(EvalError::TypeMismatch(
-                            "parameter key for dense lookup must be integral".to_string(),
-                        ))
-                    }
-                })
-                .collect(),
-            _ => Err(EvalError::TypeMismatch(
-                "parameter key for dense lookup must be numeric".to_string(),
-            )),
+            Self::Integer(values) => Some(values.clone()),
+            Self::Decimal(values) => values.iter().copied().map(decimal_as_index).collect(),
+            Self::Float(values) => values.iter().copied().map(f64_as_index).collect(),
+            _ => None,
         }
     }
 
@@ -186,10 +169,10 @@ impl DenseNum for Decimal {
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
-        // Truncate toward zero; `to_i64` returns None when the truncated value
-        // is beyond the i64 range, which the strict n contract treats as a hard
-        // error (never a saturation to i64::MAX).
-        self.trunc().to_i64()
+        // Truncate toward zero; the truncated value is integral, so this is
+        // `None` only beyond the i64 range, which the strict n contract treats
+        // as a hard error (never a saturation to i64::MAX).
+        decimal_as_index(self.trunc())
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -289,12 +272,10 @@ impl DenseNum for f64 {
     fn try_to_i64_trunc(self) -> Option<i64> {
         // Reject non-finite and out-of-range values instead of saturating: the
         // strict n contract errors on a garbage n rather than silently reading
-        // it as 0 (NaN) or a clamped extreme.
-        let truncated = self.trunc();
-        if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
-            return None;
-        }
-        Some(truncated as i64)
+        // it as 0 (NaN) or a clamped extreme. `f64_as_index` owns the range
+        // check; `i64::MAX as f64` rounds up to 2^63, so comparing against it
+        // let exactly 2^63 through to saturate.
+        f64_as_index(self.trunc())
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -2067,12 +2048,12 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledScalarExpr::Derived(index) => Ok(self.evaluate_scalar(*index)?.clone()),
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
-                let keys = self.eval_scalar_expr(index)?.as_index_vec()?;
-                lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
-                    &keys,
-                    self.period,
-                )
+                let parameter = &self.program.parameters[*parameter].parameter;
+                let keys = self
+                    .eval_scalar_expr(index)?
+                    .as_index_vec()
+                    .ok_or_else(|| parameter_key_error(&parameter.name))?;
+                lookup_parameter_dense::<N>(parameter, &keys, self.period)
             }
             CompiledScalarExpr::Add(items) => {
                 let mut total = vec![N::ZERO; self.batch.row_count];
@@ -2101,6 +2082,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 elementwise(dividend, divisor, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("max"));
+                }
                 let mut values = vec![N::MIN; self.batch.row_count];
                 for item in items {
                     let candidate = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
@@ -2113,6 +2097,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(values))
             }
             CompiledScalarExpr::Min(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("min"));
+                }
                 let mut values = vec![N::MAX; self.batch.row_count];
                 for item in items {
                     let candidate = N::vec_from_column(&self.eval_scalar_expr(item)?)?;
@@ -2146,7 +2133,10 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             ])),
             CompiledScalarExpr::DateAddDays { date, days } => {
                 let base = self.eval_scalar_expr(date)?.as_date_vec()?;
-                let offset = self.eval_scalar_expr(days)?.as_index_vec()?;
+                let offset = self
+                    .eval_scalar_expr(days)?
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Day))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2156,7 +2146,10 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledScalarExpr::DateAddMonths { date, months } => {
                 let base = self.eval_scalar_expr(date)?.as_date_vec()?;
-                let offset = self.eval_scalar_expr(months)?.as_index_vec()?;
+                let offset = self
+                    .eval_scalar_expr(months)?
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Month))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2166,7 +2159,10 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledScalarExpr::DateAddYears { date, years } => {
                 let base = self.eval_scalar_expr(date)?.as_date_vec()?;
-                let offset = self.eval_scalar_expr(years)?.as_index_vec()?;
+                let offset = self
+                    .eval_scalar_expr(years)?
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Year))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2382,14 +2378,12 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 project_root_column_to_related(&values, &offsets)
             }
             CompiledRelatedScalarExpr::ParameterLookup { parameter, index } => {
+                let parameter = &self.program.parameters[*parameter].parameter;
                 let keys = self
                     .resolve_related_scalar(relation, index)?
-                    .as_index_vec()?;
-                lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
-                    &keys,
-                    self.period,
-                )
+                    .as_index_vec()
+                    .ok_or_else(|| parameter_key_error(&parameter.name))?;
+                lookup_parameter_dense::<N>(parameter, &keys, self.period)
             }
             CompiledRelatedScalarExpr::Add(items) => {
                 let mut total = vec![N::ZERO; length];
@@ -2418,6 +2412,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 elementwise(dividend, divisor, N::try_div)
             }
             CompiledRelatedScalarExpr::Max(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("max"));
+                }
                 let mut values = vec![N::MIN; length];
                 for item in items {
                     let candidate =
@@ -2431,6 +2428,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok(N::into_column(values))
             }
             CompiledRelatedScalarExpr::Min(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("min"));
+                }
                 let mut values = vec![N::MAX; length];
                 for item in items {
                     let candidate =
@@ -2465,7 +2465,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
                 let offset = self
                     .resolve_related_scalar(relation, days)?
-                    .as_index_vec()?;
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Day))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2477,7 +2478,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
                 let offset = self
                     .resolve_related_scalar(relation, months)?
-                    .as_index_vec()?;
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Month))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2489,7 +2491,8 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let base = self.resolve_related_scalar(relation, date)?.as_date_vec()?;
                 let offset = self
                     .resolve_related_scalar(relation, years)?
-                    .as_index_vec()?;
+                    .as_index_vec()
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Year))?;
                 Ok(DenseColumn::Date(
                     base.into_iter()
                         .zip(offset)
@@ -2679,9 +2682,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 // Period-specific: resolve at the reference period. The index
                 // expression is itself lifetime-evaluated (typically a literal
                 // or derived), then used as integer keys.
-                let keys = self.eval_scalar(index)?.as_index_vec()?;
+                let parameter = &self.program.parameters[*parameter].parameter;
+                let keys = self
+                    .eval_scalar(index)?
+                    .as_index_vec()
+                    .ok_or_else(|| parameter_key_error(&parameter.name))?;
                 lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
+                    parameter,
                     &keys,
                     self.period_executors[self.reference_period].period,
                 )
@@ -2715,6 +2722,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 elementwise(dividend, divisor, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("max"));
+                }
                 let mut values = vec![N::MIN; self.row_count];
                 for item in items {
                     let candidate = N::vec_from_column(&self.eval_scalar(item)?)?;
@@ -2727,6 +2737,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok(N::into_column(values))
             }
             CompiledScalarExpr::Min(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("min"));
+                }
                 let mut values = vec![N::MAX; self.row_count];
                 for item in items {
                     let candidate = N::vec_from_column(&self.eval_scalar(item)?)?;

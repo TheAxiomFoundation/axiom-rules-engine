@@ -77,6 +77,10 @@ pub enum SpecError {
         effective_from: NaiveDate,
         effective_to: NaiveDate,
     },
+    /// `max()` or `min()` with no operand. It has no value, and the
+    /// evaluators report the same text if a hand-built program reaches them.
+    #[error("{function}() requires at least one operand")]
+    EmptyExtremum { function: &'static str },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1128,6 +1132,19 @@ impl OverPeriodsKindSpec {
     }
 }
 
+/// Convert the operands of `max()` or `min()`, refusing an empty list: with
+/// no operand there is no value, and the evaluators would otherwise have to
+/// invent one.
+fn extremum_operands(
+    function: &'static str,
+    items: &[ScalarExprSpec],
+) -> Result<Vec<ScalarExpr>, SpecError> {
+    if items.is_empty() {
+        return Err(SpecError::EmptyExtremum { function });
+    }
+    items.iter().map(ScalarExprSpec::to_model).collect()
+}
+
 impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
@@ -1160,18 +1177,8 @@ impl ScalarExprSpec {
                 Box::new(left.to_model()?),
                 Box::new(right.to_model()?),
             )),
-            Self::Max { items } => Ok(ScalarExpr::Max(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
-            Self::Min { items } => Ok(ScalarExpr::Min(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
+            Self::Max { items } => Ok(ScalarExpr::Max(extremum_operands("max", items)?)),
+            Self::Min { items } => Ok(ScalarExpr::Min(extremum_operands("min", items)?)),
             Self::Ceil { value } => Ok(ScalarExpr::Ceil(Box::new(value.to_model()?))),
             Self::Floor { value } => Ok(ScalarExpr::Floor(Box::new(value.to_model()?))),
             Self::PeriodStart => Ok(ScalarExpr::PeriodStart),

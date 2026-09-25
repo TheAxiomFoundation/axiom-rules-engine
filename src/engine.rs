@@ -113,6 +113,44 @@ pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, Arit
         .ok_or(ArithmeticError::Overflow("division"))
 }
 
+// Explain, bulk and dense report each of the errors below with the text built
+// here, so a failure reads the same in every execution mode. Integer operands
+// are read by `model::decimal_as_index` and `model::f64_as_index`.
+
+/// A parameter-table key that is not an exact integer in the `i64` range.
+pub(crate) fn parameter_key_error(parameter: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "parameter key for `{parameter}` must be an integer"
+    ))
+}
+
+/// The unit a `date_add_*` call shifts by.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CalendarUnit {
+    Day,
+    Month,
+    Year,
+}
+
+/// A `date_add_days` / `_months` / `_years` count that is not an exact integer
+/// in the `i64` range.
+pub(crate) fn calendar_count_error(unit: CalendarUnit) -> EvalError {
+    let unit = match unit {
+        CalendarUnit::Day => "day",
+        CalendarUnit::Month => "month",
+        CalendarUnit::Year => "year",
+    };
+    EvalError::TypeMismatch(format!(
+        "date_add_{unit}s expects an integer {unit} count on the right"
+    ))
+}
+
+/// `max()` or `min()` with no operand, which has no value. `ProgramSpec`
+/// refuses it on load; this covers a `model::Program` built directly.
+pub(crate) fn empty_extremum_error(function: &str) -> EvalError {
+    EvalError::TypeMismatch(format!("{function}() requires at least one operand"))
+}
+
 #[derive(Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
@@ -761,11 +799,7 @@ impl<'a> Engine<'a> {
                 let lookup_key = self
                     .eval_scalar_expr_inner(index, entity_id, period, relation_context)?
                     .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(format!(
-                            "parameter key for `{parameter}` must be an integer"
-                        ))
-                    })?;
+                    .ok_or_else(|| parameter_key_error(parameter))?;
                 self.lookup_parameter(parameter, lookup_key, period)
             }
             ScalarExpr::Add(items) => {
@@ -799,9 +833,7 @@ impl<'a> Engine<'a> {
             ScalarExpr::Max(items) => {
                 let mut iter = items.iter();
                 let Some(first) = iter.next() else {
-                    return Err(EvalError::TypeMismatch(
-                        "max() requires at least one operand".to_string(),
-                    ));
+                    return Err(empty_extremum_error("max"));
                 };
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
@@ -815,9 +847,7 @@ impl<'a> Engine<'a> {
             ScalarExpr::Min(items) => {
                 let mut iter = items.iter();
                 let Some(first) = iter.next() else {
-                    return Err(EvalError::TypeMismatch(
-                        "min() requires at least one operand".to_string(),
-                    ));
+                    return Err(empty_extremum_error("min"));
                 };
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
@@ -850,11 +880,7 @@ impl<'a> Engine<'a> {
                 let offset = self
                     .eval_scalar_expr_inner(days, entity_id, period, relation_context)?
                     .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_days expects an integer day count on the right".to_string(),
-                        )
-                    })?;
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Day))?;
                 Ok(ScalarValue::Date(shift_calendar_days(base, offset)?))
             }
             ScalarExpr::DateAddMonths { date, months } => {
@@ -869,12 +895,7 @@ impl<'a> Engine<'a> {
                 let offset = self
                     .eval_scalar_expr_inner(months, entity_id, period, relation_context)?
                     .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_months expects an integer month count on the right"
-                                .to_string(),
-                        )
-                    })?;
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Month))?;
                 Ok(ScalarValue::Date(shift_calendar_months(base, offset)?))
             }
             ScalarExpr::DateAddYears { date, years } => {
@@ -889,11 +910,7 @@ impl<'a> Engine<'a> {
                 let offset = self
                     .eval_scalar_expr_inner(years, entity_id, period, relation_context)?
                     .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_years expects an integer year count on the right".to_string(),
-                        )
-                    })?;
+                    .ok_or_else(|| calendar_count_error(CalendarUnit::Year))?;
                 Ok(ScalarValue::Date(shift_calendar_years(base, offset)?))
             }
             ScalarExpr::DaysBetween { from, to } => {

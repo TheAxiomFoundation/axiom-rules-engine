@@ -5,17 +5,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
 };
 use crate::engine::{
     ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+    empty_extremum_error, parameter_key_error,
 };
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, JudgmentExpr,
-    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue, decimal_as_index,
 };
 use crate::spec::{DTypeSpec, JudgmentOutcomeSpec, PeriodSpec, ScalarValueSpec};
 
@@ -38,22 +38,14 @@ impl ScalarColumn {
         }
     }
 
-    fn as_index_vec(&self) -> Result<Vec<i64>, EvalError> {
+    /// Read every row as an integer operand, or `None` when any row is not
+    /// an exact integer in the `i64` range. As in explain, a fractional key is
+    /// refused, never truncated; the caller reports explain's error.
+    fn as_index_vec(&self) -> Option<Vec<i64>> {
         match self {
-            Self::Integer(values) => Ok(values.clone()),
-            Self::Decimal(values) => values
-                .iter()
-                .map(|value| {
-                    value.to_i64().ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "parameter key for bulk lookup must be integral".to_string(),
-                        )
-                    })
-                })
-                .collect(),
-            _ => Err(EvalError::TypeMismatch(
-                "parameter key for bulk lookup must be numeric".to_string(),
-            )),
+            Self::Integer(values) => Some(values.clone()),
+            Self::Decimal(values) => values.iter().copied().map(decimal_as_index).collect(),
+            _ => None,
         }
     }
 
@@ -560,7 +552,10 @@ impl<'a> BulkEvaluator<'a> {
             }
             ScalarExpr::Derived(name) => Ok(self.evaluate_scalar(name)?.clone()),
             ScalarExpr::ParameterLookup { parameter, index } => {
-                let keys = self.eval_scalar_expr(index)?.as_index_vec()?;
+                let keys = self
+                    .eval_scalar_expr(index)?
+                    .as_index_vec()
+                    .ok_or_else(|| parameter_key_error(parameter))?;
                 let parameter = self
                     .program
                     .parameters
@@ -594,6 +589,9 @@ impl<'a> BulkEvaluator<'a> {
                 elementwise(left, right, checked_div)
             }
             ScalarExpr::Max(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("max"));
+                }
                 let mut values = vec![Decimal::MIN; self.entity_ids.len()];
                 for item in items {
                     let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
@@ -606,6 +604,9 @@ impl<'a> BulkEvaluator<'a> {
                 Ok(ScalarColumn::Decimal(values))
             }
             ScalarExpr::Min(items) => {
+                if items.is_empty() {
+                    return Err(empty_extremum_error("min"));
+                }
                 let mut values = vec![Decimal::MAX; self.entity_ids.len()];
                 for item in items {
                     let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
@@ -1534,6 +1535,69 @@ fn compare_scalar_values_for_bulk(
                 ComparisonOp::Eq => left == right,
                 ComparisonOp::Ne => left != right,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FastPathResult, try_execute};
+    use crate::api::ExecutionQuery;
+    use crate::model::{DataSet, DerivedSemantics, ScalarExpr};
+    use crate::spec::{PeriodKindSpec, PeriodSpec};
+
+    /// `ProgramSpec` refuses an empty `max()` / `min()` on load, so only a
+    /// `model::Program` built in Rust reaches bulk with one. Bulk must fail
+    /// (sending the request to explain, which reports the same error) rather
+    /// than answer `Decimal::MIN` or `Decimal::MAX`.
+    #[test]
+    fn an_empty_max_or_min_fails_instead_of_answering_a_sentinel() {
+        let source = r#"
+format: rulespec/v1
+rules:
+  - name: amount
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: max(income)
+"#;
+        let spec = crate::rulespec::lower_rulespec_str(source).expect("RuleSpec lowers");
+        for (function, empty) in [
+            ("max", ScalarExpr::Max(vec![])),
+            ("min", ScalarExpr::Min(vec![])),
+        ] {
+            let mut program = spec.to_program().expect("program converts");
+            let derived = program.derived.get_mut("amount").expect("amount rule");
+            derived.semantics = DerivedSemantics::Scalar(empty.clone());
+            for version in &mut derived.versions {
+                version.semantics = DerivedSemantics::Scalar(empty.clone());
+            }
+            let query = ExecutionQuery {
+                entity_id: "p0".to_string(),
+                period: PeriodSpec {
+                    kind: PeriodKindSpec::Month,
+                    start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date"),
+                    end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("date"),
+                },
+                outputs: vec!["amount".to_string()],
+                assessment_date: None,
+            };
+            match try_execute(&program, &DataSet::default(), &[query]) {
+                Ok(FastPathResult::Unsupported { reason }) => assert!(
+                    reason.contains(&format!("{function}() requires at least one operand")),
+                    "{reason}"
+                ),
+                Ok(FastPathResult::Executed(response)) => {
+                    panic!(
+                        "bulk answered an empty {function}(): {:?}",
+                        response.results
+                    )
+                }
+                Err(error) => panic!("unexpected error: {error}"),
+            }
         }
     }
 }

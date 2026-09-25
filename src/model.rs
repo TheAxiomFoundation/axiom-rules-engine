@@ -214,9 +214,37 @@ impl ScalarValue {
     pub fn as_index(&self) -> Option<i64> {
         match self {
             ScalarValue::Integer(value) => Some(*value),
-            ScalarValue::Decimal(value) if value.fract().is_zero() => value.to_i64(),
+            ScalarValue::Decimal(value) => decimal_as_index(*value),
             _ => None,
         }
+    }
+}
+
+/// Read a Decimal as an integer operand (a parameter-table key or a
+/// `date_add_*` count): its exact value when that is an integer in the `i64`
+/// range, otherwise `None`. A fractional part is refused, never truncated.
+///
+/// Explain, bulk and dense all read integer operands through this function or
+/// [`f64_as_index`], so every execution mode accepts exactly the same values.
+pub(crate) fn decimal_as_index(value: Decimal) -> Option<i64> {
+    if value.fract().is_zero() {
+        value.to_i64()
+    } else {
+        None
+    }
+}
+
+/// [`decimal_as_index`] for dense's `f64` columns: the value when it is finite,
+/// integral and inside the `i64` range, otherwise `None`. The range check is
+/// needed because `as i64` saturates (1e20 would read as `i64::MAX`).
+pub(crate) fn f64_as_index(value: f64) -> Option<i64> {
+    // 2^63. `i64::MIN` is -2^63 exactly, while `i64::MAX as f64` rounds up to
+    // 2^63, one past the range.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if value.is_finite() && value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value) {
+        Some(value as i64)
+    } else {
+        None
     }
 }
 
