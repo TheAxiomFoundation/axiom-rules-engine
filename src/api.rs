@@ -12,7 +12,7 @@ use crate::spec::{
     ScalarValueSpec,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ExecutionRequest {
     pub mode: ExecutionMode,
     pub program: ProgramSpec,
@@ -20,11 +20,70 @@ pub struct ExecutionRequest {
     pub queries: Vec<ExecutionQuery>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CompiledExecutionRequest {
     pub mode: ExecutionMode,
     pub dataset: DatasetSpec,
     pub queries: Vec<ExecutionQuery>,
+}
+
+// Keep the public request fields and other unknown-field handling unchanged,
+// while rejecting even null or empty pins instead of silently ignoring them.
+fn reject_pins<'de, D>(_deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Err(serde::de::Error::custom(
+        "this engine line (release/v0.1) does not support pins; remove `pins` or use an engine with pin support",
+    ))
+}
+
+impl<'de> Deserialize<'de> for ExecutionRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Request {
+            mode: ExecutionMode,
+            program: ProgramSpec,
+            dataset: DatasetSpec,
+            queries: Vec<ExecutionQuery>,
+            #[serde(default, rename = "pins", deserialize_with = "reject_pins")]
+            _pins: (),
+        }
+
+        let request = Request::deserialize(deserializer)?;
+        Ok(Self {
+            mode: request.mode,
+            program: request.program,
+            dataset: request.dataset,
+            queries: request.queries,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for CompiledExecutionRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Request {
+            mode: ExecutionMode,
+            dataset: DatasetSpec,
+            queries: Vec<ExecutionQuery>,
+            #[serde(default, rename = "pins", deserialize_with = "reject_pins")]
+            _pins: (),
+        }
+
+        let request = Request::deserialize(deserializer)?;
+        Ok(Self {
+            mode: request.mode,
+            dataset: request.dataset,
+            queries: request.queries,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +237,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
     let dataset = request.dataset.to_dataset_for_program(&program)?;
+    crate::engine::validate_input_spells(&dataset)?;
 
     match requested_mode {
         ExecutionMode::Explain => execute_explain(
@@ -191,7 +251,23 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             },
         ),
         ExecutionMode::Fast => {
-            match crate::bulk::try_execute(&program, &dataset, &request.queries)? {
+            // Bulk accepts one shared period. Resolve its inputs using Explain's
+            // latest-start rule; retain all spells for mixed-period fallback.
+            let resolved_dataset;
+            let fast_dataset = if let Some(first_query) = request.queries.first()
+                && request
+                    .queries
+                    .iter()
+                    .all(|query| query.period == first_query.period)
+            {
+                let period = first_query.period.to_model()?;
+                resolved_dataset = crate::engine::resolve_inputs_for_period(&dataset, &period);
+                &resolved_dataset
+            } else {
+                &dataset
+            };
+
+            match crate::bulk::try_execute(&program, fast_dataset, &request.queries)? {
                 crate::bulk::FastPathResult::Executed(response) => {
                     Ok(response.with_metadata(ExecutionMetadata {
                         requested_mode: ExecutionMode::Fast,

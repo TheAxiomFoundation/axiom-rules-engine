@@ -1553,6 +1553,228 @@ fn assessment_date_before_period_start_errors() {
     }
 }
 
+#[test]
+fn input_spells_reject_conflicts_in_both_modes_and_request_paths() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        for reverse in [false, true] {
+            for compiled in [false, true] {
+                let mut request = simple_execution_request(mode.clone(), program.clone());
+                let mut conflict = request.dataset.inputs[0].clone();
+                conflict.value = decimal_value("99");
+                // Different ends do not resolve a same-start conflict.
+                conflict.interval.end = chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+                request.dataset.inputs.push(conflict);
+                if reverse {
+                    request.dataset.inputs.reverse();
+                }
+                let result = if compiled {
+                    execute_compiled_request(
+                        CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC).unwrap(),
+                        CompiledExecutionRequest {
+                            mode: request.mode,
+                            dataset: request.dataset,
+                            queries: request.queries,
+                        },
+                    )
+                } else {
+                    execute_request(request)
+                };
+                let error = result.expect_err("conflicting spells must be rejected");
+                assert!(matches!(error, ApiError::Eval(_)));
+                let message = error.to_string();
+                assert!(message.contains("ambiguous input `amount`"), "{message}");
+                assert!(message.contains("entity `household-1`"), "{message}");
+                assert!(message.contains("2026-01-01"), "{message}");
+                assert!(message.contains("merge or split"), "{message}");
+            }
+        }
+    }
+}
+
+#[test]
+fn input_spells_validate_canonical_names_before_query_selection() {
+    let mut program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    program.derived[0].id = Some("us:test/benefit#adjusted_amount".to_string());
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        for empty_queries in [false, true] {
+            let mut request = simple_execution_request(mode.clone(), program.clone());
+            request.dataset.inputs[0].name = "us:test/benefit#input.amount".to_string();
+            request.dataset.inputs[1].name = "us:test/benefit#amount".to_string();
+            let mut conflict = request.dataset.inputs[1].clone();
+            conflict.name = "us:test/benefit#input.amount".to_string();
+            conflict.value = decimal_value("99");
+            request.dataset.inputs.push(conflict);
+            request.queries.truncate(if empty_queries { 0 } else { 1 });
+            for query in &mut request.queries {
+                query.outputs = vec!["us:test/benefit#adjusted_amount".to_string()];
+            }
+            let error = execute_request(request)
+                .expect_err("even unqueried canonical conflicts must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("ambiguous input `amount`"), "{message}");
+            assert!(message.contains("entity `household-2`"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn input_spells_latest_covering_start_wins_in_both_modes_and_orders() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        for reverse in [false, true] {
+            let mut request = simple_execution_request(mode.clone(), program.clone());
+            let mut older = request.dataset.inputs[0].clone();
+            older.interval.start = chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+            older.value = decimal_value("99");
+            request.dataset.inputs.push(older);
+            let mut non_covering = request.dataset.inputs[0].clone();
+            non_covering.interval.start = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+            non_covering.value = decimal_value("999");
+            request.dataset.inputs.push(non_covering);
+            if reverse {
+                request.dataset.inputs.reverse();
+            }
+            let response = execute_request(request).expect("overlapping spells resolve");
+            assert_eq!(response.metadata.actual_mode, mode);
+            assert_eq!(
+                decimal_output(&response.results[0].outputs["adjusted_amount"]),
+                decimal("25")
+            );
+        }
+    }
+}
+
+#[test]
+fn input_spells_equal_duplicates_and_mixed_period_fallback_are_preserved() {
+    let program = axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC)
+        .expect("program fixture parses");
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let mut request = simple_execution_request(mode, program.clone());
+        request.dataset.inputs[0].interval.end =
+            chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+        let duplicate = request.dataset.inputs[0].clone();
+        request.dataset.inputs.push(duplicate);
+        let mut february = request.dataset.inputs[0].clone();
+        february.interval.start = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        february.value = decimal_value("30");
+        request.dataset.inputs.push(february);
+        request.queries[1] = request.queries[0].clone();
+        request.queries[1].period.start = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        request.queries[1].period.end = chrono::NaiveDate::from_ymd_opt(2026, 2, 28).unwrap();
+        let response = execute_request(request).expect("equal duplicates are accepted");
+        assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
+        assert_eq!(
+            decimal_output(&response.results[0].outputs["adjusted_amount"]),
+            decimal("25")
+        );
+        assert_eq!(
+            decimal_output(&response.results[1].outputs["adjusted_amount"]),
+            decimal("40")
+        );
+    }
+}
+
+#[test]
+fn input_spells_related_inputs_use_latest_start_in_both_modes_and_orders() {
+    let period = simple_period();
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            derivation: None,
+        }],
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "household_amount".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Decimal,
+            unit: None,
+            rounding: None,
+            source: None,
+            period: None,
+            source_url: None,
+            semantics: DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::SumRelated {
+                    relation: "member_of_household".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input {
+                        name: "amount".to_string(),
+                    },
+                    where_clause: None,
+                },
+            },
+            versions: vec![],
+        }],
+        ..ProgramSpec::default()
+    };
+    let newer = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Person".to_string(),
+        entity_id: "person-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 7, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value("2000"),
+    };
+    let older = InputRecordSpec {
+        name: "amount".to_string(),
+        entity: "Person".to_string(),
+        entity_id: "person-1".to_string(),
+        interval: IntervalSpec {
+            start: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date"),
+            end: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).expect("valid date"),
+        },
+        value: decimal_value("4000"),
+    };
+    let relation = RelationRecordSpec {
+        name: "member_of_household".to_string(),
+        tuple: vec!["person-1".to_string(), "household-1".to_string()],
+        interval: IntervalSpec {
+            start: period.start,
+            end: period.end,
+        },
+    };
+    let query = ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["household_amount".to_string()],
+    };
+
+    for inputs in [vec![newer.clone(), older.clone()], vec![older, newer]] {
+        let dataset = DatasetSpec {
+            inputs,
+            relations: vec![relation.clone()],
+        };
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let response = execute_request(ExecutionRequest {
+                mode: mode.clone(),
+                program: program.clone(),
+                dataset: dataset.clone(),
+                queries: vec![query.clone()],
+            })
+            .expect("related-input request succeeds");
+
+            assert_eq!(response.metadata.actual_mode, mode);
+            assert_eq!(
+                decimal_output(
+                    response.results[0]
+                        .outputs
+                        .get("household_amount")
+                        .expect("household amount output")
+                ),
+                decimal("2000")
+            );
+        }
+    }
+}
+
 fn simple_period() -> PeriodSpec {
     PeriodSpec {
         kind: PeriodKindSpec::Month,
