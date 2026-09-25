@@ -191,7 +191,9 @@ fallback; matches without `_` are a compatibility-mode warning and a
 strict-mode error, so always write the fallback arm. When a match without `_`
 does compile, a subject that equals none of its patterns is an evaluation
 error naming the rule, the subject and its value, in every execution mode; it
-never takes the last arm's value.
+never takes the last arm's value. It fails only an evaluation that reaches the
+match: a row whose conditions select another branch, or that reads the
+matching rule only from such a branch, is unaffected.
 
 ```yaml
 format: rulespec/v1
@@ -326,7 +328,10 @@ nested `if` comparisons (a match without `_` ends in a `no_match` node carrying
 the subject and every pattern, which evaluates to an error), unary minus lowers into `0 - x`, chained `and`/`or`
 operators nest as binary pairs while some sugar lowers n-ary, and Boolean
 facts lower into `== true` comparisons. Consumers should target this
-vocabulary, not the formula text.
+vocabulary, not the formula text. Dense execution evaluates a `no_match` only at
+the end of the chain the lowering writes, where each `if` compares the node's
+subject with its next pattern in order; it refuses a program with any other
+`no_match`.
 
 Calendar shifts accept negative and zero offsets. For example, adding one
 month to 2025-01-31 yields 2025-02-28; adding one year to 2024-02-29 yields

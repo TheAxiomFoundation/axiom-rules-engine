@@ -243,7 +243,7 @@ pub enum ComparisonOp {
     Ne,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RelatedValueRef {
     Input(String),
     Derived(String),
@@ -284,7 +284,7 @@ impl OverPeriodsKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ScalarExpr {
     Literal(ScalarValue),
     Input(String),
@@ -368,7 +368,7 @@ pub enum ScalarExpr {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum JudgmentExpr {
     Comparison {
         left: ScalarExpr,
