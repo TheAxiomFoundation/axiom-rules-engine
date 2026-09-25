@@ -296,18 +296,60 @@ pub struct DenseRelationSchema {
     filter: Option<CompiledRelatedJudgmentExpr>,
 }
 
+/// One relation's rows for a batch: root row `r`'s related rows are
+/// `offsets[r]..offsets[r + 1]` of every related column.
 #[derive(Clone, Debug)]
 pub struct DenseRelationBatchSpec {
+    /// `row_count + 1` non-decreasing boundaries starting at 0. The last is the
+    /// relation's related row count.
     pub offsets: Vec<usize>,
+    /// Related columns by input name, one value per related row.
     pub inputs: HashMap<String, DenseColumn>,
+    /// The related row count, stated explicitly. When given it must equal the
+    /// last offset, like every supplied related column's length. It is required
+    /// when the offsets claim related rows but no related column is supplied
+    /// (a `len` over the relation, or a filter that reads only the current
+    /// entity), because nothing else corroborates the offsets.
+    pub related_row_count: Option<usize>,
 }
 
+/// One period's dense input: `row_count` root rows, root columns of that
+/// length, and a batch for every relation the program reads.
 #[derive(Clone, Debug)]
 pub struct DenseBatchSpec {
     pub row_count: usize,
     pub inputs: HashMap<String, DenseColumn>,
     pub relations: HashMap<DenseRelationKey, DenseRelationBatchSpec>,
 }
+
+/// The most rows a dense batch or relation may claim. Executor buffers hold one
+/// element per row and a `Vec` holds at most `isize::MAX` bytes, so a larger
+/// count would panic with "capacity overflow" at the first allocation of the
+/// widest element; `bind_batch` refuses it instead.
+const MAX_DENSE_ROWS: usize = isize::MAX as usize / WIDEST_DENSE_ELEMENT;
+
+/// The size of the widest element an executor buffer holds per row: a text
+/// column's `String` on 64-bit targets, a `Decimal` on wasm32.
+const WIDEST_DENSE_ELEMENT: usize = {
+    let sizes = [
+        size_of::<String>(),
+        size_of::<Decimal>(),
+        size_of::<f64>(),
+        size_of::<i64>(),
+        size_of::<usize>(),
+        size_of::<NaiveDate>(),
+        size_of::<JudgmentOutcome>(),
+    ];
+    let mut widest = 1;
+    let mut index = 0;
+    while index < sizes.len() {
+        if sizes[index] > widest {
+            widest = sizes[index];
+        }
+        index += 1;
+    }
+    widest
+};
 
 #[derive(Clone, Debug)]
 struct DenseRelationBatch {
@@ -933,117 +975,188 @@ impl DenseCompiledProgram {
         }
     }
 
-    fn bind_batch(&self, batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
-        for (name, column) in &batch.inputs {
-            if column.len() != batch.row_count {
+    /// Check a batch against this program, then bind its columns in program
+    /// order. Every count the executor sizes a buffer by is checked here,
+    /// before anything is bound:
+    ///
+    /// - `row_count` is at most [`MAX_DENSE_ROWS`], and every supplied root
+    ///   column has that length.
+    /// - Each relation's offsets hold `row_count + 1` non-decreasing entries
+    ///   starting at 0. The last is the relation's related row count.
+    /// - That count is justified: every supplied related column has that
+    ///   length, and so does `related_row_count` when stated. A relation that
+    ///   claims related rows with neither must state the count, because the
+    ///   offsets alone could claim any number of rows and a filter or
+    ///   broadcast would materialise one entry per claimed row.
+    ///
+    /// Columns are checked in name order, so a malformed batch always reports
+    /// the same problem.
+    fn bind_batch(&self, mut batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
+        let row_count = batch.row_count;
+        if row_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} exceeds {MAX_DENSE_ROWS}, the most rows a dense batch can hold"
+            )));
+        }
+        for (name, column) in columns_by_name(&batch.inputs) {
+            if column.len() != row_count {
                 return Err(EvalError::TypeMismatch(format!(
-                    "dense root input `{name}` has length {} but row_count is {}",
-                    column.len(),
-                    batch.row_count
+                    "dense root input `{name}` has length {} but row_count is {row_count}",
+                    column.len()
                 )));
             }
         }
+        for (index, name) in self.root_inputs.iter().enumerate() {
+            if !batch.inputs.contains_key(name) && !self.optional_root_inputs.contains(&index) {
+                return Err(missing_dense_input(name, &self.root_entity));
+            }
+        }
+        let related_counts = self
+            .relations
+            .iter()
+            .enumerate()
+            .map(|(relation_index, relation)| {
+                let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
+                    EvalError::UnknownRelation(format!(
+                        "{}::{}/{}/{}",
+                        relation.key.name,
+                        relation.key.current_slot,
+                        relation.key.related_slot,
+                        self.root_entity
+                    ))
+                })?;
+                self.check_relation_batch(relation_index, relation_batch, row_count)
+            })
+            .collect::<Result<Vec<usize>, EvalError>>()?;
 
+        // The batch is valid. Root input names are unique, so each column moves
+        // out once; a relation batch can back several compiled relations (a
+        // derived relation binds its source's batch), so its columns are cloned.
         let bound_inputs = self
             .root_inputs
             .iter()
-            .enumerate()
-            .map(|(index, name)| match batch.inputs.get(name).cloned() {
-                Some(column) => Ok(Some(column)),
-                None if self.optional_root_inputs.contains(&index) => Ok(None),
-                None => Err(EvalError::MissingInput {
-                    name: name.clone(),
-                    entity_id: self.root_entity.clone(),
-                    period_start: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                    period_end: chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("date"),
-                }),
+            .map(|name| batch.inputs.remove(name))
+            .collect();
+        let bound_relations = self
+            .relations
+            .iter()
+            .zip(related_counts)
+            .map(|(relation, related_count)| {
+                let relation_batch = &batch.relations[&relation.key];
+                DenseRelationBatch {
+                    offsets: relation_batch.offsets.clone(),
+                    related_count,
+                    inputs: relation
+                        .related_inputs
+                        .iter()
+                        .map(|name| relation_batch.inputs.get(name).cloned())
+                        .collect(),
+                }
             })
-            .collect::<Result<Vec<Option<DenseColumn>>, EvalError>>()?;
-
-        let mut bound_relations = Vec::with_capacity(self.relations.len());
-        for (relation_index, relation) in self.relations.iter().enumerate() {
-            let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
-                EvalError::UnknownRelation(format!(
-                    "{}::{}/{}/{}",
-                    relation.key.name,
-                    relation.key.current_slot,
-                    relation.key.related_slot,
-                    self.root_entity
-                ))
-            })?;
-
-            if relation_batch.offsets.len() != batch.row_count + 1 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must have length {}",
-                    relation.key.name,
-                    batch.row_count + 1
-                )));
-            }
-            if relation_batch.offsets.first().copied().unwrap_or_default() != 0 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must start at 0",
-                    relation.key.name
-                )));
-            }
-            if !relation_batch
-                .offsets
-                .windows(2)
-                .all(|pair| pair[0] <= pair[1])
-            {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must be non-decreasing",
-                    relation.key.name
-                )));
-            }
-
-            let related_count = *relation_batch.offsets.last().unwrap_or(&0);
-            let optional_for_relation = &self.optional_related_inputs[relation_index];
-            let bound_inputs = relation
-                .related_inputs
-                .iter()
-                .enumerate()
-                .map(|(input_index, name)| {
-                    let column = match relation_batch.inputs.get(name).cloned() {
-                        Some(column) => Some(column),
-                        None if optional_for_relation.contains(&input_index) => None,
-                        None => {
-                            return Err(EvalError::MissingInput {
-                                name: name.clone(),
-                                entity_id: relation.key.name.clone(),
-                                period_start: chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                                    .expect("date"),
-                                period_end: chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                                    .expect("date"),
-                            });
-                        }
-                    };
-                    if let Some(column) = &column {
-                        if column.len() != related_count {
-                            return Err(EvalError::TypeMismatch(format!(
-                                "dense relation input `{}` for `{}` has length {} but related row count is {}",
-                                name,
-                                relation.key.name,
-                                column.len(),
-                                related_count
-                            )));
-                        }
-                    }
-                    Ok(column)
-                })
-                .collect::<Result<Vec<Option<DenseColumn>>, EvalError>>()?;
-
-            bound_relations.push(DenseRelationBatch {
-                offsets: relation_batch.offsets.clone(),
-                related_count,
-                inputs: bound_inputs,
-            });
-        }
+            .collect();
 
         Ok(DenseBoundBatch {
-            row_count: batch.row_count,
+            row_count,
             inputs: bound_inputs,
             relations: bound_relations,
         })
+    }
+
+    /// Check one relation's batch against the root row count and return its
+    /// related row count (see [`Self::bind_batch`] for the rules).
+    fn check_relation_batch(
+        &self,
+        relation_index: usize,
+        relation_batch: &DenseRelationBatchSpec,
+        row_count: usize,
+    ) -> Result<usize, EvalError> {
+        let relation = &self.relations[relation_index];
+        let name = &relation.key.name;
+        let offsets = &relation_batch.offsets;
+
+        let expected = row_count.checked_add(1).ok_or_else(|| {
+            EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} leaves no room for relation `{name}`'s offsets, which need row_count + 1 entries"
+            ))
+        })?;
+        if offsets.len() != expected {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must have length {expected} (row_count + 1) but has {}",
+                offsets.len()
+            )));
+        }
+        // `expected` is at least 1, so the offsets are non-empty from here on.
+        if offsets[0] != 0 {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must start at 0 but starts at {}",
+                offsets[0]
+            )));
+        }
+        if let Some(index) = offsets.windows(2).position(|pair| pair[0] > pair[1]) {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must be non-decreasing, but offsets[{index}] = {} is greater than offsets[{}] = {}",
+                offsets[index],
+                index + 1,
+                offsets[index + 1]
+            )));
+        }
+
+        let related_count = offsets[row_count];
+        if let Some(stated) = relation_batch.related_row_count
+            && stated != related_count
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count} but related_row_count is {stated}"
+            )));
+        }
+        for (input, column) in columns_by_name(&relation_batch.inputs) {
+            if column.len() != related_count {
+                return Err(EvalError::TypeMismatch(format!(
+                    "dense relation input `{input}` for `{name}` has length {} but the relation has {related_count} related rows",
+                    column.len()
+                )));
+            }
+        }
+        let optional = &self.optional_related_inputs[relation_index];
+        for (input_index, input) in relation.related_inputs.iter().enumerate() {
+            if !relation_batch.inputs.contains_key(input) && !optional.contains(&input_index) {
+                return Err(missing_dense_input(input, name));
+            }
+        }
+        if related_count > 0
+            && relation_batch.related_row_count.is_none()
+            && relation_batch.inputs.is_empty()
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the number of related rows"
+            )));
+        }
+        if related_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` claims {related_count} related rows, more than the {MAX_DENSE_ROWS} a dense batch can hold"
+            )));
+        }
+        Ok(related_count)
+    }
+}
+
+/// A batch's columns sorted by name, so validation reports a malformed batch's
+/// problems in a fixed order rather than in `HashMap` iteration order.
+fn columns_by_name(columns: &HashMap<String, DenseColumn>) -> Vec<(&String, &DenseColumn)> {
+    let mut columns = columns.iter().collect::<Vec<_>>();
+    columns.sort_by_key(|(name, _)| *name);
+    columns
+}
+
+/// A required input the batch does not supply. A dense batch has no period of
+/// its own at binding time, so the period is a fixed placeholder.
+fn missing_dense_input(name: &str, entity: &str) -> EvalError {
+    let placeholder = NaiveDate::from_ymd_opt(1900, 1, 1).expect("date");
+    EvalError::MissingInput {
+        name: name.to_string(),
+        entity_id: entity.to_string(),
+        period_start: placeholder,
+        period_end: placeholder,
     }
 }
 
@@ -2155,16 +2268,17 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     for row in 0..self.batch.row_count {
                         let start = offsets[row];
                         let end = offsets[row + 1];
-                        let matched = mask[start..end].iter().filter(|keep| **keep).count() as i64;
-                        counts.push(matched);
+                        let matched = mask[start..end].iter().filter(|keep| **keep).count();
+                        counts.push(dense_count(matched)?);
                     }
                     Ok(DenseColumn::Integer(counts))
                 } else {
+                    // `bind_batch` checked the offsets are non-decreasing.
                     Ok(DenseColumn::Integer(
                         offsets
                             .windows(2)
-                            .map(|pair| (pair[1] - pair[0]) as i64)
-                            .collect(),
+                            .map(|pair| dense_count(pair[1] - pair[0]))
+                            .collect::<Result<Vec<i64>, EvalError>>()?,
                     ))
                 }
             }
@@ -3079,16 +3193,49 @@ fn period_label(period: &Period) -> String {
 }
 
 /// Format the value at `row` of a dense column for an error message, in the
-/// column's own dtype (so an integer year reads `1985`, not `1985.0`).
+/// column's own dtype (so an integer year reads `1985`, not `1985.0`). A row
+/// the column lacks (a zero-row column that differs from another period's
+/// only in dtype) is described by the column's dtype and length instead, so
+/// building the error never panics.
 fn dense_value_label(column: &DenseColumn, row: usize) -> String {
+    let value = match column {
+        DenseColumn::Bool(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Integer(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Decimal(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Float(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Text(values) => values.get(row).map(|value| format!("{value:?}")),
+        DenseColumn::Date(values) => values.get(row).map(ToString::to_string),
+    };
+    value.unwrap_or_else(|| {
+        let dtype = dense_dtype_label(column);
+        match column.len() {
+            0 => format!("an empty {dtype} column"),
+            length => format!("no value (row {row} of a {length}-row {dtype} column)"),
+        }
+    })
+}
+
+fn dense_dtype_label(column: &DenseColumn) -> &'static str {
     match column {
-        DenseColumn::Bool(values) => values[row].to_string(),
-        DenseColumn::Integer(values) => values[row].to_string(),
-        DenseColumn::Decimal(values) => values[row].to_string(),
-        DenseColumn::Float(values) => values[row].to_string(),
-        DenseColumn::Text(values) => format!("{:?}", values[row]),
-        DenseColumn::Date(values) => values[row].to_string(),
+        DenseColumn::Bool(_) => "bool",
+        DenseColumn::Integer(_) => "integer",
+        DenseColumn::Decimal(_) => "decimal",
+        DenseColumn::Float(_) => "float",
+        DenseColumn::Text(_) => "text",
+        DenseColumn::Date(_) => "date",
     }
+}
+
+/// A related-row count as the `i64` a count column holds. `bind_batch` bounds
+/// every related row count by [`MAX_DENSE_ROWS`], far below `i64::MAX`, so this
+/// refuses only if that bound ever loosens, rather than wrapping to a negative
+/// count.
+fn dense_count(count: usize) -> Result<i64, EvalError> {
+    i64::try_from(count).map_err(|_| {
+        EvalError::TypeMismatch(format!(
+            "dense relation count {count} does not fit in an integer column"
+        ))
+    })
 }
 
 /// Add one to `counts[row]` for each row whose value in `column` is nonzero,
@@ -3150,6 +3297,8 @@ fn accumulate_nonzero_counts(column: &DenseColumn, counts: &mut [i64]) -> Result
 /// Columns whose lengths differ, or whose types are non-numeric and mismatched,
 /// are treated as differing at the first row (this errors loudly, which is the
 /// safe outcome for a period that supplied a structurally different value).
+/// That holds even for zero-row columns, which have no row 0 to quote;
+/// `dense_value_label` describes such a column by its dtype.
 fn first_differing_row(left: &DenseColumn, right: &DenseColumn) -> Option<usize> {
     // Length mismatch cannot arise under positional lifetime alignment (every
     // period's batch has the same row count), but guard it: report row 0.
@@ -3161,27 +3310,37 @@ fn first_differing_row(left: &DenseColumn, right: &DenseColumn) -> Option<usize>
         (DenseColumn::Text(a), DenseColumn::Text(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
         (DenseColumn::Date(a), DenseColumn::Date(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
         // Any pairing of numeric variants (Integer / Decimal / Float) compares
-        // by numeric value. `vec_from_column::<Decimal>` promotes both sides to
-        // Decimal for an exact comparison when representable; a value not
-        // representable as Decimal — an f64 that is non-finite or beyond
-        // Decimal's magnitude (~7.9e28), neither of which a per-person constant
-        // year or money amount ever is — falls back to differing.
+        // by numeric value, each cell promoted to Decimal for an exact
+        // comparison. A cell not representable as Decimal (an f64 that is
+        // non-finite or beyond Decimal's magnitude, ~7.9e28, neither of which a
+        // per-person constant year or money amount ever is) cannot be proven
+        // invariant, so its row differs.
         (
             DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
             DenseColumn::Integer(_) | DenseColumn::Decimal(_) | DenseColumn::Float(_),
-        ) => match (
-            <Decimal as DenseNum>::vec_from_column(left),
-            <Decimal as DenseNum>::vec_from_column(right),
-        ) {
-            (Ok(a), Ok(b)) => (0..a.len()).find(|&row| a[row] != b[row]),
-            // Non-representable value on at least one side (non-finite or out of
-            // Decimal range): cannot prove invariance, so treat as differing at
-            // the first row.
-            _ => Some(0),
-        },
+        ) => {
+            (0..left.len()).find(
+                |&row| match (decimal_cell(left, row), decimal_cell(right, row)) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => true,
+                },
+            )
+        }
         // Genuinely different, non-numeric column shapes: not provably
         // invariant.
         _ => Some(0),
+    }
+}
+
+/// The numeric cell at `row` as an exact Decimal, converted as
+/// `vec_from_column::<Decimal>` converts a whole column. `None` for a
+/// non-numeric column, a missing row, or a float Decimal cannot represent.
+fn decimal_cell(column: &DenseColumn, row: usize) -> Option<Decimal> {
+    match column {
+        DenseColumn::Integer(values) => values.get(row).map(|value| Decimal::from(*value)),
+        DenseColumn::Decimal(values) => values.get(row).copied(),
+        DenseColumn::Float(values) => values.get(row).and_then(|value| Decimal::from_f64(*value)),
+        DenseColumn::Bool(_) | DenseColumn::Text(_) | DenseColumn::Date(_) => None,
     }
 }
 

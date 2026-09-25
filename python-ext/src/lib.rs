@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -465,39 +466,50 @@ fn build_batch(
         }
     }
 
+    // Each relation dict is `{"offsets": ..., "inputs": {...}}`, plus an
+    // optional `"related_row_count"` for a relation whose related rows no
+    // column corroborates (see `DenseRelationBatchSpec`).
     let relation_batches = relations.unwrap_or_else(|| PyDict::new(inputs.py()));
-    let mut bound_relations = HashMap::new();
+    let mut bound_relations: HashMap<DenseRelationKey, DenseRelationBatchSpec> = HashMap::new();
     for schema in compiled.relations() {
         let key = relation_key(&schema.key);
         let value = relation_batches.get_item(&key)?.ok_or_else(|| {
             PyValueError::new_err(format!("missing dense relation batch `{key}`"))
         })?;
         let relation_dict = value.cast::<PyDict>()?;
-        let offsets = extract_index_vec(
-            &relation_dict
-                .get_item("offsets")?
-                .ok_or_else(|| PyValueError::new_err("missing dense relation offsets"))?,
-        )?;
+        // Several compiled relations can share one key: a derived relation
+        // binds its source relation's batch. Build that batch once and add each
+        // relation's columns to it, so a later relation cannot replace the
+        // columns an earlier one reads.
+        let batch = match bound_relations.entry(schema.key.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(DenseRelationBatchSpec {
+                offsets: extract_index_vec(
+                    &relation_dict
+                        .get_item("offsets")?
+                        .ok_or_else(|| PyValueError::new_err("missing dense relation offsets"))?,
+                )?,
+                inputs: HashMap::new(),
+                related_row_count: extract_related_row_count(relation_dict)?,
+            }),
+        };
         let raw_inputs = relation_dict
             .get_item("inputs")?
             .ok_or_else(|| PyValueError::new_err("missing dense relation inputs"))?;
         let input_dict = raw_inputs.cast::<PyDict>()?;
-        let mut related_inputs = HashMap::new();
         for input_name in &schema.related_inputs {
+            if batch.inputs.contains_key(input_name) {
+                continue;
+            }
             let column = input_dict.get_item(input_name)?.ok_or_else(|| {
                 PyValueError::new_err(format!(
                     "missing dense relation input `{input_name}` for `{key}`"
                 ))
             })?;
-            related_inputs.insert(input_name.clone(), dense_column_from_python(&column)?);
+            batch
+                .inputs
+                .insert(input_name.clone(), dense_column_from_python(&column)?);
         }
-        bound_relations.insert(
-            schema.key.clone(),
-            DenseRelationBatchSpec {
-                offsets,
-                inputs: related_inputs,
-            },
-        );
     }
 
     Ok(DenseBatchSpec {
@@ -573,6 +585,21 @@ fn extract_index_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
     Err(PyValueError::new_err(
         "dense relation offsets must be an int64 numpy array or Python integer list",
     ))
+}
+
+/// A relation dict's optional `related_row_count`. Absent or `None` leaves the
+/// related row count to be corroborated by the relation's columns.
+fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Option<usize>> {
+    let Some(value) = relation_dict.get_item("related_row_count")? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let count = value.extract::<i64>()?;
+    usize::try_from(count).map(Some).map_err(|_| {
+        PyValueError::new_err("dense relation related_row_count must be non-negative")
+    })
 }
 
 fn parse_date(value: &str) -> PyResult<NaiveDate> {

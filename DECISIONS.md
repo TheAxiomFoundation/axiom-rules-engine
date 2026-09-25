@@ -4,6 +4,43 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-09-25 — Dense batches justify every row count they claim
+
+**Decision.** The dense binder checks a batch's whole shape before binding
+anything, and every count the executor sizes a buffer by must be justified.
+`row_count` is the caller's stated root row count, and every supplied root
+column must have that length. A relation's related row count is its last
+offset. It must be corroborated by a supplied related column of that length or
+by an explicit `DenseRelationBatchSpec::related_row_count`, and every supplied
+related column (read by the program or not) and a stated count must equal it.
+A relation that claims related rows with neither is refused; zero related rows
+need no justification. A count above `MAX_DENSE_ROWS` (`isize::MAX` divided by
+the widest per-row buffer element) is refused. Violations are
+`EvalError::TypeMismatch`.
+
+**Why.** Offsets were the only statement of how many related rows exist. A
+relation with no related input (a `len`, or a filter that reads only the
+current entity) sized its masks from the last offset alone, so offsets
+`[0, 2^50]` aborted the process, the Python interpreter included, on a failed
+allocation; `[0, usize::MAX]` panicked or counted `-1` members; and
+`row_count = usize::MAX` wrapped `row_count + 1` to 0 in release builds.
+Requiring corroboration turns a malformed offsets vector into an error, as
+`row_count` already did for root columns.
+
+**Consequences.**
+
+- A caller that passes offsets but no related column for a relation with
+  related rows must state the count: `related_row_count` in Rust, or
+  `DenseRelationBatch(related_row_count=...)` (the `"related_row_count"`
+  relation-dict key) in Python. Batches that supply related columns are
+  unaffected unless a supplied column's length disagrees with the offsets.
+- A stated count is trusted up to `MAX_DENSE_ROWS`. A `len` over a raw
+  relation reports it without allocating, but a filter sized by a stated count
+  larger than memory still aborts at allocation, as a huge `row_count` does for
+  a rule that broadcasts to every row.
+- Validation reports columns in name order, so a malformed batch reports the
+  same problem on every run.
+
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 
 **Decision.** Parameter and derived versions carry an optional inclusive

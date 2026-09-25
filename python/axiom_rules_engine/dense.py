@@ -42,8 +42,39 @@ class DerivedMetadata:
 
 @dataclass(frozen=True)
 class DenseRelationBatch:
+    """One relation's rows for a batch.
+
+    Root row ``r``'s related rows are ``offsets[r]:offsets[r + 1]`` of every
+    column in ``inputs``. ``offsets`` has one entry per root row plus one,
+    starts at 0 and never decreases; its last entry is the related row count,
+    which every related column's length must equal.
+
+    ``related_row_count`` states that count explicitly. When given it must
+    equal ``offsets[-1]``. It is required when the offsets claim related rows
+    but ``inputs`` is empty (for example a ``len`` over the relation, or a
+    filter that reads only the current entity), because nothing else
+    corroborates the offsets.
+    """
+
     offsets: np.ndarray
     inputs: dict[str, np.ndarray]
+    related_row_count: int | None = None
+
+
+def _prepare_relations(
+    relations: dict[str, DenseRelationBatch],
+) -> dict[str, dict[str, Any]]:
+    """The relation dicts the native extension reads."""
+    return {
+        key: {
+            "offsets": np.asarray(batch.offsets),
+            "inputs": {
+                name: np.asarray(values) for name, values in batch.inputs.items()
+            },
+            "related_row_count": batch.related_row_count,
+        }
+        for key, batch in relations.items()
+    }
 
 
 class CompiledDenseProgram:
@@ -230,16 +261,7 @@ class CompiledDenseProgram:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         if relations is None:
             return (prepared_inputs, None)
-        prepared_relations = {
-            key: {
-                "offsets": np.asarray(rel.offsets),
-                "inputs": {
-                    name: np.asarray(values) for name, values in rel.inputs.items()
-                },
-            }
-            for key, rel in relations.items()
-        }
-        return (prepared_inputs, prepared_relations)
+        return (prepared_inputs, _prepare_relations(relations))
 
     def _run(
         self,
@@ -254,16 +276,7 @@ class CompiledDenseProgram:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         prepared_relations = None
         if relations is not None:
-            prepared_relations = {
-                key: {
-                    "offsets": np.asarray(batch.offsets),
-                    "inputs": {
-                        name: np.asarray(values)
-                        for name, values in batch.inputs.items()
-                    },
-                }
-                for key, batch in relations.items()
-            }
+            prepared_relations = _prepare_relations(relations)
         return native_execute(
             period_kind,
             start,

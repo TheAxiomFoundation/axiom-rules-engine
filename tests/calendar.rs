@@ -313,6 +313,7 @@ rules:
                                 "base_date".into(),
                                 DenseColumn::Date(dates.to_vec()),
                             )]),
+                            related_row_count: None,
                         },
                     )]),
                 },
