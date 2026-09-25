@@ -2095,9 +2095,10 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 elementwise(left, right, N::try_mul)
             }
             CompiledScalarExpr::Div(left, right) => {
-                let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
-                let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
-                elementwise(left, right, N::try_div)
+                let divisor = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
+                reject_zero_divisor(&divisor)?;
+                let dividend = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
+                elementwise(dividend, divisor, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; self.batch.row_count];
@@ -2408,9 +2409,10 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 elementwise(left, right, N::try_mul)
             }
             CompiledRelatedScalarExpr::Div(left, right) => {
-                let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
-                let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
-                elementwise(left, right, N::try_div)
+                let divisor = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
+                reject_zero_divisor(&divisor)?;
+                let dividend = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
+                elementwise(dividend, divisor, N::try_div)
             }
             CompiledRelatedScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; length];
@@ -2702,9 +2704,10 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 elementwise(left, right, N::try_mul)
             }
             CompiledScalarExpr::Div(left, right) => {
-                let left = N::vec_from_column(&self.eval_scalar(left)?)?;
-                let right = N::vec_from_column(&self.eval_scalar(right)?)?;
-                elementwise(left, right, N::try_div)
+                let divisor = N::vec_from_column(&self.eval_scalar(right)?)?;
+                reject_zero_divisor(&divisor)?;
+                let dividend = N::vec_from_column(&self.eval_scalar(left)?)?;
+                elementwise(dividend, divisor, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; self.row_count];
@@ -3106,6 +3109,16 @@ fn elementwise<N: DenseNum>(
         *left = operation(*left, right)?;
     }
     Ok(N::into_column(left))
+}
+
+/// Division evaluates the divisor first and rejects a zero divisor before
+/// evaluating the dividend, as explain does per row, so a row that fails
+/// reports the same error in both.
+fn reject_zero_divisor<N: DenseNum>(divisor: &[N]) -> Result<(), EvalError> {
+    if divisor.iter().any(|value| *value == N::ZERO) {
+        return Err(EvalError::DivisionByZero);
+    }
+    Ok(())
 }
 
 /// Add one to `counts[row]` for each row whose value in `column` is nonzero,

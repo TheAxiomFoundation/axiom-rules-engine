@@ -551,6 +551,38 @@ fn division_by_zero_is_an_error_in_a_taken_branch_and_skipped_in_an_untaken_one(
 }
 
 #[test]
+fn division_reports_the_same_error_as_explain_in_every_mode() {
+    // Explain evaluates the divisor first and rejects zero before evaluating
+    // the dividend; fast reports explain's error, and dense follows the same
+    // order, so both failing operands give one answer everywhere.
+    for (formula, expected) in [
+        ("(amount + 1) / 0", EvalError::DivisionByZero.to_string()),
+        (
+            "(amount + 1) / (amount * 2)",
+            overflow_message("multiplication"),
+        ),
+        (
+            "(amount * 2) / (amount - amount)",
+            EvalError::DivisionByZero.to_string(),
+        ),
+    ] {
+        let rulespec = household_formula(formula);
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let error = execute_request(household_request(
+                mode.clone(),
+                &rulespec,
+                &[("household-a", &[("amount", MAX)])],
+            ))
+            .expect_err("the division fails");
+            assert_eq!(error.to_string(), expected, "{formula} in {mode:?}");
+        }
+        let error =
+            dense_households(&rulespec, &[("amount", &[MAX])]).expect_err("the division fails");
+        assert_eq!(error.to_string(), expected, "{formula} in dense");
+    }
+}
+
+#[test]
 fn related_aggregation_overflow_is_an_error_in_every_mode() {
     assert_overflows_in_explain_and_fast(
         |mode| member_request(mode, MEMBER_INCOME_TOTAL, &[("household-a", &[MAX, "1"])]),
@@ -876,7 +908,9 @@ fn generated_arithmetic_matches_the_reference_in_every_mode() {
         )
     };
 
-    let mut outcomes = [0_usize; 3]; // answered, arithmetic error, dense-only error
+    // Answered, an arithmetic error, and answered although an unselected
+    // branch fails.
+    let mut outcomes = [0_usize; 3];
     for seed in 0_u64..400 {
         let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut next = || {
@@ -966,6 +1000,14 @@ fn generated_arithmetic_matches_the_reference_in_every_mode() {
             .map(|(name, values)| (*name, values.as_slice()))
             .collect::<Vec<_>>();
         let dense = dense_households(&rulespec, &columns);
+        // A conditional whose unselected branch has no Decimal result for
+        // some household: explain and fast must not evaluate it.
+        let unselected_branch_fails = conditional
+            && households.iter().any(|(a, b)| {
+                let (a, b) = (decimal(a), decimal(b));
+                let unselected = if a > b { &else_expr } else { &then_expr };
+                unselected.reference(a, b).is_none()
+            });
 
         match &expected {
             Some(values) => {
@@ -974,27 +1016,16 @@ fn generated_arithmetic_matches_the_reference_in_every_mode() {
                 let fast = fast.unwrap_or_else(|error| panic!("{context}: fast {error}"));
                 assert_eq!(&results(&fast), values, "{context}: fast");
                 match dense {
-                    Ok(dense) => {
-                        assert_eq!(&dense, values, "{context}: dense");
-                        outcomes[0] += 1;
-                    }
-                    Err(error) => {
-                        // Dense evaluates both branches for every row, so it
-                        // may fail only on a branch some household does not
-                        // take, and only with an arithmetic error.
-                        let unselected_branch_fails = conditional
-                            && households.iter().any(|(a, b)| {
-                                let (a, b) = (decimal(a), decimal(b));
-                                let unselected = if a > b { &else_expr } else { &then_expr };
-                                unselected.reference(a, b).is_none()
-                            });
-                        assert!(
-                            unselected_branch_fails && is_arithmetic_error(&error),
-                            "{context}: dense {error:?}"
-                        );
-                        outcomes[2] += 1;
-                    }
+                    Ok(dense) => assert_eq!(&dense, values, "{context}: dense"),
+                    // Dense evaluates both branches for every row, so it may
+                    // fail only on a branch some household does not take,
+                    // and only with an arithmetic error.
+                    Err(error) => assert!(
+                        unselected_branch_fails && is_arithmetic_error(&error),
+                        "{context}: dense {error:?}"
+                    ),
                 }
+                outcomes[if unselected_branch_fails { 2 } else { 0 }] += 1;
             }
             None => {
                 let explain = explain.expect_err(&format!("{context}: explain answered"));
@@ -1007,6 +1038,39 @@ fn generated_arithmetic_matches_the_reference_in_every_mode() {
                 let dense = dense.expect_err(&format!("{context}: dense answered"));
                 assert!(is_arithmetic_error(&dense), "{context}: dense {dense:?}");
                 outcomes[1] += 1;
+            }
+        }
+
+        // Row by row, an unconditional formula fails in dense with exactly
+        // explain's error: both evaluate operands left to right, except that
+        // division evaluates the divisor first and rejects zero before the
+        // dividend. (A multi-row batch may report another row's error, since
+        // dense evaluates column by column.)
+        if !conditional {
+            for (index, household) in inputs.iter().enumerate() {
+                let explain = execute_request(household_request(
+                    ExecutionMode::Explain,
+                    &rulespec,
+                    &[("household-a", household)],
+                ));
+                let columns = household
+                    .iter()
+                    .map(|(name, value)| (*name, std::slice::from_ref(value)))
+                    .collect::<Vec<_>>();
+                let dense = dense_households(&rulespec, &columns);
+                match (explain, dense) {
+                    (Ok(explain), Ok(dense)) => {
+                        assert_eq!(results(&explain), dense, "{context}: row {index}")
+                    }
+                    (Err(explain), Err(dense)) => assert_eq!(
+                        explain.to_string(),
+                        dense.to_string(),
+                        "{context}: row {index}"
+                    ),
+                    (explain, dense) => {
+                        panic!("{context}: row {index}: explain {explain:?}, dense {dense:?}")
+                    }
+                }
             }
         }
     }
