@@ -583,6 +583,69 @@ fn division_reports_the_same_error_as_explain_in_every_mode() {
 }
 
 #[test]
+fn division_in_member_predicates_and_lifetime_formulas_rejects_zero_first() {
+    // Related-row division follows explain's order too.
+    let rulespec = member_predicate_count("(income + 1) / (income - income) > 0");
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let error = execute_request(member_request(
+            mode.clone(),
+            &rulespec,
+            &[("household-a", &[MAX])],
+        ))
+        .expect_err("the division fails");
+        assert_eq!(error.to_string(), "division by zero", "{mode:?}");
+    }
+    let error = dense_members(&rulespec, &[&[MAX]]).expect_err("the division fails");
+    assert_eq!(error.to_string(), "division by zero");
+
+    // Lifetime formulas have no explain counterpart; they divide in the same
+    // order.
+    let error = lifetime_total("(sum_over_periods(earnings) + 1) / 0", &[MAX])
+        .expect_err("the division fails");
+    assert_eq!(error.to_string(), "division by zero");
+}
+
+#[test]
+fn filtered_aggregation_checks_the_filter_before_the_value_in_every_mode() {
+    // Explain checks each member's predicate before reading its value, and
+    // dense computes the filter before the values, so a member for which
+    // both fail reports the predicate's error everywhere.
+    const RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: earning_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: income - (0 - income) > 0
+  - name: doubled
+    kind: derived
+    entity: Person
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: income * 2
+  - name: result
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum_where(member_of_household, doubled, earning_member)
+"#;
+    assert_overflows_in_explain_and_fast(
+        |mode| member_request(mode, RULESPEC, &[("household-a", &[MAX])]),
+        "subtraction",
+    );
+    assert_dense_overflow(dense_members(RULESPEC, &[&[MAX]]), "subtraction");
+}
+
+#[test]
 fn related_aggregation_overflow_is_an_error_in_every_mode() {
     assert_overflows_in_explain_and_fast(
         |mode| member_request(mode, MEMBER_INCOME_TOTAL, &[("household-a", &[MAX, "1"])]),
@@ -1044,8 +1107,9 @@ fn generated_arithmetic_matches_the_reference_in_every_mode() {
         // Row by row, an unconditional formula fails in dense with exactly
         // explain's error: both evaluate operands left to right, except that
         // division evaluates the divisor first and rejects zero before the
-        // dividend. (A multi-row batch may report another row's error, since
-        // dense evaluates column by column.)
+        // dividend. (With several rows, or several members of one household,
+        // dense may report another row's or member's error, since it
+        // evaluates a whole column before the next operation.)
         if !conditional {
             for (index, household) in inputs.iter().enumerate() {
                 let explain = execute_request(household_request(

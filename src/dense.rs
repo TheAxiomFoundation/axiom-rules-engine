@@ -2214,8 +2214,11 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 predicate,
             } => {
                 let offsets = self.batch.relations[*relation].offsets.clone();
-                let values = N::vec_from_column(&self.resolve_related_scalar(*relation, value)?)?;
+                // The filter before the values, as explain checks each
+                // member's predicate before reading its value, so a member
+                // that fails in both reports the same error.
                 let mask = self.relation_mask(*relation, predicate.as_ref())?;
+                let values = N::vec_from_column(&self.resolve_related_scalar(*relation, value)?)?;
                 let mut totals = Vec::with_capacity(self.batch.row_count);
                 for row in 0..self.batch.row_count {
                     let start = offsets[row];
@@ -3112,8 +3115,10 @@ fn elementwise<N: DenseNum>(
 }
 
 /// Division evaluates the divisor first and rejects a zero divisor before
-/// evaluating the dividend, as explain does per row, so a row that fails
-/// reports the same error in both.
+/// evaluating the dividend, as explain does, so a single row (or related
+/// member) that fails reports the same error in both. Across several rows or
+/// members dense may report a different one's error, since it evaluates a
+/// whole column before the next operation.
 fn reject_zero_divisor<N: DenseNum>(divisor: &[N]) -> Result<(), EvalError> {
     if divisor.iter().any(|value| *value == N::ZERO) {
         return Err(EvalError::DivisionByZero);
