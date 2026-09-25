@@ -31,13 +31,54 @@ fn run_with_stdin(args: &[&str], input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn aggregation CLI");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input)
-        .expect("write request");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    write_request(&mut stdin, input).expect("write request");
+    // Close the pipe so a child that reads the request sees EOF.
+    drop(stdin);
     child.wait_with_output().expect("wait for aggregation CLI")
+}
+
+/// Writes `input` to the child's stdin, treating a closed pipe as success.
+///
+/// Some invocations refuse before they read stdin (the runtime switch is off, or
+/// an argument is unknown). If such a child has already exited, the write fails
+/// with `BrokenPipe`, and the caller still checks the refusal through the exit
+/// status and stderr. Any other error is returned.
+fn write_request(stdin: &mut impl Write, input: &[u8]) -> std::io::Result<()> {
+    match stdin.write_all(input) {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
+/// A writer whose every write fails with one error kind.
+struct FailingWriter(std::io::ErrorKind);
+
+impl Write for FailingWriter {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(self.0.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn write_request_tolerates_only_a_broken_pipe() {
+    use std::io::ErrorKind;
+    assert!(write_request(&mut FailingWriter(ErrorKind::BrokenPipe), b"{}").is_ok());
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::WriteZero,
+        ErrorKind::Other,
+    ] {
+        let error = write_request(&mut FailingWriter(kind), b"{}").unwrap_err();
+        assert_eq!(error.kind(), kind);
+    }
+    let mut written = Vec::new();
+    write_request(&mut written, b"{}").unwrap();
+    assert_eq!(written, b"{}");
 }
 
 /// Compares CLI output with the result fixture at `path` byte for byte.
@@ -175,6 +216,37 @@ fn fixture_drift_report_names_every_moved_path() {
     let report = moved_json_paths(&many_expected, &many_actual);
     assert!(report.starts_with("/0, /1, "), "{report}");
     assert!(report.ends_with("/19, and 5 more"), "{report}");
+}
+
+/// Invocations that refuse before reading stdin, sent a request larger than any
+/// pipe buffer. The child never reads, so the write fills the pipe, blocks, and
+/// fails with `BrokenPipe` once the child exits, every time. The gating test
+/// below sends its 8.8 KB request to these same refusals, where that failure
+/// happens only when the child exits before the write starts.
+#[test]
+fn refusals_before_reading_stdin_survive_an_unread_request() {
+    let request = vec![b' '; 4 << 20];
+    let refusals: [(&[&str], &str); 2] = [
+        (
+            &["run-unit-aggregation", "--artifact", "never-read.json"],
+            "unit derivation is disabled",
+        ),
+        (
+            &[
+                "run-unit-aggregation",
+                "--plan",
+                "never-read.yaml",
+                "--enable-experimental-unit-derivation",
+            ],
+            "unknown run-unit-aggregation argument `--plan`",
+        ),
+    ];
+    for (args, refusal) in refusals {
+        let output = run_with_stdin(args, &request);
+        assert!(!output.status.success(), "{args:?} should refuse");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+    }
 }
 
 #[test]
