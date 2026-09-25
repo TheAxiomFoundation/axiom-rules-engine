@@ -1446,7 +1446,7 @@ fn explain_value(value: &OutputValue) -> Value {
             ScalarValueSpec::Decimal { value } => dec(value),
             other => panic!("unexpected explain scalar {other:?}"),
         }),
-        OutputValue::Judgment { outcome, .. } => Value::Judgment(outcome.clone()),
+        OutputValue::Judgment { outcome, .. } => Value::Judgment(*outcome),
     }
 }
 
