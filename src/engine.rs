@@ -1,3 +1,7 @@
+// rust_decimal and chrono operators panic on overflow. Evaluator arithmetic
+// uses the checked helpers in engine.rs instead (see clippy.toml).
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
@@ -44,6 +48,71 @@ pub(crate) fn shift_calendar_years(
         })
 }
 
+pub(crate) fn shift_calendar_days(
+    base: chrono::NaiveDate,
+    offset: i64,
+) -> Result<chrono::NaiveDate, EvalError> {
+    chrono::TimeDelta::try_days(offset)
+        .and_then(|days| base.checked_add_signed(days))
+        .ok_or_else(|| {
+            EvalError::TypeMismatch(
+                "date_add_days result is outside the supported date range".to_string(),
+            )
+        })
+}
+
+// Decimal arithmetic for every evaluator (explain, bulk, dense). rust_decimal's
+// operators panic when a result leaves the 96-bit range; an input or parameter
+// large enough to overflow is an evaluation error, never a panic, and all
+// three paths report it with the same message.
+
+/// How a checked Decimal operation fails. It is small and `Copy`, so the
+/// column loops pay nothing for it on success; `?` turns it into the
+/// matching `EvalError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArithmeticError {
+    Overflow(&'static str),
+    DivisionByZero,
+}
+
+impl From<ArithmeticError> for EvalError {
+    fn from(error: ArithmeticError) -> Self {
+        match error {
+            ArithmeticError::Overflow(operation) => EvalError::ArithmeticOverflow(operation),
+            ArithmeticError::DivisionByZero => EvalError::DivisionByZero,
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn checked_add(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_add(right)
+        .ok_or(ArithmeticError::Overflow("addition"))
+}
+
+#[inline]
+pub(crate) fn checked_sub(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_sub(right)
+        .ok_or(ArithmeticError::Overflow("subtraction"))
+}
+
+#[inline]
+pub(crate) fn checked_mul(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_mul(right)
+        .ok_or(ArithmeticError::Overflow("multiplication"))
+}
+
+/// A zero divisor is `DivisionByZero`; a quotient beyond the range (a large
+/// dividend over a divisor below one) is an overflow.
+#[inline]
+pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    if right.is_zero() {
+        return Err(ArithmeticError::DivisionByZero);
+    }
+    left.checked_div(right)
+        .ok_or(ArithmeticError::Overflow("division"))
+}
+
 #[derive(Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
@@ -88,6 +157,8 @@ pub enum EvalError {
     ExpectedScalar(String),
     #[error("division by zero")]
     DivisionByZero,
+    #[error("arithmetic overflow: {0} result is outside the representable decimal range")]
+    ArithmeticOverflow(&'static str),
     #[error(
         "over-periods reduction `{0}` is valid only under lifetime execution (execute_lifetime); it has no meaning in per-period execution"
     )]
@@ -700,26 +771,30 @@ impl<'a> Engine<'a> {
             ScalarExpr::Add(items) => {
                 let mut total = Decimal::ZERO;
                 for item in items {
-                    total += self.eval_decimal(item, entity_id, period, relation_context)?;
+                    total = checked_add(
+                        total,
+                        self.eval_decimal(item, entity_id, period, relation_context)?,
+                    )?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
-            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period, relation_context)?
-                    - self.eval_decimal(right, entity_id, period, relation_context)?,
-            )),
-            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period, relation_context)?
-                    * self.eval_decimal(right, entity_id, period, relation_context)?,
-            )),
+            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(checked_sub(
+                self.eval_decimal(left, entity_id, period, relation_context)?,
+                self.eval_decimal(right, entity_id, period, relation_context)?,
+            )?)),
+            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(checked_mul(
+                self.eval_decimal(left, entity_id, period, relation_context)?,
+                self.eval_decimal(right, entity_id, period, relation_context)?,
+            )?)),
             ScalarExpr::Div(left, right) => {
                 let divisor = self.eval_decimal(right, entity_id, period, relation_context)?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
-                Ok(ScalarValue::Decimal(
-                    self.eval_decimal(left, entity_id, period, relation_context)? / divisor,
-                ))
+                Ok(ScalarValue::Decimal(checked_div(
+                    self.eval_decimal(left, entity_id, period, relation_context)?,
+                    divisor,
+                )?))
             }
             ScalarExpr::Max(items) => {
                 let mut iter = items.iter();
@@ -780,7 +855,7 @@ impl<'a> Engine<'a> {
                             "date_add_days expects an integer day count on the right".to_string(),
                         )
                     })?;
-                Ok(ScalarValue::Date(base + chrono::Duration::days(offset)))
+                Ok(ScalarValue::Date(shift_calendar_days(base, offset)?))
             }
             ScalarExpr::DateAddMonths { date, months } => {
                 let base = self
@@ -836,7 +911,7 @@ impl<'a> Engine<'a> {
                     .ok_or_else(|| {
                         EvalError::TypeMismatch("days_between expects a date for `to`".to_string())
                     })?;
-                Ok(ScalarValue::Integer((b - a).num_days()))
+                Ok(ScalarValue::Integer(b.signed_duration_since(a).num_days()))
             }
             ScalarExpr::CountRelated {
                 relation,
@@ -851,7 +926,7 @@ impl<'a> Engine<'a> {
                     entity_id,
                     period,
                 )?;
-                let mut count = 0_i64;
+                let mut count = 0_usize;
                 for related_id in related_ids {
                     if let Some(predicate) = where_clause {
                         if !self
@@ -863,7 +938,8 @@ impl<'a> Engine<'a> {
                     }
                     count += 1;
                 }
-                Ok(ScalarValue::Integer(count))
+                // A count of collected ids fits in i64 on every supported target.
+                Ok(ScalarValue::Integer(count as i64))
             }
             ScalarExpr::SumRelated {
                 relation,
@@ -888,7 +964,8 @@ impl<'a> Engine<'a> {
                             continue;
                         }
                     }
-                    total += self.eval_related_value(value, &related_id, period)?;
+                    total =
+                        checked_add(total, self.eval_related_value(value, &related_id, period)?)?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }

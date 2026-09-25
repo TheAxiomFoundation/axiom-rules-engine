@@ -2009,9 +2009,9 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
 
 /// A parameter output anywhere in the request sends it to explain before
 /// bulk evaluates anything. Bulk evaluates both branches of `guarded` for
-/// every row, and household-a's untaken branch overflows (a panic, since
-/// arithmetic is unchecked), so warming `guarded` before seeing `rate` would
-/// crash a request that explain answers.
+/// every row, and household-a's untaken branch overflows, so warming
+/// `guarded` before seeing `rate` would name that overflow as the fallback
+/// reason (and, before evaluator arithmetic was checked, panicked).
 #[test]
 fn fast_mode_sends_a_parameter_request_to_explain_before_evaluating_anything() {
     const RULESPEC: &str = r#"
