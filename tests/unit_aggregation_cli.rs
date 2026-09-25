@@ -219,8 +219,9 @@ fn fixture_drift_report_names_every_moved_path() {
 }
 
 /// Invocations that refuse before reading stdin, sent a request larger than any
-/// pipe buffer. The child never reads, so the write fills the pipe, blocks, and
-/// fails with `BrokenPipe` once the child exits, every time. The gating test
+/// pipe buffer. The child never reads, so the write cannot complete: it fails
+/// with `BrokenPipe` at once if the child has already exited, or blocks on the
+/// full pipe until the child exits and then fails, every time. The gating test
 /// below sends its 8.8 KB request to these same refusals, where that failure
 /// happens only when the child exits before the write starts.
 #[test]
