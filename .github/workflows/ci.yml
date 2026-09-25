@@ -47,6 +47,15 @@ jobs:
       - name: cargo test (schema feature)
         run: cargo test --features schema --verbose
 
+      # The unit-derivation prototype (stage 2, src/unit_derivation) and its
+      # stage-3 aggregation layer sit behind the non-default `unit-derivation`
+      # feature, and so do their tests: the module's unit tests, the exact NZ
+      # result fixture in tests/unit_aggregation_cli.rs, and the four
+      # experimental stage-3 schemas that `schemas_are_current` checks. Without
+      # this run, a failure in any of them reaches main unnoticed.
+      - name: cargo test (schema + unit-derivation features)
+        run: cargo test --features "schema unit-derivation" --verbose
+
       - name: cargo build --release
         run: cargo build --release --verbose
 
@@ -91,6 +100,9 @@ jobs:
 
       - name: cargo test (schema feature)
         run: cargo test --features schema --verbose
+
+      - name: cargo test (schema + unit-derivation features)
+        run: cargo test --features "schema unit-derivation" --verbose
 
       - name: cargo build --release
         run: cargo build --release --verbose

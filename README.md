@@ -224,6 +224,9 @@ formats the engine exchanges:
 - `compiled-artifact.v1.schema.json` — the immutable archived v1 contract.
   Current engines reject v1 artifacts rather than guessing at missing temporal
   semantics.
+- `*.stage3.schema.json` — four explicitly experimental schemas for the
+  unit-derivation aggregation plan, compiled aggregation artifact, request, and
+  result. They are generated only when the `unit-derivation` feature is on too.
 
 These are the single source of truth for consumers that would otherwise
 re-implement the shape by hand. Current schemas mirror the engine's serde
@@ -236,13 +239,16 @@ Schema generation lives behind the non-default `schema` feature, so pure-runtime
 consumers do not compile `schemars`. Regenerate the checked-in files with:
 
 ```bash
-cargo run --features schema -- emit-schemas --out schemas
+cargo run --features "schema unit-derivation" -- emit-schemas --out schemas
 ```
 
-A golden-file test (`cargo test --features schema`) fails if the checked-in
-schemas drift from the types. `schema_conformance` validates every module and
-companion test under the explicit `AXIOM_RULESPEC_US_ROOT` checkout and
-self-skips when none is configured.
+Without `unit-derivation`, `emit-schemas` leaves the four stage-3 files
+untouched. A golden-file test fails if the checked-in schemas drift from the
+types: `cargo test --features schema` checks the others, and
+`cargo test --features "schema unit-derivation"` checks all of them.
+`schema_conformance` validates every module and companion test under the
+explicit `AXIOM_RULESPEC_US_ROOT` checkout and self-skips when none is
+configured.
 
 ## Python Package
 
@@ -256,10 +262,23 @@ bindings, and concept discovery helpers. It shells out to the compiled
 ```bash
 cargo test
 cargo test --features schema
+cargo test --features "schema unit-derivation"
 python -m pytest -q python/tests
 ```
 
 The Rust tests cover parsing, lowering, execution, dense compilation, traces,
 and RuleSpec import/ID behavior using fixtures under `tests/fixtures/rulespec/`.
 The `--features schema` run adds the JSON Schema golden-file, fidelity, and
-`rulespec-us` conformance tests.
+`rulespec-us` conformance tests. The `unit-derivation` run adds the
+experimental unit-derivation suite in `src/unit_derivation`, the stage-3
+schemas, and `tests/unit_aggregation_cli.rs`. That test compares CLI output
+with `tests/fixtures/unit_derivation/nz_income_explorer_result.json` byte for
+byte. The fixture's `plan_digest` and `trace_root` commit to the whole compiled
+source artifact, including `engine_version` and the seeded unit table, so a
+version cut or a new seeded currency changes them. When the test reports that
+only those digests moved and the cause is intended, regenerate the fixture and
+review the diff:
+
+```bash
+AXIOM_UPDATE_UNIT_AGGREGATION_FIXTURE=1 cargo test --features "schema unit-derivation" --test unit_aggregation_cli
+```
