@@ -1277,13 +1277,17 @@ fn relation_derivation_dependencies(
         };
         let mut dependencies = HashSet::new();
         collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
-        for dependency in &dependencies {
-            if !derived_names.contains(dependency) {
-                return Err(CompileError::UnknownDerivedDependency {
-                    derived: relation.name.clone(),
-                    dependency: dependency.clone(),
-                });
-            }
+        // The smallest name, so a predicate naming several unknown rules
+        // always reports the same one.
+        if let Some(dependency) = dependencies
+            .iter()
+            .filter(|dependency| !derived_names.contains(*dependency))
+            .min()
+        {
+            return Err(CompileError::UnknownDerivedDependency {
+                derived: relation.name.clone(),
+                dependency: dependency.clone(),
+            });
         }
         dependencies_by_relation.insert(relation.name.clone(), dependencies);
     }

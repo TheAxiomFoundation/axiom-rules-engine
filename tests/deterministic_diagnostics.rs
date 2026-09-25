@@ -10,6 +10,7 @@ use axiom_rules_engine::spec::{
     DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, PeriodKindSpec, PeriodSpec,
     ProgramSpec, ScalarExprSpec, ScalarValueSpec, SpecError,
 };
+use serde_json::json;
 
 const CYCLIC_RULESPEC: &str = r#"
 format: rulespec/v1
@@ -45,6 +46,47 @@ fn cyclic_dependency_diagnostic_lists_its_members_in_order() {
         assert_eq!(
             error.to_string(),
             "cyclic derived dependency detected involving: alpha, beta, gamma",
+            "run {run}"
+        );
+    }
+}
+
+/// A relation predicate naming several unknown derived rules used to report
+/// whichever one the predicate's hash set yielded first.
+#[test]
+fn unknown_relation_predicate_dependency_is_reported_in_order() {
+    let program = json!({
+        "relations": [
+            {"name": "record_of_group", "arity": 2, "slot_entities": ["Record", "Group"]},
+            {
+                "name": "matching_records",
+                "arity": 2,
+                "slot_entities": ["Record", "Group"],
+                "derivation": {
+                    "source_relation": "record_of_group",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "predicate": {
+                        "kind": "and",
+                        "items": [
+                            {"kind": "derived", "name": "delta"},
+                            {"kind": "derived", "name": "beta"},
+                            {"kind": "derived", "name": "gamma"},
+                            {"kind": "derived", "name": "alpha"}
+                        ]
+                    }
+                }
+            }
+        ]
+    });
+    for run in 0..32 {
+        let program: ProgramSpec =
+            serde_json::from_value(program.clone()).expect("valid program spec");
+        let error = CompiledProgramArtifact::compile(program)
+            .expect_err("a predicate naming unknown rules does not compile");
+        assert_eq!(
+            error.to_string(),
+            "unknown derived dependency `alpha` referenced from `matching_records`",
             "run {run}"
         );
     }
