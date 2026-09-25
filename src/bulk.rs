@@ -106,42 +106,56 @@ pub fn try_execute(
 
     let mut evaluator = BulkEvaluator::new(program, data, period, entity_ids);
     let mut results = Vec::with_capacity(queries.len());
-    let mut requested = HashSet::new();
-    for query in queries {
-        for output_reference in &query.outputs {
-            let Some(output_name) = program.resolve_derived_name(output_reference) else {
-                if program.resolve_parameter_name(output_reference).is_some() {
-                    // Parameter outputs evaluate on the explain path; report
-                    // Unsupported so fast mode falls back instead of erroring.
-                    return Ok(FastPathResult::Unsupported {
-                        reason: format!(
-                            "parameter output `{output_reference}` uses the explain path"
-                        ),
-                    });
-                }
-                return Err(EvalError::UnknownDerived(output_reference.clone()));
+    // Resolve every requested output before evaluating any. A parameter
+    // output or an unknown one sends the whole request to explain before bulk
+    // evaluates anything: bulk evaluates both branches of every conditional,
+    // so its arithmetic can fail, or overflow and panic, on a branch explain
+    // never takes.
+    let mut requested = Vec::new();
+    let mut seen = HashSet::new();
+    for output_reference in queries.iter().flat_map(|query| &query.outputs) {
+        let Some(output_name) = program.resolve_derived_name(output_reference) else {
+            let reason = if program.resolve_parameter_name(output_reference).is_some() {
+                format!("parameter output `{output_reference}` uses the explain path")
+            } else {
+                format!("unknown output `{output_reference}`; explain reports it")
             };
-            requested.insert(output_name.to_string());
+            return Ok(FastPathResult::Unsupported { reason });
+        };
+        if seen.insert(output_name.clone()) {
+            requested.push(output_name);
         }
     }
 
+    // Warm each distinct output once, in request order. The first one bulk
+    // cannot answer, because it needs a construct bulk does not support or
+    // because it fails, sends the whole request to explain and names the
+    // reason; explain then answers or reports its own first error. Bulk warms
+    // an output over every row at once, so its first error can belong to a
+    // later query than explain's, and it can come from a branch no row takes.
+    // Warming in a HashSet's iteration order, which is seeded afresh for every
+    // process, made one request fail on some runs and fall back on others.
     for output in &requested {
-        let derived = evaluator.get_derived(output)?;
-        let semantics = derived.semantics_at(&evaluator.period).ok_or_else(|| {
-            EvalError::MissingDerivedFormulaVersion {
-                derived: output.clone(),
-                at: evaluator.period.start,
+        let warmup = evaluator.get_derived(output).and_then(|derived| {
+            match derived.semantics_at(&evaluator.period) {
+                Some(DerivedSemantics::Scalar(_)) => Ok(true),
+                Some(DerivedSemantics::Judgment(_)) => Ok(false),
+                None => Err(EvalError::MissingDerivedFormulaVersion {
+                    derived: output.clone(),
+                    at: evaluator.period.start,
+                }),
             }
-        })?;
-        let warmup = match semantics {
-            DerivedSemantics::Scalar(_) => evaluator.evaluate_scalar(output).map(|_| ()),
-            DerivedSemantics::Judgment(_) => evaluator.evaluate_judgment(output).map(|_| ()),
+        });
+        let warmup = match warmup {
+            Ok(true) => evaluator.evaluate_scalar(output).map(|_| ()),
+            Ok(false) => evaluator.evaluate_judgment(output).map(|_| ()),
+            Err(error) => Err(error),
         };
         if let Err(error) = warmup {
-            if let Some(reason) = unsupported_reason(&error) {
-                return Ok(FastPathResult::Unsupported { reason });
-            }
-            return Err(error);
+            let reason = unsupported_reason(&error).unwrap_or_else(|| {
+                format!("bulk evaluation failed ({error}); explain decides the outcome")
+            });
+            return Ok(FastPathResult::Unsupported { reason });
         }
     }
 
