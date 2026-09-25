@@ -72,6 +72,18 @@ pub enum CompileError {
     AmbiguousRuleSpecYaml { path: String },
     #[error("strict relation entity validation failed:\n{0}")]
     StrictRelationEntityDiagnostics(CompileDiagnosticReport),
+    #[error("{path}: relation entity typing failed:\n{report}")]
+    RelationTyping {
+        path: String,
+        report: crate::relation_typing::RelationTypingReport,
+    },
+    #[error(
+        "compiled artefact `{path}` executes relations that fail mandatory entity typing:\n{report}\nRecompile the program with this engine, or type the artefact in place with `axiom-rules-engine migrate artifact --artifact {path} --output <typed.json>` (add `--relation-entities <relation>=<Kind>,<Kind>` for any slot it cannot infer)"
+    )]
+    LegacyArtifactRelationTyping {
+        path: String,
+        report: crate::relation_typing::RelationTypingReport,
+    },
     #[error(
         "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
     )]
@@ -98,14 +110,24 @@ pub enum CompileError {
 /// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
 pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
+/// Whether an artefact load enforces mandatory relation entity typing. Only
+/// the migration tool defers it, to type an artefact the loader rejects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelationTypingGate {
+    Enforce,
+    DeferToMigration,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CompileOptions {
     /// Escalate compatible duplicate-namespace diagnostics to compile errors.
     /// This is deliberately narrower than issue #83's future
     /// `--strict-resolution`, which also needs declared-input provenance.
     pub strict_namespaces: bool,
-    /// Escalate relation argument name/shape and executable-orientation
-    /// diagnostics to compile errors. Arity is structural in every mode.
+    /// Escalate relation argument label diagnostics (a label that is not an
+    /// UpperCamelCase entity kind, or a kind no rule in the closure uses) to
+    /// compile errors. Arity is structural in every mode, and executed
+    /// relations must be entity-typed in every mode (`relation_typing`).
     pub strict_relation_entities: bool,
 }
 
@@ -245,17 +267,14 @@ impl CompiledProgramArtifact {
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
-        let mut diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
+        let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
-        let orientation_diagnostics = relation_orientation_diagnostics(&program, path)?;
-        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
-            return Err(CompileError::StrictRelationEntityDiagnostics(
-                CompileDiagnosticReport {
-                    diagnostics: orientation_diagnostics,
-                },
-            ));
-        }
-        diagnostics.extend(orientation_diagnostics);
+        crate::relation_typing::check_program(&program.to_program()?).map_err(|report| {
+            CompileError::RelationTyping {
+                path: path.to_string(),
+                report,
+            }
+        })?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -270,6 +289,7 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
         fill_absent_catalog: bool,
+        typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
         if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
@@ -299,15 +319,14 @@ impl CompiledProgramArtifact {
                 "metadata does not match the compiled program",
             ));
         }
-        let orientation_diagnostics = relation_orientation_diagnostics(&self.program, path)?;
-        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
-            return Err(CompileError::StrictRelationEntityDiagnostics(
-                CompileDiagnosticReport {
-                    diagnostics: orientation_diagnostics,
+        if typing == RelationTypingGate::Enforce {
+            crate::relation_typing::check_program(&self.program.to_program()?).map_err(
+                |report| CompileError::LegacyArtifactRelationTyping {
+                    path: path.to_string(),
+                    report,
                 },
-            ));
+            )?;
         }
-        self.diagnostics.extend(orientation_diagnostics);
         Ok(self)
     }
 
@@ -470,6 +489,30 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
+        Self::from_json_source_gated(source, path, options, RelationTypingGate::Enforce)
+    }
+
+    /// Load an artefact without the mandatory relation typing gate, so the
+    /// migration tool can type an artefact the loader would reject. Every
+    /// other contract check still runs.
+    pub(crate) fn from_json_str_for_relation_migration(
+        source: &str,
+        path: &str,
+    ) -> Result<Self, CompileError> {
+        Self::from_json_source_gated(
+            source,
+            path,
+            CompileOptions::default(),
+            RelationTypingGate::DeferToMigration,
+        )
+    }
+
+    fn from_json_source_gated(
+        source: &str,
+        path: &str,
+        options: CompileOptions,
+        typing: RelationTypingGate,
+    ) -> Result<Self, CompileError> {
         let value: serde_json::Value =
             serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
@@ -506,7 +549,7 @@ impl CompiledProgramArtifact {
                 path: path.to_string(),
                 error,
             })?;
-        artifact.check_format_version(path, options, catalog_absent)
+        artifact.check_format_version(path, options, catalog_absent, typing)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -541,66 +584,6 @@ impl CompiledProgramArtifact {
 }
 
 const DUPLICATE_PARAMETER_DIAGNOSTIC: &str = "duplicate_parameter_name";
-const RELATION_ORIENTATION_DIAGNOSTIC: &str = "relation_orientation_mismatch";
-
-fn relation_orientation_diagnostics(
-    program: &ProgramSpec,
-    path: &str,
-) -> Result<Vec<CompileDiagnostic>, CompileError> {
-    let runtime_program = program.to_program()?;
-    let usages = crate::model::relation_usage_records(&runtime_program);
-    let mut relations = program
-        .relations
-        .iter()
-        .filter(|relation| relation.derivation.is_none() && !relation.slot_entities.is_empty())
-        .collect::<Vec<_>>();
-    relations.sort_by(|left, right| left.name.cmp(&right.name));
-
-    let mut diagnostics = Vec::new();
-    for relation in relations {
-        let Some(usage) = usages.iter().find(|usage| {
-            usage.relation == relation.name
-                && usage
-                    .slot_entities
-                    .iter()
-                    .zip(&relation.slot_entities)
-                    .any(|(used, declared)| used.as_ref().is_some_and(|used| used != declared))
-        }) else {
-            continue;
-        };
-        diagnostics.push(CompileDiagnostic {
-            code: RELATION_ORIENTATION_DIAGNOSTIC,
-            path: relation
-                .name
-                .split_once("#relation.")
-                .map_or_else(|| path.to_string(), |(target, _)| target.to_string()),
-            message: format!(
-                "data relation `{}` declares slot entity order {}, but executable usage derives order {} (citing rule `{}`); the declaration remains verbatim, and strict relation entity mode treats this warning as an error",
-                relation.name,
-                format_declared_slot_entities(&relation.slot_entities),
-                format_usage_slot_entities(&usage.slot_entities),
-                usage.citing_rule,
-            ),
-        });
-    }
-    Ok(diagnostics)
-}
-
-fn format_declared_slot_entities(entities: &[String]) -> String {
-    format!("[{}]", entities.join(", "))
-}
-
-fn format_usage_slot_entities(entities: &[Option<String>]) -> String {
-    format!(
-        "[{}]",
-        entities
-            .iter()
-            .map(|entity| entity.as_deref().unwrap_or("?"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 fn normalize_parameter_duplicates(
     program: &mut ProgramSpec,
     path: &str,

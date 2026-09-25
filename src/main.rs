@@ -98,7 +98,9 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         aliases: &[],
         description: &[
             "Corpus-migration tooling; `migrate scan <path>...` inventories",
-            "hand-expanded exactly-one patterns (#152).",
+            "hand-expanded exactly-one patterns (#152); `migrate artifact`",
+            "types the relations of an artifact compiled before relation",
+            "entity typing became mandatory.",
         ],
     },
     CommandMetadata {
@@ -155,6 +157,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::to_string_pretty(&serde_json::json!({
                         "engine_version": env!("CARGO_PKG_VERSION"),
                         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                        // A format-2 artifact whose executed relations
+                        // declare no slot kinds loads in engines without
+                        // this capability and is refused by engines with it
+                        // (`migrate artifact` types it).
+                        "capabilities": ["relation_entity_typing"],
                     }))?
                 );
                 return Ok(());
@@ -605,12 +612,13 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match args.next().as_deref() {
         Some("scan") => {}
         Some("apply") => return run_migrate_apply(args.collect()),
+        Some("artifact") => return run_migrate_artifact(args.collect()),
         Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
         None => {
-            return Err(
-                "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>..."
-                    .into(),
-            );
+            return Err(format!(
+                "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
+            )
+            .into());
         }
     }
     let mut json = false;
@@ -725,6 +733,93 @@ fn collect_yaml_files(
 /// assignments plus a rescan proving the pattern is gone. Dry-run by
 /// default; `--write` saves. Sites with non-fact bases are reported for
 /// hands and left untouched.
+const MIGRATE_ARTIFACT_USAGE: &str = "migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]";
+
+/// `migrate artifact`: type the relations of a compiled artifact that the
+/// loader refuses under mandatory relation entity typing. Without
+/// `--output` it reports what it would change and writes nothing.
+fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifact_path: Option<PathBuf> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut json = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--artifact" => artifact_path = args.next().map(PathBuf::from),
+            "--output" => output_path = args.next().map(PathBuf::from),
+            "--json" => json = true,
+            "--relation-entities" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("usage: {MIGRATE_ARTIFACT_USAGE}"))?;
+                let (relation, kinds) = value.split_once('=').ok_or_else(|| {
+                    format!("--relation-entities expects <relation>=<Kind>,<Kind>, got `{value}`")
+                })?;
+                let kinds = kinds
+                    .split(',')
+                    .map(|kind| kind.trim().to_string())
+                    .collect::<Vec<_>>();
+                if relation.is_empty() || kinds.iter().any(String::is_empty) {
+                    return Err(format!(
+                        "--relation-entities expects <relation>=<Kind>,<Kind>, got `{value}`"
+                    )
+                    .into());
+                }
+                if overrides.insert(relation.to_string(), kinds).is_some() {
+                    return Err(format!("--relation-entities repeats relation `{relation}`").into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "unknown migrate artifact argument `{other}`\n\nusage: {MIGRATE_ARTIFACT_USAGE}"
+                )
+                .into());
+            }
+        }
+    }
+    let artifact_path = artifact_path.ok_or_else(|| format!("usage: {MIGRATE_ARTIFACT_USAGE}"))?;
+    let shown = artifact_path.display().to_string();
+    let source = std::fs::read_to_string(&artifact_path)
+        .map_err(|error| format!("failed to read `{shown}`: {error}"))?;
+    let migration =
+        axiom_rules_engine::migrate::migrate_artifact_relation_typing(&source, &shown, &overrides)?;
+    if let Some(output_path) = &output_path {
+        std::fs::write(
+            output_path,
+            format!("{}\n", serde_json::to_string_pretty(&migration.artifact)?),
+        )?;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "artifact": shown,
+                "output": output_path.as_ref().map(|path| path.display().to_string()),
+                "changes": migration.changes,
+            }))?
+        );
+    } else {
+        if migration.changes.is_empty() {
+            println!("{shown}: every executed relation is already entity-typed; nothing to change");
+        }
+        for change in &migration.changes {
+            println!(
+                "{shown}: relation `{}` slot kinds [{}] -> [{}] ({})",
+                change.relation,
+                change.previous.join(", "),
+                change.slot_entities.join(", "),
+                change.source
+            );
+        }
+        match &output_path {
+            Some(path) => println!("wrote {}", path.display()),
+            None => println!("dry run: pass --output <typed.json> to write the typed artifact"),
+        }
+    }
+    Ok(())
+}
+
 fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
     let mut write = false;

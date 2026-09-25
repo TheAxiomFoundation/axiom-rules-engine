@@ -226,6 +226,8 @@ pub enum ApiError {
     Eval(#[from] EvalError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    #[error("relation entity typing failed:\n{0}")]
+    RelationTyping(crate::relation_typing::RelationTypingReport),
     #[error(
         "assessment_date {assessment_date} is before the query period start {period_start}; a determination cannot be assessed before the period it covers begins (see docs/bitemporal.md)"
     )]
@@ -261,7 +263,13 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     validate_assessment_dates(&request.queries)?;
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
-    let dataset = request.dataset.to_dataset_for_program(&program)?;
+    // A request can carry a raw program that never went through the compiler
+    // or the artifact loader, so it faces the same mandatory relation typing.
+    crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
+    let query_entities = query_entity_kinds(&program, &request.queries);
+    let dataset = request
+        .dataset
+        .to_dataset_for_queries(&program, &query_entities)?;
     crate::engine::validate_input_spells(&dataset)?;
 
     match requested_mode {
@@ -317,6 +325,30 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             }
         }
     }
+}
+
+/// Each query evaluates its output rules on its `entity_id`, so that id has
+/// each rule's entity kind. Entity-free (`Scalar`) rules and parameters say
+/// nothing about the id.
+fn query_entity_kinds(
+    program: &crate::model::Program,
+    queries: &[ExecutionQuery],
+) -> Vec<(String, String)> {
+    let mut kinds = std::collections::BTreeSet::new();
+    for query in queries {
+        for output in &query.outputs {
+            let Some(derived) = program
+                .resolve_derived_name(output)
+                .and_then(|name| program.derived.get(&name))
+            else {
+                continue;
+            };
+            if derived.entity != crate::model::SCALAR_ENTITY {
+                kinds.insert((query.entity_id.clone(), derived.entity.clone()));
+            }
+        }
+    }
+    kinds.into_iter().collect()
 }
 
 pub fn execute_compiled_request(

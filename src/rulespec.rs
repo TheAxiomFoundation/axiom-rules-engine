@@ -254,6 +254,22 @@ pub enum RuleSpecError {
         new: Vec<String>,
     },
     #[error(
+        "`{citing}` aggregates relation `{relation}` from entity `{entity}`, but every slot of the relation ({slot_entities:?}) holds `{entity}`, so the aggregation direction is ambiguous. Wrap the relation in a `derived_relation` whose explicit `current_slot` and `related_slot` say which side the rule aggregates from"
+    )]
+    AmbiguousRelationDirection {
+        relation: String,
+        citing: String,
+        entity: String,
+        slot_entities: Vec<String>,
+    },
+    #[error(
+        "relation `{relation}` is used without a local declaration, and the declarations sharing its name disagree on slot entity kinds ({declarations}); declare the relation in the module that aggregates it"
+    )]
+    ConflictingInferredRelationEntities {
+        relation: String,
+        declarations: String,
+    },
+    #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
     )]
     ConflictingUnitDeclarations {
@@ -2063,7 +2079,15 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
-        crate::relation_direction::resolve(&mut program);
+        type_inferred_relations(&mut program, &explicit_relations)?;
+        crate::relation_direction::resolve(&mut program).map_err(|ambiguous| {
+            RuleSpecError::AmbiguousRelationDirection {
+                relation: ambiguous.relation,
+                citing: ambiguous.citing,
+                entity: ambiguous.entity,
+                slot_entities: ambiguous.slot_entities,
+            }
+        })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2837,6 +2861,67 @@ fn append_missing_units(program: &mut ProgramSpec, units: &[UnitSpec]) {
             program.units.push(unit.clone());
         }
     }
+}
+
+/// Formula lowering synthesizes an unscoped relation for a short name the
+/// aggregating module does not declare (a composition root, or a module
+/// relying on an imported declaration). Such a relation carries no slot
+/// kinds, and executing an untyped relation is a typing error. When every
+/// declaration of that short name in the import-merged closure that declares
+/// kinds agrees, the unscoped relation takes those kinds: its tuples describe
+/// the same legal relationship. Disagreeing declarations are an error rather
+/// than a guess; with no typed declaration the relation stays untyped.
+fn type_inferred_relations(
+    program: &mut ProgramSpec,
+    explicit_relations: &[RelationSpec],
+) -> Result<(), RuleSpecError> {
+    for relation in &mut program.relations {
+        if relation.derivation.is_some()
+            || !relation.slot_entities.is_empty()
+            || relation.name.contains('#')
+        {
+            continue;
+        }
+        let suffix = format!("#relation.{}", relation.name);
+        let declarations = explicit_relations
+            .iter()
+            .filter(|declared| declared.name.ends_with(&suffix))
+            .filter(|declared| declared.arity == relation.arity)
+            .filter(|declared| !declared.slot_entities.is_empty())
+            .fold(
+                std::collections::BTreeMap::<Vec<String>, Vec<String>>::new(),
+                |mut groups, declared| {
+                    groups
+                        .entry(declared.slot_entities.clone())
+                        .or_default()
+                        .push(declared.name.clone());
+                    groups
+                },
+            );
+        match declarations.len() {
+            0 => {}
+            1 => {
+                let (kinds, _) = declarations
+                    .into_iter()
+                    .next()
+                    .expect("one declaration group exists");
+                relation.slot_entities = kinds;
+            }
+            _ => {
+                return Err(RuleSpecError::ConflictingInferredRelationEntities {
+                    relation: relation.name.clone(),
+                    declarations: declarations
+                        .into_iter()
+                        .map(|(kinds, names)| {
+                            format!("[{}] by {}", kinds.join(", "), names.join(", "))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_missing_relations(
