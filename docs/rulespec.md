@@ -304,19 +304,42 @@ Rule names are public concept fragments, not just display labels. See
 [`concept-naming.md`](concept-naming.md) for the naming contract.
 
 Execution requests for repo-backed RuleSpec reject bare output, input, and
-relation names. Dataset inputs use `#input.<local symbol>` when supplying an
-input slot from the current rule, or the upstream rule id when supplying an
-imported derived/parameter value:
+relation names. Dataset inputs must use a request name from the compiled
+program's `metadata.input_catalog`, such as the owning module's
+`#input.<local symbol>`. An imported rule's inputs use that upstream module's
+catalog names. For example, a companion case can supply primitive inputs and
+related-entity facts:
 
 ```yaml
 input:
   us:statutes/7/2017/a#input.household_size: 1
-  us:statutes/7/2014/e/6/A#snap_net_income: 100
   us:statutes/7/2012/j#relation.member_of_household:
     - us:statutes/7/2012/j#input.snap_member_is_elderly_or_disabled: false
-output:
-  us:statutes/7/2017/a#snap_regular_month_allotment: 268
 ```
+
+Dataset records naming a derived rule or parameter are rejected during
+program-aware binding in both explain and fast modes, including records for
+unqueried rules. The same refusal applies to bare rule names unless the name
+is also an actual input slot exposed by the catalog. Unknown input names and
+unknown `#input.` references are rejected too.
+
+To override a scalar derived rule in a `run-compiled` request, use `pins` with
+the rule's local name and a typed value, alongside the request's `mode`,
+`dataset`, and `queries` fields:
+
+```json
+{
+  "pins": [
+    {"rule": "snap_net_income", "value": {"kind": "decimal", "value": "100"}}
+  ]
+}
+```
+
+Pins accept scalar derived rules, not judgments or parameters. Parameters
+are law values defined in the program; change the program parameter to model
+a different law. Companion test `input` maps contain dataset facts, not
+implicit pins. Callers of the lower-level `DatasetSpec::to_dataset` or direct
+`DataSet` constructors must use program-aware binding to obtain these checks.
 
 Responses are keyed by durable ids and include the local `name` inside each
 output value only as display metadata alongside the id.
