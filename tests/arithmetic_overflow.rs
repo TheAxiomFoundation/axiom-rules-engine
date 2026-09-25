@@ -771,3 +771,245 @@ fn arithmetic_on_lifetime_reductions_reports_overflow() {
         );
     }
 }
+
+/// A generated arithmetic expression over the household inputs `a` and `b`.
+enum Expr {
+    Input(&'static str),
+    Literal(&'static str),
+    Binary(char, Box<Expr>, Box<Expr>),
+}
+
+impl Expr {
+    fn formula(&self) -> String {
+        match self {
+            Expr::Input(name) => name.to_string(),
+            Expr::Literal(value) => value.to_string(),
+            Expr::Binary(op, left, right) => {
+                format!("({} {op} {})", left.formula(), right.formula())
+            }
+        }
+    }
+
+    fn inputs(&self, used: &mut Vec<&'static str>) {
+        match self {
+            Expr::Input(name) => {
+                if !used.contains(name) {
+                    used.push(name);
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Binary(_, left, right) => {
+                left.inputs(used);
+                right.inputs(used);
+            }
+        }
+    }
+
+    /// The reference: rust_decimal's own checked operations, independent of
+    /// the engine's helpers. `None` means the operation has no Decimal result
+    /// (an overflow or a zero divisor), where the raw operator panics.
+    fn reference(&self, a: Decimal, b: Decimal) -> Option<Decimal> {
+        match self {
+            Expr::Input("a") => Some(a),
+            Expr::Input(_) => Some(b),
+            Expr::Literal(value) => Some(decimal(value)),
+            Expr::Binary(op, left, right) => {
+                let (left, right) = (left.reference(a, b)?, right.reference(a, b)?);
+                match op {
+                    '+' => left.checked_add(right),
+                    '-' => left.checked_sub(right),
+                    '*' => left.checked_mul(right),
+                    _ => left.checked_div(right),
+                }
+            }
+        }
+    }
+}
+
+/// Invariants over generated formulas and operands, including the extremes
+/// of the Decimal range:
+/// 1. No evaluator panics.
+/// 2. Explain equals the reference: the same value where every operation on
+///    the selected branch has a Decimal result, and an arithmetic error
+///    (ArithmeticOverflow or DivisionByZero) where one does not.
+/// 3. Fast mode returns explain's values, or explain's exact error.
+/// 4. Dense equals the reference, except that it evaluates both branches of
+///    a conditional for every row: it may instead report an arithmetic error,
+///    and only when some household's unselected branch has no Decimal result.
+///    That divergence is intended until dense evaluates branches per row
+///    (#180).
+#[test]
+fn generated_arithmetic_matches_the_reference_in_every_mode() {
+    const OPERANDS: [&str; 11] = [
+        "0",
+        "1",
+        "-1",
+        "0.5",
+        "7",
+        "1000000000000000",
+        "0.0000000000000000000000000001",
+        "39614081257132168796771975168",
+        "-39614081257132168796771975168",
+        MAX,
+        "-79228162514264337593543950335",
+    ];
+    const LITERALS: [&str; 5] = ["0", "1", "2", "0.5", "3"];
+    fn generate(next: &mut impl FnMut() -> u64, depth: u32) -> Expr {
+        if depth == 0 || next() % 3 == 0 {
+            return match next() % 3 {
+                0 => Expr::Input("a"),
+                1 => Expr::Input("b"),
+                _ => Expr::Literal(LITERALS[(next() % 5) as usize]),
+            };
+        }
+        let op = ['+', '-', '*', '/'][(next() % 4) as usize];
+        Expr::Binary(
+            op,
+            Box::new(generate(next, depth - 1)),
+            Box::new(generate(next, depth - 1)),
+        )
+    }
+    let is_arithmetic_error = |error: &EvalError| {
+        matches!(
+            error,
+            EvalError::ArithmeticOverflow(_) | EvalError::DivisionByZero
+        )
+    };
+
+    let mut outcomes = [0_usize; 3]; // answered, arithmetic error, dense-only error
+    for seed in 0_u64..400 {
+        let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let conditional = next() % 2 == 0;
+        let then_expr = generate(&mut next, 3);
+        let else_expr = generate(&mut next, 3);
+        let households = [
+            (
+                OPERANDS[(next() % 11) as usize],
+                OPERANDS[(next() % 11) as usize],
+            ),
+            (
+                OPERANDS[(next() % 11) as usize],
+                OPERANDS[(next() % 11) as usize],
+            ),
+        ];
+
+        let mut used = Vec::new();
+        then_expr.inputs(&mut used);
+        let body = if conditional {
+            else_expr.inputs(&mut used);
+            for name in ["a", "b"] {
+                if !used.contains(&name) {
+                    used.push(name);
+                }
+            }
+            format!(
+                "|-\n          if a > b: {}\n          else: {}",
+                then_expr.formula(),
+                else_expr.formula()
+            )
+        } else {
+            then_expr.formula()
+        };
+        if used.is_empty() {
+            // A formula of literals alone has no rows to evaluate in dense.
+            continue;
+        }
+        let rulespec = household_formula(&body);
+        let expected = households
+            .iter()
+            .map(|(a, b)| {
+                let (a, b) = (decimal(a), decimal(b));
+                if !conditional || a > b {
+                    then_expr.reference(a, b)
+                } else {
+                    else_expr.reference(a, b)
+                }
+            })
+            .collect::<Option<Vec<Decimal>>>();
+        let context = format!("seed {seed}: {body} over {households:?}");
+
+        let inputs = households
+            .iter()
+            .map(|(a, b)| {
+                used.iter()
+                    .map(|name| (*name, if *name == "a" { *a } else { *b }))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let request = |mode| {
+            household_request(
+                mode,
+                &rulespec,
+                &[("household-a", &inputs[0]), ("household-b", &inputs[1])],
+            )
+        };
+        let explain = execute_request(request(ExecutionMode::Explain));
+        let fast = execute_request(request(ExecutionMode::Fast));
+        let columns = used
+            .iter()
+            .map(|name| {
+                let values = households
+                    .iter()
+                    .map(|(a, b)| if *name == "a" { *a } else { *b })
+                    .collect::<Vec<_>>();
+                (*name, values)
+            })
+            .collect::<Vec<_>>();
+        let columns = columns
+            .iter()
+            .map(|(name, values)| (*name, values.as_slice()))
+            .collect::<Vec<_>>();
+        let dense = dense_households(&rulespec, &columns);
+
+        match &expected {
+            Some(values) => {
+                let explain = explain.unwrap_or_else(|error| panic!("{context}: explain {error}"));
+                assert_eq!(&results(&explain), values, "{context}: explain");
+                let fast = fast.unwrap_or_else(|error| panic!("{context}: fast {error}"));
+                assert_eq!(&results(&fast), values, "{context}: fast");
+                match dense {
+                    Ok(dense) => {
+                        assert_eq!(&dense, values, "{context}: dense");
+                        outcomes[0] += 1;
+                    }
+                    Err(error) => {
+                        // Dense evaluates both branches for every row, so it
+                        // may fail only on a branch some household does not
+                        // take, and only with an arithmetic error.
+                        let unselected_branch_fails = conditional
+                            && households.iter().any(|(a, b)| {
+                                let (a, b) = (decimal(a), decimal(b));
+                                let unselected = if a > b { &else_expr } else { &then_expr };
+                                unselected.reference(a, b).is_none()
+                            });
+                        assert!(
+                            unselected_branch_fails && is_arithmetic_error(&error),
+                            "{context}: dense {error:?}"
+                        );
+                        outcomes[2] += 1;
+                    }
+                }
+            }
+            None => {
+                let explain = explain.expect_err(&format!("{context}: explain answered"));
+                assert!(
+                    matches!(&explain, ApiError::Eval(error) if is_arithmetic_error(error)),
+                    "{context}: explain {explain:?}"
+                );
+                let fast = fast.expect_err(&format!("{context}: fast answered"));
+                assert_eq!(fast.to_string(), explain.to_string(), "{context}: fast");
+                let dense = dense.expect_err(&format!("{context}: dense answered"));
+                assert!(is_arithmetic_error(&dense), "{context}: dense {dense:?}");
+                outcomes[1] += 1;
+            }
+        }
+    }
+    // Keep the generator honest: every outcome must actually occur.
+    assert!(outcomes.iter().all(|count| *count > 0), "{outcomes:?}");
+}
