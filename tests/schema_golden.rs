@@ -2,8 +2,11 @@
 //!
 //! - `schemas_are_current` regenerates every schema in memory and asserts the
 //!   checked-in `schemas/*.json` copy is byte-identical, so CI fails on drift
-//!   between the Rust types and the published files. Refresh with
-//!   `cargo run -- emit-schemas --out schemas`.
+//!   between the Rust types and the published files. The four experimental
+//!   stage-3 schemas exist only with `unit-derivation` as well, so they are
+//!   checked only under `--features "schema unit-derivation"`. Refresh all of
+//!   them with `cargo run --features "schema unit-derivation" -- emit-schemas
+//!   --out schemas`.
 //! - `published_schemas_are_valid_draft07` compiles each published schema as a
 //!   JSON Schema, catching a malformed hand-written fragment.
 //! - `artifact_schema_accepts_a_real_compiled_artifact` compiles an in-repo
@@ -56,7 +59,7 @@ fn schemas_are_current() {
     assert!(
         stale.is_empty(),
         "checked-in schemas differ from the generated ones \
-         (run `cargo run -- emit-schemas --out schemas`):\n{}",
+         (run `cargo run --features \"schema unit-derivation\" -- emit-schemas --out schemas`):\n{}",
         stale.join("\n")
     );
 }

@@ -38,10 +38,15 @@ fs = []
 # is kept OFF the default build to keep pure-runtime consumers (the PyO3
 # extension, wasm, finbot, microsim) lean. CI runs the schema tests with
 # `--features schema`; `cargo test --features schema` reproduces them locally.
+# The four stage-3 schemas are generated and checked only with
+# `--features "schema unit-derivation"`.
 schema = ["dep:schemars"]
 # Stage-2 prototype for the ratified unit-derivation semantics. The runtime
 # configuration inside the module is independently disabled by default. This
-# feature does not extend artifact v2 or any publication/launch surface.
+# feature does not extend artifact v2 or any publication/launch surface. CI
+# also runs `cargo test --features "schema unit-derivation"`, which covers the
+# module's unit tests, the stage-3 CLI fixture, and the four experimental
+# stage-3 schemas.
 unit-derivation = ["dep:num-bigint"]
 
 [[bin]]
