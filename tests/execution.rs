@@ -1567,7 +1567,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
-        mode: ExecutionMode::Fast,
+        mode: ExecutionMode::Explain,
         program,
         dataset,
         queries,
@@ -1576,6 +1576,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
 
     assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
     assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
     assert!(
         fast.metadata
             .fallback_reason
@@ -1589,6 +1590,517 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         serde_json::to_value(&fast.results).expect("fast results serialise"),
         serde_json::to_value(&explain.results).expect("explain results serialise")
     );
+}
+
+/// A household program whose outputs fail in fast mode in different ways:
+/// `household_income` aggregates a related derived value and `period_start_date`
+/// reads the period start, two constructs bulk does not support (fallback, each
+/// with its own reason); `guarded_amount` never takes its `else` branch,
+/// which reads the missing `absent_amount` (bulk skips it too, since every row
+/// agrees on the condition); `reads_first` and `reads_second` read genuinely
+/// missing inputs, and both `shares_failure` rules depend on `reads_first`.
+fn fast_outcome_program() -> ProgramSpec {
+    let household_rule = |name: &str, expr: ScalarExprSpec| DerivedSpec {
+        id: None,
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        dtype: DTypeSpec::Decimal,
+        unit: None,
+        rounding: None,
+        source: None,
+        period: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics: DerivedSemanticsSpec::Scalar { expr },
+        versions: vec![],
+    };
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            slot_entities: Vec::new(),
+            derivation: None,
+        }],
+        derived: vec![
+            DerivedSpec {
+                entity: "Person".to_string(),
+                ..household_rule("person_income", input("income"))
+            },
+            household_rule(
+                "household_income",
+                ScalarExprSpec::SumRelated {
+                    relation: "member_of_household".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Derived {
+                        name: "person_income".to_string(),
+                    },
+                    where_clause: None,
+                },
+            ),
+            household_rule(
+                "guarded_amount",
+                ScalarExprSpec::If {
+                    condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                        left: Box::new(decimal_literal(0)),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(decimal_literal(0)),
+                    }),
+                    then_expr: Box::new(decimal_literal(7)),
+                    else_expr: Box::new(input("absent_amount")),
+                },
+            ),
+            household_rule("reads_first", input("absent_first")),
+            household_rule("reads_second", input("absent_second")),
+            DerivedSpec {
+                dtype: DTypeSpec::Date,
+                ..household_rule("period_start_date", ScalarExprSpec::PeriodStart)
+            },
+            household_rule(
+                "shares_failure_a",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(1),
+                    ],
+                },
+            ),
+            household_rule(
+                "shares_failure_b",
+                ScalarExprSpec::Add {
+                    items: vec![
+                        ScalarExprSpec::Derived {
+                            name: "reads_first".to_string(),
+                        },
+                        decimal_literal(2),
+                    ],
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    }
+}
+
+fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionRequest {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    ExecutionRequest {
+        mode,
+        program: fast_outcome_program(),
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: decimal_value("100"),
+            }],
+            relations: vec![RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval,
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: outputs.iter().map(|output| output.to_string()).collect(),
+        }],
+    }
+}
+
+/// Fast mode's outcome is a function of the request, not of the process.
+/// Each run below builds fresh hash sets, each with its own hasher keys, so an
+/// outcome that depended on hash iteration order would vary across the 64
+/// runs of each output order. When any requested output
+/// needs explain, the whole request falls back, whichever output is listed
+/// first, and answers `guarded_amount` as explain does (7).
+#[test]
+fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
+    let explain = execute_request(fast_outcome_request(
+        ExecutionMode::Explain,
+        &["household_income", "guarded_amount"],
+    ))
+    .expect("explain answers both outputs");
+    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["guarded_amount"]),
+        decimal("7")
+    );
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["household_income"]),
+        decimal("100")
+    );
+
+    for outputs in [
+        ["household_income", "guarded_amount"],
+        ["guarded_amount", "household_income"],
+    ] {
+        for run in 0..64 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "run {run} with outputs {outputs:?} failed instead of falling back: {error}"
+                    )
+                });
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+            assert_eq!(
+                fast.metadata.fallback_reason.as_deref(),
+                Some("bulk execution does not yet support aggregating related derived values"),
+                "run {run} with outputs {outputs:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(&fast.results).expect("results serialise"),
+                explain_results,
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// When several outputs need explain for different reasons, the first of
+/// them in request order supplies the fallback reason, in either order, also
+/// after an output bulk answers.
+#[test]
+fn fast_mode_fallback_reason_is_the_first_in_request_order() {
+    const RELATED: &str = "bulk execution does not yet support aggregating related derived values";
+    const PERIOD: &str = "bulk fast mode does not yet support period_start / period_end";
+    for (outputs, reason) in [
+        (["household_income", "period_start_date"], RELATED),
+        (["period_start_date", "household_income"], PERIOD),
+        (["guarded_amount", "period_start_date"], PERIOD),
+    ] {
+        for run in 0..16 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| panic!("run {run} with outputs {outputs:?}: {error}"));
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+            assert_eq!(
+                fast.metadata.fallback_reason.as_deref(),
+                Some(reason),
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// With no output needing explain, fast mode reports the first failing output
+/// in request order on every run, the same error explain reports.
+#[test]
+fn fast_mode_reports_the_first_failing_output_in_request_order() {
+    for (outputs, missing) in [
+        (["reads_first", "reads_second"], "`absent_first`"),
+        (["reads_second", "reads_first"], "`absent_second`"),
+        // Two outputs sharing one failing dependency report its error.
+        (["shares_failure_a", "shares_failure_b"], "`absent_first`"),
+        // An unknown output is an error in its place in request order.
+        (["reads_first", "no_such_output"], "`absent_first`"),
+        (["no_such_output", "reads_first"], "no_such_output"),
+    ] {
+        let explain = execute_request(fast_outcome_request(ExecutionMode::Explain, &outputs))
+            .expect_err("explain fails on the first missing input");
+        assert!(
+            explain.to_string().contains(missing),
+            "explain reported {explain}"
+        );
+        for run in 0..64 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .expect_err("fast fails on the first missing input");
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+}
+
+/// A household rule reading one input, and a batch request over several
+/// households that supplies `inputs` as (input name, household, value).
+fn batch_request(
+    mode: ExecutionMode,
+    rules: Vec<(&str, ScalarExprSpec)>,
+    inputs: &[(&str, &str, &str)],
+    queries: &[(&str, &[&str])],
+) -> ExecutionRequest {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    ExecutionRequest {
+        mode,
+        program: ProgramSpec {
+            derived: rules
+                .into_iter()
+                .map(|(name, expr)| DerivedSpec {
+                    id: None,
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    dtype: DTypeSpec::Decimal,
+                    unit: None,
+                    rounding: None,
+                    source: None,
+                    period: None,
+                    source_url: None,
+                    corpus_citation_path: None,
+                    semantics: DerivedSemanticsSpec::Scalar { expr },
+                    versions: vec![],
+                })
+                .collect(),
+            ..ProgramSpec::default()
+        },
+        dataset: DatasetSpec {
+            inputs: inputs
+                .iter()
+                .map(|(name, entity_id, value)| InputRecordSpec {
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: interval.clone(),
+                    value: decimal_value(value),
+                })
+                .collect(),
+            relations: Vec::new(),
+        },
+        queries: queries
+            .iter()
+            .map(|(entity_id, outputs)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: outputs.iter().map(|output| output.to_string()).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Bulk warms each output over every row at once, so across a multi-query
+/// batch its first error can belong to a later query than explain's (which
+/// works query by query). Fast mode therefore lets explain decide any request
+/// bulk fails on, and reports explain's error.
+#[test]
+fn fast_mode_reports_explains_error_across_a_multi_query_batch() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![
+            ("amount_output", input("amount")),
+            ("other_output", input("absent_other")),
+        ]
+    };
+    // `amount` is supplied for household-a only, so warming `amount_output`
+    // fails on household-b before either later output of household-a is
+    // reached.
+    for first_query_outputs in [
+        &["amount_output", "no_such_output"][..],
+        &["amount_output", "other_output"][..],
+    ] {
+        let request = |mode| {
+            batch_request(
+                mode,
+                rules(),
+                &[("amount", "household-a", "5")],
+                &[
+                    ("household-a", first_query_outputs),
+                    ("household-b", &["amount_output"]),
+                ],
+            )
+        };
+        let explain = execute_request(request(ExecutionMode::Explain))
+            .expect_err("explain fails on household-a's second output");
+        assert!(
+            !explain.to_string().contains("household-b"),
+            "explain reported {explain}"
+        );
+        for run in 0..32 {
+            let fast = execute_request(request(ExecutionMode::Fast))
+                .expect_err("fast fails as explain does");
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "run {run} with first query outputs {first_query_outputs:?}"
+            );
+        }
+    }
+}
+
+/// Bulk evaluates both branches of a conditional for every row. When the rows
+/// disagree, the branch a row does not take can fail for that row; explain
+/// never evaluates it, so the request succeeds through explain.
+#[test]
+fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![(
+            "flagged_or_amount",
+            ScalarExprSpec::If {
+                condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                    left: Box::new(input("flag")),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(decimal_literal(1)),
+                }),
+                then_expr: Box::new(decimal_literal(7)),
+                else_expr: Box::new(input("amount")),
+            },
+        )]
+    };
+    // household-a takes the `then` branch and has no `amount`; household-b
+    // takes the `else` branch and has one.
+    let request = |mode| {
+        batch_request(
+            mode,
+            rules(),
+            &[
+                ("flag", "household-a", "1"),
+                ("flag", "household-b", "0"),
+                ("amount", "household-b", "5"),
+            ],
+            &[
+                ("household-a", &["flagged_or_amount"]),
+                ("household-b", &["flagged_or_amount"]),
+            ],
+        )
+    };
+    let explain = execute_request(request(ExecutionMode::Explain)).expect("explain answers");
+    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["flagged_or_amount"]),
+        decimal("7")
+    );
+    assert_eq!(
+        decimal_output(&explain.results[1].outputs["flagged_or_amount"]),
+        decimal("5")
+    );
+    for run in 0..16 {
+        let fast = execute_request(request(ExecutionMode::Fast))
+            .unwrap_or_else(|error| panic!("run {run} failed instead of falling back: {error}"));
+        assert_eq!(
+            fast.metadata.actual_mode,
+            ExecutionMode::Explain,
+            "run {run}"
+        );
+        assert!(
+            fast.metadata
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("`amount`")),
+            "run {run}: {:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&fast.results).expect("results serialise"),
+            explain_results,
+            "run {run}"
+        );
+    }
+}
+
+/// A parameter output anywhere in the request sends it to explain before
+/// bulk evaluates anything. Bulk evaluates both branches of `guarded` for
+/// every row, and household-a's untaken branch overflows (a panic, since
+/// arithmetic is unchecked), so warming `guarded` before seeing `rate` would
+/// crash a request that explain answers.
+#[test]
+fn fast_mode_sends_a_parameter_request_to_explain_before_evaluating_anything() {
+    const RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: rate
+    kind: parameter
+    dtype: Decimal
+    versions:
+      - effective_from: 2026-01-01
+        formula: "3"
+  - name: guarded
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          if flag == 1: 0
+          else: amount * 2
+"#;
+    let program =
+        axiom_rules_engine::rulespec::lower_rulespec_str(RULESPEC).expect("RuleSpec lowers");
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let input = |name: &str, entity_id: &str, value: &str| InputRecordSpec {
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        entity_id: entity_id.to_string(),
+        interval: interval.clone(),
+        value: decimal_value(value),
+    };
+    let request = |mode, first_outputs: &[&str]| ExecutionRequest {
+        mode,
+        program: program.clone(),
+        dataset: DatasetSpec {
+            inputs: vec![
+                input("flag", "household-a", "1"),
+                input("amount", "household-a", &Decimal::MAX.to_string()),
+                input("flag", "household-b", "0"),
+                input("amount", "household-b", "1"),
+            ],
+            relations: Vec::new(),
+        },
+        queries: [
+            ("household-a", first_outputs),
+            ("household-b", &["guarded"][..]),
+        ]
+        .into_iter()
+        .map(|(entity_id, outputs)| ExecutionQuery {
+            assessment_date: None,
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+            outputs: outputs.iter().map(|output| output.to_string()).collect(),
+        })
+        .collect(),
+    };
+    for first_outputs in [&["guarded", "rate"][..], &["rate", "guarded"][..]] {
+        let explain = execute_request(request(ExecutionMode::Explain, first_outputs))
+            .expect("explain answers");
+        assert_eq!(
+            decimal_output(&explain.results[0].outputs["guarded"]),
+            decimal("0")
+        );
+        assert_eq!(
+            decimal_output(&explain.results[1].outputs["guarded"]),
+            decimal("2")
+        );
+        let fast = execute_request(request(ExecutionMode::Fast, first_outputs))
+            .expect("fast answers through explain");
+        assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+        assert!(
+            fast.metadata
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("parameter output `rate`")),
+            "{:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&fast.results).expect("results serialise"),
+            serde_json::to_value(&explain.results).expect("results serialise"),
+            "outputs {first_outputs:?}"
+        );
+    }
 }
 
 #[test]
