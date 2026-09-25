@@ -106,64 +106,57 @@ pub fn try_execute(
 
     let mut evaluator = BulkEvaluator::new(program, data, period, entity_ids);
     let mut results = Vec::with_capacity(queries.len());
-    // Warm each requested output once, in request order. The first output
-    // that needs explain (a parameter output, or a construct bulk does not
-    // support) sends the whole request to explain, whatever earlier outputs
-    // raised: bulk evaluates both branches of a conditional, so its errors may
-    // come from a branch explain never takes. Otherwise a failure also sends
-    // the request to explain, and the first failure in request order names
-    // the reason; bulk never reports an error itself. Warming in a HashSet's
-    // iteration order,
-    // which is seeded afresh for every process, made one request fail on some
-    // runs and fall back to explain on others.
+    // Resolve every requested output before evaluating any. A parameter
+    // output or an unknown one sends the whole request to explain before bulk
+    // evaluates anything: bulk evaluates both branches of every conditional,
+    // so its arithmetic can fail, or overflow and panic, on a branch explain
+    // never takes.
+    let mut requested = Vec::new();
     let mut seen = HashSet::new();
-    let mut first_error = None;
     for output_reference in queries.iter().flat_map(|query| &query.outputs) {
         let Some(output_name) = program.resolve_derived_name(output_reference) else {
-            if program.resolve_parameter_name(output_reference).is_some() {
-                // Parameter outputs evaluate on the explain path; report
-                // Unsupported so fast mode falls back instead of erroring.
-                return Ok(FastPathResult::Unsupported {
-                    reason: format!("parameter output `{output_reference}` uses the explain path"),
-                });
-            }
-            first_error.get_or_insert(EvalError::UnknownDerived(output_reference.clone()));
-            continue;
+            let reason = if program.resolve_parameter_name(output_reference).is_some() {
+                format!("parameter output `{output_reference}` uses the explain path")
+            } else {
+                format!("unknown output `{output_reference}`; explain reports it")
+            };
+            return Ok(FastPathResult::Unsupported { reason });
         };
-        if !seen.insert(output_name.clone()) {
-            continue;
+        if seen.insert(output_name.clone()) {
+            requested.push(output_name);
         }
-        let warmup = evaluator.get_derived(&output_name).and_then(|derived| {
+    }
+
+    // Warm each distinct output once, in request order. The first one bulk
+    // cannot answer, because it needs a construct bulk does not support or
+    // because it fails, sends the whole request to explain and names the
+    // reason; explain then answers or reports its own first error. Bulk warms
+    // an output over every row at once, so its first error can belong to a
+    // later query than explain's, and it can come from a branch no row takes.
+    // Warming in a HashSet's iteration order, which is seeded afresh for every
+    // process, made one request fail on some runs and fall back on others.
+    for output in &requested {
+        let warmup = evaluator.get_derived(output).and_then(|derived| {
             match derived.semantics_at(&evaluator.period) {
                 Some(DerivedSemantics::Scalar(_)) => Ok(true),
                 Some(DerivedSemantics::Judgment(_)) => Ok(false),
                 None => Err(EvalError::MissingDerivedFormulaVersion {
-                    derived: output_name.clone(),
+                    derived: output.clone(),
                     at: evaluator.period.start,
                 }),
             }
         });
         let warmup = match warmup {
-            Ok(true) => evaluator.evaluate_scalar(&output_name).map(|_| ()),
-            Ok(false) => evaluator.evaluate_judgment(&output_name).map(|_| ()),
+            Ok(true) => evaluator.evaluate_scalar(output).map(|_| ()),
+            Ok(false) => evaluator.evaluate_judgment(output).map(|_| ()),
             Err(error) => Err(error),
         };
         if let Err(error) = warmup {
-            if let Some(reason) = unsupported_reason(&error) {
-                return Ok(FastPathResult::Unsupported { reason });
-            }
-            first_error.get_or_insert(error);
+            let reason = unsupported_reason(&error).unwrap_or_else(|| {
+                format!("bulk evaluation failed ({error}); explain decides the outcome")
+            });
+            return Ok(FastPathResult::Unsupported { reason });
         }
-    }
-    // Any other failure also goes to explain, which decides the outcome.
-    // Bulk evaluates each output over every row at once, so its first error
-    // can belong to a later query than the one explain, working query by
-    // query, fails on, and it can come from a conditional branch that no row
-    // takes. Explain then either reports its own first error or answers.
-    if let Some(error) = first_error {
-        return Ok(FastPathResult::Unsupported {
-            reason: format!("bulk evaluation failed ({error}); explain decides the outcome"),
-        });
     }
 
     for (row_index, query) in queries.iter().enumerate() {
@@ -275,9 +268,6 @@ struct BulkEvaluator<'a> {
     relation_adjacency: HashMap<(String, usize), Vec<Vec<Vec<String>>>>,
     scalar_cache: HashMap<String, ScalarColumn>,
     judgment_cache: HashMap<String, Vec<JudgmentOutcome>>,
-    /// Rules whose evaluation failed, so outputs that share a failing
-    /// dependency report its error without evaluating it again.
-    failed: HashMap<String, EvalError>,
 }
 
 impl<'a> BulkEvaluator<'a> {
@@ -335,7 +325,6 @@ impl<'a> BulkEvaluator<'a> {
             relation_adjacency,
             scalar_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
-            failed: HashMap::new(),
         }
     }
 
@@ -348,65 +337,48 @@ impl<'a> BulkEvaluator<'a> {
 
     fn evaluate_scalar(&mut self, name: &str) -> Result<&ScalarColumn, EvalError> {
         if !self.scalar_cache.contains_key(name) {
-            if let Some(error) = self.failed.get(name) {
-                return Err(error.clone());
-            }
-            let column = self.compute_scalar(name).inspect_err(|error| {
-                self.failed.insert(name.to_string(), error.clone());
+            let derived = self.get_derived(name)?.clone();
+            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: name.to_string(),
+                    at: self.period.start,
+                }
             })?;
+            let mut column = match semantics {
+                DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
+                DerivedSemantics::Judgment(_) => {
+                    return Err(EvalError::ExpectedScalar(name.to_string()));
+                }
+            };
+            // Opt-in output rounding, applied to the whole column before caching
+            // so dependents (`ScalarExpr::Derived`) and direct outputs both see
+            // the rounded values — identical to the explain path.
+            if let Some(rounding) = derived.rounding {
+                column = column.rounded(rounding);
+            }
             self.scalar_cache.insert(name.to_string(), column);
         }
         Ok(self.scalar_cache.get(name).expect("column cached"))
     }
 
-    fn compute_scalar(&mut self, name: &str) -> Result<ScalarColumn, EvalError> {
-        let derived = self.get_derived(name)?.clone();
-        let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-            EvalError::MissingDerivedFormulaVersion {
-                derived: name.to_string(),
-                at: self.period.start,
-            }
-        })?;
-        let mut column = match semantics {
-            DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
-            DerivedSemantics::Judgment(_) => {
-                return Err(EvalError::ExpectedScalar(name.to_string()));
-            }
-        };
-        // Opt-in output rounding, applied to the whole column before caching
-        // so dependents (`ScalarExpr::Derived`) and direct outputs both see
-        // the rounded values — identical to the explain path.
-        if let Some(rounding) = derived.rounding {
-            column = column.rounded(rounding);
-        }
-        Ok(column)
-    }
-
     fn evaluate_judgment(&mut self, name: &str) -> Result<&Vec<JudgmentOutcome>, EvalError> {
         if !self.judgment_cache.contains_key(name) {
-            if let Some(error) = self.failed.get(name) {
-                return Err(error.clone());
-            }
-            let column = self.compute_judgment(name).inspect_err(|error| {
-                self.failed.insert(name.to_string(), error.clone());
+            let derived = self.get_derived(name)?.clone();
+            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
+                EvalError::MissingDerivedFormulaVersion {
+                    derived: name.to_string(),
+                    at: self.period.start,
+                }
             })?;
+            let column = match semantics {
+                DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
+                DerivedSemantics::Scalar(_) => {
+                    return Err(EvalError::ExpectedJudgment(name.to_string()));
+                }
+            };
             self.judgment_cache.insert(name.to_string(), column);
         }
         Ok(self.judgment_cache.get(name).expect("column cached"))
-    }
-
-    fn compute_judgment(&mut self, name: &str) -> Result<Vec<JudgmentOutcome>, EvalError> {
-        let derived = self.get_derived(name)?.clone();
-        let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-            EvalError::MissingDerivedFormulaVersion {
-                derived: name.to_string(),
-                at: self.period.start,
-            }
-        })?;
-        match semantics {
-            DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr),
-            DerivedSemantics::Scalar(_) => Err(EvalError::ExpectedJudgment(name.to_string())),
-        }
     }
 
     fn eval_scalar_expr(&mut self, expr: &ScalarExpr) -> Result<ScalarColumn, EvalError> {
