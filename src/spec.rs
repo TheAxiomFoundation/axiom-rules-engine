@@ -28,10 +28,27 @@ pub enum SpecError {
     InvalidSourceSha256 { location: String, value: String },
     #[error("{location} declares non-canonical public rule id `{value}`")]
     InvalidPublicRuleId { location: String, value: String },
+    #[error("{kind}s {names} share the public id `{id}`; give each its own id")]
+    DuplicatePublicId {
+        kind: &'static str,
+        id: String,
+        names: String,
+    },
     #[error(
-        "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot, derived rule, or parameter in the compiled program"
+        "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot in the compiled program; use a request name from the input catalog"
     )]
     InvalidDatasetInputReference { reference: String },
+    #[error(
+        "dataset input `{reference}` names derived rule `{rule}`, which the engine computes; supply the rule's inputs or, for a scalar rule, use request pins (\"pins\": [{{\"rule\": \"{rule}\", \"value\": ...}}])"
+    )]
+    DerivedRuleDatasetInput { reference: String, rule: String },
+    #[error(
+        "dataset input `{reference}` names parameter `{parameter}`; parameters are law values, not dataset inputs; change the program parameter instead"
+    )]
+    ParameterDatasetInput {
+        reference: String,
+        parameter: String,
+    },
     #[error(
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
@@ -196,6 +213,21 @@ impl ProgramSpec {
             program.add_derived(model)?;
         }
 
+        // References resolve by public id, so an id two rules share would
+        // resolve to whichever the program's hash map yields first.
+        reject_duplicate_public_ids(
+            "parameter",
+            self.parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_deref(), parameter.name.as_str())),
+        )?;
+        reject_duplicate_public_ids(
+            "derived rule",
+            self.derived
+                .iter()
+                .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
+        )?;
+
         Ok(program)
     }
 }
@@ -228,6 +260,33 @@ fn validate_citation_path(location: &str, value: &str) -> Result<(), SpecError> 
         });
     }
     Ok(())
+}
+
+fn reject_duplicate_public_ids<'a>(
+    kind: &'static str,
+    rules: impl Iterator<Item = (Option<&'a str>, &'a str)>,
+) -> Result<(), SpecError> {
+    let mut names_by_id = BTreeMap::<&str, Vec<&str>>::new();
+    for (id, name) in rules {
+        if let Some(id) = id {
+            names_by_id.entry(id).or_default().push(name);
+        }
+    }
+    match names_by_id.into_iter().find(|(_, names)| names.len() > 1) {
+        Some((id, mut names)) => {
+            names.sort_unstable();
+            Err(SpecError::DuplicatePublicId {
+                kind,
+                id: id.to_string(),
+                names: names
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+        }
+        None => Ok(()),
+    }
 }
 
 /// Options for binding a wire [`DatasetSpec`] to a compiled [`Program`].
@@ -1417,6 +1476,9 @@ impl IntervalSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputRecordSpec {
+    /// A request name from the program's input catalog. Derived rules and
+    /// parameters cannot be supplied as dataset inputs; scalar rule overrides
+    /// belong in the compiled request's `pins`.
     pub name: String,
     pub entity: String,
     pub entity_id: String,
@@ -1442,8 +1504,32 @@ impl InputRecordSpec {
     ) -> Result<InputRecord, SpecError> {
         let name = program
             .resolve_input_name_with_catalog(&self.name, input_catalog)
-            .ok_or_else(|| SpecError::InvalidDatasetInputReference {
-                reference: self.name.clone(),
+            .ok_or_else(|| {
+                if let Some(rule) = program.derived.get(&self.name).or_else(|| {
+                    program
+                        .derived
+                        .values()
+                        .find(|rule| rule.id.as_deref() == Some(&self.name))
+                }) {
+                    return SpecError::DerivedRuleDatasetInput {
+                        reference: self.name.clone(),
+                        rule: rule.name.clone(),
+                    };
+                }
+                if let Some(parameter) = program.parameters.get(&self.name).or_else(|| {
+                    program
+                        .parameters
+                        .values()
+                        .find(|parameter| parameter.id.as_deref() == Some(&self.name))
+                }) {
+                    return SpecError::ParameterDatasetInput {
+                        reference: self.name.clone(),
+                        parameter: parameter.name.clone(),
+                    };
+                }
+                SpecError::InvalidDatasetInputReference {
+                    reference: self.name.clone(),
+                }
             })?;
         Ok(InputRecord {
             name,

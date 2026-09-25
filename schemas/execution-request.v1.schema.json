@@ -355,6 +355,7 @@
           "$ref": "#/$defs/IntervalSpec"
         },
         "name": {
+          "description": "A request name from the program's input catalog. Derived rules and\nparameters cannot be supplied as dataset inputs; scalar rule overrides\nbelong in the compiled request's `pins`.",
           "type": "string"
         },
         "value": {

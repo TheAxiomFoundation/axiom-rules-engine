@@ -1009,7 +1009,7 @@ pub fn rulespec_test_schema() -> Value {
                 },
                 "input": {
                     "type": "object",
-                    "description": "Input/flag values keyed by durable id. Scalars, or lists (of scalars or related-entity objects).",
+                    "description": "Dataset input/flag values keyed by catalog request name, or relation ids for related-entity facts. Scalars, or lists (of scalars or related-entity objects). Derived rule and parameter ids are not dataset inputs and do not implicitly pin computations; program-aware binding rejects them.",
                     "additionalProperties": input_value.clone()
                 },
                 "tables": {

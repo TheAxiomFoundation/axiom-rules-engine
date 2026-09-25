@@ -600,6 +600,7 @@ impl Program {
         }
     }
 
+    /// Resolve only runtime input slots, never derived rules or parameters.
     pub fn resolve_input_name(&self, reference: &str) -> Option<String> {
         let input_catalog = self.input_catalog();
         self.resolve_input_name_with_catalog(reference, &input_catalog)
@@ -623,22 +624,6 @@ impl Program {
                 .get(input_name)
                 .is_some_and(|request_names| request_names.iter().any(|name| name == reference))
                 .then(|| input_name.to_string());
-        }
-
-        if let Some(derived) = self
-            .derived
-            .values()
-            .find(|derived| derived.id.as_deref() == Some(reference))
-        {
-            return Some(derived.name.clone());
-        }
-
-        if let Some(parameter) = self
-            .parameters
-            .values()
-            .find(|parameter| parameter.id.as_deref() == Some(reference))
-        {
-            return Some(parameter.name.clone());
         }
 
         None
