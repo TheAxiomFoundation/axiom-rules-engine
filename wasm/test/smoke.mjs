@@ -165,4 +165,37 @@ assert.throws(
   "v1 artifacts are rejected by the v2 engine",
 );
 
+// A formula string may escape a multibyte character. The lexer once decoded
+// only the escape's first UTF-8 byte and then panicked, which traps a wasm
+// instance (panic=abort) instead of throwing a JS Error.
+const ESCAPE_TARGET = "us:policies/tests/escape";
+const ESCAPE_MODULE = String.raw`
+format: rulespec/v1
+rules:
+  - name: escaped_label
+    kind: parameter
+    dtype: Text
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          "caf\é"
+`;
+const escapeArtifact = JSON.parse(
+  engine.compile(JSON.stringify({ [ESCAPE_TARGET]: ESCAPE_MODULE }), ESCAPE_TARGET),
+);
+const escapedLabel = escapeArtifact.program.parameters.find((parameter) =>
+  parameter.name.endsWith("escaped_label"),
+);
+assert.ok(escapedLabel, "compiled program exposes escaped_label");
+assert.equal(escapedLabel.versions[0].values["0"].value, "café");
+assert.throws(
+  () =>
+    engine.compile(
+      JSON.stringify({ [ESCAPE_TARGET]: ESCAPE_MODULE.replace('"caf\\é"', '"caf\\é') }),
+      ESCAPE_TARGET,
+    ),
+  /unterminated string/,
+  "an unterminated escaped string is reported",
+);
+
 console.log("smoke test passed");

@@ -130,6 +130,7 @@ fn keyword(s: &str) -> Option<TokType> {
 }
 
 pub struct Lexer<'a> {
+    text: &'a str,
     src: &'a [u8],
     pos: usize,
     line: usize,
@@ -140,12 +141,32 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
         Self {
+            text: src,
             src: src.as_bytes(),
             pos: 0,
             line: 1,
             col: 1,
             tokens: Vec::new(),
         }
+    }
+
+    /// The source text between two byte offsets. Scanning is bytewise, so an
+    /// offset could land inside a multibyte character; that is a parse error
+    /// here rather than a panic.
+    fn slice(
+        &self,
+        start: usize,
+        end: usize,
+        line: usize,
+        col: usize,
+    ) -> Result<&'a str, FormulaError> {
+        self.text.get(start..end).ok_or_else(|| {
+            FormulaError::parse(
+                line,
+                col,
+                format!("lexer offset {start}..{end} is not on a character boundary"),
+            )
+        })
     }
 
     fn advance(&mut self, n: usize) {
@@ -214,7 +235,7 @@ impl<'a> Lexer<'a> {
                         .enumerate()
                         .all(|(i, &b)| matches!(i, 4 | 7) || b.is_ascii_digit())
                 {
-                    let s = std::str::from_utf8(slice).unwrap().to_string();
+                    let s = self.slice(self.pos, self.pos + 10, line, col)?.to_string();
                     self.advance(10);
                     self.push(TokType::Date, s, line, col);
                     continue;
@@ -242,9 +263,7 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                let s = std::str::from_utf8(&self.src[self.pos..end])
-                    .unwrap()
-                    .to_string();
+                let s = self.slice(self.pos, end, line, col)?.to_string();
                 let n = end - self.pos;
                 self.advance(n);
                 self.push(
@@ -269,35 +288,32 @@ impl<'a> Lexer<'a> {
                 while self.pos < self.src.len() {
                     let current = self.src[self.pos];
                     if current == quote {
-                        if segment_start < self.pos {
-                            value.push_str(
-                                std::str::from_utf8(&self.src[segment_start..self.pos]).unwrap(),
-                            );
-                        }
+                        value.push_str(self.slice(segment_start, self.pos, line, col)?);
                         self.advance(1);
                         self.push(TokType::String, value, line, col);
                         break;
                     }
                     if current == b'\\' {
-                        if segment_start < self.pos {
-                            value.push_str(
-                                std::str::from_utf8(&self.src[segment_start..self.pos]).unwrap(),
-                            );
-                        }
-                        if self.pos + 1 >= self.src.len() {
+                        value.push_str(self.slice(segment_start, self.pos, line, col)?);
+                        // Decode the whole escaped character: a multibyte one
+                        // spans several bytes, and stepping over only its
+                        // first would leave the cursor inside it.
+                        let Some(escaped) = self
+                            .slice(self.pos + 1, self.src.len(), line, col)?
+                            .chars()
+                            .next()
+                        else {
                             return Err(FormulaError::parse(line, col, "unterminated string"));
-                        }
-                        let escaped = self.src[self.pos + 1];
+                        };
                         value.push(match escaped {
-                            b'\\' => '\\',
-                            b'"' => '"',
-                            b'\'' => '\'',
-                            b'n' => '\n',
-                            b'r' => '\r',
-                            b't' => '\t',
-                            other => other as char,
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            // `\\`, `\"`, `\'`, and any other escaped
+                            // character stand for that character.
+                            other => other,
                         });
-                        self.advance(2);
+                        self.advance(1 + escaped.len_utf8());
                         segment_start = self.pos;
                         continue;
                     }
@@ -341,9 +357,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 let final_end = if is_path { path_end } else { end };
-                let s = std::str::from_utf8(&self.src[self.pos..final_end])
-                    .unwrap()
-                    .to_string();
+                let s = self.slice(self.pos, final_end, line, col)?.to_string();
                 let n = final_end - self.pos;
                 self.advance(n);
                 if !is_path {
@@ -371,7 +385,7 @@ impl<'a> Lexer<'a> {
                     _ => None,
                 };
                 if let Some(ty) = ty {
-                    let s = std::str::from_utf8(pair).unwrap().to_string();
+                    let s = self.slice(self.pos, self.pos + 2, line, col)?.to_string();
                     self.advance(2);
                     self.push(ty, s, line, col);
                     continue;
@@ -395,10 +409,17 @@ impl<'a> Lexer<'a> {
                 b'[' => (TokType::LBracket, 1),
                 b']' => (TokType::RBracket, 1),
                 _ => {
+                    // Report the whole character, not its first UTF-8 byte
+                    // read as Latin-1 (`é` would otherwise show as `Ã`).
+                    let unexpected = self
+                        .slice(self.pos, self.src.len(), line, col)?
+                        .chars()
+                        .next()
+                        .unwrap_or(c as char);
                     return Err(FormulaError::parse(
                         line,
                         col,
-                        format!("unexpected char {:?}", c as char),
+                        format!("unexpected char {unexpected:?}"),
                     ));
                 }
             };
@@ -2036,4 +2057,118 @@ pub(crate) fn lower_judgment_formula(
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     lower_to_judgment(&expr, &ctx)
+}
+
+#[cfg(test)]
+mod lexer_tests {
+    use proptest::prelude::*;
+
+    use super::{FormulaError, Lexer, TokType};
+
+    /// Lex `src` and return the value of the one string token it holds.
+    fn string_value(src: &str) -> Result<String, FormulaError> {
+        let tokens = Lexer::new(src).tokenise()?;
+        match tokens.as_slice() {
+            [token, eof] if token.ty == TokType::String && eof.ty == TokType::Eof => {
+                Ok(token.value.clone())
+            }
+            _ => panic!("{src:?} lexed to {tokens:?}, not one string token"),
+        }
+    }
+
+    /// The character that a backslash escape of `c` stands for.
+    fn unescape(c: char) -> char {
+        match c {
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            other => other,
+        }
+    }
+
+    #[test]
+    fn every_escaped_character_decodes_whole() {
+        // Every Unicode scalar value, so every UTF-8 width from one to four
+        // bytes, in both quote styles. The trailing `é` makes the lexer slice
+        // the source just after the escape, where a cursor left inside the
+        // escaped character used to panic.
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            for quote in ['"', '\''] {
+                let src = format!("{quote}\\{c}é{quote}");
+                let value = string_value(&src).unwrap_or_else(|error| panic!("{src:?}: {error}"));
+                assert_eq!(value, format!("{}é", unescape(c)), "{src:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn unexpected_character_is_reported_whole() {
+        for (src, reported) in [("é", "'é'"), ("x €", "'€'"), ("𝄞", "'𝄞'")] {
+            let error = Lexer::new(src)
+                .tokenise()
+                .expect_err("a character outside the grammar is an error");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unexpected char {reported}")),
+                "{src:?}: {error}"
+            );
+        }
+    }
+
+    /// Characters that reach every lexer branch, weighted toward those that
+    /// open, close, or escape a string, and toward multibyte ones.
+    fn lexer_char() -> impl Strategy<Value = char> {
+        prop_oneof![
+            3 => prop::sample::select(vec!['"', '\'', '\\', '#', '\n', '\r', '\t', ' ']),
+            3 => prop::sample::select(vec!['é', 'ß', '€', '中', '𝄞', '😀', '\u{301}', '\u{feff}']),
+            2 => prop::char::range('!', '~'),
+            1 => any::<char>(),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4096))]
+
+        /// Every input lexes to tokens or to a parse error; none panics.
+        #[test]
+        fn tokenise_never_panics(chars in prop::collection::vec(lexer_char(), 0..64)) {
+            let src: String = chars.into_iter().collect();
+            let _ = Lexer::new(&src).tokenise();
+        }
+
+        /// Any text, quoted with any mix of escaped and raw characters, lexes
+        /// back to exactly that text.
+        #[test]
+        fn quoted_text_round_trips(
+            parts in prop::collection::vec((lexer_char(), any::<bool>()), 0..48),
+            single in any::<bool>(),
+        ) {
+            let quote = if single { '\'' } else { '"' };
+            let mut literal = String::from(quote);
+            let mut text = String::new();
+            for (c, escape) in parts {
+                text.push(c);
+                match c {
+                    '\n' if escape => literal.push_str("\\n"),
+                    '\r' if escape => literal.push_str("\\r"),
+                    '\t' if escape => literal.push_str("\\t"),
+                    // Escaped, these letters name control characters.
+                    'n' | 'r' | 't' => literal.push(c),
+                    _ if escape || c == quote || c == '\\' => {
+                        literal.push('\\');
+                        literal.push(c);
+                    }
+                    _ => literal.push(c),
+                }
+            }
+            literal.push(quote);
+            match string_value(&literal) {
+                Ok(value) => prop_assert_eq!(value, text, "{:?}", literal),
+                Err(error) => {
+                    return Err(TestCaseError::fail(format!("{literal:?}: {error}")));
+                }
+            }
+        }
+    }
 }
