@@ -332,25 +332,13 @@ fn fast_mode_answers_through_explain_when_only_an_untaken_branch_overflows() {
     .expect("explain evaluates only the branch each household takes");
     assert_eq!(results(&explain), [decimal("0"), decimal("2")]);
 
-    // The households disagree on the condition, so bulk evaluates `amount * 2`
-    // for household-a too. That overflow sends the request to explain.
+    // The households disagree on the condition. Bulk evaluates `amount * 2`
+    // only for household-b, which selects it, so fast mode answers itself.
     let fast = execute_request(household_request(ExecutionMode::Fast, GUARDED, households))
-        .expect("fast answers through explain");
-    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
-    assert_eq!(
-        fast.metadata.fallback_reason.as_deref(),
-        Some(
-            format!(
-                "bulk evaluation failed ({}); explain decides the outcome",
-                overflow_message("multiplication")
-            )
-            .as_str()
-        )
-    );
-    assert_eq!(
-        serde_json::to_value(&fast.results).expect("results serialise"),
-        serde_json::to_value(&explain.results).expect("results serialise")
-    );
+        .expect("fast evaluates only the branch each household takes");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
+    assert_eq!(results(&fast), results(&explain));
 
     // Alone, household-a takes the `then` branch in every row, so bulk never
     // evaluates `amount * 2` and fast mode answers without falling back.
@@ -529,12 +517,9 @@ fn division_by_zero_is_an_error_in_a_taken_branch_and_skipped_in_an_untaken_one(
         GUARDED_DIVISION,
         households,
     ))
-    .expect("fast answers through explain");
-    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
-    assert_eq!(
-        fast.metadata.fallback_reason.as_deref(),
-        Some("bulk evaluation failed (division by zero); explain decides the outcome")
-    );
+    .expect("fast skips household-a's division");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
     assert_eq!(results(&fast), results(&explain));
     // As for the overflow above: dense evaluates both branches for the whole
     // batch, so the mixed batch may fail there, but never panics.

@@ -21,7 +21,9 @@ RuleSpec YAML only as test fixtures under `tests/fixtures/rulespec/`.
 - durable repo-backed output IDs, e.g.
   `us:statutes/7/2017/a#snap_regular_month_allotment`
 - `explain` execution with traces
-- `fast` execution through the generic dense path when supported
+- `fast` execution: one columnar pass over a batch that returns exactly what
+  `explain` returns, falling back to `explain` for constructs it does not
+  implement — see [`docs/execution-semantics.md`](docs/execution-semantics.md)
 - opt-in currency output rounding per rule (`rounding: half_up|half_even|floor|ceil`),
   applied identically across the explain, fast, and dense paths — see
   [`docs/rulespec.md`](docs/rulespec.md#currency-rounding)
