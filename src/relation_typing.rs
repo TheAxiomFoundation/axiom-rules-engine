@@ -323,7 +323,7 @@ impl<'a> Checker<'a> {
                         relation,
                         citing,
                         format!(
-                            "`{citing}` evaluates on `{entity}` ids and aggregates relation `{relation}` keyed on slot {current}, which declares `{current_kind}` (slot kinds {}); so the lookup can never match those ids. Declare the kinds in tuple order and recompile",
+                            "`{citing}` evaluates on `{entity}` ids and aggregates relation `{relation}` keyed on slot {current}, which declares `{current_kind}` (slot kinds {}), so the lookup can never match those ids. Declare the kinds in tuple order and recompile",
                             format_kinds(kinds)
                         ),
                     );
