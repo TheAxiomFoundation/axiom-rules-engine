@@ -267,14 +267,42 @@ rules:
         formula: sum_where(member_of_household, earned_income, is_countable_member)
 ```
 
-For a two-slot relation with declared `arguments`, aggregates use the slot matching
-the enclosing rule’s `entity` as the current entity and the other slot as the
-related entity. Both `[Person, Household]` and `[Household, Person]` work when
-dataset tuples follow the declared order. Untyped or ambiguous declarations
-retain the legacy direction (current slot 1, related slot 0). This applies when
-compiling RuleSpec; loading an existing compiled artifact does not rewrite it.
-Recompile artifacts to adopt corrected directions, and ensure dataset tuples
-follow their declared argument order.
+Relation entity typing is mandatory. Every relation an aggregate or
+membership test executes must declare `arguments`: one entity kind per tuple
+slot, in tuple order. Compiling a program that executes an untyped relation
+fails with `untyped_relation`, because the engine cannot check dataset tuples
+against slots it knows nothing about, and a tuple stored in the other
+orientation would aggregate nothing.
+
+For a two-slot relation, aggregates use the slot whose kind is the enclosing
+rule's `entity` as the current entity and the other slot as the related
+entity. Both `[Person, Household]` and `[Household, Person]` work when dataset
+tuples follow the declared order. Compilation fails when the direction cannot
+be read from the kinds:
+
+- when no slot holds the rule's entity (`relation_current_slot_entity_mismatch`);
+- when a rule evaluated on the related ids has another entity
+  (`relation_related_slot_entity_mismatch`);
+- when every slot holds the rule's entity, as in `[Person, Person]`
+  (`AmbiguousRelationDirection`). Wrap such a relation in a
+  `derived_relation` whose explicit `current_slot` and `related_slot` say which
+  side the rule aggregates from.
+
+An aggregate over a `derived_relation` uses the derivation's `current_slot` and
+`related_slot`. A derived relation takes its source's slot kinds; if it
+declares `slot_entities`, they must match the source's.
+
+A relation name a module aggregates without declaring it (a composition root,
+or a module relying on an import) takes the kinds of the same-named
+declarations in the import-merged closure when they all agree; if they
+disagree, compilation fails, and with no typed declaration the relation is
+untyped.
+
+Compiled artifacts written before typing became mandatory can execute untyped
+relations. Loading one fails with a message naming
+`axiom-rules-engine migrate artifact`, which types the artifact as it executes
+(see [`docs/rulespec.md`](rulespec.md#relation-entity-typing)). Recompiling from
+typed source is the durable fix.
 
 ## Judgment position
 
