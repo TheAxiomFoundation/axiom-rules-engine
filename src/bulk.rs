@@ -745,6 +745,18 @@ impl<'a> BulkEvaluator<'a> {
                 else_expr,
             } => {
                 let condition = self.eval_judgment_expr(condition)?;
+                // Explain evaluates only the branch a row selects. When every
+                // row selects the same branch, evaluate only that one, so an
+                // error in a branch no row takes cannot fail the batch: a
+                // pinned rule's original formula (apply_pins wraps it as
+                // `if 0 == 0 then <pin> else <original>`), a guarded division.
+                // A batch whose rows disagree still evaluates both branches.
+                if condition.iter().all(|outcome| outcome.is_holds()) {
+                    return self.eval_scalar_expr(then_expr);
+                }
+                if !condition.iter().any(|outcome| outcome.is_holds()) {
+                    return self.eval_scalar_expr(else_expr);
+                }
                 let then_values = self.eval_scalar_expr(then_expr)?;
                 let else_values = self.eval_scalar_expr(else_expr)?;
                 select_scalar_column(condition, then_values, else_values)
@@ -769,6 +781,14 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::And(items) => {
                 let mut results = vec![JudgmentOutcome::Holds; self.entity_ids.len()];
                 for item in items {
+                    // Explain stops a row at its first operand that does not
+                    // hold; once no row can change, skip the rest as it does.
+                    if results
+                        .iter()
+                        .all(|outcome| *outcome == JudgmentOutcome::NotHolds)
+                    {
+                        break;
+                    }
                     let values = self.eval_judgment_expr(item)?;
                     for (index, value) in values.into_iter().enumerate() {
                         results[index] = match (results[index], value) {
@@ -786,6 +806,13 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::Or(items) => {
                 let mut results = vec![JudgmentOutcome::NotHolds; self.entity_ids.len()];
                 for item in items {
+                    // Explain stops a row at its first operand that holds.
+                    if results
+                        .iter()
+                        .all(|outcome| *outcome == JudgmentOutcome::Holds)
+                    {
+                        break;
+                    }
                     let values = self.eval_judgment_expr(item)?;
                     for (index, value) in values.into_iter().enumerate() {
                         results[index] = match (results[index], value) {

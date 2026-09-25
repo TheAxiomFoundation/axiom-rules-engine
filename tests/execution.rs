@@ -2540,6 +2540,196 @@ fn pinned_versioned_rule_evaluates_to_the_pin_in_every_mode() {
 }
 
 #[test]
+fn pinned_rule_needs_none_of_its_original_inputs_in_any_mode() {
+    // The pin replaces adjusted_amount's value, so its formula's `amount`
+    // input need not be supplied. Fast mode used to evaluate the original
+    // formula anyway and fail with a missing input.
+    let period = simple_period();
+    for mode in [ExecutionMode::Fast, ExecutionMode::Explain] {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
+            .expect("RuleSpec module compiles from YAML");
+        let response = execute_compiled_request(
+            artifact,
+            CompiledExecutionRequest {
+                mode: mode.clone(),
+                dataset: DatasetSpec {
+                    inputs: Vec::new(),
+                    relations: Vec::new(),
+                },
+                queries: simple_queries(&period),
+                pins: vec![RulePin {
+                    rule: "adjusted_amount".to_string(),
+                    value: decimal_value("99"),
+                }],
+            },
+        )
+        .unwrap_or_else(|error| panic!("pinned {mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode);
+        assert_eq!(response.metadata.fallback_reason, None);
+        for result in &response.results {
+            assert_eq!(
+                decimal_output(&result.outputs["adjusted_amount"]),
+                decimal("99")
+            );
+        }
+    }
+}
+
+fn household_decimal_rule(name: &str, expr: ScalarExprSpec) -> DerivedSpec {
+    DerivedSpec {
+        id: None,
+        name: name.to_string(),
+        entity: "Household".to_string(),
+        dtype: DTypeSpec::Decimal,
+        unit: None,
+        rounding: None,
+        source: None,
+        period: None,
+        source_url: None,
+        corpus_citation_path: None,
+        semantics: DerivedSemanticsSpec::Scalar { expr },
+        versions: vec![],
+    }
+}
+
+fn input_expr(name: &str) -> ScalarExprSpec {
+    ScalarExprSpec::Input {
+        name: name.to_string(),
+    }
+}
+
+fn amount_compared(op: ComparisonOpSpec, value: i64) -> axiom_rules_engine::spec::JudgmentExprSpec {
+    axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+        left: Box::new(input_expr("amount")),
+        op,
+        right: Box::new(decimal_literal(value)),
+    }
+}
+
+/// Explain evaluates only the branch a row selects and stops `and` / `or` at
+/// the first operand that decides the row. Fast mode matches it when every
+/// row in the batch decides the same way: branches and operands that no row
+/// reaches are not evaluated, so their errors cannot fail the batch.
+#[test]
+fn fast_mode_skips_branches_and_operands_no_row_reaches() {
+    use axiom_rules_engine::spec::JudgmentExprSpec;
+
+    let program = ProgramSpec {
+        derived: vec![
+            // Guarded division: every household has amount 15 or 20, so no
+            // row takes the branch that divides by a zero input.
+            household_decimal_rule(
+                "guarded_ratio",
+                ScalarExprSpec::If {
+                    condition: Box::new(amount_compared(ComparisonOpSpec::Gt, 0)),
+                    then_expr: Box::new(input_expr("amount")),
+                    else_expr: Box::new(ScalarExprSpec::Div {
+                        left: Box::new(input_expr("amount")),
+                        right: Box::new(input_expr("zero")),
+                    }),
+                },
+            ),
+            // Every row fails the first operand, so neither mode reads
+            // `absent_flag`.
+            household_decimal_rule(
+                "and_short_circuit",
+                ScalarExprSpec::If {
+                    condition: Box::new(JudgmentExprSpec::And {
+                        items: vec![
+                            amount_compared(ComparisonOpSpec::Gt, 100),
+                            JudgmentExprSpec::Comparison {
+                                left: Box::new(input_expr("absent_flag")),
+                                op: ComparisonOpSpec::Gt,
+                                right: Box::new(decimal_literal(0)),
+                            },
+                        ],
+                    }),
+                    then_expr: Box::new(decimal_literal(1)),
+                    else_expr: Box::new(decimal_literal(2)),
+                },
+            ),
+            // Every row satisfies the first operand.
+            household_decimal_rule(
+                "or_short_circuit",
+                ScalarExprSpec::If {
+                    condition: Box::new(JudgmentExprSpec::Or {
+                        items: vec![
+                            amount_compared(ComparisonOpSpec::Gt, 10),
+                            JudgmentExprSpec::Comparison {
+                                left: Box::new(input_expr("absent_flag")),
+                                op: ComparisonOpSpec::Gt,
+                                right: Box::new(decimal_literal(0)),
+                            },
+                        ],
+                    }),
+                    then_expr: Box::new(decimal_literal(3)),
+                    else_expr: Box::new(decimal_literal(4)),
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let mut dataset = simple_dataset(&period);
+    for entity_id in ["household-1", "household-2"] {
+        dataset.inputs.push(InputRecordSpec {
+            name: "zero".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.to_string(),
+            interval: IntervalSpec {
+                start: period.start,
+                end: period.end,
+            },
+            value: decimal_value("0"),
+        });
+    }
+    let queries: Vec<ExecutionQuery> = simple_queries(&period)
+        .into_iter()
+        .map(|query| ExecutionQuery {
+            outputs: vec![
+                "guarded_ratio".to_string(),
+                "and_short_circuit".to_string(),
+                "or_short_circuit".to_string(),
+            ],
+            ..query
+        })
+        .collect();
+
+    let mut responses = Vec::new();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: queries.clone(),
+        })
+        .unwrap_or_else(|error| panic!("{mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode);
+        let values: Vec<[Decimal; 3]> = response
+            .results
+            .iter()
+            .map(|result| {
+                [
+                    decimal_output(&result.outputs["guarded_ratio"]),
+                    decimal_output(&result.outputs["and_short_circuit"]),
+                    decimal_output(&result.outputs["or_short_circuit"]),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                [decimal("15"), decimal("2"), decimal("3")],
+                [decimal("20"), decimal("2"), decimal("3")],
+            ],
+            "{mode:?}"
+        );
+        responses.push(values);
+    }
+    assert_eq!(responses[0], responses[1]);
+}
+
+#[test]
 fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
