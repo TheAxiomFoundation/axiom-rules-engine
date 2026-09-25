@@ -10,7 +10,9 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use thiserror::Error;
 
 use crate::compile::CompiledProgramArtifact;
-use crate::engine::{EvalError, checked_add, checked_div, checked_mul, checked_sub};
+use crate::engine::{
+    ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+};
 use crate::model::{
     ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
     OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
@@ -109,10 +111,10 @@ trait DenseNum: Copy + PartialOrd {
     /// a result outside its range as `ArithmeticOverflow` and a zero divisor as
     /// `DivisionByZero`, the same errors as the explain and bulk paths; `f64`
     /// follows IEEE 754 except that a zero divisor is `DivisionByZero` here too.
-    fn try_add(self, other: Self) -> Result<Self, EvalError>;
-    fn try_sub(self, other: Self) -> Result<Self, EvalError>;
-    fn try_mul(self, other: Self) -> Result<Self, EvalError>;
-    fn try_div(self, other: Self) -> Result<Self, EvalError>;
+    fn try_add(self, other: Self) -> Result<Self, ArithmeticError>;
+    fn try_sub(self, other: Self) -> Result<Self, ArithmeticError>;
+    fn try_mul(self, other: Self) -> Result<Self, ArithmeticError>;
+    fn try_div(self, other: Self) -> Result<Self, ArithmeticError>;
     fn from_decimal(value: &Decimal) -> Self;
     fn ceil(self) -> Self;
     fn floor(self) -> Self;
@@ -143,19 +145,23 @@ impl DenseNum for Decimal {
     const MIN: Self = Decimal::MIN;
     const MAX: Self = Decimal::MAX;
 
-    fn try_add(self, other: Self) -> Result<Self, EvalError> {
+    #[inline]
+    fn try_add(self, other: Self) -> Result<Self, ArithmeticError> {
         checked_add(self, other)
     }
 
-    fn try_sub(self, other: Self) -> Result<Self, EvalError> {
+    #[inline]
+    fn try_sub(self, other: Self) -> Result<Self, ArithmeticError> {
         checked_sub(self, other)
     }
 
-    fn try_mul(self, other: Self) -> Result<Self, EvalError> {
+    #[inline]
+    fn try_mul(self, other: Self) -> Result<Self, ArithmeticError> {
         checked_mul(self, other)
     }
 
-    fn try_div(self, other: Self) -> Result<Self, EvalError> {
+    #[inline]
+    fn try_div(self, other: Self) -> Result<Self, ArithmeticError> {
         checked_div(self, other)
     }
 
@@ -219,24 +225,24 @@ impl DenseNum for f64 {
     const MAX: Self = f64::MAX;
 
     #[inline]
-    fn try_add(self, other: Self) -> Result<Self, EvalError> {
+    fn try_add(self, other: Self) -> Result<Self, ArithmeticError> {
         Ok(self + other)
     }
 
     #[inline]
-    fn try_sub(self, other: Self) -> Result<Self, EvalError> {
+    fn try_sub(self, other: Self) -> Result<Self, ArithmeticError> {
         Ok(self - other)
     }
 
     #[inline]
-    fn try_mul(self, other: Self) -> Result<Self, EvalError> {
+    fn try_mul(self, other: Self) -> Result<Self, ArithmeticError> {
         Ok(self * other)
     }
 
     #[inline]
-    fn try_div(self, other: Self) -> Result<Self, EvalError> {
+    fn try_div(self, other: Self) -> Result<Self, ArithmeticError> {
         if other == 0.0 {
-            return Err(EvalError::DivisionByZero);
+            return Err(ArithmeticError::DivisionByZero);
         }
         Ok(self / other)
     }
@@ -2081,32 +2087,17 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledScalarExpr::Sub(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_sub(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_sub)
             }
             CompiledScalarExpr::Mul(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_mul(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_mul)
             }
             CompiledScalarExpr::Div(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar_expr(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar_expr(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_div(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; self.batch.row_count];
@@ -2409,32 +2400,17 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledRelatedScalarExpr::Sub(left, right) => {
                 let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
                 let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_sub(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_sub)
             }
             CompiledRelatedScalarExpr::Mul(left, right) => {
                 let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
                 let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_mul(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_mul)
             }
             CompiledRelatedScalarExpr::Div(left, right) => {
                 let left = N::vec_from_column(&self.resolve_related_scalar(relation, left)?)?;
                 let right = N::vec_from_column(&self.resolve_related_scalar(relation, right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left.try_div(right))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_div)
             }
             CompiledRelatedScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; length];
@@ -2718,32 +2694,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             CompiledScalarExpr::Sub(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(l, r)| l.try_sub(r))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_sub)
             }
             CompiledScalarExpr::Mul(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(l, r)| l.try_mul(r))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_mul)
             }
             CompiledScalarExpr::Div(left, right) => {
                 let left = N::vec_from_column(&self.eval_scalar(left)?)?;
                 let right = N::vec_from_column(&self.eval_scalar(right)?)?;
-                Ok(N::into_column(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(l, r)| l.try_div(r))
-                        .collect::<Result<Vec<N>, EvalError>>()?,
-                ))
+                elementwise(left, right, N::try_div)
             }
             CompiledScalarExpr::Max(items) => {
                 let mut values = vec![N::MIN; self.row_count];
@@ -3131,6 +3092,20 @@ fn dense_value_label(column: &DenseColumn, row: usize) -> String {
         DenseColumn::Text(values) => format!("{:?}", values[row]),
         DenseColumn::Date(values) => values[row].to_string(),
     }
+}
+
+/// Combine two numeric columns row by row, writing into the left column's
+/// buffer.
+fn elementwise<N: DenseNum>(
+    mut left: Vec<N>,
+    right: Vec<N>,
+    operation: impl Fn(N, N) -> Result<N, ArithmeticError>,
+) -> Result<DenseColumn, EvalError> {
+    debug_assert_eq!(left.len(), right.len());
+    for (left, right) in left.iter_mut().zip(right) {
+        *left = operation(*left, right)?;
+    }
+    Ok(N::into_column(left))
 }
 
 /// Add one to `counts[row]` for each row whose value in `column` is nonzero,

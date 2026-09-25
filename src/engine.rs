@@ -66,29 +66,51 @@ pub(crate) fn shift_calendar_days(
 // large enough to overflow is an evaluation error, never a panic, and all
 // three paths report it with the same message.
 
-pub(crate) fn checked_add(left: Decimal, right: Decimal) -> Result<Decimal, EvalError> {
+/// How a checked Decimal operation fails. It is small and `Copy`, so the
+/// column loops pay nothing for it on success; `?` turns it into the
+/// matching `EvalError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArithmeticError {
+    Overflow(&'static str),
+    DivisionByZero,
+}
+
+impl From<ArithmeticError> for EvalError {
+    fn from(error: ArithmeticError) -> Self {
+        match error {
+            ArithmeticError::Overflow(operation) => EvalError::ArithmeticOverflow(operation),
+            ArithmeticError::DivisionByZero => EvalError::DivisionByZero,
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn checked_add(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
     left.checked_add(right)
-        .ok_or(EvalError::ArithmeticOverflow("addition"))
+        .ok_or(ArithmeticError::Overflow("addition"))
 }
 
-pub(crate) fn checked_sub(left: Decimal, right: Decimal) -> Result<Decimal, EvalError> {
+#[inline]
+pub(crate) fn checked_sub(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
     left.checked_sub(right)
-        .ok_or(EvalError::ArithmeticOverflow("subtraction"))
+        .ok_or(ArithmeticError::Overflow("subtraction"))
 }
 
-pub(crate) fn checked_mul(left: Decimal, right: Decimal) -> Result<Decimal, EvalError> {
+#[inline]
+pub(crate) fn checked_mul(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
     left.checked_mul(right)
-        .ok_or(EvalError::ArithmeticOverflow("multiplication"))
+        .ok_or(ArithmeticError::Overflow("multiplication"))
 }
 
 /// A zero divisor is `DivisionByZero`; a quotient beyond the range (a large
 /// dividend over a divisor below one) is an overflow.
-pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, EvalError> {
+#[inline]
+pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
     if right.is_zero() {
-        return Err(EvalError::DivisionByZero);
+        return Err(ArithmeticError::DivisionByZero);
     }
     left.checked_div(right)
-        .ok_or(EvalError::ArithmeticOverflow("division"))
+        .ok_or(ArithmeticError::Overflow("division"))
 }
 
 #[derive(Debug, Error)]

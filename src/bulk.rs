@@ -10,7 +10,9 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
 };
-use crate::engine::{EvalError, checked_add, checked_div, checked_mul, checked_sub};
+use crate::engine::{
+    ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+};
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, JudgmentExpr,
     JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
@@ -247,6 +249,20 @@ fn fast_mode_metadata() -> ExecutionMetadata {
         actual_mode: ExecutionMode::Fast,
         fallback_reason: None,
     }
+}
+
+/// Combine two decimal columns row by row, writing into the left column's
+/// buffer.
+fn elementwise(
+    mut left: Vec<Decimal>,
+    right: Vec<Decimal>,
+    operation: impl Fn(Decimal, Decimal) -> Result<Decimal, ArithmeticError>,
+) -> Result<ScalarColumn, EvalError> {
+    debug_assert_eq!(left.len(), right.len());
+    for (left, right) in left.iter_mut().zip(right) {
+        *left = operation(*left, right)?;
+    }
+    Ok(ScalarColumn::Decimal(left))
 }
 
 fn unsupported_reason(error: &EvalError) -> Option<String> {
@@ -565,32 +581,17 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::Sub(left, right) => {
                 let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
                 let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| checked_sub(left, right))
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
-                ))
+                elementwise(left, right, checked_sub)
             }
             ScalarExpr::Mul(left, right) => {
                 let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
                 let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| checked_mul(left, right))
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
-                ))
+                elementwise(left, right, checked_mul)
             }
             ScalarExpr::Div(left, right) => {
                 let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
                 let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| checked_div(left, right))
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
-                ))
+                elementwise(left, right, checked_div)
             }
             ScalarExpr::Max(items) => {
                 let mut values = vec![Decimal::MIN; self.entity_ids.len()];
