@@ -1823,6 +1823,190 @@ fn fast_mode_reports_the_first_failing_output_in_request_order() {
     }
 }
 
+/// A household rule reading one input, and a batch request over several
+/// households that supplies `inputs` as (input name, household, value).
+fn batch_request(
+    mode: ExecutionMode,
+    rules: Vec<(&str, ScalarExprSpec)>,
+    inputs: &[(&str, &str, &str)],
+    queries: &[(&str, &[&str])],
+) -> ExecutionRequest {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    ExecutionRequest {
+        mode,
+        program: ProgramSpec {
+            derived: rules
+                .into_iter()
+                .map(|(name, expr)| DerivedSpec {
+                    id: None,
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    dtype: DTypeSpec::Decimal,
+                    unit: None,
+                    rounding: None,
+                    source: None,
+                    period: None,
+                    source_url: None,
+                    corpus_citation_path: None,
+                    semantics: DerivedSemanticsSpec::Scalar { expr },
+                    versions: vec![],
+                })
+                .collect(),
+            ..ProgramSpec::default()
+        },
+        dataset: DatasetSpec {
+            inputs: inputs
+                .iter()
+                .map(|(name, entity_id, value)| InputRecordSpec {
+                    name: name.to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: interval.clone(),
+                    value: decimal_value(value),
+                })
+                .collect(),
+            relations: Vec::new(),
+        },
+        queries: queries
+            .iter()
+            .map(|(entity_id, outputs)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: outputs.iter().map(|output| output.to_string()).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Bulk warms each output over every row at once, so across a multi-query
+/// batch its first error can belong to a later query than explain's (which
+/// works query by query). Fast mode therefore lets explain decide any request
+/// bulk fails on, and reports explain's error.
+#[test]
+fn fast_mode_reports_explains_error_across_a_multi_query_batch() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![
+            ("amount_output", input("amount")),
+            ("other_output", input("absent_other")),
+        ]
+    };
+    // `amount` is supplied for household-a only, so warming `amount_output`
+    // fails on household-b before either later output of household-a is
+    // reached.
+    for first_query_outputs in [
+        &["amount_output", "no_such_output"][..],
+        &["amount_output", "other_output"][..],
+    ] {
+        let request = |mode| {
+            batch_request(
+                mode,
+                rules(),
+                &[("amount", "household-a", "5")],
+                &[
+                    ("household-a", first_query_outputs),
+                    ("household-b", &["amount_output"]),
+                ],
+            )
+        };
+        let explain = execute_request(request(ExecutionMode::Explain))
+            .expect_err("explain fails on household-a's second output");
+        assert!(
+            !explain.to_string().contains("household-b"),
+            "explain reported {explain}"
+        );
+        for run in 0..32 {
+            let fast = execute_request(request(ExecutionMode::Fast))
+                .expect_err("fast fails as explain does");
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "run {run} with first query outputs {first_query_outputs:?}"
+            );
+        }
+    }
+}
+
+/// Bulk evaluates both branches of a conditional for every row. When the rows
+/// disagree, the branch a row does not take can fail for that row; explain
+/// never evaluates it, so the request succeeds through explain.
+#[test]
+fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() {
+    let input = |name: &str| ScalarExprSpec::Input {
+        name: name.to_string(),
+    };
+    let rules = || {
+        vec![(
+            "flagged_or_amount",
+            ScalarExprSpec::If {
+                condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                    left: Box::new(input("flag")),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(decimal_literal(1)),
+                }),
+                then_expr: Box::new(decimal_literal(7)),
+                else_expr: Box::new(input("amount")),
+            },
+        )]
+    };
+    // household-a takes the `then` branch and has no `amount`; household-b
+    // takes the `else` branch and has one.
+    let request = |mode| {
+        batch_request(
+            mode,
+            rules(),
+            &[
+                ("flag", "household-a", "1"),
+                ("flag", "household-b", "0"),
+                ("amount", "household-b", "5"),
+            ],
+            &[
+                ("household-a", &["flagged_or_amount"]),
+                ("household-b", &["flagged_or_amount"]),
+            ],
+        )
+    };
+    let explain = execute_request(request(ExecutionMode::Explain)).expect("explain answers");
+    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["flagged_or_amount"]),
+        decimal("7")
+    );
+    assert_eq!(
+        decimal_output(&explain.results[1].outputs["flagged_or_amount"]),
+        decimal("5")
+    );
+    for run in 0..16 {
+        let fast = execute_request(request(ExecutionMode::Fast))
+            .unwrap_or_else(|error| panic!("run {run} failed instead of falling back: {error}"));
+        assert_eq!(
+            fast.metadata.actual_mode,
+            ExecutionMode::Explain,
+            "run {run}"
+        );
+        assert!(
+            fast.metadata
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("`amount`")),
+            "run {run}: {:?}",
+            fast.metadata.fallback_reason
+        );
+        assert_eq!(
+            serde_json::to_value(&fast.results).expect("results serialise"),
+            explain_results,
+            "run {run}"
+        );
+    }
+}
+
 #[test]
 fn fast_mode_falls_back_for_filtered_relation_counts() {
     let period = PeriodSpec {

@@ -110,8 +110,10 @@ pub fn try_execute(
     // that needs explain (a parameter output, or a construct bulk does not
     // support) sends the whole request to explain, whatever earlier outputs
     // raised: bulk evaluates both branches of a conditional, so its errors may
-    // come from a branch explain never takes. Otherwise the first error in
-    // request order is the result. Warming in a HashSet's iteration order,
+    // come from a branch explain never takes. Otherwise a failure also sends
+    // the request to explain, and the first failure in request order names
+    // the reason; bulk never reports an error itself. Warming in a HashSet's
+    // iteration order,
     // which is seeded afresh for every process, made one request fail on some
     // runs and fall back to explain on others.
     let mut seen = HashSet::new();
@@ -153,8 +155,15 @@ pub fn try_execute(
             first_error.get_or_insert(error);
         }
     }
+    // Any other failure also goes to explain, which decides the outcome.
+    // Bulk evaluates each output over every row at once, so its first error
+    // can belong to a later query than the one explain, working query by
+    // query, fails on, and it can come from a conditional branch that no row
+    // takes. Explain then either reports its own first error or answers.
     if let Some(error) = first_error {
-        return Err(error);
+        return Ok(FastPathResult::Unsupported {
+            reason: format!("bulk evaluation failed ({error}); explain decides the outcome"),
+        });
     }
 
     for (row_index, query) in queries.iter().enumerate() {
