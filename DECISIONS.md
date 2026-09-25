@@ -4,6 +4,42 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-09-25 — Relation entity typing is mandatory
+
+**Decision.** Every relation that a `count_related`, `sum_related`, or
+membership node executes must declare one entity kind per slot, and the slot
+a node keys on must hold the entity evaluating it. The check
+(`relation_typing`) runs at compile, at artifact load, and on raw-program
+requests; there is no opt-out. RuleSpec lowering refuses a direction it would
+have to guess (every slot holds the rule's entity), aggregates over a derived
+relation use the derivation's slots, and an undeclared short-name relation
+takes the kinds of the same-named declarations only when they all agree.
+Binding uses queries as kind evidence alongside input records and rejects
+tuples whose length differs from the arity. The artifact format stays 2:
+typed and relation-free artifacts load byte-for-byte, an artifact executing
+an untyped relation is refused with a pointer to `migrate artifact`, and
+`capabilities` lists `relation_entity_typing` so publishers can tell engines
+apart.
+
+**Why.** Entity ids are untyped strings and aggregation looks tuples up by
+`(relation, current_slot, id)`. With an untyped relation, a tuple stored in
+the other orientation matched nothing: rulespec-us `us/statutes/7/2012/j`'s
+`member_of_household` returned `not_holds` for a household with an elderly
+member, in explain and fast, exit 0, no warning (reproduced 2026-09-24 at
+6e709eb). The orientation checks were warnings behind an opt-in strict mode
+the CLI never set, and every backend shares the lookup, so differential
+testing between modes could not see it. Four commits in two weeks (78e9442,
+3edeab4, bbf9d3b, 6e709eb) fixed bugs in this area.
+
+**Alternatives.** Bumping the artifact format to 3 would force recompiling
+artifacts that are already safe and move engine, rulespec-us, the Python
+package, and axiom-api in lockstep; the capability string carries the same
+signal without that. A legacy load flag would reintroduce the silent zero the
+change exists to remove. Keeping undeclared short names untyped would fail
+every composition root that aggregates `member_of_household` until
+axiom-compose can emit `arguments`. Making dataset binding strict by default
+is a separate call (#190).
+
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 
 **Decision.** Parameter and derived versions carry an optional inclusive
