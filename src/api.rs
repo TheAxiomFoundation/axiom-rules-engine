@@ -233,8 +233,9 @@ pub enum ApiError {
         assessment_date: NaiveDate,
         period_start: NaiveDate,
     },
-    /// The program's dependency graph is not executable (a cycle, a dangling
-    /// derived reference, or a duplicate rule).
+    /// The program's dependency graph is not executable: a cycle (including
+    /// one routed through derived relations), a reference to an undefined
+    /// rule or relation, or a duplicate rule.
     #[error(transparent)]
     InvalidProgram(#[from] crate::compile::CompileError),
     #[error("pinned rule `{rule}` does not exist in the program")]

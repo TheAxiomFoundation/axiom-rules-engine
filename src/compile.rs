@@ -980,7 +980,8 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::
 }
 
 /// Check that a program's derived-rule and relation-derivation graphs are
-/// closed and acyclic, as compilation does. The evaluators recurse through
+/// closed and acyclic, as compilation does, counting a rule's dependencies
+/// through every derived relation it aggregates over. The evaluators recurse through
 /// this graph, so a request carrying a raw `ProgramSpec` must pass this check
 /// before execution; a cycle would otherwise recurse until the stack overflows.
 pub(crate) fn validate_dependency_graph(program: &ProgramSpec) -> Result<(), CompileError> {
@@ -1274,32 +1275,83 @@ fn detect_relation_cycle(
     Ok(())
 }
 
+/// The derived rules each derived relation's membership depends on,
+/// transitively: the rules its predicate reads, plus everything the relations
+/// it is derived from or names in its predicate (through `relation_member`,
+/// `len`, `count_where`, `sum_where`) depend on. A rule that aggregates over a
+/// derived relation depends on all of these, so a cycle routed through a
+/// relation's source or through another relation's predicate is detected
+/// like a direct one. `validate_relation_derivation_graph` has already proven
+/// the relation graph acyclic, so the recursion terminates.
 fn relation_derivation_dependencies(
     program: &ProgramSpec,
     derived_names: &HashSet<String>,
 ) -> Result<HashMap<String, HashSet<String>>, CompileError> {
-    let mut dependencies_by_relation = HashMap::new();
-    for relation in &program.relations {
-        let Some(derivation) = &relation.derivation else {
-            continue;
-        };
-        let mut dependencies = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
-        // The smallest name, so a predicate naming several unknown rules
-        // always reports the same one.
-        if let Some(dependency) = dependencies
-            .iter()
-            .filter(|dependency| !derived_names.contains(*dependency))
-            .min()
-        {
-            return Err(CompileError::UnknownDerivedDependency {
-                derived: relation.name.clone(),
-                dependency: dependency.clone(),
-            });
-        }
-        dependencies_by_relation.insert(relation.name.clone(), dependencies);
+    let relations = program
+        .relations
+        .iter()
+        .map(|relation| (relation.name.as_str(), relation))
+        .collect::<HashMap<_, _>>();
+    let mut names = program
+        .relations
+        .iter()
+        .filter(|relation| relation.derivation.is_some())
+        .map(|relation| relation.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    let mut closures = HashMap::new();
+    for name in names {
+        relation_dependency_closure(name, &relations, derived_names, &mut closures)?;
     }
-    Ok(dependencies_by_relation)
+    Ok(closures)
+}
+
+fn relation_dependency_closure(
+    name: &str,
+    relations: &HashMap<&str, &crate::spec::RelationSpec>,
+    derived_names: &HashSet<String>,
+    closures: &mut HashMap<String, HashSet<String>>,
+) -> Result<HashSet<String>, CompileError> {
+    if let Some(closure) = closures.get(name) {
+        return Ok(closure.clone());
+    }
+    let Some(derivation) = relations
+        .get(name)
+        .and_then(|relation| relation.derivation.as_ref())
+    else {
+        return Ok(HashSet::new());
+    };
+    let mut named = HashSet::new();
+    collect_relation_members_from_judgment(&derivation.predicate, &mut named);
+    named.insert(derivation.source_relation.clone());
+    let mut named = named.into_iter().collect::<Vec<_>>();
+    named.sort_unstable();
+    let mut named_closures = HashMap::new();
+    for related in named {
+        let closure = relation_dependency_closure(&related, relations, derived_names, closures)?;
+        named_closures.insert(related, closure);
+    }
+
+    let mut dependencies = HashSet::new();
+    collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &named_closures);
+    // The smallest name, so a predicate naming several unknown rules always
+    // reports the same one. Unknown rules reached only through another
+    // relation were reported when that relation's closure was built.
+    if let Some(dependency) = dependencies
+        .iter()
+        .filter(|dependency| !derived_names.contains(*dependency))
+        .min()
+    {
+        return Err(CompileError::UnknownDerivedDependency {
+            derived: name.to_string(),
+            dependency: dependency.clone(),
+        });
+    }
+    if let Some(source) = named_closures.get(&derivation.source_relation) {
+        dependencies.extend(source.iter().cloned());
+    }
+    closures.insert(name.to_string(), dependencies.clone());
+    Ok(dependencies)
 }
 
 fn derived_dependencies(
@@ -1435,7 +1487,11 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
