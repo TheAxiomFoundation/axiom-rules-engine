@@ -980,10 +980,10 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::
 }
 
 /// Check that a program's derived-rule and relation-derivation graphs are
-/// closed and acyclic, as compilation does, counting a rule's dependencies
-/// through every derived relation it aggregates over. The evaluators recurse through
-/// this graph, so a request carrying a raw `ProgramSpec` must pass this check
-/// before execution; a cycle would otherwise recurse until the stack overflows.
+/// closed and acyclic, as compilation does, including cycles routed through
+/// derived relations. The evaluators recurse through this graph, so a request
+/// carrying a raw `ProgramSpec` must pass this check before execution; a
+/// cycle would otherwise recurse until the stack overflows.
 pub(crate) fn validate_dependency_graph(program: &ProgramSpec) -> Result<(), CompileError> {
     evaluation_order(program).map(|_| ())
 }
@@ -1060,7 +1060,121 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
         return Err(CompileError::CyclicDependency { cycle });
     }
 
+    // The order above is stored in artifact metadata and compared exactly
+    // when an artifact is loaded, so it stays as computed; this further check
+    // only refuses programs, never reorders them.
+    reject_relation_routed_cycles(program)?;
     Ok(order)
+}
+
+/// Refuse a rule that depends on itself through derived relations: `e`
+/// counts over `R`, and `R`'s membership depends on `e` through its predicate,
+/// its source relation, or a relation its predicate names (by
+/// `relation_member`, `len`, `count_where` or `sum_where`). The order above
+/// only follows a derived relation's own predicate, so such a cycle passed it
+/// and the evaluators recursed until the stack overflowed. This walks one
+/// graph of rules and derived relations; every version of a rule counts, as it
+/// does above. Relation-only cycles were already refused.
+fn reject_relation_routed_cycles(program: &ProgramSpec) -> Result<(), CompileError> {
+    let rule_node = |name: &str| format!("rule:{name}");
+    let relation_node = |name: &str| format!("relation:{name}");
+    let mut nodes = BTreeSet::new();
+    for derived in &program.derived {
+        nodes.insert(rule_node(&derived.name));
+    }
+    for relation in &program.relations {
+        nodes.insert(relation_node(&relation.name));
+    }
+    // dependents[x] lists the nodes that depend on x.
+    let mut dependents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut add_edge = |dependency: String, dependent: &String| {
+        if nodes.contains(&dependency) {
+            dependents
+                .entry(dependency)
+                .or_default()
+                .insert(dependent.clone());
+        }
+    };
+
+    for derived in &program.derived {
+        let dependent = rule_node(&derived.name);
+        let mut rules = HashSet::new();
+        let mut relations = HashSet::new();
+        let empty = HashMap::new();
+        for semantics in std::iter::once(&derived.semantics)
+            .chain(derived.versions.iter().map(|version| &version.semantics))
+        {
+            match semantics {
+                DerivedSemanticsSpec::Scalar { expr } => {
+                    collect_scalar_dependencies(expr, &mut rules, &empty);
+                    collect_relation_members_from_scalar(expr, &mut relations);
+                }
+                DerivedSemanticsSpec::Judgment { expr } => {
+                    collect_judgment_dependencies(expr, &mut rules, &empty);
+                    collect_relation_members_from_judgment(expr, &mut relations);
+                }
+            }
+        }
+        for rule in rules {
+            add_edge(rule_node(&rule), &dependent);
+        }
+        for relation in relations {
+            add_edge(relation_node(&relation), &dependent);
+        }
+    }
+    for relation in &program.relations {
+        let Some(derivation) = &relation.derivation else {
+            continue;
+        };
+        let dependent = relation_node(&relation.name);
+        let mut rules = HashSet::new();
+        collect_judgment_dependencies(&derivation.predicate, &mut rules, &HashMap::new());
+        let mut relations = HashSet::new();
+        collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
+        relations.insert(derivation.source_relation.clone());
+        for rule in rules {
+            add_edge(rule_node(&rule), &dependent);
+        }
+        for source in relations {
+            add_edge(relation_node(&source), &dependent);
+        }
+    }
+
+    let mut incoming = nodes
+        .iter()
+        .map(|node| (node.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for targets in dependents.values() {
+        for target in targets {
+            *incoming.get_mut(target).expect("edge target is a node") += 1;
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(node, _)| node.clone())
+        .collect::<BTreeSet<_>>();
+    while let Some(node) = ready.pop_first() {
+        incoming.remove(&node);
+        for target in dependents.get(&node).into_iter().flatten() {
+            if let Some(count) = incoming.get_mut(target) {
+                *count -= 1;
+                if *count == 0 {
+                    ready.insert(target.clone());
+                }
+            }
+        }
+    }
+    let rules = incoming
+        .keys()
+        .filter_map(|node| node.strip_prefix("rule:"))
+        .collect::<Vec<_>>();
+    if rules.is_empty() {
+        return Ok(());
+    }
+    Err(CompileError::CyclicDependency {
+        cycle: rules.join(", "),
+    })
 }
 
 fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
@@ -1275,83 +1389,32 @@ fn detect_relation_cycle(
     Ok(())
 }
 
-/// The derived rules each derived relation's membership depends on,
-/// transitively: the rules its predicate reads, plus everything the relations
-/// it is derived from or names in its predicate (through `relation_member`,
-/// `len`, `count_where`, `sum_where`) depend on. A rule that aggregates over a
-/// derived relation depends on all of these, so a cycle routed through a
-/// relation's source or through another relation's predicate is detected
-/// like a direct one. `validate_relation_derivation_graph` has already proven
-/// the relation graph acyclic, so the recursion terminates.
 fn relation_derivation_dependencies(
     program: &ProgramSpec,
     derived_names: &HashSet<String>,
 ) -> Result<HashMap<String, HashSet<String>>, CompileError> {
-    let relations = program
-        .relations
-        .iter()
-        .map(|relation| (relation.name.as_str(), relation))
-        .collect::<HashMap<_, _>>();
-    let mut names = program
-        .relations
-        .iter()
-        .filter(|relation| relation.derivation.is_some())
-        .map(|relation| relation.name.as_str())
-        .collect::<Vec<_>>();
-    names.sort_unstable();
-    let mut closures = HashMap::new();
-    for name in names {
-        relation_dependency_closure(name, &relations, derived_names, &mut closures)?;
+    let mut dependencies_by_relation = HashMap::new();
+    for relation in &program.relations {
+        let Some(derivation) = &relation.derivation else {
+            continue;
+        };
+        let mut dependencies = HashSet::new();
+        collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
+        // The smallest name, so a predicate naming several unknown rules
+        // always reports the same one.
+        if let Some(dependency) = dependencies
+            .iter()
+            .filter(|dependency| !derived_names.contains(*dependency))
+            .min()
+        {
+            return Err(CompileError::UnknownDerivedDependency {
+                derived: relation.name.clone(),
+                dependency: dependency.clone(),
+            });
+        }
+        dependencies_by_relation.insert(relation.name.clone(), dependencies);
     }
-    Ok(closures)
-}
-
-fn relation_dependency_closure(
-    name: &str,
-    relations: &HashMap<&str, &crate::spec::RelationSpec>,
-    derived_names: &HashSet<String>,
-    closures: &mut HashMap<String, HashSet<String>>,
-) -> Result<HashSet<String>, CompileError> {
-    if let Some(closure) = closures.get(name) {
-        return Ok(closure.clone());
-    }
-    let Some(derivation) = relations
-        .get(name)
-        .and_then(|relation| relation.derivation.as_ref())
-    else {
-        return Ok(HashSet::new());
-    };
-    let mut named = HashSet::new();
-    collect_relation_members_from_judgment(&derivation.predicate, &mut named);
-    named.insert(derivation.source_relation.clone());
-    let mut named = named.into_iter().collect::<Vec<_>>();
-    named.sort_unstable();
-    let mut named_closures = HashMap::new();
-    for related in named {
-        let closure = relation_dependency_closure(&related, relations, derived_names, closures)?;
-        named_closures.insert(related, closure);
-    }
-
-    let mut dependencies = HashSet::new();
-    collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &named_closures);
-    // The smallest name, so a predicate naming several unknown rules always
-    // reports the same one. Unknown rules reached only through another
-    // relation were reported when that relation's closure was built.
-    if let Some(dependency) = dependencies
-        .iter()
-        .filter(|dependency| !derived_names.contains(*dependency))
-        .min()
-    {
-        return Err(CompileError::UnknownDerivedDependency {
-            derived: name.to_string(),
-            dependency: dependency.clone(),
-        });
-    }
-    if let Some(source) = named_closures.get(&derivation.source_relation) {
-        dependencies.extend(source.iter().cloned());
-    }
-    closures.insert(name.to_string(), dependencies.clone());
-    Ok(dependencies)
+    Ok(dependencies_by_relation)
 }
 
 fn derived_dependencies(
@@ -1487,11 +1550,7 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { relation, .. } => {
-            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
-                dependencies.extend(relation_dependencies.iter().cloned());
-            }
-        }
+        JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {

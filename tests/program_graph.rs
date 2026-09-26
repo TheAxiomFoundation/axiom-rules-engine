@@ -14,6 +14,14 @@ use axiom_rules_engine::spec::{
     RelationDerivationSpec, RelationRecordSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
 };
 
+/// The compile error carried by a request refused for its dependency graph.
+fn graph_error(error: &ApiError) -> Option<&CompileError> {
+    match error {
+        ApiError::InvalidProgram(error) => Some(error),
+        _ => None,
+    }
+}
+
 fn household_rule(name: &str, expr: ScalarExprSpec) -> DerivedSpec {
     DerivedSpec {
         id: None,
@@ -70,8 +78,8 @@ fn a_derived_rule_cycle_is_an_error_not_a_stack_overflow() {
             .expect_err("a cyclic program is refused");
         assert!(
             matches!(
-                &error,
-                ApiError::InvalidProgram(CompileError::CyclicDependency { cycle })
+                graph_error(&error),
+                Some(CompileError::CyclicDependency { cycle })
                     if cycle == "alpha, beta"
             ),
             "{mode:?}: {error:?}"
@@ -120,8 +128,8 @@ fn a_derived_relation_derived_from_itself_is_an_error_not_a_stack_overflow() {
             .expect_err("a relation derived from itself is refused");
         assert!(
             matches!(
-                &error,
-                ApiError::InvalidProgram(CompileError::CyclicRelationDependency { cycle })
+                graph_error(&error),
+                Some(CompileError::CyclicRelationDependency { cycle })
                     if cycle == "loop"
             ),
             "{mode:?}: {error:?}"
@@ -206,6 +214,9 @@ fn derived_relation(name: &str, source: &str, predicate: JudgmentExprSpec) -> Re
 }
 
 /// Run `e` over one household in both modes and return each mode's outcome.
+/// The household is related to itself, so a relation predicate that reads
+/// `e` reads it for the same household, and a cycle through `e` recurses
+/// instead of stopping at an entity with no relations of its own.
 fn run_e(program: &ProgramSpec) -> Vec<Result<(), ApiError>> {
     let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
     let end = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("valid date");
@@ -215,7 +226,7 @@ fn run_e(program: &ProgramSpec) -> Vec<Result<(), ApiError>> {
             let mut request = request(mode, program.clone(), "e");
             request.dataset.relations = vec![RelationRecordSpec {
                 name: "member".to_string(),
-                tuple: vec!["household-1".to_string(), "person-1".to_string()],
+                tuple: vec!["household-1".to_string(), "household-1".to_string()],
                 interval: IntervalSpec { start, end },
             }];
             execute_request(request).map(|_| ())
@@ -227,8 +238,8 @@ fn assert_cycle_through_e(program: &ProgramSpec, label: &str) {
     for outcome in run_e(program) {
         assert!(
             matches!(
-                &outcome,
-                Err(ApiError::InvalidProgram(CompileError::CyclicDependency { cycle }))
+                outcome.as_ref().err().and_then(graph_error),
+                Some(CompileError::CyclicDependency { cycle })
                     if cycle == "e"
             ),
             "{label}: {outcome:?}"
@@ -238,8 +249,10 @@ fn assert_cycle_through_e(program: &ProgramSpec, label: &str) {
 
 /// Cycles routed through relations: `e` counts over `R`, and `R`'s membership
 /// depends on `e` through its source relation, a `relation_member` predicate,
-/// or a count inside its predicate. All three used to overflow the stack
-/// even after direct cycles were refused.
+/// or a count inside its predicate. Before this check, each shape overflowed
+/// the stack in both modes, whether sent inline or compiled: the check run
+/// when an artifact is loaded follows only a derived relation's own
+/// predicate, so it accepted all three.
 #[test]
 fn a_cycle_routed_through_other_relations_is_refused() {
     let shapes = [
@@ -279,7 +292,8 @@ fn a_cycle_routed_through_other_relations_is_refused() {
 
 /// A compiled artifact runs the same check when it is loaded, so a
 /// relation-routed cycle cannot reach the evaluators through `run-compiled`
-/// or wasm either.
+/// or wasm either, and a request pin cannot rescue it: pins are applied after
+/// the artifact loads.
 #[test]
 fn a_compiled_artifact_with_a_relation_routed_cycle_is_refused_at_load() {
     let program = ProgramSpec {
@@ -328,7 +342,7 @@ fn judgment_and_version_only_cycles_are_refused() {
     let error = execute_request(request(ExecutionMode::Explain, judgments, "j1"))
         .expect_err("a judgment cycle is refused");
     assert!(
-        matches!(&error, ApiError::InvalidProgram(CompileError::CyclicDependency { cycle }) if cycle == "j1, j2"),
+        matches!(graph_error(&error), Some(CompileError::CyclicDependency { cycle }) if cycle == "j1, j2"),
         "{error:?}"
     );
 
@@ -351,7 +365,7 @@ fn judgment_and_version_only_cycles_are_refused() {
     let error = execute_request(request(ExecutionMode::Fast, versioned, "v"))
         .expect_err("a version-only cycle is refused");
     assert!(
-        matches!(&error, ApiError::InvalidProgram(CompileError::CyclicDependency { cycle }) if cycle == "v"),
+        matches!(graph_error(&error), Some(CompileError::CyclicDependency { cycle }) if cycle == "v"),
         "{error:?}"
     );
 }
@@ -377,8 +391,8 @@ fn an_undefined_rule_reference_is_refused_even_in_a_dead_branch() {
         .expect_err("an undefined reference is refused");
     assert!(
         matches!(
-            &error,
-            ApiError::InvalidProgram(CompileError::UnknownDerivedDependency { derived, dependency })
+            graph_error(&error),
+            Some(CompileError::UnknownDerivedDependency { derived, dependency })
                 if derived == "d" && dependency == "nope"
         ),
         "{error:?}"
@@ -391,8 +405,10 @@ fn an_undefined_rule_reference_is_refused_even_in_a_dead_branch() {
 /// membership in `Q`, or counts `Q`; `S` and `Q` read `e` or not. The test
 /// models the dependency graph itself and checks the engine agrees: a program
 /// is refused as cyclic exactly when `e` depends on itself, and otherwise runs
-/// without being refused. A cycle the check missed would abort this test
-/// process with a stack overflow.
+/// successfully. Before this check, all 20 cyclic programs overflowed the
+/// stack in both modes when sent inline; compiling them refused the 8 whose
+/// `R` reads `e` directly and accepted the other 12. A cycle the check missed
+/// would abort this test process.
 #[test]
 fn cycle_detection_agrees_with_a_model_of_every_small_program() {
     #[derive(Clone, Copy, Debug)]
@@ -447,10 +463,7 @@ fn cycle_detection_agrees_with_a_model_of_every_small_program() {
                             assert_cycle_through_e(&program, &label);
                         } else {
                             for outcome in run_e(&program) {
-                                assert!(
-                                    !matches!(outcome, Err(ApiError::InvalidProgram(_))),
-                                    "{label}: {outcome:?}"
-                                );
+                                assert!(outcome.is_ok(), "{label}: {outcome:?}");
                             }
                         }
                         checked += 1;
@@ -460,4 +473,85 @@ fn cycle_detection_agrees_with_a_model_of_every_small_program() {
         }
     }
     assert_eq!(checked, 64);
+}
+
+/// The routed-cycle check refuses programs but never reorders them: an
+/// artifact's stored evaluation order must equal the order recomputed when it
+/// loads, so a changed order would make previously valid artifacts
+/// unloadable. This artifact was compiled before the check existed (main at
+/// 5a29e03). `e` counts `R`, which is filtered from `S`, whose predicate reads
+/// `z`; the program is acyclic.
+#[test]
+fn an_artifact_compiled_before_this_check_still_loads_and_runs() {
+    const ARTIFACT: &str = r#"{"artifact_format_version":2,"engine_version":"0.2.2","metadata":{"evaluation_order":["e","z"],"fast_path":{"blockers":[],"compatible":true,"strategy":"generic_bulk"},"input_catalog":[]},"program":{"derived":[{"dtype":"integer","entity":"Household","expr":{"current_slot":0,"kind":"count_related","related_slot":1,"relation":"R","where":null},"name":"e","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null},{"dtype":"integer","entity":"Household","expr":{"kind":"literal","value":{"kind":"integer","value":1}},"name":"z","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null}],"parameters":[],"relations":[{"arity":2,"name":"member"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"derived","name":"z"},"op":"gte","right":{"kind":"literal","value":{"kind":"integer","value":0}}},"related_slot":1,"source_relation":"member"},"name":"S"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"literal","value":{"kind":"integer","value":1}},"op":"eq","right":{"kind":"literal","value":{"kind":"integer","value":1}}},"related_slot":1,"source_relation":"S"},"name":"R"}],"units":[]}}"#;
+    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(ARTIFACT)
+        .expect("a previously compiled acyclic artifact still loads");
+    assert_eq!(artifact.metadata.evaluation_order, ["e", "z"]);
+    let recompiled =
+        axiom_rules_engine::compile::CompiledProgramArtifact::compile(artifact.program.clone())
+            .expect("the program still compiles");
+    assert_eq!(recompiled.metadata, artifact.metadata);
+    for outcome in run_e(&artifact.program) {
+        assert!(outcome.is_ok(), "{outcome:?}");
+    }
+}
+
+/// The check covers the whole program, as the compile-time check does: every
+/// dated version of a rule contributes its dependencies, whichever dates a
+/// request asks about. Here `a` counts `R` in 2025 and `b` reads `a` in 2026,
+/// while `R`'s membership reads `b`. No single year's rules form a cycle and
+/// main evaluated 2026 to `a = b = 1`, but the program is refused, just as
+/// compilation already refuses a direct cycle that exists only across
+/// versions.
+#[test]
+fn a_cycle_formed_across_dated_versions_is_refused() {
+    let dated = |name: &str, in_2025: ScalarExprSpec, from_2026: ScalarExprSpec| DerivedSpec {
+        versions: vec![
+            DerivedVersionSpec {
+                effective_from: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date"),
+                effective_to: Some(
+                    chrono::NaiveDate::from_ymd_opt(2025, 12, 31).expect("valid date"),
+                ),
+                semantics: DerivedSemanticsSpec::Scalar { expr: in_2025 },
+            },
+            DerivedVersionSpec {
+                effective_from: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+                effective_to: None,
+                semantics: DerivedSemanticsSpec::Scalar { expr: from_2026 },
+            },
+        ],
+        ..household_rule(name, literal(0))
+    };
+    let reads = |name: &str| ScalarExprSpec::Derived {
+        name: name.to_string(),
+    };
+    let reads_b = JudgmentExprSpec::Comparison {
+        left: Box::new(reads("b")),
+        op: ComparisonOpSpec::Gte,
+        right: Box::new(literal(0)),
+    };
+    let program = ProgramSpec {
+        relations: vec![
+            base_relation(),
+            derived_relation("S", "member", reads_b),
+            derived_relation("R", "S", always()),
+        ],
+        derived: vec![
+            dated("a", count("R"), literal(1)),
+            dated("b", literal(1), reads("a")),
+        ],
+        ..ProgramSpec::default()
+    };
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let error = execute_request(request(mode.clone(), program.clone(), "a"))
+            .expect_err("a cycle across versions is refused");
+        assert!(
+            matches!(
+                graph_error(&error),
+                Some(CompileError::CyclicDependency { cycle })
+                    if cycle == "a, b"
+            ),
+            "{mode:?}: {error:?}"
+        );
+    }
 }
