@@ -113,7 +113,7 @@ pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, Arit
         .ok_or(ArithmeticError::Overflow("division"))
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
     UnknownDerived(String),
@@ -376,10 +376,25 @@ pub struct Engine<'a> {
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
     active_evaluations: Vec<CacheKey>,
+    /// Whether to record the per-node trace. The bulk evaluator borrows this
+    /// interpreter for per-entity relation work and never reads a trace.
+    tracing: bool,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(program: &'a Program, data: &'a DataSet) -> Self {
+        Self::with_tracing(program, data, true)
+    }
+
+    /// An interpreter that computes exactly what [`Engine::new`] computes but
+    /// records no trace. The bulk evaluator uses it for per-entity work
+    /// (relation aggregations) so that work follows the reference semantics
+    /// by construction.
+    pub(crate) fn new_untraced(program: &'a Program, data: &'a DataSet) -> Self {
+        Self::with_tracing(program, data, false)
+    }
+
+    fn with_tracing(program: &'a Program, data: &'a DataSet, tracing: bool) -> Self {
         let mut input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>> =
             HashMap::new();
         for record in &data.inputs {
@@ -414,6 +429,7 @@ impl<'a> Engine<'a> {
             judgment_cache: HashMap::new(),
             execution_trace: HashMap::new(),
             active_evaluations: Vec::new(),
+            tracing,
         }
     }
 
@@ -440,7 +456,9 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        self.execution_trace.entry(key.clone()).or_default();
+        if self.tracing {
+            self.execution_trace.entry(key.clone()).or_default();
+        }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
             DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period),
@@ -460,7 +478,7 @@ impl<'a> Engine<'a> {
         // rounding actually moves the value, keep the pre-rounding amount so the
         // trace can show the rounding step.
         let rounded = apply_output_rounding(&derived, value.clone());
-        if rounded != value {
+        if self.tracing && rounded != value {
             self.pre_rounding_cache.insert(key.clone(), value);
         }
         self.scalar_cache.insert(key, rounded.clone());
@@ -490,7 +508,9 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        self.execution_trace.entry(key.clone()).or_default();
+        if self.tracing {
+            self.execution_trace.entry(key.clone()).or_default();
+        }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
             DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period),
@@ -604,6 +624,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_evaluated_dependency(&mut self, key: CacheKey) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -614,6 +637,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_skipped_dependency(&mut self, dependency: SkippedTraceDependency) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -624,6 +650,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_parameter_read(&mut self, read: ParameterTraceRead) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -641,6 +670,9 @@ impl<'a> Engine<'a> {
         relation_context: Option<RelationEvalContext<'_>>,
         reason: TraceSkipReason,
     ) {
+        if !self.tracing {
+            return;
+        }
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_scalar_trace_references(expr, &mut derived, &mut parameters);
@@ -676,6 +708,9 @@ impl<'a> Engine<'a> {
         relation_context: Option<RelationEvalContext<'_>>,
         reason: TraceSkipReason,
     ) {
+        if !self.tracing {
+            return;
+        }
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_judgment_trace_references(expr, &mut derived, &mut parameters);
@@ -719,7 +754,7 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn eval_scalar_expr(
+    pub(crate) fn eval_scalar_expr(
         &mut self,
         expr: &ScalarExpr,
         entity_id: &str,
@@ -1371,45 +1406,58 @@ impl<'a> Engine<'a> {
         op: ComparisonOp,
         right: &ScalarValue,
     ) -> Result<bool, EvalError> {
-        match (left, right) {
-            (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
-                ComparisonOp::Eq => Ok(left == right),
-                ComparisonOp::Ne => Ok(left != right),
-                _ => Err(EvalError::TypeMismatch(
-                    "boolean comparisons only support == and !=".to_string(),
-                )),
-            },
-            (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
-                ComparisonOp::Eq => Ok(left == right),
-                ComparisonOp::Ne => Ok(left != right),
-                _ => Err(EvalError::TypeMismatch(
-                    "text comparisons only support == and !=".to_string(),
-                )),
-            },
-            (ScalarValue::Date(left), ScalarValue::Date(right)) => Ok(match op {
+        compare_scalar_values(left, op, right)
+    }
+}
+
+/// Compare two scalars under the reference semantics: booleans and text
+/// support only `==`/`!=`, dates compare chronologically, and anything else
+/// compares numerically or fails with a type error. The columnar evaluators
+/// call this for every row whose operands are not a vectorised shape, so a
+/// comparison means the same thing in every mode.
+pub(crate) fn compare_scalar_values(
+    left: &ScalarValue,
+    op: ComparisonOp,
+    right: &ScalarValue,
+) -> Result<bool, EvalError> {
+    match (left, right) {
+        (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "boolean comparisons only support == and !=".to_string(),
+            )),
+        },
+        (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "text comparisons only support == and !=".to_string(),
+            )),
+        },
+        (ScalarValue::Date(left), ScalarValue::Date(right)) => Ok(match op {
+            ComparisonOp::Lt => left < right,
+            ComparisonOp::Lte => left <= right,
+            ComparisonOp::Gt => left > right,
+            ComparisonOp::Gte => left >= right,
+            ComparisonOp::Eq => left == right,
+            ComparisonOp::Ne => left != right,
+        }),
+        _ => {
+            let left = left.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
+            })?;
+            let right = right.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
+            })?;
+            Ok(match op {
                 ComparisonOp::Lt => left < right,
                 ComparisonOp::Lte => left <= right,
                 ComparisonOp::Gt => left > right,
                 ComparisonOp::Gte => left >= right,
                 ComparisonOp::Eq => left == right,
                 ComparisonOp::Ne => left != right,
-            }),
-            _ => {
-                let left = left.as_decimal().ok_or_else(|| {
-                    EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
-                })?;
-                let right = right.as_decimal().ok_or_else(|| {
-                    EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
-                })?;
-                Ok(match op {
-                    ComparisonOp::Lt => left < right,
-                    ComparisonOp::Lte => left <= right,
-                    ComparisonOp::Gt => left > right,
-                    ComparisonOp::Gte => left >= right,
-                    ComparisonOp::Eq => left == right,
-                    ComparisonOp::Ne => left != right,
-                })
-            }
+            })
         }
     }
 }

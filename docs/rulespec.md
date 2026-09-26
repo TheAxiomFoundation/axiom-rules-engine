@@ -198,12 +198,13 @@ members. The runtime id for the filtered entity is the source relation's current
 entity id, so a SNAP unit backed by `household-1` is queried with
 `entity_id: household-1`.
 
-Derived relations execute in explain mode, bulk fast mode, and the generic dense
+Derived relations execute in explain mode, bulk fast mode (which evaluates each
+row's relation aggregations on the explain interpreter), and the generic dense
 compiler for predicates that can be evaluated from related inputs, related
 judgment rules, and current/root entity judgment or scalar rules. A
 `source_relation` may also point at another `derived_relation`; the runtime
-applies the parent filter before the child filter. Optimized execution paths may
-still reject membership predicates that aggregate another relation from inside a
+applies the parent filter before the child filter. The dense compiler may still
+reject membership predicates that aggregate another relation from inside a
 current/root predicate.
 
 Inside a derived-relation predicate, a referenced scalar rule uses its declared
@@ -213,8 +214,12 @@ group's key without copying the group value onto each record. This scope is
 preserved through arithmetic, parameter indices, date expressions and scalar
 conditionals, including dependency traces. Bare input references still read the
 related record; use an entity-scoped scalar rule for a current-record value.
-Conditional scalar membership operands can use the generic explain fallback
-when fast execution cannot compile them; the response metadata records it.
+Conditional scalar membership operands evaluate in every mode.
+
+Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
+a branch, operand or related member that a row's evaluation does not reach
+cannot fail that row or the batch. See
+[execution-semantics.md](execution-semantics.md).
 
 Top-level `imports` merge other RuleSpec files into the compiled RuleSpec module
 before the current file is lowered. Every import is an exact absolute canonical
