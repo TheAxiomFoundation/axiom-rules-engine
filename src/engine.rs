@@ -1,3 +1,7 @@
+// rust_decimal and chrono operators panic on overflow. Evaluator arithmetic
+// uses the checked helpers in engine.rs instead (see clippy.toml).
+#![deny(clippy::arithmetic_side_effects)]
+
 use std::collections::{HashMap, HashSet};
 
 use rust_decimal::Decimal;
@@ -44,7 +48,72 @@ pub(crate) fn shift_calendar_years(
         })
 }
 
-#[derive(Debug, Error)]
+pub(crate) fn shift_calendar_days(
+    base: chrono::NaiveDate,
+    offset: i64,
+) -> Result<chrono::NaiveDate, EvalError> {
+    chrono::TimeDelta::try_days(offset)
+        .and_then(|days| base.checked_add_signed(days))
+        .ok_or_else(|| {
+            EvalError::TypeMismatch(
+                "date_add_days result is outside the supported date range".to_string(),
+            )
+        })
+}
+
+// Decimal arithmetic for every evaluator (explain, bulk, dense). rust_decimal's
+// operators panic when a result leaves the 96-bit range; an input or parameter
+// large enough to overflow is an evaluation error, never a panic, and all
+// three paths report it with the same message.
+
+/// How a checked Decimal operation fails. It is small and `Copy`, so the
+/// column loops pay nothing for it on success; `?` turns it into the
+/// matching `EvalError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArithmeticError {
+    Overflow(&'static str),
+    DivisionByZero,
+}
+
+impl From<ArithmeticError> for EvalError {
+    fn from(error: ArithmeticError) -> Self {
+        match error {
+            ArithmeticError::Overflow(operation) => EvalError::ArithmeticOverflow(operation),
+            ArithmeticError::DivisionByZero => EvalError::DivisionByZero,
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn checked_add(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_add(right)
+        .ok_or(ArithmeticError::Overflow("addition"))
+}
+
+#[inline]
+pub(crate) fn checked_sub(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_sub(right)
+        .ok_or(ArithmeticError::Overflow("subtraction"))
+}
+
+#[inline]
+pub(crate) fn checked_mul(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    left.checked_mul(right)
+        .ok_or(ArithmeticError::Overflow("multiplication"))
+}
+
+/// A zero divisor is `DivisionByZero`; a quotient beyond the range (a large
+/// dividend over a divisor below one) is an overflow.
+#[inline]
+pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, ArithmeticError> {
+    if right.is_zero() {
+        return Err(ArithmeticError::DivisionByZero);
+    }
+    left.checked_div(right)
+        .ok_or(ArithmeticError::Overflow("division"))
+}
+
+#[derive(Clone, Debug, Error)]
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
     UnknownDerived(String),
@@ -88,6 +157,8 @@ pub enum EvalError {
     ExpectedScalar(String),
     #[error("division by zero")]
     DivisionByZero,
+    #[error("arithmetic overflow: {0} result is outside the representable decimal range")]
+    ArithmeticOverflow(&'static str),
     #[error(
         "over-periods reduction `{0}` is valid only under lifetime execution (execute_lifetime); it has no meaning in per-period execution"
     )]
@@ -305,10 +376,25 @@ pub struct Engine<'a> {
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
     active_evaluations: Vec<CacheKey>,
+    /// Whether to record the per-node trace. The bulk evaluator borrows this
+    /// interpreter for per-entity relation work and never reads a trace.
+    tracing: bool,
 }
 
 impl<'a> Engine<'a> {
     pub fn new(program: &'a Program, data: &'a DataSet) -> Self {
+        Self::with_tracing(program, data, true)
+    }
+
+    /// An interpreter that computes exactly what [`Engine::new`] computes but
+    /// records no trace. The bulk evaluator uses it for per-entity work
+    /// (relation aggregations) so that work follows the reference semantics
+    /// by construction.
+    pub(crate) fn new_untraced(program: &'a Program, data: &'a DataSet) -> Self {
+        Self::with_tracing(program, data, false)
+    }
+
+    fn with_tracing(program: &'a Program, data: &'a DataSet, tracing: bool) -> Self {
         let mut input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>> =
             HashMap::new();
         for record in &data.inputs {
@@ -343,6 +429,7 @@ impl<'a> Engine<'a> {
             judgment_cache: HashMap::new(),
             execution_trace: HashMap::new(),
             active_evaluations: Vec::new(),
+            tracing,
         }
     }
 
@@ -369,7 +456,9 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        self.execution_trace.entry(key.clone()).or_default();
+        if self.tracing {
+            self.execution_trace.entry(key.clone()).or_default();
+        }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
             DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period),
@@ -389,7 +478,7 @@ impl<'a> Engine<'a> {
         // rounding actually moves the value, keep the pre-rounding amount so the
         // trace can show the rounding step.
         let rounded = apply_output_rounding(&derived, value.clone());
-        if rounded != value {
+        if self.tracing && rounded != value {
             self.pre_rounding_cache.insert(key.clone(), value);
         }
         self.scalar_cache.insert(key, rounded.clone());
@@ -419,7 +508,9 @@ impl<'a> Engine<'a> {
                 at: period.start,
             }
         })?;
-        self.execution_trace.entry(key.clone()).or_default();
+        if self.tracing {
+            self.execution_trace.entry(key.clone()).or_default();
+        }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
             DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period),
@@ -533,6 +624,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_evaluated_dependency(&mut self, key: CacheKey) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -543,6 +637,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_skipped_dependency(&mut self, dependency: SkippedTraceDependency) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -553,6 +650,9 @@ impl<'a> Engine<'a> {
     }
 
     fn record_parameter_read(&mut self, read: ParameterTraceRead) {
+        if !self.tracing {
+            return;
+        }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
@@ -570,6 +670,9 @@ impl<'a> Engine<'a> {
         relation_context: Option<RelationEvalContext<'_>>,
         reason: TraceSkipReason,
     ) {
+        if !self.tracing {
+            return;
+        }
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_scalar_trace_references(expr, &mut derived, &mut parameters);
@@ -605,6 +708,9 @@ impl<'a> Engine<'a> {
         relation_context: Option<RelationEvalContext<'_>>,
         reason: TraceSkipReason,
     ) {
+        if !self.tracing {
+            return;
+        }
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_judgment_trace_references(expr, &mut derived, &mut parameters);
@@ -648,7 +754,7 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn eval_scalar_expr(
+    pub(crate) fn eval_scalar_expr(
         &mut self,
         expr: &ScalarExpr,
         entity_id: &str,
@@ -700,26 +806,30 @@ impl<'a> Engine<'a> {
             ScalarExpr::Add(items) => {
                 let mut total = Decimal::ZERO;
                 for item in items {
-                    total += self.eval_decimal(item, entity_id, period, relation_context)?;
+                    total = checked_add(
+                        total,
+                        self.eval_decimal(item, entity_id, period, relation_context)?,
+                    )?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
-            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period, relation_context)?
-                    - self.eval_decimal(right, entity_id, period, relation_context)?,
-            )),
-            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(left, entity_id, period, relation_context)?
-                    * self.eval_decimal(right, entity_id, period, relation_context)?,
-            )),
+            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(checked_sub(
+                self.eval_decimal(left, entity_id, period, relation_context)?,
+                self.eval_decimal(right, entity_id, period, relation_context)?,
+            )?)),
+            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(checked_mul(
+                self.eval_decimal(left, entity_id, period, relation_context)?,
+                self.eval_decimal(right, entity_id, period, relation_context)?,
+            )?)),
             ScalarExpr::Div(left, right) => {
                 let divisor = self.eval_decimal(right, entity_id, period, relation_context)?;
                 if divisor.is_zero() {
                     return Err(EvalError::DivisionByZero);
                 }
-                Ok(ScalarValue::Decimal(
-                    self.eval_decimal(left, entity_id, period, relation_context)? / divisor,
-                ))
+                Ok(ScalarValue::Decimal(checked_div(
+                    self.eval_decimal(left, entity_id, period, relation_context)?,
+                    divisor,
+                )?))
             }
             ScalarExpr::Max(items) => {
                 let mut iter = items.iter();
@@ -780,7 +890,7 @@ impl<'a> Engine<'a> {
                             "date_add_days expects an integer day count on the right".to_string(),
                         )
                     })?;
-                Ok(ScalarValue::Date(base + chrono::Duration::days(offset)))
+                Ok(ScalarValue::Date(shift_calendar_days(base, offset)?))
             }
             ScalarExpr::DateAddMonths { date, months } => {
                 let base = self
@@ -836,7 +946,7 @@ impl<'a> Engine<'a> {
                     .ok_or_else(|| {
                         EvalError::TypeMismatch("days_between expects a date for `to`".to_string())
                     })?;
-                Ok(ScalarValue::Integer((b - a).num_days()))
+                Ok(ScalarValue::Integer(b.signed_duration_since(a).num_days()))
             }
             ScalarExpr::CountRelated {
                 relation,
@@ -851,7 +961,7 @@ impl<'a> Engine<'a> {
                     entity_id,
                     period,
                 )?;
-                let mut count = 0_i64;
+                let mut count = 0_usize;
                 for related_id in related_ids {
                     if let Some(predicate) = where_clause {
                         if !self
@@ -863,7 +973,8 @@ impl<'a> Engine<'a> {
                     }
                     count += 1;
                 }
-                Ok(ScalarValue::Integer(count))
+                // A count of collected ids fits in i64 on every supported target.
+                Ok(ScalarValue::Integer(count as i64))
             }
             ScalarExpr::SumRelated {
                 relation,
@@ -888,7 +999,8 @@ impl<'a> Engine<'a> {
                             continue;
                         }
                     }
-                    total += self.eval_related_value(value, &related_id, period)?;
+                    total =
+                        checked_add(total, self.eval_related_value(value, &related_id, period)?)?;
                 }
                 Ok(ScalarValue::Decimal(total))
             }
@@ -1294,45 +1406,58 @@ impl<'a> Engine<'a> {
         op: ComparisonOp,
         right: &ScalarValue,
     ) -> Result<bool, EvalError> {
-        match (left, right) {
-            (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
-                ComparisonOp::Eq => Ok(left == right),
-                ComparisonOp::Ne => Ok(left != right),
-                _ => Err(EvalError::TypeMismatch(
-                    "boolean comparisons only support == and !=".to_string(),
-                )),
-            },
-            (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
-                ComparisonOp::Eq => Ok(left == right),
-                ComparisonOp::Ne => Ok(left != right),
-                _ => Err(EvalError::TypeMismatch(
-                    "text comparisons only support == and !=".to_string(),
-                )),
-            },
-            (ScalarValue::Date(left), ScalarValue::Date(right)) => Ok(match op {
+        compare_scalar_values(left, op, right)
+    }
+}
+
+/// Compare two scalars under the reference semantics: booleans and text
+/// support only `==`/`!=`, dates compare chronologically, and anything else
+/// compares numerically or fails with a type error. The columnar evaluators
+/// call this for every row whose operands are not a vectorised shape, so a
+/// comparison means the same thing in every mode.
+pub(crate) fn compare_scalar_values(
+    left: &ScalarValue,
+    op: ComparisonOp,
+    right: &ScalarValue,
+) -> Result<bool, EvalError> {
+    match (left, right) {
+        (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "boolean comparisons only support == and !=".to_string(),
+            )),
+        },
+        (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
+            ComparisonOp::Eq => Ok(left == right),
+            ComparisonOp::Ne => Ok(left != right),
+            _ => Err(EvalError::TypeMismatch(
+                "text comparisons only support == and !=".to_string(),
+            )),
+        },
+        (ScalarValue::Date(left), ScalarValue::Date(right)) => Ok(match op {
+            ComparisonOp::Lt => left < right,
+            ComparisonOp::Lte => left <= right,
+            ComparisonOp::Gt => left > right,
+            ComparisonOp::Gte => left >= right,
+            ComparisonOp::Eq => left == right,
+            ComparisonOp::Ne => left != right,
+        }),
+        _ => {
+            let left = left.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
+            })?;
+            let right = right.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
+            })?;
+            Ok(match op {
                 ComparisonOp::Lt => left < right,
                 ComparisonOp::Lte => left <= right,
                 ComparisonOp::Gt => left > right,
                 ComparisonOp::Gte => left >= right,
                 ComparisonOp::Eq => left == right,
                 ComparisonOp::Ne => left != right,
-            }),
-            _ => {
-                let left = left.as_decimal().ok_or_else(|| {
-                    EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
-                })?;
-                let right = right.as_decimal().ok_or_else(|| {
-                    EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
-                })?;
-                Ok(match op {
-                    ComparisonOp::Lt => left < right,
-                    ComparisonOp::Lte => left <= right,
-                    ComparisonOp::Gt => left > right,
-                    ComparisonOp::Gte => left >= right,
-                    ComparisonOp::Eq => left == right,
-                    ComparisonOp::Ne => left != right,
-                })
-            }
+            })
         }
     }
 }

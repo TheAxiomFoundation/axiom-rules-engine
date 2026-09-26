@@ -1,69 +1,252 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+//! The fast (bulk) evaluator: one columnar pass over every query row of a
+//! request, computing exactly what the explain interpreter computes.
+//!
+//! Every expression node is evaluated under a [`RowMask`] of the rows whose
+//! reference evaluation reaches it, and errors are recorded per row
+//! ([`RowErrors`]) rather than aborting the batch. `if` evaluates each branch
+//! only for the rows that select it, `and`/`or` only for undecided rows, and a
+//! derived rule only for the rows that reach a reference to it. The request
+//! then fails with the first failing (query, output) in explain's order, or
+//! not at all. See `docs/execution-semantics.md`.
+//!
+//! rust_decimal and chrono operators panic on overflow. Evaluator arithmetic
+//! uses the checked helpers in engine.rs instead (see clippy.toml); an
+//! overflow fails its row like any other evaluation error.
+#![deny(clippy::arithmetic_side_effects)]
+
+use std::collections::{BTreeMap, HashMap};
 
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 
 use crate::api::{
     ExecutionMetadata, ExecutionMode, ExecutionQuery, ExecutionResponse, OutputValue, QueryResult,
 };
-use crate::engine::EvalError;
+use crate::engine::{
+    ArithmeticError, Engine, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+    compare_scalar_values,
+};
+use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, IndexedParameter, JudgmentExpr,
-    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    ComparisonOp, DataSet, DerivedSemantics, JudgmentExpr, JudgmentOutcome, Period, Program,
+    ScalarExpr, ScalarValue,
 };
 use crate::spec::{DTypeSpec, JudgmentOutcomeSpec, PeriodSpec, ScalarValueSpec};
 
+/// Values of one scalar node for every row. Rows outside the node's mask, and
+/// rows that failed, hold an unspecified placeholder.
 #[derive(Clone, Debug)]
 enum ScalarColumn {
     Bool(Vec<bool>),
     Integer(Vec<i64>),
     Decimal(Vec<Decimal>),
     Text(Vec<String>),
+    /// Rows whose values differ in kind, such as an integer branch selected on
+    /// some rows and a decimal one on others. Each row keeps the exact value
+    /// the explain path produces for it.
+    Mixed(Vec<ScalarValue>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueKind {
+    Bool,
+    Integer,
+    Decimal,
+    Text,
+}
+
+fn value_kind(value: &ScalarValue) -> Option<ValueKind> {
+    match value {
+        ScalarValue::Bool(_) => Some(ValueKind::Bool),
+        ScalarValue::Integer(_) => Some(ValueKind::Integer),
+        ScalarValue::Decimal(_) => Some(ValueKind::Decimal),
+        ScalarValue::Text(_) => Some(ValueKind::Text),
+        ScalarValue::Date(_) => None,
+    }
 }
 
 impl ScalarColumn {
-    fn as_decimal_vec(&self) -> Result<Vec<Decimal>, EvalError> {
+    fn placeholder(len: usize) -> Self {
+        Self::Integer(vec![0; len])
+    }
+
+    fn broadcast(value: &ScalarValue, len: usize) -> Self {
+        match value {
+            ScalarValue::Bool(value) => Self::Bool(vec![*value; len]),
+            ScalarValue::Integer(value) => Self::Integer(vec![*value; len]),
+            ScalarValue::Decimal(value) => Self::Decimal(vec![*value; len]),
+            ScalarValue::Text(value) => Self::Text(vec![value.clone(); len]),
+            ScalarValue::Date(_) => Self::Mixed(vec![value.clone(); len]),
+        }
+    }
+
+    /// Build a column from the values of the rows that produced one. Callers
+    /// reject date values first: bulk columns never hold dates.
+    fn from_entries(len: usize, entries: Vec<(usize, ScalarValue)>) -> Self {
+        let mut kind = None;
+        let mut mixed = false;
+        for (_, value) in &entries {
+            let value_kind = value_kind(value);
+            match kind {
+                None => kind = value_kind,
+                Some(existing) if Some(existing) != value_kind => mixed = true,
+                Some(_) => {}
+            }
+        }
+        if mixed {
+            let mut values = vec![ScalarValue::Integer(0); len];
+            for (row, value) in entries {
+                values[row] = value;
+            }
+            return Self::Mixed(values);
+        }
+        match kind {
+            None => Self::placeholder(len),
+            Some(ValueKind::Bool) => {
+                let mut values = vec![false; len];
+                for (row, value) in entries {
+                    if let ScalarValue::Bool(value) = value {
+                        values[row] = value;
+                    }
+                }
+                Self::Bool(values)
+            }
+            Some(ValueKind::Integer) => {
+                let mut values = vec![0; len];
+                for (row, value) in entries {
+                    if let ScalarValue::Integer(value) = value {
+                        values[row] = value;
+                    }
+                }
+                Self::Integer(values)
+            }
+            Some(ValueKind::Decimal) => {
+                let mut values = vec![Decimal::ZERO; len];
+                for (row, value) in entries {
+                    if let ScalarValue::Decimal(value) = value {
+                        values[row] = value;
+                    }
+                }
+                Self::Decimal(values)
+            }
+            Some(ValueKind::Text) => {
+                let mut values = vec![String::new(); len];
+                for (row, value) in entries {
+                    if let ScalarValue::Text(value) = value {
+                        values[row] = value;
+                    }
+                }
+                Self::Text(values)
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
         match self {
-            Self::Integer(values) => Ok(values.iter().map(|value| Decimal::from(*value)).collect()),
-            Self::Decimal(values) => Ok(values.clone()),
-            _ => Err(EvalError::TypeMismatch(
-                "expected decimal-compatible bulk column".to_string(),
-            )),
+            Self::Bool(values) => values.len(),
+            Self::Integer(values) => values.len(),
+            Self::Decimal(values) => values.len(),
+            Self::Text(values) => values.len(),
+            Self::Mixed(values) => values.len(),
         }
     }
 
-    fn as_index_vec(&self) -> Result<Vec<i64>, EvalError> {
+    /// The row's value, of exactly the kind the explain path returns.
+    fn value_at(&self, row: usize) -> ScalarValue {
         match self {
-            Self::Integer(values) => Ok(values.clone()),
-            Self::Decimal(values) => values
-                .iter()
-                .map(|value| {
-                    value.to_i64().ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "parameter key for bulk lookup must be integral".to_string(),
-                        )
-                    })
-                })
-                .collect(),
-            _ => Err(EvalError::TypeMismatch(
-                "parameter key for bulk lookup must be numeric".to_string(),
-            )),
+            Self::Bool(values) => ScalarValue::Bool(values[row]),
+            Self::Integer(values) => ScalarValue::Integer(values[row]),
+            Self::Decimal(values) => ScalarValue::Decimal(values[row]),
+            Self::Text(values) => ScalarValue::Text(values[row].clone()),
+            Self::Mixed(values) => values[row].clone(),
         }
     }
 
-    fn scalar_value_at(&self, index: usize, dtype: &DType) -> ScalarValue {
-        match (self, dtype) {
-            (Self::Bool(values), _) => ScalarValue::Bool(values[index]),
-            (Self::Integer(values), DType::Integer) => ScalarValue::Integer(values[index]),
-            (Self::Integer(values), _) => ScalarValue::Decimal(Decimal::from(values[index])),
-            (Self::Decimal(values), _) => ScalarValue::Decimal(values[index]),
-            (Self::Text(values), _) => ScalarValue::Text(values[index].clone()),
+    /// Read the live rows as numbers, recording explain's type error for a row
+    /// whose value is not numeric.
+    fn decimals(&self, live: &RowMask, errors: &mut RowErrors) -> Vec<Decimal> {
+        match self {
+            Self::Integer(values) => values.iter().map(|value| Decimal::from(*value)).collect(),
+            Self::Decimal(values) => values.clone(),
+            Self::Mixed(values) => {
+                let mut numbers = vec![Decimal::ZERO; values.len()];
+                for row in live.rows() {
+                    match values[row].as_decimal() {
+                        Some(value) => numbers[row] = value,
+                        None => errors.record(row, not_numeric()),
+                    }
+                }
+                numbers
+            }
+            Self::Bool(_) | Self::Text(_) => {
+                errors.record_all(live, &not_numeric());
+                vec![Decimal::ZERO; self.len()]
+            }
         }
     }
 
-    /// Round a decimal column elementwise under `rounding`. Currency formulas
-    /// evaluate to `Decimal` columns, so only that variant rounds; other
-    /// variants are returned unchanged (a currency rule never produces them).
+    /// Overwrite `rows` with `source`'s values, widening to [`Self::Mixed`]
+    /// when the two columns hold different kinds.
+    fn assign_rows(&mut self, source: &ScalarColumn, rows: &RowMask) {
+        match (&mut *self, source) {
+            (Self::Bool(target), Self::Bool(source)) => {
+                for row in rows.rows() {
+                    target[row] = source[row];
+                }
+            }
+            (Self::Integer(target), Self::Integer(source)) => {
+                for row in rows.rows() {
+                    target[row] = source[row];
+                }
+            }
+            (Self::Decimal(target), Self::Decimal(source)) => {
+                for row in rows.rows() {
+                    target[row] = source[row];
+                }
+            }
+            (Self::Text(target), Self::Text(source)) => {
+                for row in rows.rows() {
+                    target[row] = source[row].clone();
+                }
+            }
+            (Self::Mixed(target), source) => {
+                for row in rows.rows() {
+                    target[row] = source.value_at(row);
+                }
+            }
+            (target, source) => {
+                let mut values = (0..target.len())
+                    .map(|row| target.value_at(row))
+                    .collect::<Vec<_>>();
+                for row in rows.rows() {
+                    values[row] = source.value_at(row);
+                }
+                *target = Self::Mixed(values);
+            }
+        }
+    }
+
+    /// The per-row choice of an `if`: `then_values` on `then_rows`,
+    /// `else_values` on `else_rows`. A branch no row selects contributes
+    /// nothing, not even its kind.
+    fn select(
+        then_rows: &RowMask,
+        then_values: ScalarColumn,
+        else_rows: &RowMask,
+        else_values: ScalarColumn,
+    ) -> Self {
+        if then_rows.is_empty() {
+            return else_values;
+        }
+        if else_rows.is_empty() {
+            return then_values;
+        }
+        let mut selected = then_values;
+        selected.assign_rows(&else_values, else_rows);
+        selected
+    }
+
+    /// Round decimal values under a rule's currency rounding. Integers pass
+    /// through unchanged, as they do in the explain path.
     fn rounded(self, rounding: crate::model::Rounding) -> Self {
         match self {
             Self::Decimal(values) => Self::Decimal(
@@ -72,9 +255,28 @@ impl ScalarColumn {
                     .map(|value| rounding.apply(value))
                     .collect(),
             ),
+            Self::Mixed(values) => Self::Mixed(
+                values
+                    .into_iter()
+                    .map(|value| match value {
+                        ScalarValue::Decimal(amount) => {
+                            ScalarValue::Decimal(rounding.apply(amount))
+                        }
+                        other => other,
+                    })
+                    .collect(),
+            ),
             other => other,
         }
     }
+}
+
+fn not_numeric() -> EvalError {
+    EvalError::TypeMismatch("expected numeric scalar".to_string())
+}
+
+fn unsupported(construct: &str) -> EvalError {
+    EvalError::TypeMismatch(format!("bulk fast mode does not yet support {construct}"))
 }
 
 pub fn try_execute(
@@ -82,10 +284,6 @@ pub fn try_execute(
     data: &DataSet,
     queries: &[ExecutionQuery],
 ) -> Result<FastPathResult, EvalError> {
-    if queries.is_empty() {
-        return Ok(FastPathResult::Executed(empty_response()));
-    }
-
     let Some(first_period) = queries.first().map(|query| &query.period) else {
         return Ok(FastPathResult::Executed(empty_response()));
     };
@@ -103,108 +301,94 @@ pub fn try_execute(
         .iter()
         .map(|query| query.entity_id.clone())
         .collect::<Vec<String>>();
+    let row_count = queries.len();
 
-    let mut evaluator = BulkEvaluator::new(program, data, period, entity_ids);
-    let mut results = Vec::with_capacity(queries.len());
-    // Resolve every requested output before evaluating any. A parameter
-    // output or an unknown one sends the whole request to explain before bulk
-    // evaluates anything: bulk evaluates both branches of every conditional,
-    // so its arithmetic can fail, or overflow and panic, on a branch explain
-    // never takes.
-    let mut requested = Vec::new();
-    let mut seen = HashSet::new();
-    for output_reference in queries.iter().flat_map(|query| &query.outputs) {
-        let Some(output_name) = program.resolve_derived_name(output_reference) else {
-            let reason = if program.resolve_parameter_name(output_reference).is_some() {
-                format!("parameter output `{output_reference}` uses the explain path")
-            } else {
-                format!("unknown output `{output_reference}`; explain reports it")
+    // Resolve every requested output before evaluating any, in request
+    // order. A parameter output or an unknown one sends the whole request to
+    // explain before bulk evaluates anything. Each derived output is then
+    // evaluated only for the rows that request it: a row of another entity
+    // kind never reads this output's inputs.
+    let mut requested: Vec<(String, Vec<bool>)> = Vec::new();
+    let mut requested_index: HashMap<String, usize> = HashMap::new();
+    for (row, query) in queries.iter().enumerate() {
+        for output_reference in &query.outputs {
+            let Some(output_name) = program.resolve_derived_name(output_reference) else {
+                let reason = if program.resolve_parameter_name(output_reference).is_some() {
+                    format!("parameter output `{output_reference}` uses the explain path")
+                } else {
+                    format!("unknown output `{output_reference}`; explain reports it")
+                };
+                return Ok(FastPathResult::Unsupported { reason });
             };
-            return Ok(FastPathResult::Unsupported { reason });
-        };
-        if seen.insert(output_name.clone()) {
-            requested.push(output_name);
+            let index = *requested_index
+                .entry(output_name.clone())
+                .or_insert_with(|| {
+                    requested.push((output_name.clone(), vec![false; row_count]));
+                    requested.len() - 1
+                });
+            requested[index].1[row] = true;
         }
     }
 
-    // Warm each distinct output once, in request order. The first one bulk
-    // cannot answer, because it needs a construct bulk does not support or
-    // because it fails, sends the whole request to explain and names the
-    // reason; explain then answers or reports its own first error. Bulk warms
-    // an output over every row at once, so its first error can belong to a
-    // later query than explain's, and it can come from a branch no row takes.
-    // Warming in a HashSet's iteration order, which is seeded afresh for every
-    // process, made one request fail on some runs and fall back on others.
-    for output in &requested {
-        let warmup = evaluator.get_derived(output).and_then(|derived| {
-            match derived.semantics_at(&evaluator.period) {
-                Some(DerivedSemantics::Scalar(_)) => Ok(true),
-                Some(DerivedSemantics::Judgment(_)) => Ok(false),
-                None => Err(EvalError::MissingDerivedFormulaVersion {
-                    derived: output.clone(),
-                    at: evaluator.period.start,
-                }),
+    // Evaluate each distinct output once, in request order. Masking makes a
+    // recorded error one explain also reaches, but explain's first error
+    // (by query, then output) is the request's answer, so the first output
+    // bulk cannot answer, because a live row reaches a construct bulk does
+    // not support or fails, sends the whole request to explain, which then
+    // reports its own first error. Bulk never returns an evaluation error.
+    let mut evaluator = BulkEvaluator::new(program, data, period, entity_ids);
+    let mut evaluated = HashMap::with_capacity(requested.len());
+    for (output_name, rows) in requested {
+        let mask = RowMask::from_bits(rows);
+        let output = match evaluator.evaluate_output(&output_name, &mask) {
+            Ok(output) => output,
+            Err(error) => {
+                let reason = unsupported_reason(&error).unwrap_or_else(|| {
+                    format!("bulk evaluation failed ({error}); explain decides the outcome")
+                });
+                return Ok(FastPathResult::Unsupported { reason });
             }
-        });
-        let warmup = match warmup {
-            Ok(true) => evaluator.evaluate_scalar(output).map(|_| ()),
-            Ok(false) => evaluator.evaluate_judgment(output).map(|_| ()),
-            Err(error) => Err(error),
         };
-        if let Err(error) = warmup {
-            let reason = unsupported_reason(&error).unwrap_or_else(|| {
-                format!("bulk evaluation failed ({error}); explain decides the outcome")
+        if let Some((_, error)) = output.errors.first() {
+            return Ok(FastPathResult::Unsupported {
+                reason: format!("bulk evaluation failed ({error}); explain decides the outcome"),
             });
-            return Ok(FastPathResult::Unsupported { reason });
         }
+        evaluated.insert(output_name, output);
     }
 
+    // Every requested row succeeded; assemble in request order.
+    let mut results = Vec::with_capacity(queries.len());
     for (row_index, query) in queries.iter().enumerate() {
         let mut outputs = BTreeMap::new();
         for output_reference in &query.outputs {
             let output_name = program
                 .resolve_derived_name(output_reference)
                 .ok_or_else(|| EvalError::UnknownDerived(output_reference.clone()))?;
-            let derived = evaluator.get_derived(&output_name)?.clone();
+            let derived = evaluator.get_derived(&output_name)?;
+            let output = evaluated
+                .get(&output_name)
+                .expect("every resolved output was evaluated");
             let output_key = derived
                 .id
                 .clone()
                 .unwrap_or_else(|| output_name.to_string());
-            let semantics = derived.semantics_at(&evaluator.period).ok_or_else(|| {
-                EvalError::MissingDerivedFormulaVersion {
-                    derived: output_name.clone(),
-                    at: evaluator.period.start,
-                }
-            })?;
-            match semantics {
-                DerivedSemantics::Scalar(_) => {
-                    let column = evaluator.evaluate_scalar(&output_name)?;
-                    outputs.insert(
-                        output_key,
-                        OutputValue::Scalar {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            dtype: DTypeSpec::from_model(&derived.dtype),
-                            unit: derived.unit.clone(),
-                            value: ScalarValueSpec::from_model(
-                                column.scalar_value_at(row_index, &derived.dtype),
-                            ),
-                        },
-                    );
-                }
-                DerivedSemantics::Judgment(_) => {
-                    let column = evaluator.evaluate_judgment(&output_name)?;
-                    outputs.insert(
-                        output_key,
-                        OutputValue::Judgment {
-                            name: derived.name.clone(),
-                            id: derived.id.clone(),
-                            unit: derived.unit.clone(),
-                            outcome: JudgmentOutcomeSpec::from(column[row_index]),
-                        },
-                    );
-                }
-            }
+            let value = match &output.values {
+                OutputColumn::Scalar(column) => OutputValue::Scalar {
+                    name: derived.name.clone(),
+                    id: derived.id.clone(),
+                    dtype: DTypeSpec::from_model(&derived.dtype),
+                    unit: derived.unit.clone(),
+                    value: ScalarValueSpec::from_model(column.value_at(row_index)),
+                },
+                OutputColumn::Judgment(outcomes) => OutputValue::Judgment {
+                    name: derived.name.clone(),
+                    id: derived.id.clone(),
+                    unit: derived.unit.clone(),
+                    outcome: JudgmentOutcomeSpec::from(outcomes[row_index]),
+                },
+            };
+            outputs.insert(output_key, value);
         }
         results.push(QueryResult {
             entity_id: query.entity_id.clone(),
@@ -258,16 +442,40 @@ fn unsupported_reason(error: &EvalError) -> Option<String> {
     }
 }
 
+enum OutputColumn {
+    Scalar(ScalarColumn),
+    Judgment(Vec<JudgmentOutcome>),
+}
+
+struct EvaluatedOutput {
+    values: OutputColumn,
+    errors: RowErrors,
+}
+
+/// A derived rule's column, computed so far for `computed` rows.
+struct DerivedColumn<T> {
+    values: T,
+    errors: RowErrors,
+    computed: RowMask,
+}
+
+/// Evaluation result of one node: per-row values and per-row errors. A
+/// column-level `Err` from an `eval_*` method means the batch reached a
+/// construct fast mode declines, and the request falls back to explain.
+type Scalars = (ScalarColumn, RowErrors);
+type Judgments = (Vec<JudgmentOutcome>, RowErrors);
+
 struct BulkEvaluator<'a> {
     program: &'a Program,
+    data: &'a DataSet,
     period: Period,
     entity_ids: Vec<String>,
-    query_index: HashMap<String, usize>,
     query_input_cells: HashMap<String, Vec<Option<ScalarValue>>>,
-    related_input_index: HashMap<(String, String), ScalarValue>,
-    relation_adjacency: HashMap<(String, usize), Vec<Vec<Vec<String>>>>,
-    scalar_cache: HashMap<String, ScalarColumn>,
-    judgment_cache: HashMap<String, Vec<JudgmentOutcome>>,
+    scalar_cache: HashMap<String, DerivedColumn<ScalarColumn>>,
+    judgment_cache: HashMap<String, DerivedColumn<Vec<JudgmentOutcome>>>,
+    /// The reference interpreter, built on first use, for per-entity relation
+    /// aggregation.
+    engine: Option<Engine<'a>>,
 }
 
 impl<'a> BulkEvaluator<'a> {
@@ -277,1232 +485,671 @@ impl<'a> BulkEvaluator<'a> {
         period: Period,
         entity_ids: Vec<String>,
     ) -> Self {
-        let query_index = entity_ids
-            .iter()
-            .enumerate()
-            .map(|(index, entity_id)| (entity_id.clone(), index))
-            .collect::<HashMap<String, usize>>();
-
-        let mut query_input_cells: HashMap<String, Vec<Option<ScalarValue>>> = HashMap::new();
-        let mut related_input_index = HashMap::new();
-        for record in &data.inputs {
-            if record.interval.contains_period(&period) {
-                if let Some(&query_row) = query_index.get(&record.entity_id) {
-                    query_input_cells
-                        .entry(record.name.clone())
-                        .or_insert_with(|| vec![None; entity_ids.len()])[query_row] =
-                        Some(record.value.clone());
-                } else {
-                    related_input_index.insert(
-                        (record.name.clone(), record.entity_id.clone()),
-                        record.value.clone(),
-                    );
-                }
-            }
+        let mut query_rows: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (row, entity_id) in entity_ids.iter().enumerate() {
+            query_rows.entry(entity_id.as_str()).or_default().push(row);
         }
 
-        let mut relation_adjacency = HashMap::new();
-        for record in &data.relations {
-            if record.interval.contains_period(&period) {
-                for (slot, value) in record.tuple.iter().enumerate() {
-                    if let Some(&query_row) = query_index.get(value) {
-                        relation_adjacency
-                            .entry((record.name.clone(), slot))
-                            .or_insert_with(|| vec![Vec::new(); entity_ids.len()])[query_row]
-                            .push(record.tuple.clone());
-                    }
+        // `api::execute_request` resolves the dataset to one covering record
+        // per fact for this period before calling bulk execution.
+        let mut query_input_cells: HashMap<String, Vec<Option<ScalarValue>>> = HashMap::new();
+        for record in &data.inputs {
+            if !record.interval.contains_period(&period) {
+                continue;
+            }
+            if let Some(rows) = query_rows.get(record.entity_id.as_str()) {
+                let cells = query_input_cells
+                    .entry(record.name.clone())
+                    .or_insert_with(|| vec![None; entity_ids.len()]);
+                for row in rows {
+                    cells[*row] = Some(record.value.clone());
                 }
             }
         }
 
         Self {
             program,
+            data,
             period,
             entity_ids,
-            query_index,
             query_input_cells,
-            related_input_index,
-            relation_adjacency,
             scalar_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
+            engine: None,
         }
     }
 
-    fn get_derived(&self, name: &str) -> Result<&Derived, EvalError> {
+    fn len(&self) -> usize {
+        self.entity_ids.len()
+    }
+
+    fn get_derived(&self, name: &str) -> Result<&'a crate::model::Derived, EvalError> {
         self.program
             .derived
             .get(name)
             .ok_or_else(|| EvalError::UnknownDerived(name.to_string()))
     }
 
-    fn evaluate_scalar(&mut self, name: &str) -> Result<&ScalarColumn, EvalError> {
-        if !self.scalar_cache.contains_key(name) {
-            let derived = self.get_derived(name)?.clone();
-            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-                EvalError::MissingDerivedFormulaVersion {
-                    derived: name.to_string(),
-                    at: self.period.start,
-                }
-            })?;
-            let mut column = match semantics {
-                DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr)?,
-                DerivedSemantics::Judgment(_) => {
-                    return Err(EvalError::ExpectedScalar(name.to_string()));
-                }
-            };
-            // Opt-in output rounding, applied to the whole column before caching
-            // so dependents (`ScalarExpr::Derived`) and direct outputs both see
-            // the rounded values — identical to the explain path.
-            if let Some(rounding) = derived.rounding {
-                column = column.rounded(rounding);
+    fn engine(&mut self) -> &mut Engine<'a> {
+        let (program, data) = (self.program, self.data);
+        self.engine
+            .get_or_insert_with(|| Engine::new_untraced(program, data))
+    }
+
+    /// Evaluate a requested output for the rows in `mask`, in the order the
+    /// explain path checks it: formula version, then the rule itself.
+    fn evaluate_output(
+        &mut self,
+        name: &str,
+        mask: &RowMask,
+    ) -> Result<EvaluatedOutput, EvalError> {
+        let derived = self.get_derived(name)?;
+        match derived.semantics_at(&self.period) {
+            Some(DerivedSemantics::Judgment(_)) => {
+                let (values, errors) = self.evaluate_judgment(name, mask)?;
+                Ok(EvaluatedOutput {
+                    values: OutputColumn::Judgment(values),
+                    errors,
+                })
             }
-            self.scalar_cache.insert(name.to_string(), column);
+            Some(DerivedSemantics::Scalar(_)) => {
+                let (values, errors) = self.evaluate_scalar(name, mask)?;
+                Ok(EvaluatedOutput {
+                    values: OutputColumn::Scalar(values),
+                    errors,
+                })
+            }
+            None => {
+                let mut errors = RowErrors::new();
+                errors.record_all(
+                    mask,
+                    &EvalError::MissingDerivedFormulaVersion {
+                        derived: name.to_string(),
+                        at: self.period.start,
+                    },
+                );
+                Ok(EvaluatedOutput {
+                    values: OutputColumn::Scalar(ScalarColumn::placeholder(self.len())),
+                    errors,
+                })
+            }
         }
-        Ok(self.scalar_cache.get(name).expect("column cached"))
     }
 
-    fn evaluate_judgment(&mut self, name: &str) -> Result<&Vec<JudgmentOutcome>, EvalError> {
-        if !self.judgment_cache.contains_key(name) {
-            let derived = self.get_derived(name)?.clone();
-            let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-                EvalError::MissingDerivedFormulaVersion {
-                    derived: name.to_string(),
-                    at: self.period.start,
+    /// A derived scalar's column for the rows in `mask`, computing it only for
+    /// rows no earlier reference asked for.
+    fn evaluate_scalar(&mut self, name: &str, mask: &RowMask) -> Result<Scalars, EvalError> {
+        let pending = match self.scalar_cache.get(name) {
+            Some(cached) => mask.difference(&cached.computed),
+            None => mask.clone(),
+        };
+        if !pending.is_empty() {
+            let (values, errors) = self.compute_scalar(name, &pending)?;
+            match self.scalar_cache.get_mut(name) {
+                Some(cached) => {
+                    cached
+                        .values
+                        .assign_rows(&values, &pending.without(&errors));
+                    cached.errors.absorb(errors);
+                    cached.computed = cached.computed.union(&pending);
                 }
-            })?;
-            let column = match semantics {
-                DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr)?,
-                DerivedSemantics::Scalar(_) => {
-                    return Err(EvalError::ExpectedJudgment(name.to_string()));
-                }
-            };
-            self.judgment_cache.insert(name.to_string(), column);
-        }
-        Ok(self.judgment_cache.get(name).expect("column cached"))
-    }
-
-    fn eval_scalar_expr(&mut self, expr: &ScalarExpr) -> Result<ScalarColumn, EvalError> {
-        match expr {
-            ScalarExpr::Literal(value) => Ok(match value {
-                ScalarValue::Bool(value) => ScalarColumn::Bool(vec![*value; self.entity_ids.len()]),
-                ScalarValue::Integer(value) => {
-                    ScalarColumn::Integer(vec![*value; self.entity_ids.len()])
-                }
-                ScalarValue::Decimal(value) => {
-                    ScalarColumn::Decimal(vec![*value; self.entity_ids.len()])
-                }
-                ScalarValue::Text(value) => {
-                    ScalarColumn::Text(vec![value.clone(); self.entity_ids.len()])
-                }
-                ScalarValue::Date(_) => {
-                    return Err(EvalError::TypeMismatch(
-                        "bulk fast mode does not yet support date literals".to_string(),
-                    ));
-                }
-            }),
-            ScalarExpr::Input(name) | ScalarExpr::InputOrElse { name, .. } => {
-                let default = match expr {
-                    ScalarExpr::InputOrElse { default, .. } => Some(default.clone()),
-                    _ => None,
-                };
-                let empty_cells: Vec<Option<ScalarValue>> = if default.is_some() {
-                    vec![None; self.entity_ids.len()]
-                } else {
-                    Vec::new()
-                };
-                let cells = match self.query_input_cells.get(name) {
-                    Some(cells) => cells,
-                    None if default.is_some() => &empty_cells,
-                    None => {
-                        return Err(EvalError::MissingInput {
-                            name: name.clone(),
-                            entity_id: self.entity_ids.first().cloned().unwrap_or_default(),
-                            period_start: self.period.start,
-                            period_end: self.period.end,
-                        });
-                    }
-                };
-
-                let mut values = Vec::with_capacity(cells.len());
-                let mut saw_bool = false;
-                let mut saw_text = false;
-                let mut saw_decimal = false;
-                for (row_index, cell) in cells.iter().enumerate() {
-                    let value = match cell.clone() {
-                        Some(value) => value,
-                        None => match &default {
-                            Some(default) => default.clone(),
-                            None => {
-                                return Err(EvalError::MissingInput {
-                                    name: name.clone(),
-                                    entity_id: self.entity_ids[row_index].clone(),
-                                    period_start: self.period.start,
-                                    period_end: self.period.end,
-                                });
-                            }
+                None => {
+                    self.scalar_cache.insert(
+                        name.to_string(),
+                        DerivedColumn {
+                            values,
+                            errors,
+                            computed: pending,
                         },
-                    };
-                    match &value {
-                        ScalarValue::Bool(_) => saw_bool = true,
-                        ScalarValue::Text(_) => saw_text = true,
-                        ScalarValue::Integer(_) | ScalarValue::Decimal(_) => saw_decimal = true,
-                        ScalarValue::Date(_) => {
-                            return Err(EvalError::TypeMismatch(
-                                "bulk fast mode does not yet support date inputs".to_string(),
-                            ));
-                        }
-                    }
-                    values.push(value);
-                }
-                if saw_bool {
-                    Ok(ScalarColumn::Bool(
-                        values
-                            .into_iter()
-                            .map(|value| match value {
-                                ScalarValue::Bool(value) => Ok(value),
-                                _ => Err(EvalError::TypeMismatch(
-                                    "mixed bulk input dtypes are not supported".to_string(),
-                                )),
-                            })
-                            .collect::<Result<Vec<bool>, EvalError>>()?,
-                    ))
-                } else if saw_text {
-                    Ok(ScalarColumn::Text(
-                        values
-                            .into_iter()
-                            .map(|value| match value {
-                                ScalarValue::Text(value) => Ok(value),
-                                _ => Err(EvalError::TypeMismatch(
-                                    "mixed bulk input dtypes are not supported".to_string(),
-                                )),
-                            })
-                            .collect::<Result<Vec<String>, EvalError>>()?,
-                    ))
-                } else if saw_decimal {
-                    let integers_only = values
-                        .iter()
-                        .all(|value| matches!(value, ScalarValue::Integer(_)));
-                    if integers_only {
-                        Ok(ScalarColumn::Integer(
-                            values
-                                .into_iter()
-                                .map(|value| match value {
-                                    ScalarValue::Integer(value) => Ok(value),
-                                    _ => Err(EvalError::TypeMismatch(
-                                        "mixed bulk input dtypes are not supported".to_string(),
-                                    )),
-                                })
-                                .collect::<Result<Vec<i64>, EvalError>>()?,
-                        ))
-                    } else {
-                        Ok(ScalarColumn::Decimal(
-                            values
-                                .into_iter()
-                                .map(|value| {
-                                    value.as_decimal().ok_or_else(|| {
-                                        EvalError::TypeMismatch(
-                                            "mixed bulk input dtypes are not supported".to_string(),
-                                        )
-                                    })
-                                })
-                                .collect::<Result<Vec<Decimal>, EvalError>>()?,
-                        ))
-                    }
-                } else {
-                    Err(EvalError::TypeMismatch(
-                        "empty bulk input column".to_string(),
-                    ))
+                    );
                 }
             }
-            ScalarExpr::Derived(name) => Ok(self.evaluate_scalar(name)?.clone()),
+        }
+        Ok(match self.scalar_cache.get(name) {
+            Some(cached) => (cached.values.clone(), cached.errors.restricted_to(mask)),
+            None => (ScalarColumn::placeholder(self.len()), RowErrors::new()),
+        })
+    }
+
+    fn compute_scalar(&mut self, name: &str, mask: &RowMask) -> Result<Scalars, EvalError> {
+        let expr = match self.derived_formula(name) {
+            Ok(DerivedSemantics::Scalar(expr)) => expr,
+            Ok(DerivedSemantics::Judgment(_)) => {
+                return Ok(self.fail_all(mask, EvalError::ExpectedScalar(name.to_string())));
+            }
+            Err(error) => return Ok(self.fail_all(mask, error)),
+        };
+        let (mut values, errors) = self.eval_scalar_expr(expr, mask)?;
+        // Opt-in output rounding, applied before caching so dependents and
+        // direct outputs both see rounded values, as on the explain path.
+        if let Some(rounding) = self.get_derived(name)?.rounding {
+            values = values.rounded(rounding);
+        }
+        Ok((values, errors))
+    }
+
+    fn evaluate_judgment(&mut self, name: &str, mask: &RowMask) -> Result<Judgments, EvalError> {
+        let pending = match self.judgment_cache.get(name) {
+            Some(cached) => mask.difference(&cached.computed),
+            None => mask.clone(),
+        };
+        if !pending.is_empty() {
+            let (values, errors) = self.compute_judgment(name, &pending)?;
+            match self.judgment_cache.get_mut(name) {
+                Some(cached) => {
+                    for row in pending.without(&errors).rows() {
+                        cached.values[row] = values[row];
+                    }
+                    cached.errors.absorb(errors);
+                    cached.computed = cached.computed.union(&pending);
+                }
+                None => {
+                    self.judgment_cache.insert(
+                        name.to_string(),
+                        DerivedColumn {
+                            values,
+                            errors,
+                            computed: pending,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(match self.judgment_cache.get(name) {
+            Some(cached) => (cached.values.clone(), cached.errors.restricted_to(mask)),
+            None => (
+                vec![JudgmentOutcome::NotHolds; self.len()],
+                RowErrors::new(),
+            ),
+        })
+    }
+
+    fn compute_judgment(&mut self, name: &str, mask: &RowMask) -> Result<Judgments, EvalError> {
+        let expr = match self.derived_formula(name) {
+            Ok(DerivedSemantics::Judgment(expr)) => expr,
+            Ok(DerivedSemantics::Scalar(_)) => {
+                let (_, errors) =
+                    self.fail_all(mask, EvalError::ExpectedJudgment(name.to_string()));
+                return Ok((vec![JudgmentOutcome::NotHolds; self.len()], errors));
+            }
+            Err(error) => {
+                let (_, errors) = self.fail_all(mask, error);
+                return Ok((vec![JudgmentOutcome::NotHolds; self.len()], errors));
+            }
+        };
+        self.eval_judgment_expr(expr, mask)
+    }
+
+    /// The formula a derived rule evaluates at this period, after the checks
+    /// the explain path makes first (declared unit, then formula version).
+    fn derived_formula(&self, name: &str) -> Result<&'a DerivedSemantics, EvalError> {
+        let derived = self.get_derived(name)?;
+        if let Some(unit) = &derived.unit
+            && !self.program.units.contains_key(unit)
+        {
+            return Err(EvalError::UnknownUnit(unit.clone()));
+        }
+        derived
+            .semantics_at(&self.period)
+            .ok_or_else(|| EvalError::MissingDerivedFormulaVersion {
+                derived: name.to_string(),
+                at: self.period.start,
+            })
+    }
+
+    fn fail_all(&self, mask: &RowMask, error: EvalError) -> Scalars {
+        let mut errors = RowErrors::new();
+        errors.record_all(mask, &error);
+        (ScalarColumn::placeholder(self.len()), errors)
+    }
+
+    fn eval_scalar_expr(
+        &mut self,
+        expr: &ScalarExpr,
+        mask: &RowMask,
+    ) -> Result<Scalars, EvalError> {
+        let len = self.len();
+        if mask.is_empty() {
+            return Ok((ScalarColumn::placeholder(len), RowErrors::new()));
+        }
+        match expr {
+            ScalarExpr::Literal(value) => {
+                if matches!(value, ScalarValue::Date(_)) {
+                    return Err(unsupported("date literals"));
+                }
+                Ok((ScalarColumn::broadcast(value, len), RowErrors::new()))
+            }
+            ScalarExpr::Input(name) => self.eval_input(name, None, mask),
+            ScalarExpr::InputOrElse { name, default } => self.eval_input(name, Some(default), mask),
+            ScalarExpr::Derived(name) => self.evaluate_scalar(name, mask),
             ScalarExpr::ParameterLookup { parameter, index } => {
-                let keys = self.eval_scalar_expr(index)?.as_index_vec()?;
-                let parameter = self
-                    .program
-                    .parameters
-                    .get(parameter)
-                    .ok_or_else(|| EvalError::UnknownParameter(parameter.clone()))?;
-                Ok(lookup_parameter_bulk(parameter, &keys, &self.period)?)
+                self.eval_parameter_lookup(parameter, index, mask)
             }
             ScalarExpr::Add(items) => {
-                let mut total = vec![Decimal::ZERO; self.entity_ids.len()];
+                let mut errors = RowErrors::new();
+                let mut live = mask.clone();
+                let mut total = vec![Decimal::ZERO; len];
                 for item in items {
-                    let values = self.eval_scalar_expr(item)?.as_decimal_vec()?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        total[index] += value;
+                    let (values, next) = self.eval_decimal_operand(item, &live, &mut errors)?;
+                    let mut overflow = RowErrors::new();
+                    for row in next.rows() {
+                        match checked_add(total[row], values[row]) {
+                            Ok(sum) => total[row] = sum,
+                            Err(error) => overflow.record(row, error.into()),
+                        }
+                    }
+                    live = next.without(&overflow);
+                    errors.absorb(overflow);
+                }
+                Ok((ScalarColumn::Decimal(total), errors))
+            }
+            ScalarExpr::Sub(left, right) => self.eval_binary(left, right, mask, checked_sub),
+            ScalarExpr::Mul(left, right) => self.eval_binary(left, right, mask, checked_mul),
+            ScalarExpr::Div(left, right) => {
+                // The divisor is evaluated, and checked for zero, before the
+                // dividend: a row with a zero divisor never reads the dividend.
+                let mut errors = RowErrors::new();
+                let (divisors, live) = self.eval_decimal_operand(right, mask, &mut errors)?;
+                let mut zero = RowErrors::new();
+                for row in live.rows() {
+                    if divisors[row].is_zero() {
+                        zero.record(row, EvalError::DivisionByZero);
                     }
                 }
-                Ok(ScalarColumn::Decimal(total))
-            }
-            ScalarExpr::Sub(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left - right)
-                        .collect(),
-                ))
-            }
-            ScalarExpr::Mul(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| left * right)
-                        .collect(),
-                ))
-            }
-            ScalarExpr::Div(left, right) => {
-                let left = self.eval_scalar_expr(left)?.as_decimal_vec()?;
-                let right = self.eval_scalar_expr(right)?.as_decimal_vec()?;
-                Ok(ScalarColumn::Decimal(
-                    left.into_iter()
-                        .zip(right)
-                        .map(|(left, right)| {
-                            if right.is_zero() {
-                                Err(EvalError::DivisionByZero)
-                            } else {
-                                Ok(left / right)
-                            }
-                        })
-                        .collect::<Result<Vec<Decimal>, EvalError>>()?,
-                ))
+                let live = live.without(&zero);
+                errors.absorb(zero);
+                let (dividends, live) = self.eval_decimal_operand(left, &live, &mut errors)?;
+                let mut quotients = vec![Decimal::ZERO; len];
+                for row in live.rows() {
+                    match checked_div(dividends[row], divisors[row]) {
+                        Ok(quotient) => quotients[row] = quotient,
+                        Err(error) => errors.record(row, error.into()),
+                    }
+                }
+                Ok((ScalarColumn::Decimal(quotients), errors))
             }
             ScalarExpr::Max(items) => {
-                let mut values = vec![Decimal::MIN; self.entity_ids.len()];
-                for item in items {
-                    let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
-                    for (index, value) in candidate.into_iter().enumerate() {
-                        if value > values[index] {
-                            values[index] = value;
-                        }
-                    }
-                }
-                Ok(ScalarColumn::Decimal(values))
+                self.eval_extremum(items, mask, "max", |candidate, best| candidate > best)
             }
             ScalarExpr::Min(items) => {
-                let mut values = vec![Decimal::MAX; self.entity_ids.len()];
-                for item in items {
-                    let candidate = self.eval_scalar_expr(item)?.as_decimal_vec()?;
-                    for (index, value) in candidate.into_iter().enumerate() {
-                        if value < values[index] {
-                            values[index] = value;
-                        }
-                    }
-                }
-                Ok(ScalarColumn::Decimal(values))
+                self.eval_extremum(items, mask, "min", |candidate, best| candidate < best)
             }
-            ScalarExpr::Ceil(value) => Ok(ScalarColumn::Decimal(
-                self.eval_scalar_expr(value)?
-                    .as_decimal_vec()?
-                    .into_iter()
-                    .map(|value| value.ceil())
-                    .collect(),
-            )),
-            ScalarExpr::Floor(value) => Ok(ScalarColumn::Decimal(
-                self.eval_scalar_expr(value)?
-                    .as_decimal_vec()?
-                    .into_iter()
-                    .map(|value| value.floor())
-                    .collect(),
-            )),
-            ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support period_start / period_end".to_string(),
-            )),
-            ScalarExpr::DateAddDays { .. } => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support date_add_days".to_string(),
-            )),
-            ScalarExpr::DateAddMonths { .. } => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support date_add_months".to_string(),
-            )),
-            ScalarExpr::DateAddYears { .. } => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support date_add_years".to_string(),
-            )),
-            ScalarExpr::DaysBetween { .. } => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support days_between".to_string(),
-            )),
-            ScalarExpr::OverPeriods { kind, .. } => {
-                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+            ScalarExpr::Ceil(value) => self.eval_unary(value, mask, |value| value.ceil()),
+            ScalarExpr::Floor(value) => self.eval_unary(value, mask, |value| value.floor()),
+            ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => {
+                Err(unsupported("period_start / period_end"))
             }
-            ScalarExpr::CountRelated {
-                relation,
-                current_slot,
-                related_slot,
-                where_clause,
-            } => {
-                let mut values = Vec::with_capacity(self.entity_ids.len());
-                for row_index in 0..self.entity_ids.len() {
-                    let related = self.related_rows(relation, *current_slot, row_index)?;
-                    let current_id = self.entity_ids[row_index].clone();
-                    let mut count = 0_i64;
-                    for tuple in related {
-                        let Some(related_id) = tuple.get(*related_slot) else {
-                            continue;
-                        };
-                        if let Some(predicate) = where_clause {
-                            if !self
-                                .eval_related_judgment_expr(
-                                    predicate,
-                                    &current_id,
-                                    related_id,
-                                    None,
-                                    None,
-                                )?
-                                .is_holds()
-                            {
-                                continue;
-                            }
-                        }
-                        count += 1;
-                    }
-                    values.push(count);
-                }
-                Ok(ScalarColumn::Integer(values))
-            }
-            ScalarExpr::SumRelated {
-                relation,
-                current_slot,
-                related_slot,
-                value,
-                where_clause,
-            } => {
-                let mut totals = Vec::with_capacity(self.entity_ids.len());
-                for row_index in 0..self.entity_ids.len() {
-                    let current_id = self.entity_ids[row_index].clone();
-                    let related_ids = self
-                        .related_rows(relation, *current_slot, row_index)?
-                        .iter()
-                        .filter_map(|tuple| tuple.get(*related_slot).cloned())
-                        .collect::<Vec<String>>();
-                    let mut total = Decimal::ZERO;
-                    match value {
-                        RelatedValueRef::Input(name) => {
-                            for related_id in related_ids {
-                                if let Some(predicate) = where_clause {
-                                    if !self
-                                        .eval_related_judgment_expr(
-                                            predicate,
-                                            &current_id,
-                                            &related_id,
-                                            None,
-                                            None,
-                                        )?
-                                        .is_holds()
-                                    {
-                                        continue;
-                                    }
-                                }
-                                let scalar = self
-                                    .related_input_index
-                                    .get(&(name.clone(), related_id.clone()))
-                                    .cloned()
-                                    .ok_or_else(|| EvalError::MissingInput {
-                                        name: name.clone(),
-                                        entity_id: related_id,
-                                        period_start: self.period.start,
-                                        period_end: self.period.end,
-                                    })?;
-                                total += scalar.as_decimal().ok_or_else(|| {
-                                    EvalError::TypeMismatch(
-                                        "related aggregation requires numeric values".to_string(),
-                                    )
-                                })?;
-                            }
-                        }
-                        RelatedValueRef::Derived(_) => return Err(EvalError::TypeMismatch(
-                            "bulk execution does not yet support aggregating related derived values"
-                                .to_string(),
-                        )),
-                    }
-                    totals.push(total);
-                }
-                Ok(ScalarColumn::Decimal(totals))
+            ScalarExpr::DateAddDays { .. } => Err(unsupported("date_add_days")),
+            ScalarExpr::DateAddMonths { .. } => Err(unsupported("date_add_months")),
+            ScalarExpr::DateAddYears { .. } => Err(unsupported("date_add_years")),
+            ScalarExpr::DaysBetween { .. } => Err(unsupported("days_between")),
+            ScalarExpr::OverPeriods { kind, .. } => Ok(self.fail_all(
+                mask,
+                EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()),
+            )),
+            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
+                self.eval_per_entity(expr, mask)
             }
             ScalarExpr::If {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                let condition = self.eval_judgment_expr(condition)?;
-                // Explain evaluates only the branch a row selects. When every
-                // row selects the same branch, evaluate only that one, so an
-                // error in a branch no row takes cannot fail the batch: a
-                // pinned rule's original formula (apply_pins wraps it as
-                // `if 0 == 0 then <pin> else <original>`), a guarded division.
-                // A batch whose rows disagree still evaluates both branches.
-                if condition.iter().all(|outcome| outcome.is_holds()) {
-                    return self.eval_scalar_expr(then_expr);
-                }
-                if !condition.iter().any(|outcome| outcome.is_holds()) {
-                    return self.eval_scalar_expr(else_expr);
-                }
-                let then_values = self.eval_scalar_expr(then_expr)?;
-                let else_values = self.eval_scalar_expr(else_expr)?;
-                select_scalar_column(condition, then_values, else_values)
+                let (condition, mut errors) = self.eval_judgment_expr(condition, mask)?;
+                let live = mask.without(&errors);
+                // An undetermined condition takes the else branch.
+                let then_rows = live.filter(|row| condition[row].is_holds());
+                let else_rows = live.difference(&then_rows);
+                let (then_values, then_errors) = self.eval_scalar_expr(then_expr, &then_rows)?;
+                let (else_values, else_errors) = self.eval_scalar_expr(else_expr, &else_rows)?;
+                errors.absorb(then_errors);
+                errors.absorb(else_errors);
+                Ok((
+                    ScalarColumn::select(&then_rows, then_values, &else_rows, else_values),
+                    errors,
+                ))
             }
         }
+    }
+
+    /// Evaluate `expr` for the rows in `mask` and read it as numbers. Returns
+    /// the numbers and the rows still live afterwards; failures land in
+    /// `errors`.
+    fn eval_decimal_operand(
+        &mut self,
+        expr: &ScalarExpr,
+        mask: &RowMask,
+        errors: &mut RowErrors,
+    ) -> Result<(Vec<Decimal>, RowMask), EvalError> {
+        let (column, operand_errors) = self.eval_scalar_expr(expr, mask)?;
+        let mut live = mask.without(&operand_errors);
+        errors.absorb(operand_errors);
+        let mut conversion_errors = RowErrors::new();
+        let values = column.decimals(&live, &mut conversion_errors);
+        if !conversion_errors.is_empty() {
+            live = live.without(&conversion_errors);
+            errors.absorb(conversion_errors);
+        }
+        Ok((values, live))
+    }
+
+    fn eval_binary(
+        &mut self,
+        left: &ScalarExpr,
+        right: &ScalarExpr,
+        mask: &RowMask,
+        operation: impl Fn(Decimal, Decimal) -> Result<Decimal, ArithmeticError>,
+    ) -> Result<Scalars, EvalError> {
+        let mut errors = RowErrors::new();
+        let (left, live) = self.eval_decimal_operand(left, mask, &mut errors)?;
+        let (right, live) = self.eval_decimal_operand(right, &live, &mut errors)?;
+        let mut values = vec![Decimal::ZERO; self.len()];
+        for row in live.rows() {
+            match operation(left[row], right[row]) {
+                Ok(value) => values[row] = value,
+                Err(error) => errors.record(row, error.into()),
+            }
+        }
+        Ok((ScalarColumn::Decimal(values), errors))
+    }
+
+    fn eval_unary(
+        &mut self,
+        value: &ScalarExpr,
+        mask: &RowMask,
+        operation: impl Fn(Decimal) -> Decimal,
+    ) -> Result<Scalars, EvalError> {
+        let mut errors = RowErrors::new();
+        let (values, live) = self.eval_decimal_operand(value, mask, &mut errors)?;
+        let mut result = vec![Decimal::ZERO; self.len()];
+        for row in live.rows() {
+            result[row] = operation(values[row]);
+        }
+        Ok((ScalarColumn::Decimal(result), errors))
+    }
+
+    fn eval_extremum(
+        &mut self,
+        items: &[ScalarExpr],
+        mask: &RowMask,
+        function: &str,
+        replaces: impl Fn(Decimal, Decimal) -> bool,
+    ) -> Result<Scalars, EvalError> {
+        let Some((first, rest)) = items.split_first() else {
+            return Ok(self.fail_all(
+                mask,
+                EvalError::TypeMismatch(format!("{function}() requires at least one operand")),
+            ));
+        };
+        let mut errors = RowErrors::new();
+        let (mut best, mut live) = self.eval_decimal_operand(first, mask, &mut errors)?;
+        for item in rest {
+            let (candidates, next) = self.eval_decimal_operand(item, &live, &mut errors)?;
+            live = next;
+            for row in live.rows() {
+                if replaces(candidates[row], best[row]) {
+                    best[row] = candidates[row];
+                }
+            }
+        }
+        Ok((ScalarColumn::Decimal(best), errors))
+    }
+
+    fn eval_input(
+        &mut self,
+        name: &str,
+        default: Option<&ScalarValue>,
+        mask: &RowMask,
+    ) -> Result<Scalars, EvalError> {
+        let cells = self.query_input_cells.get(name);
+        let mut errors = RowErrors::new();
+        let mut entries = Vec::with_capacity(mask.count());
+        for row in mask.rows() {
+            let value = match (cells.and_then(|cells| cells[row].as_ref()), default) {
+                (Some(value), _) => value.clone(),
+                (None, Some(default)) => default.clone(),
+                (None, None) => {
+                    errors.record(
+                        row,
+                        EvalError::MissingInput {
+                            name: name.to_string(),
+                            entity_id: self.entity_ids[row].clone(),
+                            period_start: self.period.start,
+                            period_end: self.period.end,
+                        },
+                    );
+                    continue;
+                }
+            };
+            if matches!(value, ScalarValue::Date(_)) {
+                return Err(unsupported("date inputs"));
+            }
+            entries.push((row, value));
+        }
+        Ok((ScalarColumn::from_entries(self.len(), entries), errors))
+    }
+
+    fn eval_parameter_lookup(
+        &mut self,
+        parameter: &str,
+        index: &ScalarExpr,
+        mask: &RowMask,
+    ) -> Result<Scalars, EvalError> {
+        let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
+        let live = mask.without(&errors);
+        let definition = self.program.parameters.get(parameter);
+        let version = definition.and_then(|definition| {
+            definition
+                .versions
+                .iter()
+                .filter(|version| version.applies_at(self.period.start))
+                .max_by_key(|version| version.effective_from)
+        });
+        let mut entries = Vec::with_capacity(live.count());
+        for row in live.rows() {
+            let Some(key) = keys.value_at(row).as_index() else {
+                errors.record(
+                    row,
+                    EvalError::TypeMismatch(format!(
+                        "parameter key for `{parameter}` must be an integer"
+                    )),
+                );
+                continue;
+            };
+            if definition.is_none() {
+                errors.record(row, EvalError::UnknownParameter(parameter.to_string()));
+                continue;
+            }
+            let Some(value) = version.and_then(|version| version.values.get(&key)) else {
+                errors.record(
+                    row,
+                    EvalError::MissingParameterValue {
+                        parameter: parameter.to_string(),
+                        key,
+                        at: self.period.start,
+                    },
+                );
+                continue;
+            };
+            if matches!(value, ScalarValue::Date(_)) {
+                return Err(unsupported("date parameter values"));
+            }
+            entries.push((row, value.clone()));
+        }
+        Ok((ScalarColumn::from_entries(self.len(), entries), errors))
+    }
+
+    /// Relation aggregations visit each row's related entities, so they run
+    /// row by row on the reference interpreter: identical id resolution,
+    /// derived-relation filtering, `where` laziness and related values.
+    fn eval_per_entity(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Result<Scalars, EvalError> {
+        let period = self.period.clone();
+        let mut errors = RowErrors::new();
+        let mut entries = Vec::with_capacity(mask.count());
+        for row in mask.rows() {
+            let entity_id = self.entity_ids[row].clone();
+            match self.engine().eval_scalar_expr(expr, &entity_id, &period) {
+                Ok(value) => {
+                    if matches!(value, ScalarValue::Date(_)) {
+                        return Err(unsupported("date values"));
+                    }
+                    entries.push((row, value));
+                }
+                Err(error) => errors.record(row, error),
+            }
+        }
+        Ok((ScalarColumn::from_entries(self.len(), entries), errors))
     }
 
     fn eval_judgment_expr(
         &mut self,
         expr: &JudgmentExpr,
-    ) -> Result<Vec<JudgmentOutcome>, EvalError> {
+        mask: &RowMask,
+    ) -> Result<Judgments, EvalError> {
+        let len = self.len();
+        if mask.is_empty() {
+            return Ok((vec![JudgmentOutcome::NotHolds; len], RowErrors::new()));
+        }
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
-                let left = self.eval_scalar_expr(left)?;
-                let right = self.eval_scalar_expr(right)?;
-                compare_columns(left, *op, right)
+                let (left, mut errors) = self.eval_scalar_expr(left, mask)?;
+                let live = mask.without(&errors);
+                let (right, right_errors) = self.eval_scalar_expr(right, &live)?;
+                let live = live.without(&right_errors);
+                errors.absorb(right_errors);
+                let outcomes = compare_columns(&left, *op, &right, &live, &mut errors);
+                Ok((outcomes, errors))
             }
-            JudgmentExpr::Derived(name) => Ok(self.evaluate_judgment(name)?.clone()),
-            JudgmentExpr::RelationMember { relation, .. } => Err(EvalError::TypeMismatch(format!(
-                "fast mode cannot evaluate relation predicate `{relation}`"
-            ))),
-            JudgmentExpr::And(items) => {
-                let mut results = vec![JudgmentOutcome::Holds; self.entity_ids.len()];
-                for item in items {
-                    // Explain stops a row at its first operand that does not
-                    // hold; once no row can change, skip the rest as it does.
-                    if results
-                        .iter()
-                        .all(|outcome| *outcome == JudgmentOutcome::NotHolds)
-                    {
-                        break;
-                    }
-                    let values = self.eval_judgment_expr(item)?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        results[index] = match (results[index], value) {
-                            (JudgmentOutcome::NotHolds, _) | (_, JudgmentOutcome::NotHolds) => {
-                                JudgmentOutcome::NotHolds
-                            }
-                            (JudgmentOutcome::Undetermined, _)
-                            | (_, JudgmentOutcome::Undetermined) => JudgmentOutcome::Undetermined,
-                            _ => JudgmentOutcome::Holds,
-                        };
-                    }
-                }
-                Ok(results)
-            }
-            JudgmentExpr::Or(items) => {
-                let mut results = vec![JudgmentOutcome::NotHolds; self.entity_ids.len()];
-                for item in items {
-                    // Explain stops a row at its first operand that holds.
-                    if results
-                        .iter()
-                        .all(|outcome| *outcome == JudgmentOutcome::Holds)
-                    {
-                        break;
-                    }
-                    let values = self.eval_judgment_expr(item)?;
-                    for (index, value) in values.into_iter().enumerate() {
-                        results[index] = match (results[index], value) {
-                            (JudgmentOutcome::Holds, _) | (_, JudgmentOutcome::Holds) => {
-                                JudgmentOutcome::Holds
-                            }
-                            (JudgmentOutcome::Undetermined, _)
-                            | (_, JudgmentOutcome::Undetermined) => JudgmentOutcome::Undetermined,
-                            _ => JudgmentOutcome::NotHolds,
-                        };
-                    }
-                }
-                Ok(results)
-            }
-            JudgmentExpr::Not(item) => Ok(self
-                .eval_judgment_expr(item)?
-                .into_iter()
-                .map(|value| match value {
-                    JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
-                    JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
-                    JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                })
-                .collect()),
-        }
-    }
-
-    fn related_rows(
-        &mut self,
-        relation: &str,
-        slot: usize,
-        row_index: usize,
-    ) -> Result<Vec<Vec<String>>, EvalError> {
-        let schema = self
-            .program
-            .relations
-            .get(relation)
-            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
-        let mut rows = self
-            .relation_adjacency
-            .get(&(relation.to_string(), slot))
-            .and_then(|rows| rows.get(row_index))
-            .cloned()
-            .unwrap_or_default();
-
-        if let Some(derivation) = schema.derivation.clone() {
-            let current_id = self.entity_ids[row_index].clone();
-            let source_rows = self.related_rows(
-                &derivation.source_relation,
-                derivation.current_slot,
-                row_index,
-            )?;
-            for tuple in source_rows {
-                let Some(related_id) = tuple.get(derivation.related_slot) else {
-                    continue;
-                };
-                let current_entity = derivation
-                    .slot_entities
-                    .get(derivation.current_slot)
-                    .map(String::as_str);
-                let related_entity = derivation
-                    .slot_entities
-                    .get(derivation.related_slot)
-                    .map(String::as_str);
-                if self
-                    .eval_related_judgment_expr(
-                        &derivation.predicate,
-                        &current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )?
-                    .is_holds()
-                {
-                    rows.push(tuple);
-                }
-            }
-        }
-
-        rows.sort();
-        rows.dedup();
-        Ok(rows)
-    }
-
-    fn eval_related_judgment_expr(
-        &mut self,
-        expr: &JudgmentExpr,
-        current_id: &str,
-        related_id: &str,
-        current_entity: Option<&str>,
-        related_entity: Option<&str>,
-    ) -> Result<JudgmentOutcome, EvalError> {
-        match expr {
-            JudgmentExpr::Comparison { left, op, right } => {
-                let left = self.eval_related_scalar_expr(
-                    left,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?;
-                let right = self.eval_related_scalar_expr(
-                    right,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?;
-                Ok(if compare_scalar_values_for_bulk(&left, *op, &right)? {
-                    JudgmentOutcome::Holds
-                } else {
-                    JudgmentOutcome::NotHolds
-                })
-            }
-            JudgmentExpr::Derived(name) => {
-                let derived = self.get_derived(name)?.clone();
-                let target_id = if Some(derived.entity.as_str()) == current_entity {
-                    current_id
-                } else {
-                    related_id
-                };
-                let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-                    EvalError::MissingDerivedFormulaVersion {
-                        derived: name.to_string(),
-                        at: self.period.start,
-                    }
-                })?;
-                match semantics {
-                    DerivedSemantics::Judgment(expr) => self.eval_related_judgment_expr(
-                        expr,
-                        current_id,
-                        target_id,
-                        current_entity,
-                        related_entity,
-                    ),
-                    DerivedSemantics::Scalar(_) => Err(EvalError::ExpectedJudgment(name.clone())),
-                }
-            }
-            JudgmentExpr::RelationMember {
-                relation,
-                current_slot,
-                related_slot,
-            } => Ok(
-                if self.relation_contains(
-                    relation,
-                    *current_slot,
-                    *related_slot,
-                    current_id,
-                    related_id,
-                )? {
-                    JudgmentOutcome::Holds
-                } else {
-                    JudgmentOutcome::NotHolds
-                },
-            ),
-            JudgmentExpr::And(items) => {
-                let mut saw_undetermined = false;
-                for item in items {
-                    match self.eval_related_judgment_expr(
-                        item,
-                        current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )? {
-                        JudgmentOutcome::Holds => {}
-                        JudgmentOutcome::NotHolds => return Ok(JudgmentOutcome::NotHolds),
-                        JudgmentOutcome::Undetermined => saw_undetermined = true,
-                    }
-                }
-                Ok(if saw_undetermined {
-                    JudgmentOutcome::Undetermined
-                } else {
-                    JudgmentOutcome::Holds
-                })
-            }
-            JudgmentExpr::Or(items) => {
-                let mut saw_undetermined = false;
-                for item in items {
-                    match self.eval_related_judgment_expr(
-                        item,
-                        current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )? {
-                        JudgmentOutcome::Holds => return Ok(JudgmentOutcome::Holds),
-                        JudgmentOutcome::NotHolds => {}
-                        JudgmentOutcome::Undetermined => saw_undetermined = true,
-                    }
-                }
-                Ok(if saw_undetermined {
-                    JudgmentOutcome::Undetermined
-                } else {
-                    JudgmentOutcome::NotHolds
-                })
-            }
-            JudgmentExpr::Not(item) => Ok(
-                match self.eval_related_judgment_expr(
-                    item,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )? {
-                    JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
-                    JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
-                    JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                },
-            ),
-        }
-    }
-
-    fn eval_related_scalar_expr(
-        &mut self,
-        expr: &ScalarExpr,
-        current_id: &str,
-        related_id: &str,
-        current_entity: Option<&str>,
-        related_entity: Option<&str>,
-    ) -> Result<ScalarValue, EvalError> {
-        match expr {
-            ScalarExpr::Literal(value) => Ok(value.clone()),
-            ScalarExpr::Input(name) => self.lookup_entity_input(name, related_id),
-            ScalarExpr::InputOrElse { name, default } => {
-                match self.lookup_entity_input(name, related_id) {
-                    Ok(value) => Ok(value),
-                    Err(EvalError::MissingInput { .. }) => Ok(default.clone()),
-                    Err(error) => Err(error),
-                }
-            }
-            ScalarExpr::Derived(name) => {
-                let derived = self.get_derived(name)?.clone();
-                let target_id = if Some(derived.entity.as_str()) == current_entity {
-                    current_id
-                } else if Some(derived.entity.as_str()) == related_entity {
-                    related_id
-                } else {
-                    related_id
-                };
-                let semantics = derived.semantics_at(&self.period).ok_or_else(|| {
-                    EvalError::MissingDerivedFormulaVersion {
-                        derived: name.to_string(),
-                        at: self.period.start,
-                    }
-                })?;
-                match semantics {
-                    DerivedSemantics::Scalar(expr) => self.eval_related_scalar_expr(
-                        expr,
-                        current_id,
-                        target_id,
-                        current_entity,
-                        related_entity,
-                    ),
-                    DerivedSemantics::Judgment(_) => Err(EvalError::ExpectedScalar(name.clone())),
-                }
-            }
-            ScalarExpr::Add(items) => {
-                let mut total = Decimal::ZERO;
-                for item in items {
-                    total += self
-                        .eval_related_scalar_expr(
-                            item,
-                            current_id,
-                            related_id,
-                            current_entity,
-                            related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?;
-                }
-                Ok(ScalarValue::Decimal(total))
-            }
-            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
-                    left,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    - self
-                        .eval_related_scalar_expr(
-                            right,
-                            current_id,
-                            related_id,
-                            current_entity,
-                            related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?,
-            )),
-            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
-                    left,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                    * self
-                        .eval_related_scalar_expr(
-                            right,
-                            current_id,
-                            related_id,
-                            current_entity,
-                            related_entity,
-                        )?
-                        .as_decimal()
-                        .ok_or_else(|| {
-                            EvalError::TypeMismatch("expected numeric scalar".to_string())
-                        })?,
-            )),
-            ScalarExpr::Div(left, right) => {
-                let divisor = self
-                    .eval_related_scalar_expr(
-                        right,
-                        current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )?
-                    .as_decimal()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch("expected numeric scalar".to_string())
-                    })?;
-                if divisor.is_zero() {
-                    return Err(EvalError::DivisionByZero);
-                }
-                Ok(ScalarValue::Decimal(
-                    self.eval_related_scalar_expr(
-                        left,
-                        current_id,
-                        related_id,
-                        current_entity,
-                        related_entity,
-                    )?
-                    .as_decimal()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch("expected numeric scalar".to_string())
-                    })? / divisor,
-                ))
-            }
-            ScalarExpr::Max(_) | ScalarExpr::Min(_) | ScalarExpr::ParameterLookup { .. } => {
-                Err(EvalError::TypeMismatch(
-                    "bulk fast mode does not yet support this related scalar expression"
-                        .to_string(),
-                ))
-            }
-            ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
-                    value,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                .ceil(),
-            )),
-            ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
-                self.eval_related_scalar_expr(
-                    value,
-                    current_id,
-                    related_id,
-                    current_entity,
-                    related_entity,
-                )?
-                .as_decimal()
-                .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?
-                .floor(),
-            )),
-            ScalarExpr::PeriodStart => Ok(ScalarValue::Date(self.period.start)),
-            ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(self.period.end)),
-            ScalarExpr::OverPeriods { kind, .. } => {
-                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
-            }
-            ScalarExpr::DateAddDays { .. }
-            | ScalarExpr::DateAddMonths { .. }
-            | ScalarExpr::DateAddYears { .. }
-            | ScalarExpr::DaysBetween { .. }
-            | ScalarExpr::CountRelated { .. }
-            | ScalarExpr::SumRelated { .. }
-            | ScalarExpr::If { .. } => Err(EvalError::TypeMismatch(
-                "bulk fast mode does not yet support this related scalar expression".to_string(),
-            )),
-        }
-    }
-
-    fn lookup_entity_input(&self, name: &str, entity_id: &str) -> Result<ScalarValue, EvalError> {
-        if let Some(&row_index) = self.query_index.get(entity_id) {
-            if let Some(Some(value)) = self
-                .query_input_cells
-                .get(name)
-                .and_then(|cells| cells.get(row_index))
-            {
-                return Ok(value.clone());
-            }
-        }
-        self.related_input_index
-            .get(&(name.to_string(), entity_id.to_string()))
-            .cloned()
-            .ok_or_else(|| EvalError::MissingInput {
-                name: name.to_string(),
-                entity_id: entity_id.to_string(),
-                period_start: self.period.start,
-                period_end: self.period.end,
-            })
-    }
-
-    fn relation_contains(
-        &mut self,
-        relation: &str,
-        current_slot: usize,
-        related_slot: usize,
-        current_id: &str,
-        related_id: &str,
-    ) -> Result<bool, EvalError> {
-        let Some(&row_index) = self.query_index.get(current_id) else {
-            return Ok(false);
-        };
-        Ok(self
-            .related_rows(relation, current_slot, row_index)?
-            .iter()
-            .any(|tuple| {
-                tuple
-                    .get(related_slot)
-                    .is_some_and(|candidate| candidate == related_id)
-            }))
-    }
-}
-
-fn lookup_parameter_bulk(
-    parameter: &IndexedParameter,
-    keys: &[i64],
-    period: &Period,
-) -> Result<ScalarColumn, EvalError> {
-    let version = parameter
-        .versions
-        .iter()
-        .filter(|version| version.applies_at(period.start))
-        .max_by_key(|version| version.effective_from)
-        .ok_or_else(|| EvalError::MissingParameterValue {
-            parameter: parameter.name.clone(),
-            key: keys.first().copied().unwrap_or_default(),
-            at: period.start,
-        })?;
-
-    let values = keys
-        .iter()
-        .map(|key| {
-            version
-                .values
-                .get(key)
-                .cloned()
-                .ok_or_else(|| EvalError::MissingParameterValue {
-                    parameter: parameter.name.clone(),
-                    key: *key,
-                    at: period.start,
-                })
-        })
-        .collect::<Result<Vec<ScalarValue>, EvalError>>()?;
-
-    if values
-        .iter()
-        .all(|value| matches!(value, ScalarValue::Integer(_)))
-    {
-        Ok(ScalarColumn::Integer(
-            values
-                .into_iter()
-                .map(|value| match value {
-                    ScalarValue::Integer(value) => Ok(value),
-                    _ => Err(EvalError::TypeMismatch(
-                        "mixed parameter dtypes are not supported".to_string(),
+            JudgmentExpr::Derived(name) => self.evaluate_judgment(name, mask),
+            JudgmentExpr::RelationMember { relation, .. } => {
+                let (_, errors) = self.fail_all(
+                    mask,
+                    EvalError::TypeMismatch(format!(
+                        "relation predicate `{relation}` can only be evaluated inside a derived relation"
                     )),
-                })
-                .collect::<Result<Vec<i64>, EvalError>>()?,
-        ))
-    } else {
-        Ok(ScalarColumn::Decimal(
-            values
-                .into_iter()
-                .map(|value| {
-                    value.as_decimal().ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "parameter values must be numeric in bulk mode".to_string(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<Decimal>, EvalError>>()?,
-        ))
+                );
+                Ok((vec![JudgmentOutcome::NotHolds; len], errors))
+            }
+            JudgmentExpr::And(items) => {
+                self.eval_short_circuit(items, mask, JudgmentOutcome::NotHolds)
+            }
+            JudgmentExpr::Or(items) => self.eval_short_circuit(items, mask, JudgmentOutcome::Holds),
+            JudgmentExpr::Not(item) => {
+                let (values, errors) = self.eval_judgment_expr(item, mask)?;
+                Ok((
+                    values
+                        .into_iter()
+                        .map(|value| match value {
+                            JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
+                            JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
+                            JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
+                        })
+                        .collect(),
+                    errors,
+                ))
+            }
+        }
     }
-}
 
-fn select_scalar_column(
-    condition: Vec<JudgmentOutcome>,
-    then_values: ScalarColumn,
-    else_values: ScalarColumn,
-) -> Result<ScalarColumn, EvalError> {
-    match (then_values, else_values) {
-        (ScalarColumn::Decimal(then_values), ScalarColumn::Decimal(else_values)) => {
-            Ok(ScalarColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (ScalarColumn::Integer(then_values), ScalarColumn::Integer(else_values)) => {
-            Ok(ScalarColumn::Integer(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (ScalarColumn::Decimal(then_values), ScalarColumn::Integer(else_values)) => {
-            Ok(ScalarColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            Decimal::from(else_value)
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (ScalarColumn::Integer(then_values), ScalarColumn::Decimal(else_values)) => {
-            Ok(ScalarColumn::Decimal(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            Decimal::from(then_value)
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (ScalarColumn::Bool(then_values), ScalarColumn::Bool(else_values)) => {
-            Ok(ScalarColumn::Bool(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        (ScalarColumn::Text(then_values), ScalarColumn::Text(else_values)) => {
-            Ok(ScalarColumn::Text(
-                condition
-                    .into_iter()
-                    .zip(then_values)
-                    .zip(else_values)
-                    .map(|((condition, then_value), else_value)| {
-                        if condition.is_holds() {
-                            then_value
-                        } else {
-                            else_value
-                        }
-                    })
-                    .collect(),
-            ))
-        }
-        _ => Err(EvalError::TypeMismatch(
-            "bulk if() branches must have the same dtype".to_string(),
-        )),
-    }
-}
-
-fn compare_columns(
-    left: ScalarColumn,
-    op: ComparisonOp,
-    right: ScalarColumn,
-) -> Result<Vec<JudgmentOutcome>, EvalError> {
-    match (left, right) {
-        (ScalarColumn::Bool(left), ScalarColumn::Bool(right)) => Ok(left
-            .into_iter()
-            .zip(right)
-            .map(|(left, right)| {
-                let outcome = match op {
-                    ComparisonOp::Eq => left == right,
-                    ComparisonOp::Ne => left != right,
-                    _ => false,
-                };
-                if outcome {
-                    JudgmentOutcome::Holds
+    /// `and` (`decisive` = not_holds) or `or` (`decisive` = holds): each item
+    /// is evaluated only for the rows no earlier item decided. A row with an
+    /// undetermined item and no decisive one is undetermined.
+    fn eval_short_circuit(
+        &mut self,
+        items: &[JudgmentExpr],
+        mask: &RowMask,
+        decisive: JudgmentOutcome,
+    ) -> Result<Judgments, EvalError> {
+        let exhausted = match decisive {
+            JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
+            _ => JudgmentOutcome::NotHolds,
+        };
+        let len = self.len();
+        let mut outcomes = vec![exhausted; len];
+        let mut undetermined = vec![false; len];
+        let mut errors = RowErrors::new();
+        let mut pending = mask.clone();
+        for item in items {
+            if pending.is_empty() {
+                break;
+            }
+            let (values, item_errors) = self.eval_judgment_expr(item, &pending)?;
+            let live = pending.without(&item_errors);
+            errors.absorb(item_errors);
+            pending = live.filter(|row| {
+                let value = values[row];
+                if value == decisive {
+                    outcomes[row] = decisive;
+                    false
                 } else {
-                    JudgmentOutcome::NotHolds
-                }
-            })
-            .collect()),
-        (ScalarColumn::Text(left), ScalarColumn::Text(right)) => Ok(left
-            .into_iter()
-            .zip(right)
-            .map(|(left, right)| {
-                let outcome = match op {
-                    ComparisonOp::Eq => left == right,
-                    ComparisonOp::Ne => left != right,
-                    _ => false,
-                };
-                if outcome {
-                    JudgmentOutcome::Holds
-                } else {
-                    JudgmentOutcome::NotHolds
-                }
-            })
-            .collect()),
-        (left, right) => {
-            let left = left.as_decimal_vec()?;
-            let right = right.as_decimal_vec()?;
-            Ok(left
-                .into_iter()
-                .zip(right)
-                .map(|(left, right)| {
-                    let outcome = match op {
-                        ComparisonOp::Lt => left < right,
-                        ComparisonOp::Lte => left <= right,
-                        ComparisonOp::Gt => left > right,
-                        ComparisonOp::Gte => left >= right,
-                        ComparisonOp::Eq => left == right,
-                        ComparisonOp::Ne => left != right,
-                    };
-                    if outcome {
-                        JudgmentOutcome::Holds
-                    } else {
-                        JudgmentOutcome::NotHolds
+                    if value == JudgmentOutcome::Undetermined {
+                        undetermined[row] = true;
                     }
-                })
-                .collect())
+                    true
+                }
+            });
         }
+        for row in pending.rows() {
+            if undetermined[row] {
+                outcomes[row] = JudgmentOutcome::Undetermined;
+            }
+        }
+        Ok((outcomes, errors))
     }
 }
 
-fn compare_scalar_values_for_bulk(
-    left: &ScalarValue,
+/// Compare two columns on the live rows with the reference comparison
+/// semantics. Same-kind numeric, boolean and text columns take a vectorised
+/// path; anything else compares row by row with the explain function.
+fn compare_columns(
+    left: &ScalarColumn,
     op: ComparisonOp,
-    right: &ScalarValue,
-) -> Result<bool, EvalError> {
+    right: &ScalarColumn,
+    live: &RowMask,
+    errors: &mut RowErrors,
+) -> Vec<JudgmentOutcome> {
+    let mut outcomes = vec![JudgmentOutcome::NotHolds; left.len()];
+    let outcome = |holds: bool| {
+        if holds {
+            JudgmentOutcome::Holds
+        } else {
+            JudgmentOutcome::NotHolds
+        }
+    };
+    let numeric = |left: Decimal, right: Decimal| match op {
+        ComparisonOp::Lt => left < right,
+        ComparisonOp::Lte => left <= right,
+        ComparisonOp::Gt => left > right,
+        ComparisonOp::Gte => left >= right,
+        ComparisonOp::Eq => left == right,
+        ComparisonOp::Ne => left != right,
+    };
     match (left, right) {
-        (ScalarValue::Bool(left), ScalarValue::Bool(right)) => match op {
-            ComparisonOp::Eq => Ok(left == right),
-            ComparisonOp::Ne => Ok(left != right),
-            _ => Err(EvalError::TypeMismatch(
-                "boolean comparisons only support == and !=".to_string(),
-            )),
-        },
-        (ScalarValue::Text(left), ScalarValue::Text(right)) => match op {
-            ComparisonOp::Eq => Ok(left == right),
-            ComparisonOp::Ne => Ok(left != right),
-            _ => Err(EvalError::TypeMismatch(
-                "text comparisons only support == and !=".to_string(),
-            )),
-        },
-        (left, right) => {
-            let left = left.as_decimal().ok_or_else(|| {
-                EvalError::TypeMismatch("left side of comparison is not numeric".to_string())
-            })?;
-            let right = right.as_decimal().ok_or_else(|| {
-                EvalError::TypeMismatch("right side of comparison is not numeric".to_string())
-            })?;
-            Ok(match op {
-                ComparisonOp::Lt => left < right,
-                ComparisonOp::Lte => left <= right,
-                ComparisonOp::Gt => left > right,
-                ComparisonOp::Gte => left >= right,
-                ComparisonOp::Eq => left == right,
-                ComparisonOp::Ne => left != right,
-            })
+        (ScalarColumn::Integer(left), ScalarColumn::Integer(right)) => {
+            for row in live.rows() {
+                outcomes[row] =
+                    outcome(numeric(Decimal::from(left[row]), Decimal::from(right[row])));
+            }
+        }
+        (
+            ScalarColumn::Integer(_) | ScalarColumn::Decimal(_),
+            ScalarColumn::Integer(_) | ScalarColumn::Decimal(_),
+        ) => {
+            let mut ignored = RowErrors::new();
+            let left = left.decimals(live, &mut ignored);
+            let right = right.decimals(live, &mut ignored);
+            for row in live.rows() {
+                outcomes[row] = outcome(numeric(left[row], right[row]));
+            }
+        }
+        _ => {
+            for row in live.rows() {
+                match compare_scalar_values(&left.value_at(row), op, &right.value_at(row)) {
+                    Ok(holds) => outcomes[row] = outcome(holds),
+                    Err(error) => errors.record(row, error),
+                }
+            }
         }
     }
+    outcomes
 }
