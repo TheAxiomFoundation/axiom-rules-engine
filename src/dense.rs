@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::{
     ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
+    relation_member_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
@@ -541,6 +542,13 @@ enum CompiledRelatedJudgmentExpr {
         right: CompiledRelatedScalarExpr,
     },
     RootJudgment(Box<CompiledJudgmentExpr>),
+    /// A `relation_member` outside a derived relation's own predicate: in a
+    /// `count`/`sum` `where` clause, or in a related rule a predicate reads.
+    /// Explain evaluates both without a relation context, so every related
+    /// row that reaches it fails with explain's error.
+    RelationMemberWithoutContext {
+        relation: String,
+    },
     And(Vec<CompiledRelatedJudgmentExpr>),
     Or(Vec<CompiledRelatedJudgmentExpr>),
     Not(Box<CompiledRelatedJudgmentExpr>),
@@ -606,6 +614,11 @@ impl DenseCompiledProgram {
         Self::from_program(&artifact.program.to_program()?, entity)
     }
 
+    /// Compile `program` as given. Like `Engine::new`, this does not check the
+    /// dependency graph: an artifact is checked when it is compiled or
+    /// loaded, and `execute_request` checks an inline program, both refusing a
+    /// cycle routed through a derived relation even where no rule reaches it.
+    /// Prefer [`Self::from_artifact`] for a program that has not been checked.
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,
@@ -1108,6 +1121,12 @@ struct DenseCompiler<'a> {
     /// expressions inline a related entity's rules, so a `match` in one names
     /// the innermost rule here, as explain does.
     related_rules: Vec<String>,
+    /// The derived relation whose own predicate is being compiled, if any.
+    /// Explain evaluates a `relation_member` there with the candidate tuple in
+    /// scope, including under `if` conditions and other operands. It is `None`
+    /// in `where` clauses and in the rules a predicate reads, which explain
+    /// evaluates without that scope.
+    membership_scope: Option<String>,
 }
 
 impl<'a> DenseCompiler<'a> {
@@ -1126,6 +1145,7 @@ impl<'a> DenseCompiler<'a> {
             derived_index: HashMap::new(),
             visiting: HashSet::new(),
             related_rules: Vec::new(),
+            membership_scope: None,
         })
     }
 
@@ -1509,7 +1529,9 @@ impl<'a> DenseCompiler<'a> {
                 match &derived.semantics {
                     DerivedSemantics::Judgment(expr) => {
                         self.related_rules.push(name.clone());
+                        let scope = self.membership_scope.take();
                         let compiled = self.compile_related_predicate(relation_index, expr);
+                        self.membership_scope = scope;
                         self.related_rules.pop();
                         compiled
                     }
@@ -1518,7 +1540,28 @@ impl<'a> DenseCompiler<'a> {
                     ))),
                 }
             }
-            JudgmentExpr::RelationMember { .. } => Ok(CompiledRelatedJudgmentExpr::Literal(true)),
+            JudgmentExpr::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } => match self.membership_scope.as_deref() {
+                None => Ok(CompiledRelatedJudgmentExpr::RelationMemberWithoutContext {
+                    relation: relation.clone(),
+                }),
+                Some(scope)
+                    if self.holds_for_every_candidate(
+                        scope,
+                        relation,
+                        *current_slot,
+                        *related_slot,
+                    ) =>
+                {
+                    Ok(CompiledRelatedJudgmentExpr::Literal(true))
+                }
+                Some(scope) => Err(DenseCompileError::Unsupported(format!(
+                    "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
+                ))),
+            },
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
                     .iter()
@@ -1590,7 +1633,9 @@ impl<'a> DenseCompiler<'a> {
                 match &derived.semantics {
                     DerivedSemantics::Scalar(expr) => {
                         self.related_rules.push(name.clone());
+                        let scope = self.membership_scope.take();
                         let compiled = self.compile_related_scalar(relation_index, expr);
+                        self.membership_scope = scope;
                         self.related_rules.pop();
                         compiled
                     }
@@ -1976,7 +2021,9 @@ impl<'a> DenseCompiler<'a> {
                 // The predicate is compiled once per relation, so a `match` in
                 // it is named by whichever rule evaluates the relation.
                 self.related_rules.push(String::new());
+                let scope = self.membership_scope.replace(name.to_string());
                 let filter = self.compile_related_predicate(index, &derivation.predicate);
+                self.membership_scope = scope;
                 self.related_rules.pop();
                 let filter = filter?;
                 self.relations[index].filter = Some(filter);
@@ -1996,6 +2043,47 @@ impl<'a> DenseCompiler<'a> {
                 Ok(index)
             }
         }
+    }
+
+    /// Whether explain's `relation_member` of `relation` (with these slots)
+    /// holds for every tuple the derived relation `scope` filters, so dense
+    /// can test it without the tuples. Explain filters `scope`'s source's
+    /// related entities for its slots (engine.rs `related_entity_ids`), and a
+    /// source that is itself derived filters its own source the same way, so
+    /// each relation up that chain, tested with the slots the chain reads it
+    /// with, contains every candidate. That holds because a dense batch keys a
+    /// derived relation to its base relation and so carries no tuples named by
+    /// a derived relation itself. Any other membership needs tuples a dense
+    /// batch does not carry.
+    fn holds_for_every_candidate(
+        &self,
+        scope: &str,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> bool {
+        let derivation_of = |name: &str| {
+            self.program
+                .relations
+                .get(name)
+                .and_then(|schema| schema.derivation.as_ref())
+        };
+        let mut next = derivation_of(scope);
+        // A validated chain names each relation once; the bound only ends a
+        // cyclic chain in a program that skipped validation.
+        for _ in 0..self.program.relations.len() {
+            let Some(derivation) = next else {
+                return false;
+            };
+            if derivation.source_relation == relation
+                && derivation.current_slot == current_slot
+                && derivation.related_slot == related_slot
+            {
+                return true;
+            }
+            next = derivation_of(&derivation.source_relation);
+        }
+        false
     }
 
     fn related_input(&mut self, relation: usize, name: &str) -> usize {
@@ -3062,6 +3150,11 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     &self.batch.relations[relation].offsets,
                 )?;
                 Ok((projected, self.lower_errors(relation, &root_errors, mask)))
+            }
+            CompiledRelatedJudgmentExpr::RelationMemberWithoutContext { relation: name } => {
+                let mut errors = RowErrors::new();
+                errors.record_all(mask, &relation_member_outside_derived_relation(name));
+                Ok((vec![false; length], errors))
             }
             CompiledRelatedJudgmentExpr::And(items) | CompiledRelatedJudgmentExpr::Or(items) => {
                 // Short-circuit per related row: `and` stops at the first

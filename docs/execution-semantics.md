@@ -42,6 +42,18 @@ output's formula is evaluated for that entity and period as follows.
   for the referencing entity (or, inside a relation predicate, the entity its
   declared entity kind selects) when evaluation reaches the reference, and not
   otherwise.
+- **A value keeps the kind its expression computes.** A rule's declared
+  `dtype` is reported beside its value but never converts it: `count` yields
+  an integer even in a rule declared `decimal`, and `sum`, arithmetic,
+  `max`/`min` and `ceil`/`floor` yield decimals even in a rule declared
+  `integer`. An `if` yields the kind of the branch each row takes. Output
+  rounding applies to decimal values only.
+- **`relation_member` needs a derived relation.** It tests whether the current
+  and related entity of the derived relation whose predicate is being
+  evaluated appear together, in the slots it names, in the named relation.
+  That predicate is the only place that supplies them. Anywhere else, including a `count`/`sum` `where` clause
+  and a rule the predicate references, `relation_member` is a type error of
+  the evaluation that reaches it.
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -95,8 +107,8 @@ that row, and a dense call fails exactly when explain would fail for some row.
 When several rows fail, the error is the first failing row's, then the first
 failing output's in the requested order.
 
-Three representation limits apply. They are properties of typed columns, not
-of evaluation order. A column's dtype never depends on which rows are live:
+Four representation limits apply. They are properties of typed columns and
+positional relation batches, not of evaluation order. A column's dtype never depends on which rows are live:
 dense still types a branch no row selects, and a parameter lookup's dtype is
 that of the selected table, not of the keys a batch happens to look up.
 
@@ -113,6 +125,16 @@ that of the selected table, not of the keys a batch happens to look up.
    column the caller does not supply is a missing input on every row. It is an
    error only if a live row reads it, exactly as a missing input record is in
    explain.
+4. **Relation batches carry base relations only.** A derived relation is its
+   base relation's batch filtered by its predicate, and related rows carry no
+   entity ids. Tuples a dataset supplies under a derived relation's own name,
+   which explain adds to the filtered ones, have no place in a batch. Inside a
+   derived relation's predicate, dense can decide a `relation_member` only
+   when it holds for every filtered tuple: a test of the relation's source, or
+   of a source further up its chain, with the slots the chain reads it with.
+   The dense compiler rejects a predicate that tests membership of any other
+   relation. A `relation_member` anywhere else fails the rows that reach it,
+   as in explain.
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
