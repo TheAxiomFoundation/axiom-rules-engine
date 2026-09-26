@@ -201,11 +201,15 @@ entity id, so a SNAP unit backed by `household-1` is queried with
 Derived relations execute in explain mode, bulk fast mode (which evaluates each
 row's relation aggregations on the explain interpreter), and the generic dense
 compiler for predicates that can be evaluated from related inputs, related
-judgment rules, and current/root entity judgment or scalar rules. A
+judgment rules, current/root entity judgment or scalar rules, and membership of
+the relation's own source (`member_of_household` in `snap_unit` above). A
 `source_relation` may also point at another `derived_relation`; the runtime
-applies the parent filter before the child filter. The dense compiler may still
-reject membership predicates that aggregate another relation from inside a
-current/root predicate.
+applies the parent filter before the child filter, and a predicate may then
+also test membership of a source further up that chain. The dense compiler
+rejects a predicate that tests membership of any other relation, because a
+dense batch carries no tuples for it, and may still reject membership
+predicates that aggregate another relation from inside a current/root
+predicate.
 
 Inside a derived-relation predicate, a referenced scalar rule uses its declared
 entity to select the current or related record, just as a referenced judgment

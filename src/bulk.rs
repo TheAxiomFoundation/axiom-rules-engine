@@ -23,7 +23,7 @@ use crate::api::{
 };
 use crate::engine::{
     ArithmeticError, Engine, EvalError, checked_add, checked_div, checked_mul, checked_sub,
-    compare_scalar_values,
+    compare_scalar_values, relation_member_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
@@ -1035,12 +1035,8 @@ impl<'a> BulkEvaluator<'a> {
             }
             JudgmentExpr::Derived(name) => self.evaluate_judgment(name, mask),
             JudgmentExpr::RelationMember { relation, .. } => {
-                let (_, errors) = self.fail_all(
-                    mask,
-                    EvalError::TypeMismatch(format!(
-                        "relation predicate `{relation}` can only be evaluated inside a derived relation"
-                    )),
-                );
+                let (_, errors) =
+                    self.fail_all(mask, relation_member_outside_derived_relation(relation));
                 Ok((vec![JudgmentOutcome::NotHolds; len], errors))
             }
             JudgmentExpr::And(items) => {
