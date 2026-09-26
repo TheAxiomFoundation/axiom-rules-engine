@@ -70,6 +70,12 @@ fn scalar(expr: &mut ScalarExprSpec, entity: &str, slots: &Slots) {
             scalar(then_expr, entity, slots);
             scalar(else_expr, entity, slots);
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            scalar(subject, entity, slots);
+            for pattern in patterns {
+                scalar(pattern, entity, slots);
+            }
+        }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Min { items }
         | ScalarExprSpec::Max { items } => {

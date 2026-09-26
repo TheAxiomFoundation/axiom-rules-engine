@@ -809,6 +809,15 @@ fn format_scalar_expression(
             format_scalar_expression(program, then_expr),
             format_scalar_expression(program, else_expr)
         ),
+        ScalarExpr::NoMatch { subject, patterns } => format!(
+            "(no match arm for {} among [{}])",
+            format_scalar_expression(program, subject),
+            patterns
+                .iter()
+                .map(|pattern| format_scalar_expression(program, pattern))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         ScalarExpr::OverPeriods { kind, value, n } => format!(
             "{}({}{})",
             kind.as_call_name(),

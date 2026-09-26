@@ -127,6 +127,9 @@ enum NumG {
     Ceil(Box<NumG>),
     Floor(Box<NumG>),
     If(Box<BoolG>, Box<NumG>, Box<NumG>),
+    /// `match subject: p => v ...`, with a `_` arm when the default is
+    /// present; without one, a subject no pattern covers fails the row.
+    Match(Box<NumG>, Vec<(u8, NumG)>, Option<Box<NumG>>),
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +182,8 @@ enum PNumG {
     Div(Box<PNumG>, Box<PNumG>),
     Max(Vec<PNumG>),
     If(Box<PBoolG>, Box<PNumG>, Box<PNumG>),
+    /// See [`NumG::Match`].
+    Match(Box<PNumG>, Vec<(u8, PNumG)>, Option<Box<PNumG>>),
 }
 
 #[derive(Clone, Debug)]
@@ -381,7 +386,8 @@ fn pnum_strategy() -> BoxedStrategy<PNumG> {
         ),
         (2, (0..MAX_PERSON_RULES).prop_map(PNumG::Rule).boxed()),
     ]);
-    leaf.prop_recursive(2, 8, 2, |inner| {
+    let subject = leaf.clone();
+    leaf.prop_recursive(2, 8, 2, move |inner| {
         let condition = pbool_over(inner.clone());
         weighted(vec![
             (2, vec(inner.clone(), 1..=2).prop_map(PNumG::Add).boxed()),
@@ -406,8 +412,20 @@ fn pnum_strategy() -> BoxedStrategy<PNumG> {
             (1, vec(inner.clone(), 1..=2).prop_map(PNumG::Max).boxed()),
             (
                 2,
-                (condition, inner.clone(), inner)
+                (condition, inner.clone(), inner.clone())
                     .prop_map(|(c, a, b)| PNumG::If(Box::new(c), Box::new(a), Box::new(b)))
+                    .boxed(),
+            ),
+            (
+                1,
+                (
+                    subject.clone(),
+                    vec((literal_index(), inner.clone()), 1..=2),
+                    proptest::option::weighted(0.75, inner),
+                )
+                    .prop_map(|(subject, arms, default)| {
+                        PNumG::Match(Box::new(subject), arms, default.map(Box::new))
+                    })
                     .boxed(),
             ),
         ])
@@ -477,66 +495,79 @@ fn num_strategy(profile: Profile) -> BoxedStrategy<NumG> {
                 .boxed(),
         ));
     }
-    weighted(leaves)
-        .prop_recursive(3, 24, 3, move |inner| {
-            let condition = bool_over(profile, inner.clone());
-            let pair = || (inner.clone(), inner.clone());
-            let mut branches = vec![
-                (2, vec(inner.clone(), 1..=3).prop_map(NumG::Add).boxed()),
+    // A `match` subject is a leaf, as in real rules (a filing status, a
+    // rule's code), which keeps generated trees shallow.
+    let leaf = weighted(leaves);
+    let subject = leaf.clone();
+    leaf.prop_recursive(3, 24, 3, move |inner| {
+        let condition = bool_over(profile, inner.clone());
+        let pair = || (inner.clone(), inner.clone());
+        let mut branches = vec![
+            (2, vec(inner.clone(), 1..=3).prop_map(NumG::Add).boxed()),
+            (
+                1,
+                pair()
+                    .prop_map(|(a, b)| NumG::Sub(Box::new(a), Box::new(b)))
+                    .boxed(),
+            ),
+            (
+                1,
+                pair()
+                    .prop_map(|(a, b)| NumG::Mul(Box::new(a), Box::new(b)))
+                    .boxed(),
+            ),
+            (
+                4,
+                pair()
+                    .prop_map(|(a, b)| NumG::Div(Box::new(a), Box::new(b)))
+                    .boxed(),
+            ),
+            (1, vec(inner.clone(), 1..=3).prop_map(NumG::Max).boxed()),
+            (1, vec(inner.clone(), 1..=3).prop_map(NumG::Min).boxed()),
+            (
+                1,
+                inner
+                    .clone()
+                    .prop_map(|value| NumG::Ceil(Box::new(value)))
+                    .boxed(),
+            ),
+            (
+                1,
+                inner
+                    .clone()
+                    .prop_map(|value| NumG::Floor(Box::new(value)))
+                    .boxed(),
+            ),
+            (
+                5,
+                (condition, inner.clone(), inner.clone())
+                    .prop_map(|(c, a, b)| NumG::If(Box::new(c), Box::new(a), Box::new(b)))
+                    .boxed(),
+            ),
+            (
+                1,
                 (
-                    1,
-                    pair()
-                        .prop_map(|(a, b)| NumG::Sub(Box::new(a), Box::new(b)))
-                        .boxed(),
-                ),
-                (
-                    1,
-                    pair()
-                        .prop_map(|(a, b)| NumG::Mul(Box::new(a), Box::new(b)))
-                        .boxed(),
-                ),
-                (
-                    4,
-                    pair()
-                        .prop_map(|(a, b)| NumG::Div(Box::new(a), Box::new(b)))
-                        .boxed(),
-                ),
-                (1, vec(inner.clone(), 1..=3).prop_map(NumG::Max).boxed()),
-                (1, vec(inner.clone(), 1..=3).prop_map(NumG::Min).boxed()),
-                (
-                    1,
-                    inner
-                        .clone()
-                        .prop_map(|value| NumG::Ceil(Box::new(value)))
-                        .boxed(),
-                ),
-                (
-                    1,
-                    inner
-                        .clone()
-                        .prop_map(|value| NumG::Floor(Box::new(value)))
-                        .boxed(),
-                ),
-                (
-                    5,
-                    (condition, inner.clone(), inner.clone())
-                        .prop_map(|(c, a, b)| NumG::If(Box::new(c), Box::new(a), Box::new(b)))
-                        .boxed(),
-                ),
-            ];
-            if profile.parameters {
-                branches.push((
-                    1,
-                    (any::<bool>(), inner.clone())
-                        .prop_map(|(integer_table, index)| {
-                            NumG::Param(integer_table, Box::new(index))
-                        })
-                        .boxed(),
-                ));
-            }
-            weighted(branches)
-        })
-        .boxed()
+                    subject.clone(),
+                    vec((literal_index(), inner.clone()), 1..=2),
+                    proptest::option::weighted(0.75, inner.clone()),
+                )
+                    .prop_map(|(subject, arms, default)| {
+                        NumG::Match(Box::new(subject), arms, default.map(Box::new))
+                    })
+                    .boxed(),
+            ),
+        ];
+        if profile.parameters {
+            branches.push((
+                1,
+                (any::<bool>(), inner.clone())
+                    .prop_map(|(integer_table, index)| NumG::Param(integer_table, Box::new(index)))
+                    .boxed(),
+            ));
+        }
+        weighted(branches)
+    })
+    .boxed()
 }
 
 fn bool_over(profile: Profile, num: BoxedStrategy<NumG>) -> BoxedStrategy<BoolG> {
@@ -899,6 +930,35 @@ fn if_expr(
     }
 }
 
+/// A `match` as the formula lowering writes it: an `if subject == pattern`
+/// chain, ending in the `_` value or, without one, in `no_match`. When
+/// `force`d, every arm's `if` evaluates both of its branches, so the fallback
+/// is always reached.
+fn match_chain(
+    subject: ScalarExprSpec,
+    arms: Vec<(ScalarExprSpec, ScalarExprSpec)>,
+    default: Option<ScalarExprSpec>,
+    force: bool,
+) -> ScalarExprSpec {
+    let mut chain = default.unwrap_or_else(|| ScalarExprSpec::NoMatch {
+        subject: Box::new(subject.clone()),
+        patterns: arms.iter().map(|(pattern, _)| pattern.clone()).collect(),
+    });
+    for (pattern, value) in arms.into_iter().rev() {
+        let condition = cmp(subject.clone(), ComparisonOpSpec::Eq, pattern);
+        chain = if force {
+            if_expr(
+                condition,
+                force_numeric_pair(value.clone(), chain.clone()),
+                force_numeric_pair(chain, value),
+            )
+        } else {
+            if_expr(condition, value, chain)
+        };
+    }
+    chain
+}
+
 fn div(left: ScalarExprSpec, right: ScalarExprSpec) -> ScalarExprSpec {
     ScalarExprSpec::Div {
         left: Box::new(left),
@@ -1047,6 +1107,19 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
                 if_expr(condition, a, b)
             }
         }
+        NumG::Match(subject, arms, default) => match_chain(
+            lower_num(subject, cx),
+            arms.iter()
+                .map(|(pattern, value)| {
+                    (
+                        lit(num_literal(*pattern, integer_kinds)),
+                        lower_num(value, cx),
+                    )
+                })
+                .collect(),
+            default.as_ref().map(|default| lower_num(default, cx)),
+            cx.force,
+        ),
     }
 }
 
@@ -1229,6 +1302,19 @@ fn lower_pnum(expr: &PNumG, cx: &Cx<'_>) -> ScalarExprSpec {
                 if_expr(condition, a, b)
             }
         }
+        PNumG::Match(subject, arms, default) => match_chain(
+            lower_pnum(subject, cx),
+            arms.iter()
+                .map(|(pattern, value)| {
+                    (
+                        lit(num_literal(*pattern, integer_kinds)),
+                        lower_pnum(value, cx),
+                    )
+                })
+                .collect(),
+            default.as_ref().map(|default| lower_pnum(default, cx)),
+            cx.force,
+        ),
     }
 }
 
@@ -1517,6 +1603,12 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
         }
         ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
             walk_scalar(value, visit)
+        }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            walk_scalar(subject, visit);
+            for pattern in patterns {
+                walk_scalar(pattern, visit);
+            }
         }
         ScalarExprSpec::DateAddDays { date, days: other }
         | ScalarExprSpec::DateAddMonths {
@@ -2707,6 +2799,9 @@ fn seed_for(property: u64) -> [u8; 32] {
     seed
 }
 
+/// How explain's error for an uncovered `match` subject begins.
+const NO_MATCH_PREFIX: &str = "no `match` arm in ";
+
 #[derive(Debug, Default)]
 struct Stats {
     cases: u32,
@@ -2715,6 +2810,11 @@ struct Stats {
     /// Explain succeeded but the forced program (every branch and operand
     /// evaluated) failed: the case hides an error behind laziness.
     hazards: u32,
+    /// Explain failed because a `match` without `_` covered no arm.
+    uncovered_matches: u32,
+    /// Explain succeeded, and the forced program failed on an uncovered
+    /// `match`: the case hides one behind laziness.
+    hidden_matches: u32,
     fast_ok_fast_path: u32,
     fast_ok_fallback: u32,
     dense_ran: u32,
@@ -2727,11 +2827,13 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; fast path {} / fallback {}; dense ran {} / declined {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; reference panics {}; divergences {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
             self.hazards,
+            self.uncovered_matches,
+            self.hidden_matches,
             self.fast_ok_fast_path,
             self.fast_ok_fallback,
             self.dense_ran,
@@ -2817,6 +2919,11 @@ fn assert_exercised(name: &str, stats: &Stats, min_hazard_share: f64) {
         "{name}: too few cases hide an error behind a dead branch or short circuit: {}",
         stats.summary(name)
     );
+    assert!(
+        f64::from(stats.uncovered_matches) >= 0.01 * cases && stats.hidden_matches > 0,
+        "{name}: too few cases reach, or hide behind laziness, a `match` no arm covers: {}",
+        stats.summary(name)
+    );
     let fast_total = stats.fast_ok_fast_path + stats.fast_ok_fallback;
     if fast_total > 0 {
         assert!(
@@ -2855,8 +2962,18 @@ fn explain_reference(lowered: &Lowered, stats: &mut Stats) -> Option<Outcome> {
             if !forced.is_ok() {
                 stats.hazards += 1;
             }
+            if let Outcome::Err { message, .. } = &forced
+                && message.starts_with(NO_MATCH_PREFIX)
+            {
+                stats.hidden_matches += 1;
+            }
         }
-        Outcome::Err { .. } => stats.explain_err += 1,
+        Outcome::Err { message, .. } => {
+            stats.explain_err += 1;
+            if message.starts_with(NO_MATCH_PREFIX) {
+                stats.uncovered_matches += 1;
+            }
+        }
         Outcome::Panic(_) => {
             stats.reference_panics += 1;
             return None;

@@ -3760,6 +3760,19 @@ rules:
         matches!(joint_arm.as_ref(), ScalarExprSpec::If { .. }),
         "the final concrete pattern must be preserved as a comparison"
     );
+    // The chain ends in NoMatch, which lists every pattern, instead of
+    // repeating the last arm's value for subjects no arm covers.
+    let ScalarExprSpec::If {
+        else_expr: fallback,
+        ..
+    } = joint_arm.as_ref()
+    else {
+        panic!("joint pattern should lower to an if");
+    };
+    let ScalarExprSpec::NoMatch { patterns, .. } = fallback.as_ref() else {
+        panic!("a match without `_` should end in NoMatch, got {fallback:?}");
+    };
+    assert_eq!(patterns.len(), 2);
 
     let error = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::strict())
         .expect_err("strict lowering rejects a match without a wildcard");

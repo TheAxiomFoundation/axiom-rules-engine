@@ -1440,6 +1440,113 @@ rules:
     }
 }
 
+const NON_EXHAUSTIVE_MATCH_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              1 => 10
+              2 => 20
+"#;
+
+fn filing_status_request(mode: ExecutionMode, filers: &[(&str, i64)]) -> CompiledExecutionRequest {
+    let period = simple_period();
+    CompiledExecutionRequest {
+        mode,
+        dataset: DatasetSpec {
+            inputs: filers
+                .iter()
+                .map(|(entity_id, filing_status)| InputRecordSpec {
+                    name: "filing_status".to_string(),
+                    entity: "TaxUnit".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Integer {
+                        value: *filing_status,
+                    },
+                })
+                .collect(),
+            relations: Vec::new(),
+        },
+        queries: filers
+            .iter()
+            .map(|(entity_id, _)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: vec!["filing_credit".to_string()],
+            })
+            .collect(),
+        pins: Vec::new(),
+    }
+}
+
+/// A `match` without `_` used to give an uncovered subject its last arm's
+/// value (filing status 9 got the joint amount). It is now an error naming
+/// the rule, the subject and its value, in explain and fast mode alike, while
+/// covered subjects keep their arm's value. The artifact goes through its JSON
+/// form, as a served artifact does.
+#[test]
+fn non_exhaustive_match_rejects_an_uncovered_subject_in_every_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(NON_EXHAUSTIVE_MATCH_RULESPEC)
+        .expect("a match without `_` still compiles");
+    let json = serde_json::to_string(&artifact).expect("artifact serialises");
+    assert!(json.contains(r#""kind":"no_match""#), "{json}");
+    let artifact: CompiledProgramArtifact =
+        serde_json::from_str(&json).expect("artifact deserialises");
+
+    let mut errors = Vec::new();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        // Rows take different arms, so the batch's innermost comparison
+        // (`== 2`) fails for a row that matched the outer arm: that row is
+        // covered and must not be reported.
+        let covered = execute_compiled_request(
+            artifact.clone(),
+            filing_status_request(mode.clone(), &[("filer-1", 1), ("filer-2", 2)]),
+        )
+        .unwrap_or_else(|error| panic!("covered subjects fail in {mode:?}: {error}"));
+        assert_eq!(covered.metadata.actual_mode, mode);
+        let values: Vec<i64> = covered
+            .results
+            .iter()
+            .map(|result| integer_output(&result.outputs["filing_credit"]))
+            .collect();
+        assert_eq!(values, vec![10, 20], "{mode:?}");
+
+        let error = execute_compiled_request(
+            artifact.clone(),
+            filing_status_request(
+                mode.clone(),
+                &[("filer-1", 1), ("filer-9", 9), ("filer-2", 2)],
+            ),
+        )
+        .expect_err("an uncovered subject is an error, not the last arm");
+        assert!(
+            matches!(
+                &error,
+                ApiError::Eval(EvalError::NoMatchingArm { rule, subject, value, patterns })
+                    if rule == "filing_credit"
+                        && subject == "filing_status"
+                        && value == "9"
+                        && patterns == "1, 2"
+            ),
+            "{mode:?}: {error:?}"
+        );
+        errors.push(error.to_string());
+    }
+    assert_eq!(errors[0], errors[1]);
+    assert!(errors[0].contains("add an arm for it or a final `_ =>` arm"));
+}
+
 fn integer_result(
     program: &ProgramSpec,
     mode: ExecutionMode,

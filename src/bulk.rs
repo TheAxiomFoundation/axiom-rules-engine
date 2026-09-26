@@ -790,6 +790,19 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
                 self.eval_per_entity(expr, mask)
             }
+            // The fallback of a `match` without `_`: every row that reaches it
+            // fails with explain's error, and any failure sends the request to
+            // explain, which names the rule.
+            ScalarExpr::NoMatch { subject, patterns } => {
+                let (values, mut errors) = self.eval_scalar_expr(subject, mask)?;
+                for row in mask.without(&errors).rows() {
+                    errors.record(
+                        row,
+                        crate::engine::no_matching_arm(subject, &values.value_at(row), patterns),
+                    );
+                }
+                Ok((ScalarColumn::placeholder(len), errors))
+            }
             ScalarExpr::If {
                 condition,
                 then_expr,

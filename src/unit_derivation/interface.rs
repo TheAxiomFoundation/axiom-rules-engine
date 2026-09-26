@@ -238,6 +238,16 @@ impl<'a> PhaseTwoEngine<'a> {
                     self.collect_scalar_reduction_reasons(n, entity_id, period, visiting, reasons);
                 }
             }
+            ScalarExpr::NoMatch { subject, patterns } => {
+                self.collect_scalar_reduction_reasons(
+                    subject, entity_id, period, visiting, reasons,
+                );
+                for pattern in patterns {
+                    self.collect_scalar_reduction_reasons(
+                        pattern, entity_id, period, visiting, reasons,
+                    );
+                }
+            }
             ScalarExpr::Literal(_)
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }

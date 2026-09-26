@@ -136,6 +136,15 @@ pub enum EvalError {
         entity_id: String,
         effective_from: chrono::NaiveDate,
     },
+    #[error(
+        "no `match` arm in `{rule}` covers `{subject}` = {value} (arms: {patterns}); add an arm for it or a final `_ =>` arm"
+    )]
+    NoMatchingArm {
+        rule: String,
+        subject: String,
+        value: String,
+        patterns: String,
+    },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
     #[error("type mismatch: {0}")]
@@ -222,6 +231,64 @@ pub enum EvalError {
         second_period: String,
         second_value: String,
     },
+}
+impl EvalError {
+    /// Name the rule a `match` failure occurred in. The evaluator of the rule
+    /// that contains the `match` fills this in as the error leaves it; rules
+    /// further up the dependency chain leave it unchanged.
+    pub(crate) fn within_rule(self, rule: &str) -> Self {
+        match self {
+            Self::NoMatchingArm {
+                rule: existing,
+                subject,
+                value,
+                patterns,
+            } if existing.is_empty() => Self::NoMatchingArm {
+                rule: rule.to_string(),
+                subject,
+                value,
+                patterns,
+            },
+            other => other,
+        }
+    }
+}
+
+/// The error for a `match` subject that none of `patterns` covers.
+pub(crate) fn no_matching_arm(
+    subject: &ScalarExpr,
+    value: &ScalarValue,
+    patterns: &[ScalarExpr],
+) -> EvalError {
+    EvalError::NoMatchingArm {
+        rule: String::new(),
+        subject: describe_match_operand(subject),
+        value: describe_scalar_value(value),
+        patterns: patterns
+            .iter()
+            .map(describe_match_operand)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
+    match expr {
+        ScalarExpr::Literal(value) => describe_scalar_value(value),
+        ScalarExpr::Input(name) | ScalarExpr::Derived(name) => name.clone(),
+        ScalarExpr::InputOrElse { name, .. } => name.clone(),
+        _ => "the match subject".to_string(),
+    }
+}
+
+pub(crate) fn describe_scalar_value(value: &ScalarValue) -> String {
+    match value {
+        ScalarValue::Bool(value) => value.to_string(),
+        ScalarValue::Integer(value) => value.to_string(),
+        ScalarValue::Decimal(value) => value.to_string(),
+        ScalarValue::Text(value) => format!("{value:?}"),
+        ScalarValue::Date(value) => value.to_string(),
+    }
 }
 
 /// Validate the one unresolvable tie in the input-spell precedence contract.
@@ -471,7 +538,8 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("scalar evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated?;
+        let value = evaluated
+            .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(derived_name)))?;
         // Apply the rule's opt-in output rounding before caching, so the
         // rounded value is what both direct queries and dependent rules
         // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
@@ -523,7 +591,8 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("judgment evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated?;
+        let value = evaluated
+            .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(derived_name)))?;
         self.judgment_cache.insert(key, value);
         Ok(value)
     }
@@ -1032,6 +1101,11 @@ impl<'a> Engine<'a> {
                     self.eval_scalar_expr_inner(else_expr, entity_id, period, relation_context)
                 }
             }
+            ScalarExpr::NoMatch { subject, patterns } => {
+                let value =
+                    self.eval_scalar_expr_inner(subject, entity_id, period, relation_context)?;
+                Err(no_matching_arm(subject, &value, patterns))
+            }
             // Cross-period reductions are only defined when a batch is supplied
             // per period (the dense lifetime surface). The sparse single-period
             // interpreter has no period axis to reduce over.
@@ -1533,6 +1607,12 @@ fn collect_scalar_trace_references(
             collect_judgment_trace_references(condition, derived, parameters);
             collect_scalar_trace_references(then_expr, derived, parameters);
             collect_scalar_trace_references(else_expr, derived, parameters);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_trace_references(subject, derived, parameters);
+            for pattern in patterns {
+                collect_scalar_trace_references(pattern, derived, parameters);
+            }
         }
         ScalarExpr::OverPeriods { value, n, .. } => {
             collect_scalar_trace_references(value, derived, parameters);

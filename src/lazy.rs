@@ -223,6 +223,21 @@ impl RowErrors {
         }
     }
 
+    /// Name `rule` in each `match` failure that does not name its rule yet:
+    /// explain names the innermost rule an error leaves.
+    pub(crate) fn within_rule(self, rule: &str) -> Self {
+        if self.errors.is_empty() {
+            return self;
+        }
+        Self {
+            errors: self
+                .errors
+                .into_iter()
+                .map(|(row, error)| (row, error.within_rule(rule)))
+                .collect(),
+        }
+    }
+
     /// The lowest failing row and its error.
     pub(crate) fn first(&self) -> Option<(usize, &EvalError)> {
         self.errors.iter().next().map(|(row, error)| (*row, error))
