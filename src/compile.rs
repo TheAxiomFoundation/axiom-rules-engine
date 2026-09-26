@@ -1164,6 +1164,12 @@ fn collect_fast_blockers_from_scalar_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, then_expr, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, else_expr, blockers);
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            collect_fast_blockers_from_scalar_expr(derived_name, subject, blockers);
+            for pattern in patterns {
+                collect_fast_blockers_from_scalar_expr(derived_name, pattern, blockers);
+            }
+        }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not support over-periods reductions; use the dense lifetime execution surface"
@@ -1405,6 +1411,12 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(then_expr, dependencies, relation_dependencies);
             collect_scalar_dependencies(else_expr, dependencies, relation_dependencies);
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            collect_scalar_dependencies(subject, dependencies, relation_dependencies);
+            for pattern in patterns {
+                collect_scalar_dependencies(pattern, dependencies, relation_dependencies);
+            }
+        }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             collect_scalar_dependencies(value, dependencies, relation_dependencies);
             if let Some(n) = n {
@@ -1511,6 +1523,12 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_judgment(condition, relations);
             collect_relation_members_from_scalar(then_expr, relations);
             collect_relation_members_from_scalar(else_expr, relations);
+        }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            collect_relation_members_from_scalar(subject, relations);
+            for pattern in patterns {
+                collect_relation_members_from_scalar(pattern, relations);
+            }
         }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             collect_relation_members_from_scalar(value, relations);

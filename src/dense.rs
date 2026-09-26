@@ -422,6 +422,15 @@ enum CompiledScalarExpr {
         then_expr: Box<CompiledScalarExpr>,
         else_expr: Box<CompiledScalarExpr>,
     },
+    /// The fallback of a `match` without `_`: every row that reaches it fails
+    /// with explain's error naming the subject's value. `placeholder` is the
+    /// last arm's value, evaluated for no rows, so the column has the arms'
+    /// dtype whichever rows are live.
+    NoMatch {
+        subject: Box<CompiledScalarExpr>,
+        placeholder: Box<CompiledScalarExpr>,
+        labels: MatchLabels,
+    },
     /// Cross-period reduction, evaluated only by the lifetime executor. `value`
     /// is compiled as an ordinary per-period scalar (evaluated once per supplied
     /// period); `n` (SumTopN only) is compiled likewise and read at the
@@ -486,7 +495,42 @@ enum CompiledRelatedScalarExpr {
         then_expr: Box<CompiledRelatedScalarExpr>,
         else_expr: Box<CompiledRelatedScalarExpr>,
     },
+    /// Related-row form of [`CompiledScalarExpr::NoMatch`].
+    NoMatch {
+        subject: Box<CompiledRelatedScalarExpr>,
+        placeholder: Box<CompiledRelatedScalarExpr>,
+        labels: MatchLabels,
+    },
 }
+
+/// How a failed `match` names its rule, subject and arms, rendered at compile
+/// time from the model expressions the dense plan does not keep.
+#[derive(Clone, Debug)]
+struct MatchLabels {
+    /// The rule whose formula contains the `match`, as explain names it: by
+    /// its id when it has one. Dense inlines a related entity's rules into the
+    /// aggregation that reads them, so the name is fixed here. It is empty for
+    /// a `match` directly in a derived relation's membership predicate, which
+    /// the rule that evaluates the relation names.
+    rule: String,
+    subject: String,
+    patterns: String,
+}
+
+impl MatchLabels {
+    /// Explain's error for the row whose subject value is at `row` of `subject`.
+    fn failure(&self, subject: &DenseColumn, row: usize) -> EvalError {
+        EvalError::NoMatchingArm {
+            rule: self.rule.clone(),
+            subject: self.subject.clone(),
+            value: dense_value_label(subject, row),
+            patterns: self.patterns.clone(),
+        }
+    }
+}
+
+const NO_MATCH_OUTSIDE_IF: &str =
+    "a `match` fallback (`no_match`) that is not the `else` branch of an `if`";
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
@@ -524,6 +568,9 @@ enum CompiledSemantics {
 #[derive(Clone, Debug)]
 struct CompiledDerived {
     name: String,
+    /// How explain names the rule when an error leaves it: its id when it has
+    /// one, else its name.
+    label: String,
     semantics: CompiledSemantics,
     /// Opt-in output rounding, copied from the model `Derived` at compile time.
     /// Applied to the whole evaluated column before it is cached, so dependents
@@ -915,6 +962,14 @@ impl DenseCompiledProgram {
                     || self.scalar_reduces_over_periods(then_expr, visiting)
                     || self.scalar_reduces_over_periods(else_expr, visiting)
             }
+            CompiledScalarExpr::NoMatch {
+                subject,
+                placeholder,
+                ..
+            } => {
+                self.scalar_reduces_over_periods(subject, visiting)
+                    || self.scalar_reduces_over_periods(placeholder, visiting)
+            }
         }
     }
 
@@ -1049,6 +1104,10 @@ struct DenseCompiler<'a> {
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
     visiting: HashSet<String>,
+    /// The rules whose formulas are being compiled, innermost last. Related
+    /// expressions inline a related entity's rules, so a `match` in one names
+    /// the innermost rule here, as explain does.
+    related_rules: Vec<String>,
 }
 
 impl<'a> DenseCompiler<'a> {
@@ -1066,7 +1125,39 @@ impl<'a> DenseCompiler<'a> {
             derived: Vec::new(),
             derived_index: HashMap::new(),
             visiting: HashSet::new(),
+            related_rules: Vec::new(),
         })
+    }
+
+    /// How explain names `rule` when an error leaves it: by its id when it has
+    /// one. An empty `rule` (a derived relation's predicate) stays empty.
+    fn rule_label(&self, rule: &str) -> String {
+        self.program
+            .derived
+            .get(rule)
+            .and_then(|derived| derived.id.clone())
+            .unwrap_or_else(|| rule.to_string())
+    }
+
+    fn match_labels(
+        &self,
+        rule: &str,
+        subject: &ScalarExpr,
+        patterns: &[ScalarExpr],
+    ) -> MatchLabels {
+        MatchLabels {
+            rule: self.rule_label(rule),
+            subject: crate::engine::describe_match_operand(subject),
+            patterns: patterns
+                .iter()
+                .map(crate::engine::describe_match_operand)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+
+    fn related_rule(&self) -> String {
+        self.related_rules.last().cloned().unwrap_or_default()
     }
 
     fn finish(self) -> DenseCompiledProgram {
@@ -1123,6 +1214,7 @@ impl<'a> DenseCompiler<'a> {
         };
 
         self.visiting.insert(name.to_string());
+        self.related_rules.push(name.to_string());
         let compiled_semantics = match source_semantics {
             DerivedSemantics::Scalar(expr) => {
                 CompiledSemantics::Scalar(self.compile_scalar_expr(name, expr)?)
@@ -1131,11 +1223,13 @@ impl<'a> DenseCompiler<'a> {
                 CompiledSemantics::Judgment(self.compile_judgment_expr(name, expr)?)
             }
         };
+        self.related_rules.pop();
         self.visiting.remove(name);
 
         let index = self.derived.len();
         self.derived.push(CompiledDerived {
             name: derived.name.clone(),
+            label: self.rule_label(name),
             semantics: compiled_semantics,
             rounding: derived.rounding,
             effective_from,
@@ -1282,8 +1376,18 @@ impl<'a> DenseCompiler<'a> {
             } => Ok(CompiledScalarExpr::If {
                 condition: Box::new(self.compile_judgment_expr(derived_name, condition)?),
                 then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
-                else_expr: Box::new(self.compile_scalar_expr(derived_name, else_expr)?),
+                else_expr: Box::new(match else_expr.as_ref() {
+                    ScalarExpr::NoMatch { subject, patterns } => CompiledScalarExpr::NoMatch {
+                        subject: Box::new(self.compile_scalar_expr(derived_name, subject)?),
+                        placeholder: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
+                        labels: self.match_labels(derived_name, subject, patterns),
+                    },
+                    else_expr => self.compile_scalar_expr(derived_name, else_expr)?,
+                }),
             }),
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_IF.to_string(),
+            )),
             ScalarExpr::OverPeriods { kind, value, n } => {
                 let value = self.compile_scalar_expr(derived_name, value)?;
                 let n = n
@@ -1404,7 +1508,10 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &derived.semantics {
                     DerivedSemantics::Judgment(expr) => {
-                        self.compile_related_predicate(relation_index, expr)
+                        self.related_rules.push(name.clone());
+                        let compiled = self.compile_related_predicate(relation_index, expr);
+                        self.related_rules.pop();
+                        compiled
                     }
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "where-clause predicates cannot reference scalar derived values (`{name}`)"
@@ -1482,7 +1589,10 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &derived.semantics {
                     DerivedSemantics::Scalar(expr) => {
-                        self.compile_related_scalar(relation_index, expr)
+                        self.related_rules.push(name.clone());
+                        let compiled = self.compile_related_scalar(relation_index, expr);
+                        self.related_rules.pop();
+                        compiled
                     }
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "related scalar expressions cannot reference judgment derived values (`{name}`)"
@@ -1560,8 +1670,24 @@ impl<'a> DenseCompiler<'a> {
             } => Ok(CompiledRelatedScalarExpr::If {
                 condition: Box::new(self.compile_related_predicate(relation_index, condition)?),
                 then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
-                else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
+                else_expr: Box::new(match else_expr.as_ref() {
+                    ScalarExpr::NoMatch { subject, patterns } => {
+                        CompiledRelatedScalarExpr::NoMatch {
+                            subject: Box::new(
+                                self.compile_related_scalar(relation_index, subject)?,
+                            ),
+                            placeholder: Box::new(
+                                self.compile_related_scalar(relation_index, then_expr)?,
+                            ),
+                            labels: self.match_labels(&self.related_rule(), subject, patterns),
+                        }
+                    }
+                    else_expr => self.compile_related_scalar(relation_index, else_expr)?,
+                }),
             }),
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_IF.to_string(),
+            )),
             ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
@@ -1691,12 +1817,28 @@ impl<'a> DenseCompiler<'a> {
                     entity,
                     then_expr,
                 )?),
-                else_expr: Box::new(self.compile_current_scalar_expr(
-                    derived_name,
-                    entity,
-                    else_expr,
-                )?),
+                else_expr: Box::new(match else_expr.as_ref() {
+                    ScalarExpr::NoMatch { subject, patterns } => CompiledScalarExpr::NoMatch {
+                        subject: Box::new(self.compile_current_scalar_expr(
+                            derived_name,
+                            entity,
+                            subject,
+                        )?),
+                        placeholder: Box::new(self.compile_current_scalar_expr(
+                            derived_name,
+                            entity,
+                            then_expr,
+                        )?),
+                        labels: self.match_labels(derived_name, subject, patterns),
+                    },
+                    else_expr => {
+                        self.compile_current_scalar_expr(derived_name, entity, else_expr)?
+                    }
+                }),
             }),
+            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
+                NO_MATCH_OUTSIDE_IF.to_string(),
+            )),
             ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
                 Err(DenseCompileError::Unsupported(
                     "current-entity derived relation predicates cannot aggregate another relation"
@@ -1831,7 +1973,12 @@ impl<'a> DenseCompiler<'a> {
                     filter: None,
                 });
                 self.relation_index.insert(lookup_key, index);
-                let filter = self.compile_related_predicate(index, &derivation.predicate)?;
+                // The predicate is compiled once per relation, so a `match` in
+                // it is named by whichever rule evaluates the relation.
+                self.related_rules.push(String::new());
+                let filter = self.compile_related_predicate(index, &derivation.predicate);
+                self.related_rules.pop();
+                let filter = filter?;
                 self.relations[index].filter = Some(filter);
                 return Ok(index);
             } else {
@@ -2461,7 +2608,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         };
         let (live, mut errors) = self.commenced_rows(derived_index, mask);
         let (column, formula_errors) = self.eval_scalar_expr(expr, &live)?;
-        errors.absorb(formula_errors);
+        errors.absorb(formula_errors.within_rule(&derived.label));
         // Opt-in output rounding, applied before caching so dependents and
         // direct outputs see the same rounded values, as on the explain path.
         // Rounds in the executor's numeric mode (exact for Decimal,
@@ -2533,7 +2680,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         };
         let (live, mut errors) = self.commenced_rows(derived_index, mask);
         let (values, formula_errors) = self.eval_judgment_expr(expr, &live)?;
-        errors.absorb(formula_errors);
+        errors.absorb(formula_errors.within_rule(&derived.label));
         Ok((values, errors))
     }
 
@@ -2655,6 +2802,19 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 value,
                 predicate,
             } => self.eval_sum_related(*relation, value, predicate.as_ref(), mask),
+            CompiledScalarExpr::NoMatch {
+                subject,
+                placeholder,
+                labels,
+            } => {
+                let (placeholder, _) =
+                    self.eval_scalar_expr(placeholder, &RowMask::none(mask.len()))?;
+                let (subject, mut errors) = self.eval_scalar_expr(subject, mask)?;
+                for row in mask.without(&errors).rows() {
+                    errors.record(row, labels.failure(&subject, row));
+                }
+                Ok((placeholder, errors))
+            }
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -3125,6 +3285,19 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 to,
                 mask,
             ),
+            CompiledRelatedScalarExpr::NoMatch {
+                subject,
+                placeholder,
+                labels,
+            } => {
+                let (placeholder, _) =
+                    self.resolve_related_scalar(relation, placeholder, &RowMask::none(mask.len()))?;
+                let (subject, mut errors) = self.resolve_related_scalar(relation, subject, mask)?;
+                for related in mask.without(&errors).rows() {
+                    errors.record(related, labels.failure(&subject, related));
+                }
+                Ok((placeholder, errors))
+            }
             CompiledRelatedScalarExpr::If {
                 condition,
                 then_expr,
@@ -3299,7 +3472,8 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 EvalError::ExpectedScalar(derived.name.clone()),
             ));
         };
-        let (column, mut errors) = self.eval_scalar(expr, mask)?;
+        let (column, errors) = self.eval_scalar(expr, mask)?;
+        let mut errors = errors.within_rule(&derived.label);
         let column = match derived.rounding {
             Some(rounding) => {
                 round_dense_column::<N>(column, rounding, &mask.without(&errors), &mut errors)
@@ -3335,7 +3509,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let program = self.program;
         let derived = &program.derived[derived_index];
         match &derived.semantics {
-            CompiledSemantics::Judgment(expr) => self.eval_judgment(expr, mask),
+            CompiledSemantics::Judgment(expr) => self
+                .eval_judgment(expr, mask)
+                .map(|(values, errors)| (values, errors.within_rule(&derived.label))),
             CompiledSemantics::Scalar(_) => {
                 let (_, errors) = fail_numeric::<N>(
                     self.row_count,
@@ -3408,6 +3584,18 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledScalarExpr::Floor(value) => {
                 eval_unary::<N, _, _>(self, value, mask, |value| value.floor())
+            }
+            CompiledScalarExpr::NoMatch {
+                subject,
+                placeholder,
+                labels,
+            } => {
+                let (placeholder, _) = self.eval_scalar(placeholder, &RowMask::none(mask.len()))?;
+                let (subject, mut errors) = self.eval_scalar(subject, mask)?;
+                for row in mask.without(&errors).rows() {
+                    errors.record(row, labels.failure(&subject, row));
+                }
+                Ok((placeholder, errors))
             }
             CompiledScalarExpr::If {
                 condition,
@@ -3861,6 +4049,11 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
             else_expr,
             ..
         } => nested_over_periods_kind(then_expr).or_else(|| nested_over_periods_kind(else_expr)),
+        CompiledScalarExpr::NoMatch {
+            subject,
+            placeholder,
+            ..
+        } => nested_over_periods_kind(subject).or_else(|| nested_over_periods_kind(placeholder)),
     }
 }
 

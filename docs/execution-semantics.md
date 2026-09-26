@@ -22,7 +22,10 @@ output's formula is evaluated for that entity and period as follows.
 
 - **Conditionals are lazy.** `if c then a else b` evaluates `c` first. When `c`
   holds, only `a` is evaluated; when `c` does not hold or is undetermined, only
-  `b` is evaluated. `match` lowers to nested `if` and inherits this.
+  `b` is evaluated. `match` lowers to nested `if` and inherits this. A
+  `match` without `_` ends its chain in `no_match`, which fails the row with
+  the subject's value when no arm covers it; a row whose conditions never
+  reach the `match` never reaches that error.
 - **Boolean operators short-circuit.** `and(x1, ..., xn)` evaluates its items
   left to right and stops at the first `not_holds`; it is `undetermined` if an
   evaluated item was undetermined and none failed, else `holds`. `or` stops at

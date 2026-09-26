@@ -1085,6 +1085,15 @@ pub enum ScalarExprSpec {
         then_expr: Box<ScalarExprSpec>,
         else_expr: Box<ScalarExprSpec>,
     },
+    /// The fallback of a `match` without a `_ =>` arm, reached only when the
+    /// subject equals none of `patterns`; evaluating it is an error, never a
+    /// value. It carries the subject and every listed pattern so evaluators
+    /// that compute both branches of a conditional can tell which rows reach
+    /// it.
+    NoMatch {
+        subject: Box<ScalarExprSpec>,
+        patterns: Vec<ScalarExprSpec>,
+    },
     /// Reduction over an entity's own period axis (lifetime execution only).
     /// `n` is present only for the `sum_top_n` reduction. Expression-level,
     /// additive to the serialized surface — no artifact-format-version bump.
@@ -1230,6 +1239,13 @@ impl ScalarExprSpec {
                 condition: Box::new(condition.to_model()?),
                 then_expr: Box::new(then_expr.to_model()?),
                 else_expr: Box::new(else_expr.to_model()?),
+            }),
+            Self::NoMatch { subject, patterns } => Ok(ScalarExpr::NoMatch {
+                subject: Box::new(subject.to_model()?),
+                patterns: patterns
+                    .iter()
+                    .map(ScalarExprSpec::to_model)
+                    .collect::<Result<_, _>>()?,
             }),
             Self::OverPeriods { over, value, n } => Ok(ScalarExpr::OverPeriods {
                 kind: over.to_model(),
