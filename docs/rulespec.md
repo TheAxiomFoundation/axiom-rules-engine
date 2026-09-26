@@ -115,8 +115,10 @@ orientation that executable `count_related`, `sum_related`, and membership
 nodes use. A membership node is executable only inside a derived relation's
 predicate, where it reads the two IDs the relation binds. As at run time, that
 binding carries through comparisons, `if` conditions and branches, and
-arithmetic, but not into a nested aggregation's `where` clause; a membership
-node outside that scope cannot evaluate and implies no orientation. If the
+arithmetic, but not into a nested aggregation's `where` clause, a `match`
+fallback's pattern labels, or an over-periods reduction. The reference
+evaluator rejects a membership node outside that scope, so it implies no
+orientation. If the
 derived orientation disagrees with the declaration, compilation emits
 `warning[relation_orientation_mismatch]` naming both orders and a citing rule.
 The serialized declaration remains verbatim for source fidelity.

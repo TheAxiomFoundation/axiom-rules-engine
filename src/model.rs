@@ -1045,16 +1045,14 @@ fn collect_scalar_relation_usages(
             operand(then_expr, usages);
             operand(else_expr, usages);
         }
-        ScalarExpr::NoMatch { subject, patterns } => {
-            operand(subject, usages);
-            for pattern in patterns {
-                operand(pattern, usages);
-            }
-        }
+        // Patterns only label the no-match error; no evaluator runs them.
+        ScalarExpr::NoMatch { subject, .. } => operand(subject, usages),
+        // Lifetime execution reduces these operands on the rule's own row, but
+        // no evaluator runs a reduction inside a derived relation's predicate
+        // (explain rejects it everywhere, dense inside related expressions).
         ScalarExpr::OverPeriods { value, n, .. } => {
-            operand(value, usages);
-            if let Some(n) = n {
-                operand(n, usages);
+            for child in std::iter::once(value).chain(n) {
+                collect_scalar_relation_usages(program, child, entity, None, citing_rule, usages);
             }
         }
     }
@@ -1817,18 +1815,6 @@ mod relation_usage_tests {
                 "no_match subject",
                 json!({"kind": "no_match", "subject": operand, "patterns": [int(2)]}),
             ),
-            (
-                "no_match pattern",
-                json!({"kind": "no_match", "subject": int(2), "patterns": [operand]}),
-            ),
-            (
-                "over_periods value",
-                json!({"kind": "over_periods", "over": "sum", "value": operand}),
-            ),
-            (
-                "over_periods n",
-                json!({"kind": "over_periods", "over": "sum_top_n", "value": int(1), "n": operand}),
-            ),
         ]
     }
 
@@ -1955,6 +1941,46 @@ mod relation_usage_tests {
             "expr": member(0, 1)
         }]);
         assert_eq!(head_usages(always, judgment_rule), [], "judgment rule");
+    }
+
+    #[test]
+    fn membership_in_operands_no_predicate_evaluates_records_no_usage() {
+        // `no_match` patterns only label an error, and no evaluator runs a
+        // reduction inside a predicate. Slots (0, 1) under the predicate's
+        // context would record `[Household, Person]` if either leaked.
+        let operand = indicator(member(0, 1));
+        let pattern = json!({"kind": "no_match", "subject": int(0), "patterns": [operand]});
+        let unselected = json!({
+            "kind": "if", "condition": equals_one(int(1)), "then_expr": int(1), "else_expr": pattern
+        });
+        assert_eq!(head_usages(equals_one(unselected), json!([])), []);
+        for reduction in [
+            json!({"kind": "over_periods", "over": "sum", "value": operand}),
+            json!({"kind": "over_periods", "over": "sum_top_n", "value": int(1), "n": operand}),
+        ] {
+            assert_eq!(head_usages(equals_one(reduction), json!([])), []);
+        }
+        // A rule-level reduction still runs its aggregations in lifetime mode.
+        let spec: ProgramSpec = serde_json::from_value(json!({
+            "relations": [{"name": "member", "arity": 2, "slot_entities": ["Person", "Household"]}],
+            "derived": [{
+                "name": "members_over_time",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {"kind": "over_periods", "over": "sum", "value": {
+                    "kind": "count_related", "relation": "member", "current_slot": 1, "related_slot": 0
+                }}
+            }]
+        }))
+        .expect("program spec parses");
+        let program = spec.to_program().expect("program builds");
+        assert!(
+            relation_usage_records(&program)
+                .iter()
+                .any(|usage| usage.relation == "member"),
+            "aggregations under a rule-level reduction are executable uses"
+        );
     }
 
     #[test]
