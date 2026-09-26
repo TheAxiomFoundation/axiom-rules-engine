@@ -222,7 +222,18 @@ fn dense(
     households: &[Household],
     outputs: &[&str],
 ) -> Result<DenseExecutionResult, EvalError> {
-    let program = DenseCompiledProgram::from_artifact(artifact, Some("Household"))
+    dense_for("Household", artifact, households, outputs)
+}
+
+/// Dense execution with `root` as the row entity; a derived-relation entity
+/// such as a SNAP unit is keyed by its household, as on the explain path.
+fn dense_for(
+    root: &str,
+    artifact: &CompiledProgramArtifact,
+    households: &[Household],
+    outputs: &[&str],
+) -> Result<DenseExecutionResult, EvalError> {
+    let program = DenseCompiledProgram::from_artifact(artifact, Some(root))
         .expect("dense compilation succeeds");
     let mut relations = HashMap::new();
     if !program.relations().is_empty() {
@@ -273,6 +284,32 @@ fn decimal_of(value: &ScalarValueSpec) -> Option<Decimal> {
 /// Explain answers every row; fast answers the same, on its own path, with
 /// the same value kinds; dense holds explain's values.
 fn assert_all_modes_agree(rulespec: &str, households: &[Household], outputs: &[&str]) {
+    assert_all_modes_agree_for("Household", rulespec, households, outputs);
+}
+
+/// A positive control: once a row does reach the failing branch, operand or
+/// member, every mode fails.
+fn assert_all_modes_fail_for(
+    root: &str,
+    rulespec: &str,
+    households: &[Household],
+    outputs: &[&str],
+) {
+    let artifact = compile(rulespec);
+    let explain = run(ExecutionMode::Explain, &artifact, households, outputs, &[])
+        .expect_err("explain fails once a row reaches the error");
+    let fast = run(ExecutionMode::Fast, &artifact, households, outputs, &[])
+        .expect_err("fast fails as explain does");
+    assert_eq!(fast.to_string(), explain.to_string());
+    dense_for(root, &artifact, households, outputs).expect_err("dense fails as explain does");
+}
+
+fn assert_all_modes_agree_for(
+    root: &str,
+    rulespec: &str,
+    households: &[Household],
+    outputs: &[&str],
+) {
     let artifact = compile(rulespec);
     let explain = run(ExecutionMode::Explain, &artifact, households, outputs, &[])
         .expect("explain answers every row");
@@ -282,7 +319,7 @@ fn assert_all_modes_agree(rulespec: &str, households: &[Household], outputs: &[&
     assert_eq!(fast.metadata.fallback_reason, None);
     assert_eq!(without_trace(&fast), without_trace(&explain));
 
-    let dense = dense(&artifact, households, outputs).expect("dense answers every row");
+    let dense = dense_for(root, &artifact, households, outputs).expect("dense answers every row");
     for (row, result) in explain.results.iter().enumerate() {
         for output in outputs {
             let explain_value = &result.outputs[*output];
@@ -788,4 +825,233 @@ fn a_cached_rule_keeps_its_dtype_whichever_output_reaches_it_first() {
             float_in_decimal.outputs["passthrough"]
         );
     }
+}
+
+fn rule_on(entity: &str, name: &str, dtype: &str, formula: &str) -> String {
+    rule(name, dtype, formula).replace("entity: Household", &format!("entity: {entity}"))
+}
+
+fn derived_relation(name: &str, source: &str, entity: &str, alias: &str, formula: &str) -> String {
+    format!(
+        "  - name: {name}\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: {source}\n      entity: {entity}\n      member_relation: {alias}\n      slot_entities: [Person, Household]\n    versions:\n      - effective_from: '2026-01-01'\n        formula: {formula}\n"
+    )
+}
+
+fn members(inputs: &[Vec<(&'static str, V)>]) -> Vec<Vec<(&'static str, V)>> {
+    inputs.to_vec()
+}
+
+#[test]
+fn a_derived_relation_filter_runs_only_for_units_that_aggregate() {
+    // The membership filter divides by hours, which are zero for the only
+    // member of a unit whose aggregation is on an untaken branch.
+    let rulespec = module(&format!(
+        "{MEMBERS}{}{}{}{}",
+        person_rule("eligible", "Judgment", "income / hours > 10"),
+        derived_relation(
+            "snap_unit",
+            "member_of_household",
+            "SnapUnit",
+            "members",
+            "member_of_household and eligible"
+        ),
+        rule_on("SnapUnit", "size", "Integer", "len(members)"),
+        rule_on(
+            "SnapUnit",
+            "guarded_size",
+            "Integer",
+            "if active: size\nelse: 0"
+        ),
+    ));
+    let unit = |active, member_rows: &[Vec<(&'static str, V)>]| Household {
+        inputs: vec![("active", V::B(active))],
+        members: members(member_rows),
+    };
+    let zero_hours = vec![("income", V::I(100)), ("hours", V::I(0))];
+    let rows = [
+        unit(false, &[zero_hours.clone()]),
+        unit(
+            true,
+            &[
+                vec![("income", V::I(100)), ("hours", V::I(2))],
+                vec![("income", V::I(100)), ("hours", V::I(20))],
+            ],
+        ),
+    ];
+    assert_all_modes_agree_for("SnapUnit", &rulespec, &rows, &["guarded_size"]);
+    let live = [unit(true, &[zero_hours]), rows[1].clone()];
+    assert_all_modes_fail_for("SnapUnit", &rulespec, &live, &["guarded_size"]);
+}
+
+#[test]
+fn a_composed_relation_filters_only_the_members_its_parent_keeps() {
+    // The child filter divides by age, which is zero only for a member the
+    // parent filter drops.
+    let rulespec = module(&format!(
+        "{MEMBERS}{}{}{}{}{}",
+        person_rule("eligible", "Judgment", "has_ssn"),
+        person_rule("adult", "Judgment", "100 / age < 10"),
+        derived_relation(
+            "snap_unit",
+            "member_of_household",
+            "SnapUnit",
+            "members",
+            "eligible"
+        ),
+        derived_relation(
+            "adult_snap_unit",
+            "snap_unit",
+            "AdultSnapUnit",
+            "adult_members",
+            "adult"
+        ),
+        rule_on(
+            "AdultSnapUnit",
+            "adult_size",
+            "Integer",
+            "len(adult_members)"
+        ),
+    ));
+    let person = |ssn, age| vec![("has_ssn", V::B(ssn)), ("age", V::I(age))];
+    let rows = [
+        Household {
+            inputs: Vec::new(),
+            members: vec![person(false, 0), person(true, 20)],
+        },
+        Household {
+            inputs: Vec::new(),
+            members: vec![person(true, 30)],
+        },
+    ];
+    assert_all_modes_agree_for("AdultSnapUnit", &rulespec, &rows, &["adult_size"]);
+    let mut live = rows.clone();
+    live[0].members[0] = person(true, 0);
+    assert_all_modes_fail_for("AdultSnapUnit", &rulespec, &live, &["adult_size"]);
+}
+
+#[test]
+fn a_household_judgment_after_a_deciding_and_item_is_never_evaluated() {
+    // `accepts` divides by the household size, which is zero only for
+    // households whose members the earlier `and` items already excluded.
+    let rulespec = module(&format!(
+        "{MEMBERS}{}{}{}{}",
+        rule("accepts", "Judgment", "100 / household_size > 1"),
+        person_rule("eligible", "Judgment", "has_ssn"),
+        derived_relation(
+            "snap_unit",
+            "member_of_household",
+            "SnapUnit",
+            "members",
+            "member_of_household and eligible and accepts"
+        ),
+        rule_on("SnapUnit", "size", "Integer", "len(members)"),
+    ));
+    let household = |size, ssns: &[bool]| Household {
+        inputs: vec![("household_size", V::I(size))],
+        members: ssns
+            .iter()
+            .map(|ssn| vec![("has_ssn", V::B(*ssn))])
+            .collect(),
+    };
+    let rows = [
+        household(0, &[false]),
+        household(2, &[true, false]),
+        household(0, &[]),
+    ];
+    assert_all_modes_agree_for("SnapUnit", &rulespec, &rows, &["size"]);
+    let live = [household(0, &[true]), rows[1].clone(), rows[2].clone()];
+    assert_all_modes_fail_for("SnapUnit", &rulespec, &live, &["size"]);
+}
+
+#[test]
+fn a_rule_first_reached_for_some_rows_keeps_its_dtype_when_extended() {
+    // As above, but the first touch computes the pass-through for one live
+    // row rather than none.
+    let rulespec = module(&format!(
+        "{}{}",
+        rule("passthrough", "Money", "x"),
+        rule("a", "Money", "if flag: passthrough\nelse: 0"),
+    ));
+    let program = DenseCompiledProgram::from_artifact(&compile(&rulespec), Some("Household"))
+        .expect("dense compilation succeeds");
+    let batch = || DenseBatchSpec {
+        row_count: 2,
+        inputs: HashMap::from([
+            (
+                "x".to_string(),
+                DenseColumn::Decimal(vec![Decimal::ONE, Decimal::TWO]),
+            ),
+            ("flag".to_string(), DenseColumn::Bool(vec![true, false])),
+        ]),
+        relations: HashMap::new(),
+    };
+    for outputs in [["a", "passthrough"], ["passthrough", "a"]] {
+        let outputs = outputs.map(str::to_string);
+        let result = program
+            .execute_f64(
+                &period().to_model().expect("period converts"),
+                batch(),
+                &outputs,
+            )
+            .expect("f64 execution succeeds");
+        assert!(
+            matches!(
+                &result.outputs["passthrough"],
+                DenseOutputValue::Scalar(DenseColumn::Decimal(values))
+                    if values == &[Decimal::ONE, Decimal::TWO]
+            ),
+            "{outputs:?}: {:?}",
+            result.outputs["passthrough"]
+        );
+    }
+}
+
+#[test]
+fn lifetime_checks_see_only_the_rows_that_reach_them() {
+    // Row 0 takes the else branch: its top-N count (99) is out of range and
+    // its bonus varies by period, but neither is read. Row 1 takes the top-N
+    // branch with a valid count and a constant bonus.
+    let rulespec = "format: rulespec/v1\nrules:\n  - name: total\n    kind: derived\n    entity: Worker\n    dtype: Money\n    period: Year\n    versions:\n      - effective_from: '1960-01-01'\n        formula: |-\n          if use_top: sum_top_n_over_periods(earnings, n) + bonus\n          else: sum_over_periods(earnings)\n";
+    let program = DenseCompiledProgram::from_artifact(&compile(rulespec), Some("Worker"))
+        .expect("dense compilation succeeds");
+    let year = |y| Period {
+        kind: PeriodKind::TaxYear,
+        start: chrono::NaiveDate::from_ymd_opt(y, 1, 1).expect("date"),
+        end: chrono::NaiveDate::from_ymd_opt(y, 12, 31).expect("date"),
+    };
+    let periods = [year(2001), year(2002), year(2003)];
+    let batches = |use_top: [bool; 2]| {
+        [
+            ([10, 100], [1, 5]),
+            ([20, 300], [2, 5]),
+            ([30, 200], [3, 5]),
+        ]
+        .into_iter()
+        .map(|(earnings, bonus): ([i64; 2], [i64; 2])| DenseBatchSpec {
+            row_count: 2,
+            inputs: HashMap::from([
+                ("use_top".to_string(), DenseColumn::Bool(use_top.to_vec())),
+                (
+                    "earnings".to_string(),
+                    DenseColumn::Integer(earnings.to_vec()),
+                ),
+                ("n".to_string(), DenseColumn::Integer(vec![99, 2])),
+                ("bonus".to_string(), DenseColumn::Integer(bonus.to_vec())),
+            ]),
+            relations: HashMap::new(),
+        })
+        .collect::<Vec<_>>()
+    };
+    let outputs = ["total".to_string()];
+    let result = program
+        .execute_lifetime(&periods, batches([false, true]), &outputs)
+        .expect("row 0 never reads its count or bonus");
+    assert!(matches!(
+        &result.outputs["total"],
+        DenseOutputValue::Scalar(DenseColumn::Decimal(values))
+            if values == &[Decimal::from(60), Decimal::from(505)]
+    ));
+    program
+        .execute_lifetime(&periods, batches([true, true]), &outputs)
+        .expect_err("row 0 reads its out-of-range count once it takes that branch");
 }
