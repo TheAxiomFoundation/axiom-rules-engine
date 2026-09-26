@@ -42,6 +42,18 @@ output's formula is evaluated for that entity and period as follows.
   for the referencing entity (or, inside a relation predicate, the entity its
   declared entity kind selects) when evaluation reaches the reference, and not
   otherwise.
+- **A value keeps the kind its expression computes.** A rule's declared
+  `dtype` is reported beside its value but never converts it: `count` yields
+  an integer even in a rule declared `decimal`, and `sum`, arithmetic,
+  `max`/`min` and `ceil`/`floor` yield decimals even in a rule declared
+  `integer`. An `if` yields the kind of the branch each row takes. Output
+  rounding applies to decimal values only.
+- **`relation_member` needs a derived relation.** It tests whether the current
+  and related entity of the derived relation whose predicate is being
+  evaluated appear together, in the slots it names, in the named relation.
+  That predicate is the only place that supplies them. Anywhere else, including a `count`/`sum` `where` clause
+  and a rule the predicate references, `relation_member` is a type error of
+  the evaluation that reaches it.
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that

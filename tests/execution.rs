@@ -4877,3 +4877,818 @@ rules:
         serde_json::json!({"kind": "integer", "value": 259})
     );
 }
+
+// ===========================================================================
+// Fast/explain parity regressions from the PR #195 review (2026-09-25)
+//
+// An independent review of #195 found two requests on main at b16ced0 where
+// fast mode answered and explain did not agree: a `relation_member` judgment
+// inside a `where` clause (explain errors, fast counted every related entity),
+// and a `count` in a decimal rule (explain reports an integer value, fast
+// converted it to a decimal). Both still reproduced at 2840b57 and stopped at
+// 5a29e03 (#201), which runs every relation aggregation on the reference
+// interpreter and keeps each row's value in the kind explain computes. The
+// tests below pin explain's semantics for both and for their neighbours, and
+// assert that fast mode agrees without falling back.
+//
+// Requests are written as the JSON the CLI reads, so each one can be replayed
+// with `axiom-rules-engine < request.json` after setting `mode`.
+// ===========================================================================
+
+/// A request over `dataset`'s relations and the inputs `program` reads. The
+/// datasets below are shared across programs, and a request may not supply an
+/// input its program never reads.
+fn review_request(
+    program: serde_json::Value,
+    dataset: serde_json::Value,
+    queries: serde_json::Value,
+) -> serde_json::Value {
+    fn read_inputs(value: &serde_json::Value, names: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let (Some(kind), Some(name)) = (object.get("kind"), object.get("name"))
+                    && (kind == "input" || kind == "input_or_else")
+                {
+                    names.insert(name.as_str().expect("input name").to_string());
+                }
+                object.values().for_each(|value| read_inputs(value, names));
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().for_each(|value| read_inputs(value, names))
+            }
+            _ => {}
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    read_inputs(&program, &mut names);
+    let mut dataset = dataset;
+    if let Some(inputs) = dataset["inputs"].as_array_mut() {
+        inputs.retain(|input| names.contains(input["name"].as_str().expect("input name")));
+    }
+    serde_json::json!({ "program": program, "dataset": dataset, "queries": queries })
+}
+
+fn review_period() -> serde_json::Value {
+    serde_json::json!({ "period_kind": "month", "start": "2026-01-01", "end": "2026-01-31" })
+}
+
+fn review_interval() -> serde_json::Value {
+    serde_json::json!({ "start": "2026-01-01", "end": "2026-01-31" })
+}
+
+fn review_query(entity_id: &str, outputs: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "entity_id": entity_id, "period": review_period(), "outputs": outputs })
+}
+
+fn review_rule(
+    name: &str,
+    entity: &str,
+    dtype: &str,
+    expr: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "dtype": dtype,
+        "unit": null,
+        "semantics": "scalar",
+        "expr": expr,
+    })
+}
+
+fn review_judgment_rule(name: &str, entity: &str, expr: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "dtype": "judgment",
+        "unit": null,
+        "semantics": "judgment",
+        "expr": expr,
+    })
+}
+
+fn review_input(
+    name: &str,
+    entity: &str,
+    entity_id: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "entity_id": entity_id,
+        "interval": review_interval(),
+        "value": value,
+    })
+}
+
+fn review_tuple(relation: &str, tuple: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "name": relation, "tuple": tuple, "interval": review_interval() })
+}
+
+fn review_decimal(value: &str) -> serde_json::Value {
+    serde_json::json!({ "kind": "decimal", "value": value })
+}
+
+fn review_integer(value: i64) -> serde_json::Value {
+    serde_json::json!({ "kind": "integer", "value": value })
+}
+
+fn review_literal(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "kind": "literal", "value": value })
+}
+
+fn review_comparison(
+    left: serde_json::Value,
+    op: &str,
+    right: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({ "kind": "comparison", "left": left, "op": op, "right": right })
+}
+
+/// `member(household, person)`: the household is slot 0, the person slot 1.
+fn review_member_predicate() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "relation_member",
+        "relation": "member",
+        "current_slot": 0,
+        "related_slot": 1,
+    })
+}
+
+fn review_count_members(where_clause: Option<serde_json::Value>) -> serde_json::Value {
+    let mut count = serde_json::json!({
+        "kind": "count_related",
+        "relation": "member",
+        "current_slot": 0,
+        "related_slot": 1,
+    });
+    if let Some(where_clause) = where_clause {
+        count["where"] = where_clause;
+    }
+    count
+}
+
+/// A judgment that holds (`1 == 1`) or not (`1 == 2`) without reading data.
+fn review_constant_judgment(holds: bool) -> serde_json::Value {
+    review_comparison(
+        review_literal(review_integer(1)),
+        "eq",
+        review_literal(review_integer(if holds { 1 } else { 2 })),
+    )
+}
+
+fn review_mode_request(mode: ExecutionMode, request: &serde_json::Value) -> ExecutionRequest {
+    let mut request = request.clone();
+    request["mode"] = serde_json::to_value(&mode).expect("mode serialises");
+    serde_json::from_value(request).expect("request JSON parses")
+}
+
+/// Explain and fast agree on `request`: when explain answers, fast answers
+/// the same results (value kinds included) on its own path, without falling
+/// back; when explain fails, fast fails with the same error. Returns explain's
+/// results without traces, or its error message.
+fn assert_fast_agrees_with_explain(
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let explain = execute_request(review_mode_request(ExecutionMode::Explain, request));
+    let fast = execute_request(review_mode_request(ExecutionMode::Fast, request));
+    match (explain, fast) {
+        (Ok(explain), Ok(fast)) => {
+            assert_eq!(
+                (&fast.metadata.actual_mode, &fast.metadata.fallback_reason),
+                (&ExecutionMode::Fast, &None),
+                "fast mode fell back to explain on {request}"
+            );
+            let explain = results_without_trace(&explain);
+            assert_eq!(
+                results_without_trace(&fast),
+                explain,
+                "fast and explain differ on {request}"
+            );
+            Ok(explain)
+        }
+        (Err(explain), Err(fast)) => {
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "fast and explain fail differently on {request}"
+            );
+            Err(explain.to_string())
+        }
+        (Ok(explain), Err(fast)) => panic!(
+            "explain answered {} but fast failed with `{fast}` on {request}",
+            results_without_trace(&explain)
+        ),
+        (Err(explain), Ok(fast)) => panic!(
+            "explain failed with `{explain}` but fast answered {} on {request}",
+            results_without_trace(&fast)
+        ),
+    }
+}
+
+/// Three members, all adults with income; enough for every where clause below
+/// to reach a related entity.
+fn review_members_dataset() -> serde_json::Value {
+    let people = [("p1", "100"), ("p2", "0"), ("p3", "50")];
+    serde_json::json!({
+        "inputs": people
+            .iter()
+            .map(|(person, income)| review_input("income", "Person", person, review_decimal(income)))
+            .collect::<Vec<_>>(),
+        "relations": people
+            .iter()
+            .map(|(person, _)| review_tuple("member", &["h1", person]))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn review_member_relations() -> serde_json::Value {
+    serde_json::json!([{ "name": "member", "arity": 2 }])
+}
+
+const RELATION_PREDICATE_OUTSIDE_DERIVED_RELATION: &str =
+    "type mismatch: relation predicate `member` can only be evaluated inside a derived relation";
+
+/// Explain evaluates a `count`/`sum` `where` clause once per related entity
+/// with no relation context (engine.rs `ScalarExpr::CountRelated` and
+/// `SumRelated` call `eval_judgment_expr`), and `JudgmentExpr::RelationMember`
+/// fails without one: only a derived relation's predicate supplies it. So a
+/// `relation_member` a `where` clause reaches is an error in explain, and fast
+/// mode must fail the same way. At b16ced0 fast answered the first request
+/// with a count of 3.
+#[test]
+fn relation_member_in_an_aggregation_where_clause_fails_in_fast_as_in_explain() {
+    let member = review_member_predicate();
+    let count_where = |where_clause: serde_json::Value| review_count_members(Some(where_clause));
+    let income_above_zero = review_comparison(
+        serde_json::json!({ "kind": "input", "name": "income" }),
+        "gt",
+        review_literal(review_decimal("0")),
+    );
+    let household = |expr: serde_json::Value| review_rule("n", "Household", "integer", expr);
+    let cases = vec![
+        // The reviewer's probe (t7.py, "PRE relation_member in where clause").
+        (
+            "count where relation_member",
+            vec![household(count_where(member.clone()))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "sum where relation_member",
+            vec![review_rule(
+                "n",
+                "Household",
+                "decimal",
+                serde_json::json!({
+                    "kind": "sum_related",
+                    "relation": "member",
+                    "current_slot": 0,
+                    "related_slot": 1,
+                    "value": { "kind": "input", "name": "income" },
+                    "where": member.clone(),
+                }),
+            )],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member after a held `and` item",
+            vec![household(count_where(serde_json::json!({
+                "kind": "and",
+                "items": [income_above_zero.clone(), member.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member after an unheld `or` item",
+            vec![household(count_where(serde_json::json!({
+                "kind": "or",
+                "items": [review_constant_judgment(false), member.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "negated relation_member",
+            vec![household(count_where(
+                serde_json::json!({ "kind": "not", "item": member.clone() }),
+            ))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member inside exactly_one",
+            vec![household(count_where(serde_json::json!({
+                "kind": "exactly_one",
+                "items": [member.clone(), income_above_zero.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member through a person judgment rule",
+            vec![
+                review_judgment_rule("is_member", "Person", member.clone()),
+                household(count_where(serde_json::json!({
+                    "kind": "derived",
+                    "name": "is_member",
+                }))),
+            ],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member under a household judgment",
+            vec![review_judgment_rule(
+                "has_members",
+                "Household",
+                review_comparison(
+                    count_where(member.clone()),
+                    "gt",
+                    review_literal(review_integer(0)),
+                ),
+            )],
+            vec![review_query("h1", &["has_members"])],
+        ),
+        (
+            "relation_member queried directly",
+            vec![review_judgment_rule("is_member", "Person", member.clone())],
+            vec![review_query("p1", &["is_member"])],
+        ),
+        (
+            // Only the second row reaches the where clause (h2 has no
+            // members), so explain fails there and fast must fail too.
+            "one row of a batch reaches it",
+            vec![household(count_where(member.clone()))],
+            vec![
+                review_query("h2", &["n"]),
+                review_query("h1", &["n"]),
+                review_query("h2", &["n"]),
+            ],
+        ),
+    ];
+    for (label, derived, queries) in cases {
+        let request = review_request(
+            serde_json::json!({ "relations": review_member_relations(), "derived": derived }),
+            review_members_dataset(),
+            serde_json::Value::Array(queries),
+        );
+        let error = assert_fast_agrees_with_explain(&request).expect_err(&format!(
+            "{label}: explain must reject the relation predicate"
+        ));
+        assert_eq!(
+            error, RELATION_PREDICATE_OUTSIDE_DERIVED_RELATION,
+            "{label}"
+        );
+    }
+}
+
+/// The error is a property of evaluation, not of the program: a `where` clause
+/// explain never evaluates (no related entities, a decided `or`, an `if` branch
+/// no row selects) cannot fail, and fast mode answers those requests itself.
+#[test]
+fn relation_member_a_where_clause_never_reaches_fails_neither_mode() {
+    let member = review_member_predicate();
+    let cases = vec![
+        (
+            "no related entities",
+            review_count_members(Some(member.clone())),
+            vec![
+                review_query("h2", &["n"]),
+                review_query("h3", &["n"]),
+                review_query("h2", &["n"]),
+            ],
+            vec![0, 0, 0],
+        ),
+        (
+            "an `or` decided before it",
+            review_count_members(Some(serde_json::json!({
+                "kind": "or",
+                "items": [review_constant_judgment(true), member.clone()],
+            }))),
+            vec![review_query("h1", &["n"]), review_query("h2", &["n"])],
+            vec![3, 0],
+        ),
+        (
+            "an `if` branch no row selects",
+            serde_json::json!({
+                "kind": "if",
+                "condition": review_constant_judgment(false),
+                "then_expr": review_count_members(Some(member.clone())),
+                "else_expr": review_count_members(None),
+            }),
+            vec![review_query("h1", &["n"]), review_query("h2", &["n"])],
+            vec![3, 0],
+        ),
+    ];
+    for (label, expr, queries, expected) in cases {
+        let request = review_request(
+            serde_json::json!({
+                "relations": review_member_relations(),
+                "derived": [review_rule("n", "Household", "integer", expr)],
+            }),
+            review_members_dataset(),
+            serde_json::Value::Array(queries),
+        );
+        let results = assert_fast_agrees_with_explain(&request)
+            .unwrap_or_else(|error| panic!("{label}: explain failed: {error}"));
+        let values = results
+            .as_array()
+            .expect("results are an array")
+            .iter()
+            .map(|result| result["outputs"]["n"]["value"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            expected.into_iter().map(review_integer).collect::<Vec<_>>(),
+            "{label}"
+        );
+    }
+}
+
+/// Inside a derived relation's predicate `relation_member` has its context and
+/// is evaluated: `adult_resident` keeps the members that are also residents
+/// and adults. Fast mode answers counts and sums over it, under integer,
+/// decimal and judgment rules, exactly as explain does.
+#[test]
+fn relation_member_in_a_derived_relation_predicate_is_answered_natively_like_explain() {
+    let adult_resident = |slot_entities: bool| {
+        let mut relation = serde_json::json!({
+            "name": "adult_resident",
+            "arity": 2,
+            "derivation": {
+                "source_relation": "member",
+                "current_slot": 0,
+                "related_slot": 1,
+                "predicate": {
+                    "kind": "and",
+                    "items": [
+                        {
+                            "kind": "relation_member",
+                            "relation": "resident",
+                            "current_slot": 0,
+                            "related_slot": 1,
+                        },
+                        { "kind": "derived", "name": "is_adult" },
+                    ],
+                },
+            },
+        });
+        if slot_entities {
+            relation["slot_entities"] = serde_json::json!(["Household", "Person"]);
+            relation["derivation"]["slot_entities"] = serde_json::json!(["Household", "Person"]);
+        }
+        relation
+    };
+    let over_adult_residents = |kind: &str| {
+        let mut expr = serde_json::json!({
+            "kind": kind,
+            "relation": "adult_resident",
+            "current_slot": 0,
+            "related_slot": 1,
+        });
+        if kind == "sum_related" {
+            expr["value"] = serde_json::json!({ "kind": "input", "name": "income" });
+        }
+        expr
+    };
+    let derived = serde_json::json!([
+        review_judgment_rule(
+            "is_adult",
+            "Person",
+            review_comparison(
+                serde_json::json!({
+                    "kind": "input_or_else",
+                    "name": "age",
+                    "default": review_integer(0),
+                }),
+                "gte",
+                review_literal(review_integer(18)),
+            ),
+        ),
+        review_rule(
+            "n",
+            "Household",
+            "integer",
+            over_adult_residents("count_related")
+        ),
+        review_rule(
+            "n_decimal",
+            "Household",
+            "decimal",
+            over_adult_residents("count_related")
+        ),
+        review_rule(
+            "income",
+            "Household",
+            "decimal",
+            over_adult_residents("sum_related")
+        ),
+        review_judgment_rule(
+            "any",
+            "Household",
+            review_comparison(
+                over_adult_residents("count_related"),
+                "gt",
+                review_literal(review_integer(0)),
+            ),
+        ),
+    ]);
+    // p1 is an adult resident; p2 an adult who is not a resident; p3 a
+    // resident child; p4 an adult resident of h2 with no age on record.
+    let dataset = serde_json::json!({
+        "inputs": [
+            review_input("age", "Person", "p1", review_integer(30)),
+            review_input("age", "Person", "p2", review_integer(40)),
+            review_input("age", "Person", "p3", review_integer(10)),
+            review_input("income", "Person", "p1", review_decimal("100")),
+            review_input("income", "Person", "p2", review_decimal("200")),
+            review_input("income", "Person", "p3", review_decimal("5")),
+            review_input("income", "Person", "p4", review_decimal("7")),
+        ],
+        "relations": [
+            review_tuple("member", &["h1", "p1"]),
+            review_tuple("member", &["h1", "p2"]),
+            review_tuple("member", &["h1", "p3"]),
+            review_tuple("member", &["h2", "p4"]),
+            review_tuple("resident", &["h1", "p1"]),
+            review_tuple("resident", &["h1", "p3"]),
+            review_tuple("resident", &["h2", "p4"]),
+        ],
+    });
+    let outputs = ["n", "n_decimal", "income", "any"];
+    for slot_entities in [false, true] {
+        let request = review_request(
+            serde_json::json!({
+                "relations": [
+                    { "name": "member", "arity": 2 },
+                    { "name": "resident", "arity": 2 },
+                    adult_resident(slot_entities),
+                ],
+                "derived": derived,
+            }),
+            dataset.clone(),
+            serde_json::json!([
+                review_query("h1", &outputs),
+                review_query("h2", &outputs),
+                review_query("h3", &outputs),
+                review_query("h1", &["n"]),
+            ]),
+        );
+        let results = assert_fast_agrees_with_explain(&request)
+            .unwrap_or_else(|error| panic!("explain failed: {error}"));
+        let h1 = &results[0]["outputs"];
+        assert_eq!(h1["n"]["value"], review_integer(1));
+        assert_eq!(h1["n_decimal"]["dtype"], "decimal");
+        assert_eq!(h1["n_decimal"]["value"], review_integer(1));
+        assert_eq!(h1["income"]["value"], review_decimal("100"));
+        assert_eq!(h1["any"]["outcome"], "holds");
+        // p4 has no age, so `is_adult` reads the default and does not hold.
+        assert_eq!(results[1]["outputs"]["n"]["value"], review_integer(0));
+        assert_eq!(results[2]["outputs"]["any"]["outcome"], "not_holds");
+    }
+}
+
+/// The reviewer's probe (t9.py): a `count` in a rule declared `decimal`.
+/// Explain reports the declared dtype and the value its expression computes,
+/// an integer; at b16ced0 fast converted the value to a decimal.
+#[test]
+fn count_related_in_a_decimal_rule_reports_explains_integer_value_in_fast_mode() {
+    let people = [("person-1", "100"), ("person-2", "0"), ("person-3", "50")];
+    let request = review_request(
+        serde_json::json!({
+            "relations": [{ "name": "member_of_household", "arity": 2 }],
+            "derived": [review_rule(
+                "earning_members",
+                "Household",
+                "decimal",
+                serde_json::json!({
+                    "kind": "count_related",
+                    "relation": "member_of_household",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": review_comparison(
+                        serde_json::json!({ "kind": "input", "name": "income" }),
+                        "gt",
+                        review_literal(review_decimal("0")),
+                    ),
+                }),
+            )],
+        }),
+        serde_json::json!({
+            "inputs": people
+                .iter()
+                .map(|(person, income)| review_input("income", "Person", person, review_decimal(income)))
+                .collect::<Vec<_>>(),
+            "relations": people
+                .iter()
+                .map(|(person, _)| review_tuple("member_of_household", &[person, "household-1"]))
+                .collect::<Vec<_>>(),
+        }),
+        serde_json::json!([
+            review_query("household-1", &["earning_members"]),
+            review_query("household-1", &["earning_members"]),
+        ]),
+    );
+    let results = assert_fast_agrees_with_explain(&request).expect("explain answers");
+    for result in results.as_array().expect("results are an array") {
+        assert_eq!(
+            result["outputs"]["earning_members"],
+            serde_json::json!({
+                "kind": "scalar",
+                "name": "earning_members",
+                "dtype": "decimal",
+                "unit": null,
+                "value": { "kind": "integer", "value": 2 },
+            })
+        );
+    }
+}
+
+/// Explain never converts a rule's value to its declared dtype
+/// (`Engine::evaluate_scalar` caches what the expression returns and
+/// `execute_explain` serialises it as is), so the value kind is a function of
+/// the expression and, for an `if`, of the branch each row takes. Fast mode
+/// must report the same kind for every declared dtype, every row.
+#[test]
+fn fast_reports_explains_value_kind_under_every_declared_dtype() {
+    let count = review_count_members(None);
+    let income = serde_json::json!({ "kind": "input", "name": "income" });
+    let sum = |value: serde_json::Value| {
+        serde_json::json!({
+            "kind": "sum_related",
+            "relation": "member",
+            "current_slot": 0,
+            "related_slot": 1,
+            "value": value,
+        })
+    };
+    let expressions = vec![
+        ("count", count.clone()),
+        (
+            "count where",
+            review_count_members(Some(review_comparison(
+                income.clone(),
+                "gt",
+                review_literal(review_decimal("0")),
+            ))),
+        ),
+        ("sum of decimals", sum(income.clone())),
+        (
+            "sum of integers",
+            sum(serde_json::json!({ "kind": "input", "name": "units" })),
+        ),
+        ("integer literal", review_literal(review_integer(7))),
+        ("decimal literal", review_literal(review_decimal("7"))),
+        (
+            "integer input",
+            serde_json::json!({ "kind": "input", "name": "size" }),
+        ),
+        (
+            "decimal input",
+            serde_json::json!({ "kind": "input", "name": "rent" }),
+        ),
+        (
+            "absent input's integer default",
+            serde_json::json!({
+                "kind": "input_or_else",
+                "name": "absent",
+                "default": review_integer(0),
+            }),
+        ),
+        (
+            "counts added",
+            serde_json::json!({ "kind": "add", "items": [count.clone(), count.clone()] }),
+        ),
+        (
+            "max of a count",
+            serde_json::json!({ "kind": "max", "items": [count.clone()] }),
+        ),
+        (
+            "integer table keyed by a count",
+            serde_json::json!({
+                "kind": "parameter_lookup",
+                "parameter": "per_member",
+                "index": count.clone(),
+            }),
+        ),
+        (
+            // h1 (three members) takes the integer branch; h2 and h3 (none)
+            // take the decimal one.
+            "if with an integer and a decimal branch",
+            serde_json::json!({
+                "kind": "if",
+                "condition": review_comparison(
+                    count.clone(),
+                    "gt",
+                    review_literal(review_integer(1)),
+                ),
+                "then_expr": count.clone(),
+                "else_expr": review_literal(review_decimal("0.5")),
+            }),
+        ),
+        (
+            "reference to an integer count rule",
+            serde_json::json!({ "kind": "derived", "name": "member_count" }),
+        ),
+    ];
+    let households = ["h1", "h2", "h3"];
+    let mut inputs = vec![
+        review_input("income", "Person", "p1", review_decimal("100")),
+        review_input("income", "Person", "p2", review_decimal("0")),
+        review_input("income", "Person", "p3", review_decimal("50")),
+    ];
+    for person in ["p1", "p2", "p3"] {
+        inputs.push(review_input("units", "Person", person, review_integer(2)));
+    }
+    for household in households {
+        inputs.push(review_input(
+            "size",
+            "Household",
+            household,
+            review_integer(3),
+        ));
+        inputs.push(review_input(
+            "rent",
+            "Household",
+            household,
+            review_decimal("12.5"),
+        ));
+    }
+    let members = ["p1", "p2", "p3"]
+        .iter()
+        .map(|person| review_tuple("member", &["h1", person]))
+        .collect::<Vec<_>>();
+    let dataset = serde_json::json!({ "inputs": inputs, "relations": members });
+    let parameters = serde_json::json!([{
+        "name": "per_member",
+        "unit": null,
+        "indexed_by": "members",
+        "versions": [{
+            "effective_from": "2020-01-01",
+            "values": { "0": review_integer(0), "3": review_integer(30) },
+        }],
+    }]);
+    let mut kinds_seen = std::collections::BTreeSet::new();
+    for dtype in ["integer", "decimal", "bool", "text"] {
+        for rounding in [None, Some("half_up")] {
+            for (label, expr) in &expressions {
+                let mut rule = review_rule("value", "Household", dtype, expr.clone());
+                if let Some(rounding) = rounding {
+                    // Rounding applies only to a currency unit, and rounds
+                    // decimal values only; an integer passes through.
+                    rule["rounding"] = serde_json::json!(rounding);
+                    rule["unit"] = serde_json::json!("USD");
+                }
+                let request = review_request(
+                    serde_json::json!({
+                        "units": [{ "name": "USD", "kind": "currency", "minor_units": 0 }],
+                        "relations": review_member_relations(),
+                        "parameters": parameters,
+                        "derived": [
+                            rule,
+                            review_rule("member_count", "Household", "integer", count.clone()),
+                            // Referenced on other rows, so the batch reads
+                            // `value` both as an output and as a dependency.
+                            review_rule(
+                                "value_again",
+                                "Household",
+                                "decimal",
+                                serde_json::json!({ "kind": "derived", "name": "value" }),
+                            ),
+                        ],
+                    }),
+                    dataset.clone(),
+                    serde_json::json!([
+                        review_query("h1", &["value"]),
+                        review_query("h2", &["value_again"]),
+                        review_query("h3", &["value", "value_again"]),
+                        review_query("h1", &["value_again", "value"]),
+                    ]),
+                );
+                let results = assert_fast_agrees_with_explain(&request)
+                    .unwrap_or_else(|error| panic!("{dtype} {label}: explain failed: {error}"));
+                for result in results.as_array().expect("results are an array") {
+                    for output in result["outputs"].as_object().expect("outputs").values() {
+                        kinds_seen.insert((
+                            output["dtype"].as_str().unwrap_or_default().to_string(),
+                            output["value"]["kind"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // The matrix exercises both directions of the dropped conversion: integer
+    // values under non-integer dtypes and decimal values under `integer`.
+    for (dtype, kind) in [
+        ("decimal", "integer"),
+        ("bool", "integer"),
+        ("text", "integer"),
+        ("integer", "decimal"),
+    ] {
+        assert!(
+            kinds_seen.contains(&(dtype.to_string(), kind.to_string())),
+            "no {kind} value was reported under dtype {dtype}: {kinds_seen:?}"
+        );
+    }
+}

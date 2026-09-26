@@ -18,7 +18,9 @@
 //!   negatives and fractions, `if` nesting, `and`/`or`/`not`, comparisons,
 //!   arithmetic with divisors that are often zero, `max`/`min`/`ceil`/`floor`,
 //!   indexed parameter lookups with missing and fractional keys, `count`/`sum`
-//!   over a members relation with `where` clauses, and `input_or_else`. Datasets
+//!   over a members relation (and over a derived relation filtering it) with
+//!   `where` clauses, `relation_member` judgments both inside that derived
+//!   relation's predicate and where explain rejects them, and `input_or_else`. Datasets
 //!   drop input records per row (or per column for dense), rows request
 //!   different outputs, and person rows can share the batch. Every case runs
 //!   through explain, fast and (for the dense-compatible profile) dense, and the
@@ -59,7 +61,7 @@ use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
     IndexedParameterSpec, InputRecordSpec, IntervalSpec, JudgmentExprSpec, JudgmentOutcomeSpec,
     ParameterVersionSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationRecordSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    RelationDerivationSpec, RelationRecordSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -76,6 +78,13 @@ const PERSON: &str = "Person";
 /// `member_of_household(person, household)`; aggregations read it from the
 /// household side (current slot 1) to the person side (related slot 0).
 const MEMBERS: &str = "member_of_household";
+/// A derived relation over [`MEMBERS`] whose generated predicate filters the
+/// members, read from the same slots.
+const FILTERED: &str = "filtered_members";
+/// `head_of_household(person, household)`: each household's first member.
+/// Declared alongside [`FILTERED`] so a membership test in its predicate can
+/// fail for some members.
+const HEADS: &str = "head_of_household";
 const INT_TABLE: &str = "int_table";
 const DEC_TABLE: &str = "dec_table";
 
@@ -115,8 +124,10 @@ enum NumG {
     Input(u8),
     InputOrElse(u8, u8),
     Rule(u8),
-    Count(Option<PBoolG>),
-    Sum(PValG, Option<PBoolG>),
+    /// `count`/`sum` over [`MEMBERS`], or over [`FILTERED`] when the flag is
+    /// set and the program declares it.
+    Count(bool, Option<PBoolG>),
+    Sum(bool, PValG, Option<PBoolG>),
     Param(bool, Box<NumG>),
     Add(Vec<NumG>),
     Sub(Box<NumG>, Box<NumG>),
@@ -191,6 +202,12 @@ enum PBoolG {
     Flag(bool),
     Cmp(Box<PNumG>, ComparisonOpSpec, Box<PNumG>),
     Rule(u8),
+    /// `relation_member` over [`MEMBERS`], or for an odd selector over
+    /// [`HEADS`] inside [`FILTERED`]'s predicate and over [`FILTERED`], when
+    /// the program declares it, elsewhere. Explain evaluates it only inside a
+    /// derived relation's predicate; in a `where` clause or a rule it is an
+    /// error for every row that reaches it.
+    RelationMember(u8),
     And(Vec<PBoolG>),
     Or(Vec<PBoolG>),
     Not(Box<PBoolG>),
@@ -220,6 +237,9 @@ enum PersonRuleG {
 struct ProgramG {
     rules: Vec<RuleG>,
     person_rules: Vec<PersonRuleG>,
+    /// The predicate of the derived relation [`FILTERED`], when the program
+    /// declares one.
+    filter: Option<PBoolG>,
     /// Per household numeric input: integer kind (true) or decimal kind.
     integer_inputs: [bool; 3],
 }
@@ -296,6 +316,14 @@ struct Profile {
     mixed_requests: bool,
     /// Drop input records per row. Off: drop whole columns (dense datasets).
     row_missing_inputs: bool,
+    /// Weight of a `relation_member` leaf among the judgments over persons
+    /// (`where` clauses, person rules), whose other leaves then weigh 21 in
+    /// total; 0 generates none. The derived relation's predicate draws its own
+    /// membership tests.
+    relation_member_weight: u32,
+    /// A derived relation ([`FILTERED`]) that counts and sums can aggregate
+    /// over.
+    derived_relation: bool,
 }
 
 /// Evaluation order in isolation: lazy `if`, short-circuit `and`/`or`, divisor
@@ -311,6 +339,8 @@ const EVAL_ORDER: Profile = Profile {
     ill_typed_comparisons: false,
     mixed_requests: false,
     row_missing_inputs: true,
+    relation_member_weight: 0,
+    derived_relation: false,
 };
 
 /// Everything the generator knows.
@@ -323,6 +353,28 @@ const FULL: Profile = Profile {
     ill_typed_comparisons: true,
     mixed_requests: true,
     row_missing_inputs: true,
+    relation_member_weight: 1,
+    derived_relation: true,
+};
+
+/// Relation aggregation in depth, the shapes behind the two divergences the
+/// PR #195 review found: counts and sums over the members relation and over a
+/// derived relation filtering it, `relation_member` both where explain rejects
+/// it and inside that relation's predicate, where it evaluates, and integer
+/// and decimal values under both numeric dtypes, with mixed per-row requests.
+/// Parameter tables, text and bool rules and ill-typed comparisons are left
+/// out: their errors would mask the relation errors under test.
+const RELATIONS: Profile = Profile {
+    name: "relations",
+    integer_kinds: true,
+    relations: true,
+    parameters: false,
+    text_and_bool_rules: false,
+    ill_typed_comparisons: false,
+    mixed_requests: true,
+    row_missing_inputs: true,
+    relation_member_weight: 3,
+    derived_relation: true,
 };
 
 /// The dense-compatible subset: every row requests every household rule,
@@ -336,6 +388,11 @@ const DENSE: Profile = Profile {
     ill_typed_comparisons: true,
     mixed_requests: false,
     row_missing_inputs: false,
+    // Dense compiles a `relation_member` in a `where` clause or a derived
+    // relation's predicate to `true` (issue #202), where explain fails or
+    // filters, so the dense profile generates neither until that is fixed.
+    relation_member_weight: 0,
+    derived_relation: false,
 };
 
 // ===========================================================================
@@ -374,7 +431,7 @@ fn literal_index() -> BoxedStrategy<u8> {
     (0..NUM_LITERALS.len() as u8).boxed()
 }
 
-fn pnum_strategy() -> BoxedStrategy<PNumG> {
+fn pnum_strategy(profile: Profile) -> BoxedStrategy<PNumG> {
     let leaf = weighted(vec![
         (3, literal_index().prop_map(PNumG::Lit).boxed()),
         (5, (0..P_NUM_INPUTS).prop_map(PNumG::Input).boxed()),
@@ -388,7 +445,7 @@ fn pnum_strategy() -> BoxedStrategy<PNumG> {
     ]);
     let subject = leaf.clone();
     leaf.prop_recursive(2, 8, 2, move |inner| {
-        let condition = pbool_over(inner.clone());
+        let condition = pbool_over(profile, inner.clone());
         weighted(vec![
             (2, vec(inner.clone(), 1..=2).prop_map(PNumG::Add).boxed()),
             (
@@ -433,32 +490,65 @@ fn pnum_strategy() -> BoxedStrategy<PNumG> {
     .boxed()
 }
 
-fn pbool_over(pnum: BoxedStrategy<PNumG>) -> BoxedStrategy<PBoolG> {
-    let leaf = weighted(vec![
-        (2, any::<bool>().prop_map(PBoolG::Flag).boxed()),
+fn pbool_over(profile: Profile, pnum: BoxedStrategy<PNumG>) -> BoxedStrategy<PBoolG> {
+    // A membership test outside a derived relation fails every row that
+    // reaches it, so it stays a minority leaf: frequent enough to reach, rare
+    // enough that most `where` clauses still evaluate. `filter_strategy` draws
+    // membership tests for the one predicate that can evaluate them. Profiles
+    // without it keep their original weights, and so their generated cases.
+    let scale = if profile.relation_member_weight > 0 {
+        3
+    } else {
+        1
+    };
+    let mut leaves = vec![
+        (2 * scale, any::<bool>().prop_map(PBoolG::Flag).boxed()),
         (
-            4,
+            4 * scale,
             (pnum.clone(), any_op(), pnum)
                 .prop_map(|(a, op, b)| PBoolG::Cmp(Box::new(a), op, Box::new(b)))
                 .boxed(),
         ),
-        (1, (0..MAX_PERSON_RULES).prop_map(PBoolG::Rule).boxed()),
-    ]);
-    leaf.prop_recursive(1, 4, 2, |inner| {
-        weighted(vec![
-            (2, vec(inner.clone(), 1..=2).prop_map(PBoolG::And).boxed()),
-            (2, vec(inner.clone(), 1..=2).prop_map(PBoolG::Or).boxed()),
-            (
-                1,
-                inner.prop_map(|item| PBoolG::Not(Box::new(item))).boxed(),
-            ),
-        ])
-    })
-    .boxed()
+        (scale, (0..MAX_PERSON_RULES).prop_map(PBoolG::Rule).boxed()),
+    ];
+    if profile.relation_member_weight > 0 {
+        leaves.push((
+            profile.relation_member_weight,
+            (0..2_u8).prop_map(PBoolG::RelationMember).boxed(),
+        ));
+    }
+    weighted(leaves)
+        .prop_recursive(1, 4, 2, |inner| {
+            weighted(vec![
+                (2, vec(inner.clone(), 1..=2).prop_map(PBoolG::And).boxed()),
+                (2, vec(inner.clone(), 1..=2).prop_map(PBoolG::Or).boxed()),
+                (
+                    1,
+                    inner.prop_map(|item| PBoolG::Not(Box::new(item))).boxed(),
+                ),
+            ])
+        })
+        .boxed()
 }
 
-fn pbool_strategy() -> BoxedStrategy<PBoolG> {
-    pbool_over(pnum_strategy())
+fn pbool_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
+    pbool_over(profile, pnum_strategy(profile))
+}
+
+/// [`FILTERED`]'s predicate: usually a membership test (of [`MEMBERS`], which
+/// every source tuple passes, or [`HEADS`], which only first members pass)
+/// combined with a generated predicate.
+fn filter_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
+    let predicate = pbool_strategy(profile);
+    let member = || (0..2_u8).prop_map(PBoolG::RelationMember);
+    prop_oneof![
+        1 => predicate.clone(),
+        3 => (member(), predicate.clone())
+            .prop_map(|(member, rest)| PBoolG::And(vec![member, rest])),
+        1 => (member(), predicate)
+            .prop_map(|(member, rest)| PBoolG::Or(vec![PBoolG::Not(Box::new(member)), rest])),
+    ]
+    .boxed()
 }
 
 fn pval_strategy() -> BoxedStrategy<PValG> {
@@ -482,18 +572,30 @@ fn num_strategy(profile: Profile) -> BoxedStrategy<NumG> {
         (3, (0..MAX_RULES).prop_map(NumG::Rule).boxed()),
     ];
     if profile.relations {
-        leaves.push((
-            1,
-            proptest::option::of(pbool_strategy())
-                .prop_map(NumG::Count)
-                .boxed(),
-        ));
-        leaves.push((
-            1,
-            (pval_strategy(), proptest::option::of(pbool_strategy()))
-                .prop_map(|(value, predicate)| NumG::Sum(value, predicate))
-                .boxed(),
-        ));
+        let predicate = || proptest::option::of(pbool_strategy(profile));
+        // Draw the relation choice only where it can matter, so profiles
+        // without a derived relation generate exactly what they did before.
+        let (count, sum) = if profile.derived_relation {
+            (
+                (any::<bool>(), predicate())
+                    .prop_map(|(filtered, predicate)| NumG::Count(filtered, predicate))
+                    .boxed(),
+                (any::<bool>(), pval_strategy(), predicate())
+                    .prop_map(|(filtered, value, predicate)| NumG::Sum(filtered, value, predicate))
+                    .boxed(),
+            )
+        } else {
+            (
+                predicate()
+                    .prop_map(|predicate| NumG::Count(false, predicate))
+                    .boxed(),
+                (pval_strategy(), predicate())
+                    .prop_map(|(value, predicate)| NumG::Sum(false, value, predicate))
+                    .boxed(),
+            )
+        };
+        leaves.push((1, count));
+        leaves.push((1, sum));
     }
     // A `match` subject is a leaf, as in real rules (a filing status, a
     // rule's code), which keeps generated trees shallow.
@@ -690,28 +792,35 @@ fn rule_strategy(profile: Profile) -> BoxedStrategy<RuleG> {
     weighted(alternatives)
 }
 
-fn person_rule_strategy() -> BoxedStrategy<PersonRuleG> {
+fn person_rule_strategy(profile: Profile) -> BoxedStrategy<PersonRuleG> {
     prop_oneof![
-        2 => pnum_strategy().prop_map(PersonRuleG::Num),
-        1 => pbool_strategy().prop_map(PersonRuleG::Judg),
+        2 => pnum_strategy(profile).prop_map(PersonRuleG::Num),
+        1 => pbool_strategy(profile).prop_map(PersonRuleG::Judg),
     ]
     .boxed()
 }
 
 fn program_strategy(profile: Profile) -> BoxedStrategy<ProgramG> {
     let person_rules = if profile.relations {
-        vec(person_rule_strategy(), 0..=MAX_PERSON_RULES as usize).boxed()
+        vec(person_rule_strategy(profile), 0..=MAX_PERSON_RULES as usize).boxed()
     } else {
         Just(Vec::new()).boxed()
+    };
+    let filter = if profile.derived_relation {
+        proptest::option::weighted(0.75, filter_strategy(profile)).boxed()
+    } else {
+        Just(None).boxed()
     };
     (
         vec(rule_strategy(profile), 1..=MAX_RULES as usize),
         person_rules,
         proptest::array::uniform3(any::<bool>()),
+        filter,
     )
-        .prop_map(|(rules, person_rules, integer_inputs)| ProgramG {
+        .prop_map(|(rules, person_rules, integer_inputs, filter)| ProgramG {
             rules,
             person_rules,
+            filter,
             integer_inputs,
         })
         .boxed()
@@ -844,6 +953,11 @@ struct Cx<'a> {
     /// Rewrite every lazy construct so explain evaluates all of its operands
     /// (used only to measure how often a case hides an error in a dead branch).
     force: bool,
+    /// The program declares the derived relation [`FILTERED`].
+    filtered: bool,
+    /// Lowering [`FILTERED`]'s own predicate, the one place explain gives a
+    /// `relation_member` its context.
+    in_relation_predicate: bool,
 }
 
 impl Cx<'_> {
@@ -1011,6 +1125,16 @@ fn person_num_input(index: u8) -> String {
 const TEXT_INPUT: &str = "t0";
 const PERSON_FLAG_INPUT: &str = "pf0";
 
+/// The relation a `count`/`sum` reads: [`FILTERED`] when asked for and
+/// declared, otherwise [`MEMBERS`].
+fn aggregated_relation(filtered: bool, cx: &Cx<'_>) -> &'static str {
+    if filtered && cx.filtered {
+        FILTERED
+    } else {
+        MEMBERS
+    }
+}
+
 fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
     let integer_kinds = cx.profile.integer_kinds;
     match expr {
@@ -1024,9 +1148,9 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
             Some(name) => derived(name),
             None => lit(num_literal(*index, integer_kinds)),
         },
-        NumG::Count(predicate) => {
+        NumG::Count(filtered, predicate) => {
             let count = ScalarExprSpec::CountRelated {
-                relation: MEMBERS.to_string(),
+                relation: aggregated_relation(*filtered, cx).to_string(),
                 current_slot: 1,
                 related_slot: 0,
                 where_clause: predicate
@@ -1039,8 +1163,8 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
                 ScalarExprSpec::Add { items: vec![count] }
             }
         }
-        NumG::Sum(value, predicate) => ScalarExprSpec::SumRelated {
-            relation: MEMBERS.to_string(),
+        NumG::Sum(filtered, value, predicate) => ScalarExprSpec::SumRelated {
+            relation: aggregated_relation(*filtered, cx).to_string(),
             current_slot: 1,
             related_slot: 0,
             value: match value {
@@ -1371,6 +1495,19 @@ fn lower_pbool(expr: &PBoolG, cx: &Cx<'_>) -> JudgmentExprSpec {
         PBoolG::Not(item) => JudgmentExprSpec::Not {
             item: Box::new(lower_pbool(item, cx)),
         },
+        // Inside FILTERED's predicate a membership test of FILTERED itself
+        // would be a relation cycle, which both modes reject before
+        // evaluating; test a base relation there instead.
+        PBoolG::RelationMember(selector) => JudgmentExprSpec::RelationMember {
+            relation: match (selector % 2 == 1, cx.in_relation_predicate) {
+                (true, true) => HEADS,
+                (true, false) if cx.filtered => FILTERED,
+                _ => MEMBERS,
+            }
+            .to_string(),
+            current_slot: 1,
+            related_slot: 0,
+        },
     }
 }
 
@@ -1450,6 +1587,8 @@ struct LoweredProgram {
 }
 
 fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredProgram {
+    let filter = program.filter.as_ref().filter(|_| profile.derived_relation);
+    let filtered = filter.is_some();
     let mut person_rules: Vec<(String, RuleTag)> = Vec::new();
     let mut derived_specs = Vec::new();
     for (index, rule) in program.person_rules.iter().enumerate() {
@@ -1459,6 +1598,8 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
             earlier: &[],
             person: &person_rules,
             force,
+            filtered,
+            in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
             PersonRuleG::Num(expr) => (
@@ -1496,6 +1637,8 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
             earlier: &rules,
             person: &person_rules,
             force,
+            filtered,
+            in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
             RuleG::Num {
@@ -1554,8 +1697,42 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
         rules.push((name, tag));
     }
 
+    let mut relations = vec![members_relation()];
+    if filtered {
+        relations.push(RelationSpec {
+            name: HEADS.to_string(),
+            ..members_relation()
+        });
+    }
+    if let Some(filter) = filter {
+        // The predicate routes a person rule to the related member and may
+        // test membership of the source relation, both of which need the
+        // relation context explain supplies only here.
+        let cx = Cx {
+            profile,
+            earlier: &[],
+            person: &person_rules,
+            force,
+            filtered,
+            in_relation_predicate: true,
+        };
+        relations.push(RelationSpec {
+            name: FILTERED.to_string(),
+            arity: 2,
+            slot_entities: vec![PERSON.to_string(), HOUSEHOLD.to_string()],
+            derivation: Some(RelationDerivationSpec {
+                source_relation: MEMBERS.to_string(),
+                current_slot: 1,
+                related_slot: 0,
+                entity: None,
+                member_relation: None,
+                slot_entities: vec![PERSON.to_string(), HOUSEHOLD.to_string()],
+                predicate: lower_pbool(filter, &cx),
+            }),
+        });
+    }
     let mut spec = ProgramSpec {
-        relations: vec![members_relation()],
+        relations,
         derived: derived_specs,
         ..ProgramSpec::default()
     };
@@ -1623,16 +1800,23 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(from, visit);
             walk_scalar(to, visit);
         }
-        ScalarExprSpec::CountRelated { where_clause, .. } => {
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            visit(Ref::Relation(relation));
             if let Some(predicate) = where_clause {
                 walk_judgment(predicate, visit);
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
             value,
             where_clause,
             ..
         } => {
+            visit(Ref::Relation(relation));
             match value {
                 RelatedValueRefSpec::Input { name } => visit(Ref::Input(name)),
                 RelatedValueRefSpec::Derived { .. } => visit(Ref::Derived),
@@ -1666,7 +1850,7 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(right, visit);
         }
         JudgmentExprSpec::Derived { .. } => visit(Ref::Derived),
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { .. } => visit(Ref::RelationMember),
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -1682,6 +1866,9 @@ enum Ref<'a> {
     Input(&'a str),
     Derived,
     Parameter(&'a str),
+    /// The relation a `count` or `sum` aggregates over.
+    Relation(&'a str),
+    RelationMember,
 }
 
 fn walk_semantics(semantics: &DerivedSemanticsSpec, visit: &mut dyn FnMut(Ref<'_>)) {
@@ -1701,8 +1888,67 @@ fn rule_inputs(rule: &DerivedSpec) -> BTreeSet<String> {
     inputs
 }
 
+/// The inputs the program's derived relations' predicates read.
+fn relation_predicate_inputs(program: &ProgramSpec) -> BTreeSet<String> {
+    let mut inputs = BTreeSet::new();
+    for derivation in program
+        .relations
+        .iter()
+        .filter_map(|relation| relation.derivation.as_ref())
+    {
+        walk_judgment(&derivation.predicate, &mut |reference| {
+            if let Ref::Input(name) = reference {
+                inputs.insert(name.to_string());
+            }
+        });
+    }
+    inputs
+}
+
+/// The inputs a program reads: its rules' and its derived relations'
+/// predicates'.
 fn referenced_inputs(program: &ProgramSpec) -> BTreeSet<String> {
-    program.derived.iter().flat_map(rule_inputs).collect()
+    let mut inputs = relation_predicate_inputs(program);
+    inputs.extend(program.derived.iter().flat_map(rule_inputs));
+    inputs
+}
+
+/// Some rule aggregates over [`FILTERED`], whose predicate tests membership:
+/// the one shape in which explain evaluates a `relation_member`.
+fn aggregates_over_membership_filter(program: &ProgramSpec) -> bool {
+    let tests_membership = program.relations.iter().any(|relation| {
+        relation.name == FILTERED
+            && relation.derivation.as_ref().is_some_and(|derivation| {
+                let mut found = false;
+                walk_judgment(&derivation.predicate, &mut |reference| {
+                    found |= matches!(reference, Ref::RelationMember);
+                });
+                found
+            })
+    });
+    let mut aggregates = false;
+    for rule in &program.derived {
+        walk_semantics(&rule.semantics, &mut |reference| {
+            aggregates |= matches!(reference, Ref::Relation(FILTERED));
+        });
+    }
+    tests_membership && aggregates
+}
+
+/// Some scalar output's value kind differs from its rule's declared numeric
+/// dtype (an integer under `decimal`, or a decimal under `integer`); explain
+/// reports the value its expression computed, never a converted one.
+fn crosses_numeric_kinds(results: &[serde_json::Value]) -> bool {
+    results.iter().any(|result| {
+        result["outputs"].as_object().is_some_and(|outputs| {
+            outputs.values().any(|output| {
+                matches!(
+                    (output["dtype"].as_str(), output["value"]["kind"].as_str()),
+                    (Some("decimal"), Some("integer")) | (Some("integer"), Some("decimal"))
+                )
+            })
+        })
+    })
 }
 
 fn referenced_parameters(program: &ProgramSpec) -> BTreeSet<String> {
@@ -1918,15 +2164,26 @@ fn lower_dataset(case: &CaseG, profile: Profile, referenced: &BTreeSet<String>) 
             }
         }
     }
+    // A program with FILTERED also declares HEADS: each first member.
+    let heads = case.program.filter.is_some() && profile.derived_relation;
     let relations = case
         .rows
         .iter()
         .enumerate()
         .flat_map(|(row, data)| {
-            (0..data.members.len()).map(move |member| RelationRecordSpec {
-                name: MEMBERS.to_string(),
-                tuple: vec![person_id(row, member), household_id(row)],
-                interval: period_interval(),
+            (0..data.members.len()).flat_map(move |member| {
+                let tuple = vec![person_id(row, member), household_id(row)];
+                let head = (heads && member == 0).then(|| RelationRecordSpec {
+                    name: HEADS.to_string(),
+                    tuple: tuple.clone(),
+                    interval: period_interval(),
+                });
+                std::iter::once(RelationRecordSpec {
+                    name: MEMBERS.to_string(),
+                    tuple,
+                    interval: period_interval(),
+                })
+                .chain(head)
             })
         })
         .collect();
@@ -2609,23 +2866,32 @@ fn fmt_scalar(expr: &ScalarExprSpec) -> String {
         ScalarExprSpec::Min { items } => format!("min({})", join(items, ", ")),
         ScalarExprSpec::Ceil { value } => format!("ceil({})", fmt_scalar(value)),
         ScalarExprSpec::Floor { value } => format!("floor({})", fmt_scalar(value)),
-        ScalarExprSpec::CountRelated { where_clause, .. } => match where_clause {
-            Some(predicate) => format!("count(members where {})", fmt_judgment(predicate)),
-            None => "count(members)".to_string(),
-        },
+        ScalarExprSpec::CountRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            let relation = fmt_relation(relation);
+            match where_clause {
+                Some(predicate) => format!("count({relation} where {})", fmt_judgment(predicate)),
+                None => format!("count({relation})"),
+            }
+        }
         ScalarExprSpec::SumRelated {
+            relation,
             value,
             where_clause,
             ..
         } => {
+            let relation = fmt_relation(relation);
             let value = match value {
                 RelatedValueRefSpec::Input { name } | RelatedValueRefSpec::Derived { name } => name,
             };
             match where_clause {
                 Some(predicate) => {
-                    format!("sum(members.{value} where {})", fmt_judgment(predicate))
+                    format!("sum({relation}.{value} where {})", fmt_judgment(predicate))
                 }
-                None => format!("sum(members.{value})"),
+                None => format!("sum({relation}.{value})"),
             }
         }
         ScalarExprSpec::If {
@@ -2639,6 +2905,14 @@ fn fmt_scalar(expr: &ScalarExprSpec) -> String {
             fmt_scalar(else_expr)
         ),
         other => format!("{other:?}"),
+    }
+}
+
+fn fmt_relation(relation: &str) -> &str {
+    if relation == MEMBERS {
+        "members"
+    } else {
+        relation
     }
 }
 
@@ -2666,6 +2940,9 @@ fn fmt_judgment(expr: &JudgmentExprSpec) -> String {
             format!("{} {} {}", fmt_scalar(left), fmt_op(*op), fmt_scalar(right))
         }
         JudgmentExprSpec::Derived { name } => name.clone(),
+        JudgmentExprSpec::RelationMember { relation, .. } => {
+            format!("member_of({})", fmt_relation(relation))
+        }
         JudgmentExprSpec::And { items } => format!("({})", join(items, " and ")),
         JudgmentExprSpec::Or { items } => format!("({})", join(items, " or ")),
         JudgmentExprSpec::Not { item } => format!("not {}", fmt_judgment(item)),
@@ -2675,6 +2952,17 @@ fn fmt_judgment(expr: &JudgmentExprSpec) -> String {
 
 fn render_program(program: &ProgramSpec) -> String {
     let mut text = String::new();
+    for relation in &program.relations {
+        if let Some(derivation) = &relation.derivation {
+            let _ = write!(
+                text,
+                "\n    relation {} = {} where {}",
+                relation.name,
+                fmt_relation(&derivation.source_relation),
+                fmt_judgment(&derivation.predicate)
+            );
+        }
+    }
     for rule in &program.derived {
         let body = match &rule.semantics {
             DerivedSemanticsSpec::Scalar { expr } => fmt_scalar(expr),
@@ -2801,6 +3089,8 @@ fn seed_for(property: u64) -> [u8; 32] {
 
 /// How explain's error for an uncovered `match` subject begins.
 const NO_MATCH_PREFIX: &str = "no `match` arm in ";
+/// How explain's error for a `relation_member` outside a derived relation ends.
+const RELATION_PREDICATE_OUTSIDE_SUFFIX: &str = "can only be evaluated inside a derived relation";
 
 #[derive(Debug, Default)]
 struct Stats {
@@ -2819,6 +3109,14 @@ struct Stats {
     fast_ok_fallback: u32,
     dense_ran: u32,
     dense_declined: u32,
+    /// Explain failed on a `relation_member` outside a derived relation.
+    relation_member_errors: u32,
+    /// Explain succeeded on a program aggregating over a derived relation whose
+    /// predicate tests membership.
+    membership_filters: u32,
+    /// Explain succeeded and reported a value whose kind differs from its
+    /// rule's declared numeric dtype.
+    kind_crossings: u32,
     reference_panics: u32,
     divergences: u32,
     samples: Vec<String>,
@@ -2827,7 +3125,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; relation_member errors {} / membership filters {}; kind crossings {}; reference panics {}; divergences {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -2838,6 +3136,9 @@ impl Stats {
             self.fast_ok_fallback,
             self.dense_ran,
             self.dense_declined,
+            self.relation_member_errors,
+            self.membership_filters,
+            self.kind_crossings,
             self.reference_panics,
             self.divergences
         )
@@ -2939,6 +3240,37 @@ fn assert_exercised(name: &str, stats: &Stats, min_hazard_share: f64) {
     );
 }
 
+/// Non-vacuity for the two divergences the PR #195 review found (fast
+/// answered a `relation_member` explain rejects, and converted a count's
+/// integer to the rule's decimal dtype): a passing run must have reached both
+/// shapes, and the valid use of `relation_member`, often enough to matter.
+fn assert_relation_regressions_exercised(name: &str, stats: &Stats) {
+    if report_only() || stats.cases < 200 {
+        return;
+    }
+    let cases = f64::from(stats.cases);
+    for (count, what) in [
+        (
+            stats.relation_member_errors,
+            "fail on a `relation_member` outside a derived relation",
+        ),
+        (
+            stats.membership_filters,
+            "answer over a derived relation whose predicate tests membership",
+        ),
+        (
+            stats.kind_crossings,
+            "report a value whose kind differs from its rule's numeric dtype",
+        ),
+    ] {
+        assert!(
+            f64::from(count) >= 0.01 * cases,
+            "{name}: too few cases {what}: {}",
+            stats.summary(name)
+        );
+    }
+}
+
 /// Explain the original program, and the forced program to count hazards.
 /// Returns `None` (case skipped) when explain itself panics, which only
 /// happens on decimal overflow in deep generated arithmetic.
@@ -2951,8 +3283,14 @@ fn explain_reference(lowered: &Lowered, stats: &mut Stats) -> Option<Outcome> {
         &lowered.queries,
     ));
     match &explain {
-        Outcome::Ok { .. } => {
+        Outcome::Ok { results, .. } => {
             stats.explain_ok += 1;
+            if aggregates_over_membership_filter(&lowered.program) {
+                stats.membership_filters += 1;
+            }
+            if crosses_numeric_kinds(results) {
+                stats.kind_crossings += 1;
+            }
             let forced = run_sparse(request(
                 ExecutionMode::Explain,
                 &lowered.forced,
@@ -2972,6 +3310,9 @@ fn explain_reference(lowered: &Lowered, stats: &mut Stats) -> Option<Outcome> {
             stats.explain_err += 1;
             if message.starts_with(NO_MATCH_PREFIX) {
                 stats.uncovered_matches += 1;
+            }
+            if message.ends_with(RELATION_PREDICATE_OUTSIDE_SUFFIX) {
+                stats.relation_member_errors += 1;
             }
         }
         Outcome::Panic(_) => {
@@ -3046,6 +3387,21 @@ fn random_programs_fast_matches_explain_on_full_generator() {
         |case, stats| check_explain_vs_fast(case, FULL, stats),
     );
     assert_exercised("full", &stats, 0.05);
+}
+
+/// Fast must return exactly what explain returns on programs built around
+/// relation aggregation (the [`RELATIONS`] profile), and the run must reach
+/// both divergences the PR #195 review found.
+#[test]
+fn random_programs_fast_matches_explain_on_relation_aggregation() {
+    let stats = run_property(
+        "random_programs_fast_matches_explain_on_relation_aggregation",
+        6,
+        RELATIONS,
+        |case, stats| check_explain_vs_fast(case, RELATIONS, stats),
+    );
+    assert_exercised("relations", &stats, 0.05);
+    assert_relation_regressions_exercised("relations", &stats);
 }
 
 /// Dense must hold explain's value for every row and output, and fail exactly
@@ -3145,20 +3501,23 @@ fn random_pins_match_explain_and_never_read_original_inputs() {
                 rule: rule.clone(),
                 value,
             }];
-            // Inputs only the pinned rule's own formula reads.
+            // Inputs only the pinned rule's own formula reads: no other rule
+            // and no derived relation's predicate reads them.
             let pinned_spec = lowered
                 .program
                 .derived
                 .iter()
                 .find(|spec| &spec.name == rule)
                 .expect("pinned rule exists");
-            let others = lowered
-                .program
-                .derived
-                .iter()
-                .filter(|spec| &spec.name != rule)
-                .flat_map(rule_inputs)
-                .collect::<BTreeSet<_>>();
+            let mut others = relation_predicate_inputs(&lowered.program);
+            others.extend(
+                lowered
+                    .program
+                    .derived
+                    .iter()
+                    .filter(|spec| &spec.name != rule)
+                    .flat_map(rule_inputs),
+            );
             let exclusive = rule_inputs(pinned_spec)
                 .difference(&others)
                 .cloned()
