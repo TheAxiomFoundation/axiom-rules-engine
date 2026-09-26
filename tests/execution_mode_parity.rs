@@ -50,13 +50,13 @@ use axiom_rules_engine::api::{
     ApiError, CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest,
     ExecutionResponse, OutputValue, RulePin, execute_compiled_request, execute_request,
 };
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{
-    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseExecutionResult, DenseOutputValue,
-    DenseRelationBatchSpec, DenseRelationKey,
+    DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseExecutionResult,
+    DenseOutputValue, DenseRelationBatchSpec, DenseRelationKey,
 };
 use axiom_rules_engine::engine::EvalError;
-use axiom_rules_engine::model::{DType, Period, PeriodKind};
+use axiom_rules_engine::model::{DType, Period, PeriodKind, Program};
 use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
     IndexedParameterSpec, InputRecordSpec, IntervalSpec, JudgmentExprSpec, JudgmentOutcomeSpec,
@@ -327,6 +327,13 @@ struct Profile {
     /// Weight of each of the `count` and `sum` leaves among numeric leaves
     /// whose others weigh 14 (with `relations` on).
     aggregation_weight: u32,
+    /// Above 1, each membership test [`filter_strategy`] adds to
+    /// [`FILTERED`]'s predicate is this many times likelier to test
+    /// [`MEMBERS`], its source, than [`HEADS`]; tests inside the generated
+    /// predicate it combines them with are unaffected. At 1 the tests are drawn
+    /// as [`filter_strategy`] describes. Dense declines a program whose
+    /// aggregated filter tests [`HEADS`] (issue #202).
+    source_membership_weight: u32,
 }
 
 /// Evaluation order in isolation: lazy `if`, short-circuit `and`/`or`, divisor
@@ -345,6 +352,7 @@ const EVAL_ORDER: Profile = Profile {
     relation_member_weight: 0,
     derived_relation: false,
     aggregation_weight: 1,
+    source_membership_weight: 1,
 };
 
 /// Everything the generator knows.
@@ -364,6 +372,7 @@ const FULL: Profile = Profile {
     relation_member_weight: 0,
     derived_relation: true,
     aggregation_weight: 1,
+    source_membership_weight: 1,
 };
 
 /// Relation aggregation in depth, the shapes behind the two divergences the
@@ -385,6 +394,7 @@ const RELATIONS: Profile = Profile {
     relation_member_weight: 1,
     derived_relation: true,
     aggregation_weight: 3,
+    source_membership_weight: 1,
 };
 
 /// The dense-compatible subset: every row requests every household rule,
@@ -398,12 +408,16 @@ const DENSE: Profile = Profile {
     ill_typed_comparisons: true,
     mixed_requests: false,
     row_missing_inputs: false,
-    // Dense compiles a `relation_member` in a `where` clause or a derived
-    // relation's predicate to `true` (issue #202), where explain fails or
-    // filters, so the dense profile generates neither until that is fixed.
-    relation_member_weight: 0,
-    derived_relation: false,
-    aggregation_weight: 1,
+    // A `relation_member` outside [`FILTERED`]'s predicate fails the rows
+    // that reach it, as in explain. Inside it, a test of [`MEMBERS`], its
+    // source, holds for every tuple; a test of [`HEADS`] needs tuples a dense
+    // batch does not carry, so dense declines that program (issue #202). The
+    // filter mostly tests [`MEMBERS`] so dense still runs most cases, and
+    // counts and sums are likelier so those tests often decide an answer.
+    relation_member_weight: 2,
+    derived_relation: true,
+    aggregation_weight: 2,
+    source_membership_weight: 4,
 };
 
 // ===========================================================================
@@ -553,8 +567,26 @@ fn pbool_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
 /// one in eight is a generated predicate alone.
 fn filter_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     let predicate = pbool_strategy(profile);
-    let heads = || Just(PBoolG::RelationMember(1));
-    let member = || (0..2_u8).prop_map(PBoolG::RelationMember);
+    // With a source weight above 1 every test is drawn from both relations,
+    // mostly [`MEMBERS`]; otherwise exactly as described above, so those
+    // profiles generate the same cases as before.
+    let test = |heads_only: bool| -> BoxedStrategy<PBoolG> {
+        if profile.source_membership_weight > 1 {
+            weighted(vec![
+                (
+                    profile.source_membership_weight,
+                    Just(PBoolG::RelationMember(0)).boxed(),
+                ),
+                (1, Just(PBoolG::RelationMember(1)).boxed()),
+            ])
+        } else if heads_only {
+            Just(PBoolG::RelationMember(1)).boxed()
+        } else {
+            (0..2_u8).prop_map(PBoolG::RelationMember).boxed()
+        }
+    };
+    let heads = || test(true);
+    let member = || test(false);
     prop_oneof![
         3 => heads(),
         1 => heads().prop_map(|member| PBoolG::Not(Box::new(member))),
@@ -2515,9 +2547,16 @@ fn normalize_response(response: &ExecutionResponse) -> Outcome {
 fn api_error_key(error: &ApiError) -> String {
     match error {
         ApiError::Eval(error) => eval_error_key(error, true),
+        // `execute_request` refuses an inline program with the check that
+        // compiling an artifact runs, so both are keyed alike.
+        ApiError::InvalidProgram(error) => compile_error_key(error),
         ApiError::Spec(error) => format!("Spec::{}", variant_name(&format!("{error:?}"))),
         other => format!("Api::{}", variant_name(&format!("{other:?}"))),
     }
+}
+
+fn compile_error_key(error: &CompileError) -> String {
+    format!("Compile::{}", variant_name(&format!("{error:?}")))
 }
 
 fn eval_error_key(error: &EvalError, with_location: bool) -> String {
@@ -2556,7 +2595,7 @@ fn run_compiled(program: &ProgramSpec, request: CompiledExecutionRequest) -> Out
         Ok(artifact) => artifact,
         Err(error) => {
             return Outcome::Err {
-                key: format!("Compile::{}", variant_name(&format!("{error:?}"))),
+                key: compile_error_key(&error),
                 message: error.to_string(),
             };
         }
@@ -2629,6 +2668,12 @@ enum DenseOutcome {
         message: String,
     },
     Panic(String),
+    /// Compiling the artifact refused the program before dense saw it, keyed
+    /// like explain's refusal (see [`compile_error_key`]).
+    Refused {
+        key: String,
+        message: String,
+    },
     /// The program is outside the dense compiler's fragment.
     Unsupported(String),
 }
@@ -2695,14 +2740,32 @@ fn spec_decimal(value: &ScalarValueSpec) -> Option<Decimal> {
     }
 }
 
+/// Dense as the PyO3 extension reaches it: compile an artifact, then compile
+/// that for dense. Compiling the artifact refuses what `execute_request`
+/// refuses before evaluating, such as a relation-routed cycle no queried rule
+/// reaches (#197); `DenseCompiledProgram::from_program` takes a lowered
+/// program as given, as `Engine::new` does.
+fn compile_dense(program: &ProgramSpec) -> Result<(DenseCompiledProgram, Program), DenseOutcome> {
+    let artifact = CompiledProgramArtifact::compile(program.clone()).map_err(|error| {
+        DenseOutcome::Refused {
+            key: compile_error_key(&error),
+            message: error.to_string(),
+        }
+    })?;
+    let unsupported = |error: DenseCompileError| DenseOutcome::Unsupported(error.to_string());
+    let model = artifact
+        .program
+        .to_program()
+        .map_err(|error| unsupported(error.into()))?;
+    let dense =
+        DenseCompiledProgram::from_artifact(&artifact, Some(HOUSEHOLD)).map_err(unsupported)?;
+    Ok((dense, model))
+}
+
 fn run_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -> DenseOutcome {
-    let model = match program.to_program() {
-        Ok(model) => model,
-        Err(error) => return DenseOutcome::Unsupported(error.to_string()),
-    };
-    let dense = match DenseCompiledProgram::from_program(&model, Some(HOUSEHOLD)) {
-        Ok(dense) => dense,
-        Err(error) => return DenseOutcome::Unsupported(error.to_string()),
+    let (dense, model) = match compile_dense(program) {
+        Ok(compiled) => compiled,
+        Err(outcome) => return outcome,
     };
     let dtypes = model
         .derived
@@ -2729,8 +2792,7 @@ fn dense_raw(
     outputs: &[String],
     f64_mode: bool,
 ) -> Option<Result<BTreeMap<String, String>, String>> {
-    let model = program.to_program().ok()?;
-    let dense = DenseCompiledProgram::from_program(&model, Some(HOUSEHOLD)).ok()?;
+    let (dense, _) = compile_dense(program).ok()?;
     let result = catch_unwind(AssertUnwindSafe(|| {
         if f64_mode {
             dense.execute_f64(&model_period(), batch, outputs)
@@ -2792,6 +2854,18 @@ fn compare_dense(
 ) -> Result<(), String> {
     match (explain, dense) {
         (_, DenseOutcome::Unsupported(_)) => Ok(()),
+        (Outcome::Err { key, .. }, DenseOutcome::Refused { key: refusal, .. }) => {
+            if key == refusal {
+                Ok(())
+            } else {
+                Err(format!(
+                    "explain failed with {key}, the dense path refused the program with {refusal}"
+                ))
+            }
+        }
+        (Outcome::Ok { .. }, DenseOutcome::Refused { key, .. }) => Err(format!(
+            "explain answered, the dense path refused the program with {key}"
+        )),
         (Outcome::Ok { results, .. }, DenseOutcome::Ok(columns)) => {
             for (row, result) in results.iter().enumerate() {
                 for output in outputs {
@@ -2842,6 +2916,9 @@ fn render_dense(outcome: &DenseOutcome) -> String {
         }
         DenseOutcome::Err { variant, message } => format!("Err[{variant}] {message}"),
         DenseOutcome::Panic(message) => format!("PANIC {message}"),
+        DenseOutcome::Refused { key, message } => {
+            format!("artifact compiler refused [{key}] {message}")
+        }
         DenseOutcome::Unsupported(message) => format!("dense compiler declined: {message}"),
     }
 }
@@ -3137,8 +3214,22 @@ struct Stats {
     hidden_matches: u32,
     fast_ok_fast_path: u32,
     fast_ok_fallback: u32,
+    /// The dense compiler compiled the program and dense answered: values or
+    /// a row error.
     dense_ran: u32,
     dense_declined: u32,
+    /// Dense ran, and both it and explain failed with the error for a
+    /// `relation_member` outside a derived relation.
+    dense_relation_member_errors: u32,
+    /// Dense ran on a case whose explain answer a membership test in the
+    /// derived relation's predicate decided (see `decisive_memberships`).
+    dense_decisive_memberships: u32,
+    /// Dense declined a derived relation whose predicate tests membership of
+    /// a relation a dense batch does not carry.
+    dense_membership_declines: u32,
+    /// Compiling the artifact refused the program with the error explain
+    /// refused it with.
+    dense_refusals: u32,
     /// Explain failed on a `relation_member` outside a derived relation.
     relation_member_errors: u32,
     /// Explain succeeded, and fixing every membership test in the derived
@@ -3158,7 +3249,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; relation_member errors {} / decisive memberships {}; kind crossings {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {}; relation_member errors {} / decisive memberships {}; kind crossings {}; reference panics {}; divergences {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -3169,6 +3260,10 @@ impl Stats {
             self.fast_ok_fallback,
             self.dense_ran,
             self.dense_declined,
+            self.dense_relation_member_errors,
+            self.dense_decisive_memberships,
+            self.dense_membership_declines,
+            self.dense_refusals,
             self.relation_member_errors,
             self.decisive_memberships,
             self.kind_crossings,
@@ -3371,6 +3466,41 @@ fn explain_reference(lowered: &Lowered, stats: &mut Stats) -> Option<Outcome> {
     Some(explain)
 }
 
+/// How dense's refusal of a membership test it cannot evaluate reads.
+const DENSE_MEMBERSHIP_DECLINE: &str = "in the predicate of derived relation";
+
+/// Counts one dense case. `decisive` is whether explain's answer depended on a
+/// membership test in the derived relation's predicate.
+fn record_dense(explain: &Outcome, dense: &DenseOutcome, decisive: bool, stats: &mut Stats) {
+    match dense {
+        DenseOutcome::Unsupported(message) => {
+            stats.dense_declined += 1;
+            if message.contains(DENSE_MEMBERSHIP_DECLINE) {
+                stats.dense_membership_declines += 1;
+            }
+            return;
+        }
+        DenseOutcome::Refused { key, .. } => {
+            if matches!(explain, Outcome::Err { key: refused, .. } if refused == key) {
+                stats.dense_refusals += 1;
+            }
+            return;
+        }
+        _ => {}
+    }
+    stats.dense_ran += 1;
+    if decisive {
+        stats.dense_decisive_memberships += 1;
+    }
+    if let (Outcome::Err { message, .. }, DenseOutcome::Err { message: dense, .. }) =
+        (explain, dense)
+        && message.ends_with(RELATION_PREDICATE_OUTSIDE_SUFFIX)
+        && dense.ends_with(RELATION_PREDICATE_OUTSIDE_SUFFIX)
+    {
+        stats.dense_relation_member_errors += 1;
+    }
+}
+
 fn record_fast(outcome: &Outcome, stats: &mut Stats) {
     if let Outcome::Ok { fell_back, .. } = outcome {
         if *fell_back {
@@ -3462,9 +3592,11 @@ fn random_programs_dense_matches_explain() {
         DENSE,
         |case, stats| {
             let lowered = lower(case, DENSE);
+            let decisive_before = stats.decisive_memberships;
             let Some(explain) = explain_reference(&lowered, stats) else {
                 return Ok(());
             };
+            let decisive = stats.decisive_memberships > decisive_before;
             // Every row of a dense-profile case requests the same outputs; dense
             // evaluates exactly those, for every row.
             let mut outputs = Vec::new();
@@ -3480,11 +3612,7 @@ fn random_programs_dense_matches_explain() {
             let referenced = referenced_inputs(&lowered.program);
             let batch = lower_dense_batch(case, DENSE, &referenced);
             let dense = run_dense(&lowered.program, batch.clone(), &outputs);
-            if matches!(dense, DenseOutcome::Unsupported(_)) {
-                stats.dense_declined += 1;
-            } else {
-                stats.dense_ran += 1;
-            }
+            record_dense(&explain, &dense, decisive, stats);
             compare_dense(&explain, &dense, &outputs)
                 .and_then(|()| check_dense_order_independence(&lowered.program, &batch, &outputs))
                 .map_err(|problem| {
@@ -3503,10 +3631,43 @@ fn random_programs_dense_matches_explain() {
     assert_exercised("dense", &stats, 0.05);
     if !report_only() && stats.cases >= 200 {
         assert!(
-            stats.dense_ran >= stats.cases * 8 / 10,
+            stats.dense_declined <= stats.cases * 2 / 10,
             "the dense compiler declined too many generated programs: {}",
             stats.summary("dense")
         );
+        // The shapes behind issue #202: dense must fail with explain on a
+        // `where` clause's `relation_member`, run where a test of the filter's
+        // source's membership decides the answer, decline a test of another
+        // relation's, and reach explain's refusal of a relation-routed cycle.
+        let cases = f64::from(stats.cases);
+        for (count, share, what) in [
+            (
+                stats.dense_relation_member_errors,
+                0.01,
+                "fail on a `relation_member` outside a derived relation",
+            ),
+            (
+                stats.dense_decisive_memberships,
+                0.01,
+                "run where a membership test in a derived relation's predicate decides an output",
+            ),
+            (
+                stats.dense_membership_declines,
+                0.0,
+                "decline a membership test of a relation it does not receive",
+            ),
+            (
+                stats.dense_refusals,
+                0.0,
+                "refuse a relation-routed cycle as explain does",
+            ),
+        ] {
+            assert!(
+                count > 0 && f64::from(count) >= share * cases,
+                "dense: too few cases {what}: {}",
+                stats.summary("dense")
+            );
+        }
     }
 }
 
