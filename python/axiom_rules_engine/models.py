@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ExecutionMode = Literal["explain", "fast"]
+RelationBinding = Literal["strict", "lenient"]
 
 
 class Program(BaseModel):
@@ -68,6 +69,7 @@ class ExecutionQuery(BaseModel):
 
 class ExecutionRequest(BaseModel):
     mode: ExecutionMode
+    relation_binding: RelationBinding = "strict"
     program: Program
     dataset: Dataset
     queries: list[ExecutionQuery]
@@ -100,6 +102,7 @@ class CompiledProgram(BaseModel):
 
 class CompiledExecutionRequest(BaseModel):
     mode: ExecutionMode
+    relation_binding: RelationBinding = "strict"
     dataset: Dataset
     queries: list[ExecutionQuery]
 
@@ -164,6 +167,7 @@ class QueryResult(BaseModel):
 class ExecutionMetadata(BaseModel):
     requested_mode: ExecutionMode
     actual_mode: ExecutionMode
+    relation_binding: RelationBinding | None = None
     fallback_reason: str | None = None
 
 

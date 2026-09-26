@@ -1,0 +1,648 @@
+{
+  "$defs": {
+    "DTypeSpec": {
+      "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal.",
+      "enum": [
+        "judgment",
+        "Judgment",
+        "bool",
+        "Bool",
+        "Boolean",
+        "boolean",
+        "integer",
+        "Integer",
+        "decimal",
+        "Decimal",
+        "Money",
+        "money",
+        "Rate",
+        "rate",
+        "text",
+        "Text",
+        "date",
+        "Date"
+      ],
+      "type": "string"
+    },
+    "DerivedTraceNode": {
+      "oneOf": [
+        {
+          "properties": {
+            "dependencies": {
+              "description": "Derived edges actually traversed. Every key resolves in this trace.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dtype": {
+              "$ref": "#/$defs/DTypeSpec"
+            },
+            "entity_id": {
+              "description": "Entity instance on which this rule was evaluated. Query-entity\ninstances retain the historical map key; related instances receive\nan opaque suffixed key so dependency edges remain closed.",
+              "type": "string"
+            },
+            "executed_expression": {
+              "description": "Canonical projection of the exact expression selected and executed\nfor this period. Unlike `source`, this is generated from executable\nIR and cannot drift into a contradictory arithmetic narrative.",
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "scalar",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "not_evaluated_dependencies": {
+              "description": "Parent-specific edges that were present in the selected expression\nbut not traversed because execution short-circuited or chose another\nbranch.",
+              "items": {
+                "$ref": "#/$defs/NotEvaluatedDependency"
+              },
+              "type": "array"
+            },
+            "parameter_reads": {
+              "description": "Exact temporal parameter cells read while executing this node.",
+              "items": {
+                "$ref": "#/$defs/TraceParameterRead"
+              },
+              "type": "array"
+            },
+            "pre_rounding_value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScalarValueSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The value before rounding, present only when rounding actually\nchanged it. Together with `value` and `rounding` this shows the\nrounding step (pre-value → mode → rounded value) for auditable law."
+            },
+            "rounding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RoundingModeSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The output-rounding mode the rule applied, if any. Present whenever\nthe rule declares `rounding:`, so an auditor sees the rounding step\nwas part of the determination even when the value was already whole."
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/ScalarValueSpec",
+              "description": "The rule's output value. When the rule applied currency rounding,\nthis is the rounded (post-rounding) value."
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "dtype",
+            "value",
+            "dependencies"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dependencies": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "entity_id": {
+              "type": "string"
+            },
+            "executed_expression": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "judgment",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "not_evaluated_dependencies": {
+              "items": {
+                "$ref": "#/$defs/NotEvaluatedDependency"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "$ref": "#/$defs/JudgmentOutcomeSpec"
+            },
+            "parameter_reads": {
+              "items": {
+                "$ref": "#/$defs/TraceParameterRead"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "outcome",
+            "dependencies"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExecutionMetadata": {
+      "properties": {
+        "actual_mode": {
+          "$ref": "#/$defs/ExecutionMode"
+        },
+        "fallback_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relation_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Echo of the binding policy used at the wire-dataset boundary.\nAbsent for historical responses and lower-level execution without binding."
+        },
+        "requested_mode": {
+          "$ref": "#/$defs/ExecutionMode"
+        }
+      },
+      "required": [
+        "requested_mode",
+        "actual_mode"
+      ],
+      "type": "object"
+    },
+    "ExecutionMode": {
+      "enum": [
+        "explain",
+        "fast"
+      ],
+      "type": "string"
+    },
+    "JudgmentOutcomeSpec": {
+      "enum": [
+        "holds",
+        "not_holds",
+        "undetermined"
+      ],
+      "type": "string"
+    },
+    "NotEvaluatedDependency": {
+      "properties": {
+        "dependency": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/NotEvaluatedReason"
+        }
+      },
+      "required": [
+        "dependency",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "NotEvaluatedReason": {
+      "enum": [
+        "short_circuit",
+        "branch_not_selected"
+      ],
+      "type": "string"
+    },
+    "OutputValue": {
+      "oneOf": [
+        {
+          "properties": {
+            "dtype": {
+              "$ref": "#/$defs/DTypeSpec"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "scalar",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/ScalarValueSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "dtype",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "judgment",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/JudgmentOutcomeSpec"
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PeriodSpec": {
+      "oneOf": [
+        {
+          "properties": {
+            "period_kind": {
+              "const": "month",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "period_kind": {
+              "const": "benefit_week",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "period_kind": {
+              "const": "tax_year",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "custom",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "end": {
+          "format": "date",
+          "type": "string"
+        },
+        "start": {
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "QueryResult": {
+      "properties": {
+        "assessment_date": {
+          "description": "Echo of the query's `assessment_date`, so callers can tie a result to\nthe assessment it was requested under. See `docs/bitemporal.md`.",
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputValue"
+          },
+          "type": "object"
+        },
+        "period": {
+          "$ref": "#/$defs/PeriodSpec"
+        },
+        "trace": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DerivedTraceNode"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "entity_id",
+        "period",
+        "outputs"
+      ],
+      "type": "object"
+    },
+    "RelationBinding": {
+      "description": "Relation tuple validation at the wire-dataset boundary.",
+      "oneOf": [
+        {
+          "enum": [
+            "strict"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "lenient",
+          "description": "Retain mismatched tuples without reordering; results may be incomplete.",
+          "type": "string"
+        }
+      ]
+    },
+    "RoundingModeSpec": {
+      "description": "The RuleSpec `rounding:` vocabulary, mirroring [`crate::model::RoundingMode`].",
+      "enum": [
+        "half_up",
+        "half_even",
+        "floor",
+        "ceil"
+      ],
+      "type": "string"
+    },
+    "ScalarValueSpec": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "decimal",
+              "type": "string"
+            },
+            "value": {
+              "description": "Decimal value as a quoted string (arbitrary precision) or a JSON integer; floats are rejected.",
+              "type": [
+                "string",
+                "integer"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "date",
+              "type": "string"
+            },
+            "value": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TraceParameterRead": {
+      "properties": {
+        "effective_from": {
+          "format": "date",
+          "type": "string"
+        },
+        "effective_to": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameter": {
+          "description": "Public parameter identity (durable `id` when present, otherwise name).",
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/ScalarValueSpec"
+        }
+      },
+      "required": [
+        "parameter",
+        "name",
+        "index",
+        "value",
+        "effective_from"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/execution-response.v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Execution results. metadata.relation_binding echoes the selected relation binding policy.",
+  "properties": {
+    "metadata": {
+      "$ref": "#/$defs/ExecutionMetadata"
+    },
+    "results": {
+      "items": {
+        "$ref": "#/$defs/QueryResult"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata",
+    "results"
+  ],
+  "title": "Axiom execution response",
+  "type": "object"
+}
