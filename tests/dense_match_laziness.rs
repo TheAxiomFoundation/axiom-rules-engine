@@ -861,6 +861,148 @@ fn dense_matches_explain_for_small_household_batches() {
     assert_eq!(failures, 0, "dense and explain disagreed (see stderr)");
 }
 
+/// A derived relation whose membership reads a `match` without `_` through a
+/// person judgment. A person whose `status` is 9 is covered by no arm.
+const DERIVED_RELATION_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: person_by_status
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match status:
+              1 => 10
+              2 => 20
+  - name: status_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_by_status == 10
+  - name: status_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: StatusUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and status_member
+  - name: unit_size
+    kind: derived
+    entity: StatusUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+"#;
+
+#[test]
+fn dense_names_a_match_reached_through_a_derived_relation_as_explain_does() {
+    // Each household is its members' statuses. A member with status 9 fails
+    // the membership predicate, which reads `person_by_status`; explain names
+    // that rule, by id when the rules carry one.
+    let households: &[&[i64]] = &[&[1, 2], &[1, 9]];
+    for target in [None, Some("us:policies/probe")] {
+        let mut artifact = CompiledProgramArtifact::from_rulespec_str(DERIVED_RELATION_RULESPEC)
+            .expect("RuleSpec module compiles");
+        if let Some(target) = target {
+            for derived in &mut artifact.program.derived {
+                derived.id = Some(format!("{target}#{}", derived.name));
+            }
+        }
+        let dense = DenseCompiledProgram::from_artifact(&artifact, Some("StatusUnit"))
+            .expect("dense compiles");
+        let rule = match target {
+            Some(target) => format!("{target}#person_by_status"),
+            None => "person_by_status".to_string(),
+        };
+        let expected = format!(
+            "no `match` arm in `{rule}` covers `status` = 9 (arms: 1, 2); add an arm for it or a final `_ =>` arm"
+        );
+        for batch in [&households[..1], households] {
+            let mut dataset = DatasetSpec::default();
+            let mut statuses = Vec::new();
+            let mut offsets = vec![0];
+            for (index, members) in batch.iter().enumerate() {
+                for (member, status) in members.iter().enumerate() {
+                    let person = format!("person-{index}-{member}");
+                    let input = match target {
+                        Some(target) => format!("{target}#input.status"),
+                        None => "status".to_string(),
+                    };
+                    dataset
+                        .inputs
+                        .push(integer_record(&input, "Person", &person, *status));
+                    dataset.relations.push(RelationRecordSpec {
+                        name: "member_of_household".to_string(),
+                        tuple: vec![person, format!("household-{index}")],
+                        interval: interval(),
+                    });
+                    statuses.push(*status);
+                }
+                offsets.push(statuses.len());
+            }
+            let entity_ids: Vec<String> = (0..batch.len())
+                .map(|index| format!("household-{index}"))
+                .collect();
+            let output = match target {
+                Some(target) => format!("{target}#unit_size"),
+                None => "unit_size".to_string(),
+            };
+            let explain = explain(&artifact, dataset, &entity_ids, &[output.as_str()]);
+            let dense_batch = || DenseBatchSpec {
+                row_count: batch.len(),
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    DenseRelationKey {
+                        name: "member_of_household".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                    },
+                    DenseRelationBatchSpec {
+                        offsets: offsets.clone(),
+                        inputs: HashMap::from([(
+                            "status".to_string(),
+                            DenseColumn::Integer(statuses.clone()),
+                        )]),
+                    },
+                )]),
+            };
+            let period = period_spec().to_model().expect("period converts");
+            let decimal = dense.execute(&period, dense_batch(), &names(&["unit_size"]));
+            let float = dense.execute_f64(&period, dense_batch(), &names(&["unit_size"]));
+            if batch.len() == 1 {
+                let rows = explain.expect("every member is covered");
+                let size = explain_value(rows[0].values().next().expect("one output"));
+                assert_eq!(size, Value::Number(dec("1")), "{target:?}");
+                for result in [decimal, float] {
+                    let result = result.expect("dense agrees every member is covered");
+                    assert_eq!(dense_value(&result.outputs["unit_size"], 0), size);
+                }
+            } else {
+                assert_eq!(explain.expect_err("status 9 reaches the match"), expected);
+                for result in [decimal, float] {
+                    assert_eq!(
+                        result.expect_err("dense reaches the match too").to_string(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Lifetime execution
 // ---------------------------------------------------------------------------
