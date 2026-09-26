@@ -1063,117 +1063,131 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
     // The order above is stored in artifact metadata and compared exactly
     // when an artifact is loaded, so it stays as computed; this further check
     // only refuses programs, never reorders them.
-    reject_relation_routed_cycles(program)?;
+    reject_relation_routed_cycles(program, &dependents)?;
     Ok(order)
 }
 
 /// Refuse a rule that depends on itself through derived relations: `e`
 /// counts over `R`, and `R`'s membership depends on `e` through its predicate,
 /// its source relation, or a relation its predicate names (by
-/// `relation_member`, `len`, `count_where` or `sum_where`). The order above
-/// only follows a derived relation's own predicate, so such a cycle passed it
+/// `relation_member`, `count_related` or `sum_related`). The order above
+/// follows only a derived relation's own predicate, so such a cycle passed it
 /// and the evaluators recursed until the stack overflowed. This walks one
 /// graph of rules and derived relations; every version of a rule counts, as it
-/// does above. Relation-only cycles were already refused.
-fn reject_relation_routed_cycles(program: &ProgramSpec) -> Result<(), CompileError> {
-    let rule_node = |name: &str| format!("rule:{name}");
-    let relation_node = |name: &str| format!("relation:{name}");
-    let mut nodes = BTreeSet::new();
-    for derived in &program.derived {
-        nodes.insert(rule_node(&derived.name));
+/// does above. Base relations depend on nothing, so a program without derived
+/// relations has no such cycle.
+///
+/// `rule_dependents` is the rule graph the order above was sorted from. Each
+/// edge there is a rule another rule reads, or a rule read by the predicate of
+/// a relation another rule aggregates over; the second kind is also a path
+/// through that relation here, so reusing the edges changes no verdict.
+fn reject_relation_routed_cycles(
+    program: &ProgramSpec,
+    rule_dependents: &HashMap<String, Vec<String>>,
+) -> Result<(), CompileError> {
+    if program
+        .relations
+        .iter()
+        .all(|relation| relation.derivation.is_none())
+    {
+        return Ok(());
     }
-    for relation in &program.relations {
-        nodes.insert(relation_node(&relation.name));
-    }
-    // dependents[x] lists the nodes that depend on x.
-    let mut dependents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut add_edge = |dependency: String, dependent: &String| {
-        if nodes.contains(&dependency) {
-            dependents
-                .entry(dependency)
-                .or_default()
-                .insert(dependent.clone());
+    // Nodes are rules, then derived relations, by position. Rules and
+    // relations have separate namespaces.
+    let rule_nodes = program
+        .derived
+        .iter()
+        .enumerate()
+        .map(|(index, derived)| (derived.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let derived_relations = program
+        .relations
+        .iter()
+        .filter(|relation| relation.derivation.is_some())
+        .collect::<Vec<_>>();
+    let relation_nodes = derived_relations
+        .iter()
+        .enumerate()
+        .map(|(offset, relation)| (relation.name.as_str(), program.derived.len() + offset))
+        .collect::<HashMap<_, _>>();
+    let node_count = program.derived.len() + derived_relations.len();
+    let rule_index = |name: &str| rule_nodes.get(name).copied();
+    let relation_index = |name: &str| relation_nodes.get(name).copied();
+
+    // dependents[x] lists the nodes that depend on node x.
+    let mut dependents = vec![Vec::new(); node_count];
+    let mut incoming = vec![0_usize; node_count];
+    let mut add_edge = |dependency: Option<usize>, dependent: usize| {
+        if let Some(dependency) = dependency {
+            dependents[dependency].push(dependent);
+            incoming[dependent] += 1;
         }
     };
-
-    for derived in &program.derived {
-        let dependent = rule_node(&derived.name);
-        let mut rules = HashSet::new();
+    for (dependency, dependents) in rule_dependents {
+        for dependent in dependents {
+            if let Some(dependent) = rule_index(dependent) {
+                add_edge(rule_index(dependency), dependent);
+            }
+        }
+    }
+    let no_relation_dependencies = HashMap::new();
+    for (index, derived) in program.derived.iter().enumerate() {
         let mut relations = HashSet::new();
-        let empty = HashMap::new();
         for semantics in std::iter::once(&derived.semantics)
             .chain(derived.versions.iter().map(|version| &version.semantics))
         {
             match semantics {
                 DerivedSemanticsSpec::Scalar { expr } => {
-                    collect_scalar_dependencies(expr, &mut rules, &empty);
                     collect_relation_members_from_scalar(expr, &mut relations);
                 }
                 DerivedSemanticsSpec::Judgment { expr } => {
-                    collect_judgment_dependencies(expr, &mut rules, &empty);
                     collect_relation_members_from_judgment(expr, &mut relations);
                 }
             }
         }
-        for rule in rules {
-            add_edge(rule_node(&rule), &dependent);
-        }
         for relation in relations {
-            add_edge(relation_node(&relation), &dependent);
+            add_edge(relation_index(&relation), index);
         }
     }
-    for relation in &program.relations {
-        let Some(derivation) = &relation.derivation else {
-            continue;
-        };
-        let dependent = relation_node(&relation.name);
+    for (offset, relation) in derived_relations.iter().enumerate() {
+        let index = program.derived.len() + offset;
+        let derivation = relation.derivation.as_ref().expect("derived relation");
         let mut rules = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut rules, &HashMap::new());
+        collect_judgment_dependencies(&derivation.predicate, &mut rules, &no_relation_dependencies);
+        for rule in rules {
+            add_edge(rule_index(&rule), index);
+        }
         let mut relations = HashSet::new();
         collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
         relations.insert(derivation.source_relation.clone());
-        for rule in rules {
-            add_edge(rule_node(&rule), &dependent);
-        }
         for source in relations {
-            add_edge(relation_node(&source), &dependent);
+            add_edge(relation_index(&source), index);
         }
     }
 
-    let mut incoming = nodes
-        .iter()
-        .map(|node| (node.clone(), 0_usize))
-        .collect::<BTreeMap<_, _>>();
-    for targets in dependents.values() {
-        for target in targets {
-            *incoming.get_mut(target).expect("edge target is a node") += 1;
-        }
-    }
-    let mut ready = incoming
-        .iter()
-        .filter(|(_, count)| **count == 0)
-        .map(|(node, _)| node.clone())
-        .collect::<BTreeSet<_>>();
-    while let Some(node) = ready.pop_first() {
-        incoming.remove(&node);
-        for target in dependents.get(&node).into_iter().flatten() {
-            if let Some(count) = incoming.get_mut(target) {
-                *count -= 1;
-                if *count == 0 {
-                    ready.insert(target.clone());
-                }
+    let mut ready = (0..node_count)
+        .filter(|&node| incoming[node] == 0)
+        .collect::<Vec<_>>();
+    while let Some(node) = ready.pop() {
+        for &dependent in &dependents[node] {
+            incoming[dependent] -= 1;
+            if incoming[dependent] == 0 {
+                ready.push(dependent);
             }
         }
     }
-    let rules = incoming
-        .keys()
-        .filter_map(|node| node.strip_prefix("rule:"))
-        .collect::<Vec<_>>();
-    if rules.is_empty() {
+    let cycle = program
+        .derived
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| incoming[*index] > 0)
+        .map(|(_, derived)| derived.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if cycle.is_empty() {
         return Ok(());
     }
     Err(CompileError::CyclicDependency {
-        cycle: rules.join(", "),
+        cycle: cycle.into_iter().collect::<Vec<_>>().join(", "),
     })
 }
 
