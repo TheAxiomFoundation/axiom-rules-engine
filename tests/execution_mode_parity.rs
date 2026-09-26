@@ -358,8 +358,8 @@ const FULL: Profile = Profile {
     mixed_requests: true,
     row_missing_inputs: true,
     // A `relation_member` outside a derived relation fails every row that
-    // reaches it, which would mask the other checks this profile feeds (pins,
-    // batch metamorphisms); RELATIONS covers it. Membership tests inside the
+    // reaches it, which would mask the other checks this profile feeds (the
+    // full-generator parity, pins and batch properties); RELATIONS covers it. Membership tests inside the
     // derived relation's predicate, where explain evaluates them, stay on.
     relation_member_weight: 0,
     derived_relation: true,
@@ -546,11 +546,11 @@ fn pbool_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     pbool_over(profile, pnum_strategy(profile))
 }
 
-/// [`FILTERED`]'s predicate: usually a membership test of [`HEADS`], which only
-/// first members pass, alone or negated, so it decides which members count;
-/// otherwise a membership test (of [`HEADS`] or of [`MEMBERS`], which every
-/// source tuple passes) combined with a generated predicate, or a generated
-/// predicate alone.
+/// [`FILTERED`]'s predicate. Half the draws are a membership test of [`HEADS`],
+/// which only first members pass, alone or negated, so it decides which
+/// members count; three in eight combine a membership test (of [`HEADS`] or of
+/// [`MEMBERS`], which every source tuple passes) with a generated predicate;
+/// one in eight is a generated predicate alone.
 fn filter_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     let predicate = pbool_strategy(profile);
     let heads = || Just(PBoolG::RelationMember(1));
@@ -1925,19 +1925,23 @@ fn referenced_inputs(program: &ProgramSpec) -> BTreeSet<String> {
 /// original and either replacement shows a membership test was evaluated, in
 /// the one place explain can evaluate one, and its outcome decided an answer.
 fn with_membership_tests_fixed(program: &ProgramSpec, holds: bool) -> Option<ProgramSpec> {
-    fn replace(value: &mut serde_json::Value, always: &serde_json::Value, replaced: &mut bool) {
+    fn replace(
+        value: &mut serde_json::Value,
+        replacement: &serde_json::Value,
+        replaced: &mut bool,
+    ) {
         if value["kind"] == "relation_member" {
-            *value = always.clone();
+            *value = replacement.clone();
             *replaced = true;
             return;
         }
         match value {
             serde_json::Value::Object(object) => object
                 .values_mut()
-                .for_each(|value| replace(value, always, replaced)),
+                .for_each(|value| replace(value, replacement, replaced)),
             serde_json::Value::Array(items) => items
                 .iter_mut()
-                .for_each(|value| replace(value, always, replaced)),
+                .for_each(|value| replace(value, replacement, replaced)),
             _ => {}
         }
     }
@@ -1947,13 +1951,13 @@ fn with_membership_tests_fixed(program: &ProgramSpec, holds: bool) -> Option<Pro
     } else {
         cmp(int_lit(0), ComparisonOpSpec::Eq, int_lit(1))
     };
-    let always = serde_json::to_value(fixed).expect("judgment serialises");
+    let replacement = serde_json::to_value(fixed).expect("judgment serialises");
     let mut replaced = false;
     for relation in json["relations"].as_array_mut()? {
         if relation["name"] == FILTERED {
             replace(
                 &mut relation["derivation"]["predicate"],
-                &always,
+                &replacement,
                 &mut replaced,
             );
         }
@@ -3271,10 +3275,12 @@ fn assert_exercised(name: &str, stats: &Stats, min_hazard_share: f64) {
 
 /// Non-vacuity for the two divergences the PR #195 review found (fast
 /// answered a `relation_member` explain rejects, and converted a count's
-/// integer to the rule's decimal dtype): a passing run must have reached both
-/// shapes often enough to matter, and a membership test in a derived
-/// relation's predicate, where explain evaluates it, must have decided
-/// answers as often.
+/// integer to the rule's decimal dtype). Each of these must happen often
+/// enough to matter in a passing run: explain fails on a `relation_member`
+/// outside a derived relation; explain reports a value whose kind differs
+/// from its rule's numeric dtype (tests/execution.rs pins `count` itself);
+/// and a membership test in a derived relation's predicate, where explain
+/// evaluates it, decides an answer.
 fn assert_relation_regressions_exercised(name: &str, stats: &Stats) {
     if report_only() || stats.cases < 200 {
         return;
