@@ -1927,13 +1927,41 @@ fn merge_scalar<N: DenseNum>(
     };
     let existing = cached.computed.without(&cached.errors);
     let added = pending.without(&errors);
-    let values = select_dense::<N>(&existing, cached.values, &added, values, &mut errors)?;
+    let values = merge_dense_rows::<N>(&existing, cached.values, &added, values, &mut errors)?;
     let mut merged_errors = cached.errors;
     merged_errors.absorb(errors);
     Ok(DerivedColumn {
         values,
         errors: merged_errors,
         computed: cached.computed.union(&pending),
+    })
+}
+
+/// Extend a cached column with newly computed rows. Both stretches come from
+/// the same formula, so a pair of one dtype keeps it, decimal and `f64`
+/// included: a rule that passes a decimal input through stays decimal in
+/// `f64` mode however its rows were reached. Only a formula whose dtype
+/// depends on which branch its rows took goes through `if`'s combination
+/// rule.
+fn merge_dense_rows<N: DenseNum>(
+    existing_rows: &RowMask,
+    existing: DenseColumn,
+    added_rows: &RowMask,
+    added: DenseColumn,
+    errors: &mut RowErrors,
+) -> Result<DenseColumn, EvalError> {
+    Ok(match (existing, added) {
+        (DenseColumn::Decimal(mut target), DenseColumn::Decimal(source)) => {
+            assign_rows(&mut target, &source, added_rows);
+            DenseColumn::Decimal(target)
+        }
+        (DenseColumn::Float(mut target), DenseColumn::Float(source)) => {
+            assign_rows(&mut target, &source, added_rows);
+            DenseColumn::Float(target)
+        }
+        (existing, added) => {
+            return select_dense::<N>(existing_rows, existing, added_rows, added, errors);
+        }
     })
 }
 

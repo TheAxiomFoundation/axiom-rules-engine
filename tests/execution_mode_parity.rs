@@ -2342,6 +2342,68 @@ fn run_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -
     }
 }
 
+/// Each output's raw dense column (dtype and values, via `Debug`), or the
+/// error, for checking that a column does not depend on evaluation order.
+fn dense_raw(
+    program: &ProgramSpec,
+    batch: DenseBatchSpec,
+    outputs: &[String],
+    f64_mode: bool,
+) -> Option<Result<BTreeMap<String, String>, String>> {
+    let model = program.to_program().ok()?;
+    let dense = DenseCompiledProgram::from_program(&model, Some(HOUSEHOLD)).ok()?;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if f64_mode {
+            dense.execute_f64(&model_period(), batch, outputs)
+        } else {
+            dense.execute(&model_period(), batch, outputs)
+        }
+    }))
+    .ok()?;
+    Some(
+        result
+            .map(|result| {
+                result
+                    .outputs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), format!("{value:?}")))
+                    .collect()
+            })
+            .map_err(|error| error.to_string()),
+    )
+}
+
+/// Dense columns, dtypes included, are a function of the batch: evaluating
+/// the same outputs in the reverse order gives identical columns in both
+/// numeric modes, although the derived caches are filled in another order.
+fn check_dense_order_independence(
+    program: &ProgramSpec,
+    batch: &DenseBatchSpec,
+    outputs: &[String],
+) -> Result<(), String> {
+    let reversed = outputs.iter().rev().cloned().collect::<Vec<_>>();
+    for f64_mode in [false, true] {
+        let forward = dense_raw(program, batch.clone(), outputs, f64_mode);
+        let backward = dense_raw(program, batch.clone(), &reversed, f64_mode);
+        match (forward, backward) {
+            (Some(Ok(forward)), Some(Ok(backward))) if forward != backward => {
+                return Err(format!(
+                    "dense {} columns depend on output order:\n  forward: {forward:?}\n  reversed: {backward:?}",
+                    if f64_mode { "f64" } else { "decimal" }
+                ));
+            }
+            (Some(Ok(_)), Some(Err(error))) | (Some(Err(error)), Some(Ok(_))) => {
+                return Err(format!(
+                    "dense {} succeeds in one output order and fails in the other: {error}",
+                    if f64_mode { "f64" } else { "decimal" }
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Explain (one query per row, every output) vs dense: numeric values by
 /// value (dense columns are typed), everything else exactly; errors by variant.
 fn compare_dense(
@@ -2692,7 +2754,13 @@ fn run_property(
     let stats = RefCell::new(Stats::default());
     let report_only = report_only();
     let config = Config {
-        cases: case_count(),
+        // Dense cases are cheap and dense has the most per-case state (column
+        // dtypes across derived-cache extensions), so it searches longer.
+        cases: if profile.name == DENSE.name {
+            case_count().saturating_mul(6)
+        } else {
+            case_count()
+        },
         failure_persistence: None,
         max_shrink_iters: 20_000,
         ..Config::default()
@@ -2890,23 +2958,25 @@ fn random_programs_dense_matches_explain() {
             }
             let referenced = referenced_inputs(&lowered.program);
             let batch = lower_dense_batch(case, DENSE, &referenced);
-            let dense = run_dense(&lowered.program, batch, &outputs);
+            let dense = run_dense(&lowered.program, batch.clone(), &outputs);
             if matches!(dense, DenseOutcome::Unsupported(_)) {
                 stats.dense_declined += 1;
             } else {
                 stats.dense_ran += 1;
             }
-            compare_dense(&explain, &dense, &outputs).map_err(|problem| {
-                render_case(
-                    DENSE,
-                    &lowered,
-                    &[
-                        ("divergence", problem),
-                        ("explain", explain.render()),
-                        ("dense", render_dense(&dense)),
-                    ],
-                )
-            })
+            compare_dense(&explain, &dense, &outputs)
+                .and_then(|()| check_dense_order_independence(&lowered.program, &batch, &outputs))
+                .map_err(|problem| {
+                    render_case(
+                        DENSE,
+                        &lowered,
+                        &[
+                            ("divergence", problem),
+                            ("explain", explain.render()),
+                            ("dense", render_dense(&dense)),
+                        ],
+                    )
+                })
         },
     );
     assert_exercised("dense", &stats, 0.05);

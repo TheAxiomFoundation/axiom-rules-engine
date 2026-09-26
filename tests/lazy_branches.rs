@@ -739,3 +739,53 @@ fn lifetime_reductions_skip_branches_no_row_selects() {
             if values == &[Decimal::from(6), Decimal::from(3)]
     ));
 }
+
+#[test]
+fn a_cached_rule_keeps_its_dtype_whichever_output_reaches_it_first() {
+    // `a` reaches `passthrough` only through a branch no row takes, so the
+    // first touch computes `passthrough` for no rows; requesting it afterwards
+    // extends that cache. Neither order may change the column's dtype, which
+    // is the input column's dtype, in either numeric mode.
+    let rulespec = module(&format!(
+        "{}{}",
+        rule("passthrough", "Money", "x"),
+        rule("a", "Money", "if 0 == 1: passthrough\nelse: 0"),
+    ));
+    let program = DenseCompiledProgram::from_artifact(&compile(&rulespec), Some("Household"))
+        .expect("dense compilation succeeds");
+    let period = period().to_model().expect("period converts");
+    let batch = |column: DenseColumn| DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::from([("x".to_string(), column)]),
+        relations: HashMap::new(),
+    };
+    for outputs in [["a", "passthrough"], ["passthrough", "a"]] {
+        let outputs = outputs.map(str::to_string);
+        let decimal_in_f64 = program
+            .execute_f64(
+                &period,
+                batch(DenseColumn::Decimal(vec![Decimal::ONE])),
+                &outputs,
+            )
+            .expect("f64 execution succeeds");
+        assert!(
+            matches!(
+                &decimal_in_f64.outputs["passthrough"],
+                DenseOutputValue::Scalar(DenseColumn::Decimal(values)) if values == &[Decimal::ONE]
+            ),
+            "{outputs:?}: {:?}",
+            decimal_in_f64.outputs["passthrough"]
+        );
+        let float_in_decimal = program
+            .execute(&period, batch(DenseColumn::Float(vec![1.0])), &outputs)
+            .expect("decimal execution succeeds");
+        assert!(
+            matches!(
+                &float_in_decimal.outputs["passthrough"],
+                DenseOutputValue::Scalar(DenseColumn::Float(values)) if values == &[1.0]
+            ),
+            "{outputs:?}: {:?}",
+            float_in_decimal.outputs["passthrough"]
+        );
+    }
+}
