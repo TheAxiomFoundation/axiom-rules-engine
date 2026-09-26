@@ -243,7 +243,7 @@ pub enum ComparisonOp {
     Ne,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum RelatedValueRef {
     Input(String),
     Derived(String),
@@ -284,7 +284,7 @@ impl OverPeriodsKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ScalarExpr {
     Literal(ScalarValue),
     Input(String),
@@ -347,10 +347,9 @@ pub enum ScalarExpr {
         else_expr: Box<ScalarExpr>,
     },
     /// The fallback of a `match` without a `_ =>` arm: an error naming the
-    /// subject's value. Lowering places it as the innermost `else` of the
-    /// match's comparison chain, so explain reaches it only when no pattern
-    /// matched; `patterns` lets bulk and dense, which evaluate both branches,
-    /// find the rows that reach it.
+    /// subject's value and the arms. Lowering places it as the innermost
+    /// `else` of the match's comparison chain, so an evaluation reaches it
+    /// only when no pattern matched.
     NoMatch {
         subject: Box<ScalarExpr>,
         patterns: Vec<ScalarExpr>,
@@ -368,7 +367,7 @@ pub enum ScalarExpr {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum JudgmentExpr {
     Comparison {
         left: ScalarExpr,

@@ -658,12 +658,13 @@ fn dense_names_a_failed_rule_by_its_id_as_explain_does() {
 }
 
 #[test]
-fn dense_refuses_a_match_fallback_whose_conditions_are_not_its_arms() {
+fn dense_follows_a_match_chain_whose_conditions_are_not_its_arms() {
     // `divisor`'s last arm is rewritten to test `other`, not `status`. For
     // status 3 and other 1, explain reaches the fallback and fails, where
     // taking the value of the arm whose pattern equals the subject would
-    // silently give 0. Dense cannot evaluate that chain as a `match`, so it
-    // refuses the program instead.
+    // silently give 0. Dense evaluates the conditions, not the patterns, so
+    // it fails the same way; a row that passes the rewritten condition takes
+    // that arm.
     let mut artifact = CompiledProgramArtifact::from_rulespec_str(ARITHMETIC_RULESPEC)
         .expect("RuleSpec module compiles");
     let divisor = artifact
@@ -690,13 +691,35 @@ fn dense_refuses_a_match_fallback_whose_conditions_are_not_its_arms() {
         .expect_err("explain reaches the fallback");
     assert!(error.contains("`divisor` covers `status` = 3"), "{error}");
 
-    let error = DenseCompiledProgram::from_artifact(&artifact, Some("TaxUnit"))
-        .expect_err("dense refuses the rewritten chain")
-        .to_string();
-    assert!(
-        error.contains("a `match` fallback outside its comparison chain"),
-        "{error}"
-    );
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("TaxUnit"))
+        .expect("dense compiles the rewritten chain");
+    let period = period_spec().to_model().expect("period converts");
+    for float in [false, true] {
+        let run = |rows: &[&[i64]]| {
+            let batch = tax_unit_batch(rows);
+            if float {
+                dense.execute_f64(&period, batch, &names(&["divisor"]))
+            } else {
+                dense.execute(&period, batch, &names(&["divisor"]))
+            }
+        };
+        let dense_error = run(&[&[1, 3, 1]])
+            .expect_err("dense reaches the fallback")
+            .to_string();
+        assert_eq!(dense_error, error);
+        // Status 9 with other 3 passes the rewritten condition.
+        let result = run(&[&[1, 1, 1], &[1, 9, 3]]).expect("both rows take an arm");
+        assert_eq!(
+            dense_value(&result.outputs["divisor"], 0),
+            Value::Number(dec("5")),
+            "float {float}"
+        );
+        assert_eq!(
+            dense_value(&result.outputs["divisor"], 1),
+            Value::Number(dec("0")),
+            "float {float}"
+        );
+    }
 }
 
 /// Point the condition of the arm before a `match` fallback at `other`.

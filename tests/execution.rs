@@ -1037,7 +1037,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
         ],
         relations: vec![],
     };
-    let queries = ["household-1", "household-2"]
+    let queries: Vec<ExecutionQuery> = ["household-1", "household-2"]
         .into_iter()
         .map(|entity_id| ExecutionQuery {
             assessment_date: None,
@@ -1049,13 +1049,34 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
 
     let response = execute_request(ExecutionRequest {
         mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request succeeds");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
         program,
         dataset,
         queries,
     })
-    .expect("fast request succeeds");
+    .expect("explain request succeeds");
 
     assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    // Each row keeps the kind of the branch it selected, exactly as explain
+    // reports it: the decimal input on the first row, the integer literal on
+    // the second.
+    assert_eq!(
+        results_without_trace(&response),
+        results_without_trace(&explain)
+    );
+    assert!(matches!(
+        response.results[1].outputs.get("benefit"),
+        Some(OutputValue::Scalar {
+            value: ScalarValueSpec::Integer { value: 0 },
+            ..
+        })
+    ));
     assert_eq!(
         decimal_output(
             response.results[0]
@@ -1566,7 +1587,7 @@ fn integer_result(
 }
 
 #[test]
-fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
+fn fast_mode_aggregates_related_derived_values_like_explain() {
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
@@ -1681,28 +1702,197 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("explain request succeeds");
 
+    // Aggregating a related derived value runs each row's aggregation on the
+    // reference interpreter, so fast mode answers it without falling back.
     assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
     assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
-    assert!(
-        fast.metadata
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("bulk execution does not yet support"),
-        "unexpected fallback reason: {:?}",
-        fast.metadata.fallback_reason
-    );
     assert_eq!(
-        serde_json::to_value(&fast.results).expect("fast results serialise"),
-        serde_json::to_value(&explain.results).expect("explain results serialise")
+        results_without_trace(&fast),
+        results_without_trace(&explain)
     );
 }
 
+#[test]
+fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
+    let (program, dataset, queries) = date_arithmetic_case(&[false, false]);
+
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request falls back");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+
+    assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(
+        fast.metadata.fallback_reason.as_deref(),
+        Some("bulk fast mode does not yet support days_between")
+    );
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+}
+
+#[test]
+fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
+    // Every row selects the supported branch: the date arithmetic is dead code
+    // for this batch, so fast mode answers it.
+    let (program, dataset, queries) = date_arithmetic_case(&[true, true]);
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request succeeds");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+
+    // One live row reaches the date arithmetic: fast declines and falls back.
+    let (program, dataset, queries) = date_arithmetic_case(&[true, false]);
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request falls back");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert!(fast.metadata.fallback_reason.is_some());
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+}
+
+/// `benefit = if use_amount: amount else: days_between(period_start,
+/// period_end)`, one household per flag.
+fn date_arithmetic_case(flags: &[bool]) -> (ProgramSpec, DatasetSpec, Vec<ExecutionQuery>) {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "benefit".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Integer,
+            unit: None,
+            rounding: None,
+            source: None,
+            period: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics: DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::If {
+                    condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                        left: Box::new(ScalarExprSpec::Input {
+                            name: "use_amount".to_string(),
+                        }),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(ScalarExprSpec::Literal {
+                            value: ScalarValueSpec::Bool { value: true },
+                        }),
+                    }),
+                    then_expr: Box::new(ScalarExprSpec::Input {
+                        name: "amount".to_string(),
+                    }),
+                    else_expr: Box::new(ScalarExprSpec::DaysBetween {
+                        from: Box::new(ScalarExprSpec::PeriodStart),
+                        to: Box::new(ScalarExprSpec::PeriodEnd),
+                    }),
+                },
+            },
+            versions: vec![],
+        }],
+        ..ProgramSpec::default()
+    };
+    let mut inputs = Vec::new();
+    let mut queries = Vec::new();
+    for (index, use_amount) in flags.iter().enumerate() {
+        let entity_id = format!("household-{index}");
+        inputs.push(InputRecordSpec {
+            name: "use_amount".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.clone(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: *use_amount },
+        });
+        inputs.push(InputRecordSpec {
+            name: "amount".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.clone(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: 7 },
+        });
+        queries.push(ExecutionQuery {
+            assessment_date: None,
+            entity_id,
+            period: period.clone(),
+            outputs: vec!["benefit".to_string()],
+        });
+    }
+    (
+        program,
+        DatasetSpec {
+            inputs,
+            relations: vec![],
+        },
+        queries,
+    )
+}
+
+/// A response's results as JSON with the explain-only trace removed, for
+/// comparing a fast response against an explain response exactly.
+fn results_without_trace(response: &ExecutionResponse) -> serde_json::Value {
+    let mut results = serde_json::to_value(&response.results).expect("results serialise");
+    for result in results.as_array_mut().expect("results are an array") {
+        result
+            .as_object_mut()
+            .expect("each result is an object")
+            .remove("trace");
+    }
+    results
+}
+
 /// A household program whose outputs fail in fast mode in different ways:
-/// `household_income` aggregates a related derived value and `period_start_date`
-/// reads the period start, two constructs bulk does not support (fallback, each
-/// with its own reason); `guarded_amount` never takes its `else` branch,
+/// `days_in_period` counts days between dates and `period_start_date` reads
+/// the period start, two constructs bulk does not support (fallback, each
+/// with its own reason); `household_income` aggregates a related derived
+/// value, which bulk answers on the reference interpreter; `guarded_amount` never takes its `else` branch,
 /// which reads the missing `absent_amount` (bulk skips it too, since every row
 /// agrees on the condition); `reads_first` and `reads_second` read genuinely
 /// missing inputs, and both `shares_failure` rules depend on `reads_first`.
@@ -1760,6 +1950,16 @@ fn fast_outcome_program() -> ProgramSpec {
                     else_expr: Box::new(input("absent_amount")),
                 },
             ),
+            DerivedSpec {
+                dtype: DTypeSpec::Integer,
+                ..household_rule(
+                    "days_in_period",
+                    ScalarExprSpec::DaysBetween {
+                        from: Box::new(ScalarExprSpec::PeriodStart),
+                        to: Box::new(ScalarExprSpec::PeriodEnd),
+                    },
+                )
+            },
             household_rule("reads_first", input("absent_first")),
             household_rule("reads_second", input("absent_second")),
             DerivedSpec {
@@ -1835,7 +2035,7 @@ fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionReque
 fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
     let explain = execute_request(fast_outcome_request(
         ExecutionMode::Explain,
-        &["household_income", "guarded_amount"],
+        &["period_start_date", "guarded_amount"],
     ))
     .expect("explain answers both outputs");
     let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
@@ -1843,14 +2043,10 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
         decimal_output(&explain.results[0].outputs["guarded_amount"]),
         decimal("7")
     );
-    assert_eq!(
-        decimal_output(&explain.results[0].outputs["household_income"]),
-        decimal("100")
-    );
 
     for outputs in [
-        ["household_income", "guarded_amount"],
-        ["guarded_amount", "household_income"],
+        ["period_start_date", "guarded_amount"],
+        ["guarded_amount", "period_start_date"],
     ] {
         for run in 0..64 {
             let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
@@ -1862,12 +2058,43 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
             assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
             assert_eq!(
                 fast.metadata.fallback_reason.as_deref(),
-                Some("bulk execution does not yet support aggregating related derived values"),
+                Some("bulk fast mode does not yet support period_start / period_end"),
                 "run {run} with outputs {outputs:?}"
             );
             assert_eq!(
                 serde_json::to_value(&fast.results).expect("results serialise"),
                 explain_results,
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+
+    // Without an output that needs explain, the same guarded output and a
+    // related-derived aggregation are answered in fast mode on every run.
+    let explain = execute_request(fast_outcome_request(
+        ExecutionMode::Explain,
+        &["household_income", "guarded_amount"],
+    ))
+    .expect("explain answers both outputs");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["household_income"]),
+        decimal("100")
+    );
+    for outputs in [
+        ["household_income", "guarded_amount"],
+        ["guarded_amount", "household_income"],
+    ] {
+        for run in 0..16 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| panic!("run {run} with outputs {outputs:?}: {error}"));
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+            assert_eq!(fast.metadata.fallback_reason, None);
+            let fast_request_explain =
+                execute_request(fast_outcome_request(ExecutionMode::Explain, &outputs))
+                    .expect("explain answers both outputs");
+            assert_eq!(
+                results_without_trace(&fast),
+                results_without_trace(&fast_request_explain),
                 "run {run} with outputs {outputs:?}"
             );
         }
@@ -1879,12 +2106,13 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
 /// after an output bulk answers.
 #[test]
 fn fast_mode_fallback_reason_is_the_first_in_request_order() {
-    const RELATED: &str = "bulk execution does not yet support aggregating related derived values";
+    const DAYS: &str = "bulk fast mode does not yet support days_between";
     const PERIOD: &str = "bulk fast mode does not yet support period_start / period_end";
     for (outputs, reason) in [
-        (["household_income", "period_start_date"], RELATED),
-        (["period_start_date", "household_income"], PERIOD),
+        (["days_in_period", "period_start_date"], DAYS),
+        (["period_start_date", "days_in_period"], PERIOD),
         (["guarded_amount", "period_start_date"], PERIOD),
+        (["household_income", "days_in_period"], DAYS),
     ] {
         for run in 0..16 {
             let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
@@ -2041,11 +2269,12 @@ fn fast_mode_reports_explains_error_across_a_multi_query_batch() {
     }
 }
 
-/// Bulk evaluates both branches of a conditional for every row. When the rows
-/// disagree, the branch a row does not take can fail for that row; explain
-/// never evaluates it, so the request succeeds through explain.
+/// When the rows disagree on a conditional, each branch is evaluated only
+/// for the rows that select it. The branch household-a does not take reads an
+/// input household-a lacks, which explain never evaluates; fast mode answers
+/// the batch itself, as explain does.
 #[test]
-fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() {
+fn fast_mode_answers_a_batch_whose_rows_take_different_branches() {
     let input = |name: &str| ScalarExprSpec::Input {
         name: name.to_string(),
     };
@@ -2081,7 +2310,6 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
         )
     };
     let explain = execute_request(request(ExecutionMode::Explain)).expect("explain answers");
-    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
     assert_eq!(
         decimal_output(&explain.results[0].outputs["flagged_or_amount"]),
         decimal("7")
@@ -2092,23 +2320,12 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
     );
     for run in 0..16 {
         let fast = execute_request(request(ExecutionMode::Fast))
-            .unwrap_or_else(|error| panic!("run {run} failed instead of falling back: {error}"));
+            .unwrap_or_else(|error| panic!("run {run} failed: {error}"));
+        assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast, "run {run}");
+        assert_eq!(fast.metadata.fallback_reason, None, "run {run}");
         assert_eq!(
-            fast.metadata.actual_mode,
-            ExecutionMode::Explain,
-            "run {run}"
-        );
-        assert!(
-            fast.metadata
-                .fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("`amount`")),
-            "run {run}: {:?}",
-            fast.metadata.fallback_reason
-        );
-        assert_eq!(
-            serde_json::to_value(&fast.results).expect("results serialise"),
-            explain_results,
+            results_without_trace(&fast),
+            results_without_trace(&explain),
             "run {run}"
         );
     }
@@ -2116,9 +2333,9 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
 
 /// A parameter output anywhere in the request sends it to explain before
 /// bulk evaluates anything. Bulk evaluates both branches of `guarded` for
-/// every row, and household-a's untaken branch overflows (a panic, since
-/// arithmetic is unchecked), so warming `guarded` before seeing `rate` would
-/// crash a request that explain answers.
+/// every row, and household-a's untaken branch overflows, so warming
+/// `guarded` before seeing `rate` would name that overflow as the fallback
+/// reason (and, before evaluator arithmetic was checked, panicked).
 #[test]
 fn fast_mode_sends_a_parameter_request_to_explain_before_evaluating_anything() {
     const RULESPEC: &str = r#"

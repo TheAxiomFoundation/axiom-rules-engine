@@ -455,9 +455,9 @@ fn build_batch(
         },
     };
 
-    // Only collect inputs the caller actually supplied. `bind_batch` will
-    // default any declared-but-missing optional inputs through their
-    // `input_or_else` defaults, and error on hard-required missing inputs.
+    // Only collect inputs the caller actually supplied. An absent input is a
+    // missing input on every row: `input_or_else` reads its default, and a
+    // plain read fails only the rows whose evaluation reaches it.
     let mut root_inputs = HashMap::new();
     for name in compiled.root_inputs() {
         if let Some(value) = inputs.get_item(name)? {
@@ -482,14 +482,14 @@ fn build_batch(
             .get_item("inputs")?
             .ok_or_else(|| PyValueError::new_err("missing dense relation inputs"))?;
         let input_dict = raw_inputs.cast::<PyDict>()?;
+        // Only collect the related inputs the caller supplied. An absent one
+        // is a missing input on every related row, which fails only the rows
+        // whose evaluation reads it, as for root inputs.
         let mut related_inputs = HashMap::new();
         for input_name in &schema.related_inputs {
-            let column = input_dict.get_item(input_name)?.ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "missing dense relation input `{input_name}` for `{key}`"
-                ))
-            })?;
-            related_inputs.insert(input_name.clone(), dense_column_from_python(&column)?);
+            if let Some(column) = input_dict.get_item(input_name)? {
+                related_inputs.insert(input_name.clone(), dense_column_from_python(&column)?);
+            }
         }
         bound_relations.insert(
             schema.key.clone(),
