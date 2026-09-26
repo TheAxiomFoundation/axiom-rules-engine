@@ -4889,7 +4889,9 @@ rules:
 // 5a29e03 (#201), which runs every relation aggregation on the reference
 // interpreter and keeps each row's value in the kind explain computes. The
 // tests below pin explain's semantics for both and for their neighbours, and
-// assert that fast mode agrees without falling back.
+// assert that fast mode agrees: on its own path, without falling back, where
+// explain answers, and with explain's exact error (which fast reports by
+// handing a failing request to explain) where explain fails.
 //
 // Requests are written as the JSON the CLI reads, so each one can be replayed
 // with `axiom-rules-engine < request.json` after setting `mode`.
@@ -5626,7 +5628,7 @@ fn fast_reports_explains_value_kind_under_every_declared_dtype() {
         }],
     }]);
     let mut kinds_seen = std::collections::BTreeSet::new();
-    for dtype in ["integer", "decimal", "bool", "text"] {
+    for dtype in ["integer", "decimal", "bool", "text", "date", "judgment"] {
         for rounding in [None, Some("half_up")] {
             for (label, expr) in &expressions {
                 let mut rule = review_rule("value", "Household", dtype, expr.clone());

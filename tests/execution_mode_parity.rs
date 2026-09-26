@@ -324,6 +324,9 @@ struct Profile {
     /// A derived relation ([`FILTERED`]) that counts and sums can aggregate
     /// over.
     derived_relation: bool,
+    /// Weight of each of the `count` and `sum` leaves among numeric leaves
+    /// whose others weigh 14 (with `relations` on).
+    aggregation_weight: u32,
 }
 
 /// Evaluation order in isolation: lazy `if`, short-circuit `and`/`or`, divisor
@@ -341,6 +344,7 @@ const EVAL_ORDER: Profile = Profile {
     row_missing_inputs: true,
     relation_member_weight: 0,
     derived_relation: false,
+    aggregation_weight: 1,
 };
 
 /// Everything the generator knows.
@@ -353,8 +357,13 @@ const FULL: Profile = Profile {
     ill_typed_comparisons: true,
     mixed_requests: true,
     row_missing_inputs: true,
-    relation_member_weight: 1,
+    // A `relation_member` outside a derived relation fails every row that
+    // reaches it, which would mask the other checks this profile feeds (pins,
+    // batch metamorphisms); RELATIONS covers it. Membership tests inside the
+    // derived relation's predicate, where explain evaluates them, stay on.
+    relation_member_weight: 0,
     derived_relation: true,
+    aggregation_weight: 1,
 };
 
 /// Relation aggregation in depth, the shapes behind the two divergences the
@@ -373,8 +382,9 @@ const RELATIONS: Profile = Profile {
     ill_typed_comparisons: false,
     mixed_requests: true,
     row_missing_inputs: true,
-    relation_member_weight: 3,
+    relation_member_weight: 1,
     derived_relation: true,
+    aggregation_weight: 3,
 };
 
 /// The dense-compatible subset: every row requests every household rule,
@@ -393,6 +403,7 @@ const DENSE: Profile = Profile {
     // filters, so the dense profile generates neither until that is fixed.
     relation_member_weight: 0,
     derived_relation: false,
+    aggregation_weight: 1,
 };
 
 // ===========================================================================
@@ -535,18 +546,23 @@ fn pbool_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     pbool_over(profile, pnum_strategy(profile))
 }
 
-/// [`FILTERED`]'s predicate: usually a membership test (of [`MEMBERS`], which
-/// every source tuple passes, or [`HEADS`], which only first members pass)
-/// combined with a generated predicate.
+/// [`FILTERED`]'s predicate: usually a membership test of [`HEADS`], which only
+/// first members pass, alone or negated, so it decides which members count;
+/// otherwise a membership test (of [`HEADS`] or of [`MEMBERS`], which every
+/// source tuple passes) combined with a generated predicate, or a generated
+/// predicate alone.
 fn filter_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     let predicate = pbool_strategy(profile);
+    let heads = || Just(PBoolG::RelationMember(1));
     let member = || (0..2_u8).prop_map(PBoolG::RelationMember);
     prop_oneof![
-        1 => predicate.clone(),
-        3 => (member(), predicate.clone())
+        3 => heads(),
+        1 => heads().prop_map(|member| PBoolG::Not(Box::new(member))),
+        2 => (member(), predicate.clone())
             .prop_map(|(member, rest)| PBoolG::And(vec![member, rest])),
-        1 => (member(), predicate)
+        1 => (member(), predicate.clone())
             .prop_map(|(member, rest)| PBoolG::Or(vec![PBoolG::Not(Box::new(member)), rest])),
+        1 => predicate,
     ]
     .boxed()
 }
@@ -594,8 +610,8 @@ fn num_strategy(profile: Profile) -> BoxedStrategy<NumG> {
                     .boxed(),
             )
         };
-        leaves.push((1, count));
-        leaves.push((1, sum));
+        leaves.push((profile.aggregation_weight, count));
+        leaves.push((profile.aggregation_weight, sum));
     }
     // A `match` subject is a leaf, as in real rules (a filing status, a
     // rule's code), which keeps generated trees shallow.
@@ -1800,23 +1816,16 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(from, visit);
             walk_scalar(to, visit);
         }
-        ScalarExprSpec::CountRelated {
-            relation,
-            where_clause,
-            ..
-        } => {
-            visit(Ref::Relation(relation));
+        ScalarExprSpec::CountRelated { where_clause, .. } => {
             if let Some(predicate) = where_clause {
                 walk_judgment(predicate, visit);
             }
         }
         ScalarExprSpec::SumRelated {
-            relation,
             value,
             where_clause,
             ..
         } => {
-            visit(Ref::Relation(relation));
             match value {
                 RelatedValueRefSpec::Input { name } => visit(Ref::Input(name)),
                 RelatedValueRefSpec::Derived { .. } => visit(Ref::Derived),
@@ -1850,7 +1859,7 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(right, visit);
         }
         JudgmentExprSpec::Derived { .. } => visit(Ref::Derived),
-        JudgmentExprSpec::RelationMember { .. } => visit(Ref::RelationMember),
+        JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -1866,9 +1875,6 @@ enum Ref<'a> {
     Input(&'a str),
     Derived,
     Parameter(&'a str),
-    /// The relation a `count` or `sum` aggregates over.
-    Relation(&'a str),
-    RelationMember,
 }
 
 fn walk_semantics(semantics: &DerivedSemanticsSpec, visit: &mut dyn FnMut(Ref<'_>)) {
@@ -1913,26 +1919,46 @@ fn referenced_inputs(program: &ProgramSpec) -> BTreeSet<String> {
     inputs
 }
 
-/// Some rule aggregates over [`FILTERED`], whose predicate tests membership:
-/// the one shape in which explain evaluates a `relation_member`.
-fn aggregates_over_membership_filter(program: &ProgramSpec) -> bool {
-    let tests_membership = program.relations.iter().any(|relation| {
-        relation.name == FILTERED
-            && relation.derivation.as_ref().is_some_and(|derivation| {
-                let mut found = false;
-                walk_judgment(&derivation.predicate, &mut |reference| {
-                    found |= matches!(reference, Ref::RelationMember);
-                });
-                found
-            })
-    });
-    let mut aggregates = false;
-    for rule in &program.derived {
-        walk_semantics(&rule.semantics, &mut |reference| {
-            aggregates |= matches!(reference, Ref::Relation(FILTERED));
-        });
+/// The program with every `relation_member` in [`FILTERED`]'s predicate
+/// replaced by a judgment that always holds (`holds`) or never does, or `None`
+/// when that predicate tests no membership. Explain disagreeing between the
+/// original and either replacement shows a membership test was evaluated, in
+/// the one place explain can evaluate one, and its outcome decided an answer.
+fn with_membership_tests_fixed(program: &ProgramSpec, holds: bool) -> Option<ProgramSpec> {
+    fn replace(value: &mut serde_json::Value, always: &serde_json::Value, replaced: &mut bool) {
+        if value["kind"] == "relation_member" {
+            *value = always.clone();
+            *replaced = true;
+            return;
+        }
+        match value {
+            serde_json::Value::Object(object) => object
+                .values_mut()
+                .for_each(|value| replace(value, always, replaced)),
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .for_each(|value| replace(value, always, replaced)),
+            _ => {}
+        }
     }
-    tests_membership && aggregates
+    let mut json = serde_json::to_value(program).expect("program serialises");
+    let fixed = if holds {
+        always()
+    } else {
+        cmp(int_lit(0), ComparisonOpSpec::Eq, int_lit(1))
+    };
+    let always = serde_json::to_value(fixed).expect("judgment serialises");
+    let mut replaced = false;
+    for relation in json["relations"].as_array_mut()? {
+        if relation["name"] == FILTERED {
+            replace(
+                &mut relation["derivation"]["predicate"],
+                &always,
+                &mut replaced,
+            );
+        }
+    }
+    replaced.then(|| serde_json::from_value(json).expect("program deserialises"))
 }
 
 /// Some scalar output's value kind differs from its rule's declared numeric
@@ -3111,11 +3137,14 @@ struct Stats {
     dense_declined: u32,
     /// Explain failed on a `relation_member` outside a derived relation.
     relation_member_errors: u32,
-    /// Explain succeeded on a program aggregating over a derived relation whose
-    /// predicate tests membership.
-    membership_filters: u32,
+    /// Explain succeeded, and fixing every membership test in the derived
+    /// relation's predicate to hold, or not to, changes its answer: a
+    /// `relation_member` was evaluated where explain allows it, and decided an
+    /// output.
+    decisive_memberships: u32,
     /// Explain succeeded and reported a value whose kind differs from its
-    /// rule's declared numeric dtype.
+    /// rule's declared numeric dtype (from any expression; tests/execution.rs
+    /// pins `count` itself).
     kind_crossings: u32,
     reference_panics: u32,
     divergences: u32,
@@ -3125,7 +3154,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; relation_member errors {} / membership filters {}; kind crossings {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; relation_member errors {} / decisive memberships {}; kind crossings {}; reference panics {}; divergences {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -3137,7 +3166,7 @@ impl Stats {
             self.dense_ran,
             self.dense_declined,
             self.relation_member_errors,
-            self.membership_filters,
+            self.decisive_memberships,
             self.kind_crossings,
             self.reference_panics,
             self.divergences
@@ -3243,7 +3272,9 @@ fn assert_exercised(name: &str, stats: &Stats, min_hazard_share: f64) {
 /// Non-vacuity for the two divergences the PR #195 review found (fast
 /// answered a `relation_member` explain rejects, and converted a count's
 /// integer to the rule's decimal dtype): a passing run must have reached both
-/// shapes, and the valid use of `relation_member`, often enough to matter.
+/// shapes often enough to matter, and a membership test in a derived
+/// relation's predicate, where explain evaluates it, must have decided
+/// answers as often.
 fn assert_relation_regressions_exercised(name: &str, stats: &Stats) {
     if report_only() || stats.cases < 200 {
         return;
@@ -3255,8 +3286,8 @@ fn assert_relation_regressions_exercised(name: &str, stats: &Stats) {
             "fail on a `relation_member` outside a derived relation",
         ),
         (
-            stats.membership_filters,
-            "answer over a derived relation whose predicate tests membership",
+            stats.decisive_memberships,
+            "answer where a membership test in a derived relation's predicate decides an output",
         ),
         (
             stats.kind_crossings,
@@ -3285,8 +3316,19 @@ fn explain_reference(lowered: &Lowered, stats: &mut Stats) -> Option<Outcome> {
     match &explain {
         Outcome::Ok { results, .. } => {
             stats.explain_ok += 1;
-            if aggregates_over_membership_filter(&lowered.program) {
-                stats.membership_filters += 1;
+            let decisive = [true, false].into_iter().any(|holds| {
+                with_membership_tests_fixed(&lowered.program, holds).is_some_and(|fixed| {
+                    let fixed = run_sparse(request(
+                        ExecutionMode::Explain,
+                        &fixed,
+                        &lowered.dataset,
+                        &lowered.queries,
+                    ));
+                    compare_sparse(&explain, &fixed).is_err()
+                })
+            });
+            if decisive {
+                stats.decisive_memberships += 1;
             }
             if crosses_numeric_kinds(results) {
                 stats.kind_crossings += 1;
