@@ -548,7 +548,9 @@ fn relation_orientation_diagnostics(
     path: &str,
 ) -> Result<Vec<CompileDiagnostic>, CompileError> {
     let runtime_program = program.to_program()?;
-    let usages = crate::model::relation_usage_records(&runtime_program);
+    // The runtime program carries each relation's declaration verbatim, so a
+    // conflict found against it is a conflict with the declaration here.
+    let conflicts = crate::model::relation_usage_summary(&runtime_program).declaration_conflicts;
     let mut relations = program
         .relations
         .iter()
@@ -558,14 +560,7 @@ fn relation_orientation_diagnostics(
 
     let mut diagnostics = Vec::new();
     for relation in relations {
-        let Some(usage) = usages.iter().find(|usage| {
-            usage.relation == relation.name
-                && usage
-                    .slot_entities
-                    .iter()
-                    .zip(&relation.slot_entities)
-                    .any(|(used, declared)| used.as_ref().is_some_and(|used| used != declared))
-        }) else {
+        let Some(usage) = conflicts.get(&relation.name) else {
             continue;
         };
         diagnostics.push(CompileDiagnostic {
@@ -1373,39 +1368,69 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         graph.insert(relation.name.clone(), dependencies);
     }
 
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    for relation in graph.keys() {
-        detect_relation_cycle(relation, &graph, &mut visiting, &mut visited)?;
-    }
-    Ok(())
+    detect_relation_cycle(&graph)
 }
 
-fn detect_relation_cycle(
-    relation: &str,
-    graph: &BTreeMap<String, BTreeSet<String>>,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-) -> Result<(), CompileError> {
-    if visited.contains(relation) {
-        return Ok(());
-    }
-    if !visiting.insert(relation.to_string()) {
-        let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
-        cycle.sort();
-        return Err(CompileError::CyclicRelationDependency {
-            cycle: cycle.join(", "),
-        });
-    }
-    if let Some(dependencies) = graph.get(relation) {
-        for dependency in dependencies {
-            if graph.contains_key(dependency) {
-                detect_relation_cycle(dependency, graph, visiting, visited)?;
+/// Depth-first search of the derived-relation graph for a cycle, with an
+/// explicit stack so a long chain of relations cannot overflow the call
+/// stack. Relations are visited in name order and each relation's
+/// dependencies in name order; on meeting a relation already on the current
+/// path, the error names every relation on that path, sorted.
+fn detect_relation_cycle(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+    // Nodes are derived relations by position in name order; each keeps its
+    // dependencies that are themselves derived relations, in name order.
+    let index = graph
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.as_str(), position))
+        .collect::<HashMap<_, _>>();
+    let dependencies = graph
+        .values()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter_map(|dependency| index.get(dependency.as_str()).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let names = graph.keys().collect::<Vec<_>>();
+
+    let mut on_path = vec![false; names.len()];
+    let mut finished = vec![false; names.len()];
+    // The current path: each relation with the next dependency to follow.
+    let mut path = Vec::<(usize, usize)>::new();
+    for root in 0..names.len() {
+        if finished[root] {
+            continue;
+        }
+        on_path[root] = true;
+        path.push((root, 0));
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&dependency) = dependencies[node].get(*next) else {
+                on_path[node] = false;
+                finished[node] = true;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            if finished[dependency] {
+                continue;
             }
+            if on_path[dependency] {
+                let mut cycle = path
+                    .iter()
+                    .map(|&(member, _)| names[member].as_str())
+                    .collect::<Vec<_>>();
+                cycle.sort_unstable();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            on_path[dependency] = true;
+            path.push((dependency, 0));
         }
     }
-    visiting.remove(relation);
-    visited.insert(relation.to_string());
     Ok(())
 }
 
@@ -2022,5 +2047,132 @@ rules:
             conflict_error,
             CompileError::ConflictingParameterDeclarations { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod relation_cycle_tests {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    use proptest::collection::{btree_set, vec};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+
+    use super::{CompileError, detect_relation_cycle};
+
+    /// The recursive search [`detect_relation_cycle`] replaced, kept as the
+    /// reference for which cycle is reported.
+    fn reference_detect(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+        fn visit(
+            relation: &str,
+            graph: &BTreeMap<String, BTreeSet<String>>,
+            visiting: &mut HashSet<String>,
+            visited: &mut HashSet<String>,
+        ) -> Result<(), CompileError> {
+            if visited.contains(relation) {
+                return Ok(());
+            }
+            if !visiting.insert(relation.to_string()) {
+                let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
+                cycle.sort();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            if let Some(dependencies) = graph.get(relation) {
+                for dependency in dependencies {
+                    if graph.contains_key(dependency) {
+                        visit(dependency, graph, visiting, visited)?;
+                    }
+                }
+            }
+            visiting.remove(relation);
+            visited.insert(relation.to_string());
+            Ok(())
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        for relation in graph.keys() {
+            visit(relation, graph, &mut visiting, &mut visited)?;
+        }
+        Ok(())
+    }
+
+    /// A derived-relation graph over up to nine relations whose dependencies
+    /// name other relations or a data relation outside the graph.
+    fn graph() -> impl Strategy<Value = BTreeMap<String, BTreeSet<String>>> {
+        (1_usize..10).prop_flat_map(|size| {
+            let dependency = prop_oneof![
+                6 => (0..size).prop_map(|index| format!("r{index}")),
+                1 => Just("base".to_string()),
+            ];
+            vec(btree_set(dependency, 0..3), size).prop_map(|dependencies| {
+                dependencies
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, dependencies)| (format!("r{index}"), dependencies))
+                    .collect()
+            })
+        })
+    }
+
+    fn outcome(result: Result<(), CompileError>) -> Result<(), String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn iterative_search_reports_what_the_recursive_search_reported() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 4000,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[11; 32]),
+        );
+        let cycles = std::cell::Cell::new(0_usize);
+        runner
+            .run(&graph(), |graph| {
+                let expected = outcome(reference_detect(&graph));
+                cycles.set(cycles.get() + usize::from(expected.is_err()));
+                let actual = outcome(detect_relation_cycle(&graph));
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "iterative {actual:?}, recursive {expected:?}, graph {graph:?}"
+                    )));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(cycles.get() > 1000, "only {} cyclic graphs", cycles.get());
+    }
+
+    #[test]
+    fn a_long_chain_is_searched_without_recursing_per_link() {
+        // Names ascend toward the data relation, so the first relation in name
+        // order heads the whole chain; 50,000 links overflowed the recursion.
+        let links = 50_000;
+        let mut graph = (0..links)
+            .map(|link| {
+                let source = if link + 1 < links {
+                    format!("rel{:07}", link + 1)
+                } else {
+                    "base".to_string()
+                };
+                (format!("rel{link:07}"), BTreeSet::from([source]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(detect_relation_cycle(&graph).is_ok());
+
+        // Closing the chain into a loop reports every relation on it.
+        graph.insert(
+            format!("rel{:07}", links - 1),
+            BTreeSet::from(["rel0000000".to_string()]),
+        );
+        let Err(CompileError::CyclicRelationDependency { cycle }) = detect_relation_cycle(&graph)
+        else {
+            panic!("a closed chain is a cycle");
+        };
+        assert_eq!(cycle.split(", ").count(), links);
     }
 }
