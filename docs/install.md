@@ -10,7 +10,7 @@ attestation. Verify both before you run the binary. The archives are
 asset="axiom-rules-engine-aarch64-apple-darwin.tar.xz"
 
 # Download the archive and its checksum.
-gh release download v0.1.1 \
+gh release download v0.1.2 \
   --repo TheAxiomFoundation/axiom-rules-engine \
   --pattern "$asset" \
   --pattern "$asset.sha256"
@@ -22,7 +22,7 @@ sha256sum --check "$asset.sha256"          # Linux
 # Verify GitHub/Sigstore build provenance.
 gh attestation verify "$asset" \
   --repo TheAxiomFoundation/axiom-rules-engine \
-  --source-ref refs/tags/v0.1.1
+  --source-ref refs/tags/v0.1.2
 
 # Only extract after both checks pass.
 tar -xJf "$asset"
