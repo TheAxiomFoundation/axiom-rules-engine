@@ -41,7 +41,9 @@ output's formula is evaluated for that entity and period as follows.
 - **Derived rules are values.** A rule referenced from a formula is evaluated
   for the referencing entity (or, inside a relation predicate, the entity its
   declared entity kind selects) when evaluation reaches the reference, and not
-  otherwise.
+  otherwise. Its declared output rounding applies before any dependent reads
+  the value, including when dense inlines the rule into an aggregation or
+  predicate.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
