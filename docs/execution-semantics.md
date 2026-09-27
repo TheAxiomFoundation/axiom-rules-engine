@@ -152,6 +152,49 @@ the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
 period.
 
+The dense compiler also declines one shape by depth. A `count`/`sum` inlines
+the rules its `where` clause and summed value read, and a current-entity rule
+read there inlines the same way, so the compiled expression nests as deep as
+the chain of rules it inlines. Past `dense::MAX_INLINE_DEPTH` (512) levels the
+compiler returns `DenseCompileError::Unsupported` and the generic API
+evaluates the program. The bound depends on the program alone. It is a
+compile-time decline, like the other unsupported shapes, not an evaluation
+error.
+
+## Deep programs
+
+A program's rules can reference each other in arbitrarily long chains, and
+every mode answers them. Explain, fast and dense evaluate a rule by recursing
+into the rules its formula references, and the dense compiler compiles one the
+same way. Each counts its nesting levels. At a reference to a rule it has not
+evaluated yet, once that count reaches a threshold, it does not recurse.
+Instead it returns to a driver loop and names the rule. The driver evaluates
+that rule from level zero, then retries the evaluation it interrupted, which
+now finds the rule cached. A long chain therefore runs in segments, each on a
+stack no deeper than the threshold plus one rule's own expression nesting,
+whatever the chain's length and the host's stack (`src/depth.rs`).
+
+Deferral changes no result. Evaluating a rule for an entity and period is
+deterministic, so a retry reaches the same references in the same order. Every
+value, value kind, error and explain trace is what uninterrupted recursion
+would produce. Only work changes: a deferred segment runs once up to the
+deferral and once in full. The threshold is 128 levels in release builds,
+so an evaluation that never nests that deep never retries, and 8 in debug
+builds, whose frames are about thirty times larger; deferring early also
+exercises deferral throughout the debug test suite. On a 3,000-rule chain,
+where release deferral runs dozens of times, explain and fast take the same
+time as the recursive evaluators did.
+
+Deferral happens only at rule references, so one rule's own expression
+nesting is still recursed through. Inlined dense expressions have no rule
+references, which is why dense bounds them (see above).
+
+A rule that is deferred while an evaluation it transitively started still
+waits for it depends on itself. The drivers report that as
+`EvalError::DependencyCycle` (or the dense compiler's cyclic-dependency error)
+instead of deferring forever. Compiled artifacts and `execute_request` refuse
+cyclic programs before evaluating, so only a hand-built `Program` can reach it.
+
 ## How the columnar evaluators implement this
 
 Fast and dense evaluate one expression node for many rows at once, so they
@@ -178,10 +221,15 @@ carry the reference control flow as data:
 - **Declining is structural.** Fast declines (and falls back to explain) only
   when a live row reaches a construct fast does not implement.
 
+`tests/evaluation_depth.rs` checks deep programs in every mode, including
+chains around explicit thresholds, a 20,000-rule chain on a 1 MiB thread, and
+the requests that reproduced #206.
 `tests/execution_mode_parity.rs` checks this contract differentially: it
 generates programs with dead branches, zero divisors, missing inputs, mixed
 integer/decimal branches, pins and relations, runs them through explain, fast
 and dense, and shrinks any disagreement to a minimal counterexample. It also
 checks that a batch equals its concatenated single-query runs and that
-permuting the queries permutes the results. `tests/lazy_branches.rs` holds
+permuting the queries permutes the results, and that every response, trace
+and error is identical with deferral at every rule reference and with none.
+`tests/lazy_branches.rs` holds
 named cases for the `rulespec-us` idioms that failed before masking.

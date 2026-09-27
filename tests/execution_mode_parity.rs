@@ -3282,16 +3282,27 @@ fn run_property(
     profile: Profile,
     check: impl Fn(&CaseG, &mut Stats) -> Result<(), String>,
 ) -> Stats {
+    // Dense cases are cheap and dense has the most per-case state (column
+    // dtypes across derived-cache extensions), so it searches longer.
+    let cases = if profile.name == DENSE.name {
+        case_count().saturating_mul(6)
+    } else {
+        case_count()
+    };
+    run_property_cases(name, property, profile, cases, check)
+}
+
+fn run_property_cases(
+    name: &str,
+    property: u64,
+    profile: Profile,
+    cases: u32,
+    check: impl Fn(&CaseG, &mut Stats) -> Result<(), String>,
+) -> Stats {
     let stats = RefCell::new(Stats::default());
     let report_only = report_only();
     let config = Config {
-        // Dense cases are cheap and dense has the most per-case state (column
-        // dtypes across derived-cache extensions), so it searches longer.
-        cases: if profile.name == DENSE.name {
-            case_count().saturating_mul(6)
-        } else {
-            case_count()
-        },
+        cases,
         failure_persistence: None,
         max_shrink_iters: 20_000,
         ..Config::default()
@@ -3902,4 +3913,135 @@ fn random_batches_equal_concatenated_singletons_and_permute() {
         },
     );
     assert_exercised("metamorphic", &stats, 0.05);
+}
+
+// ===========================================================================
+// Deferral (#206)
+// ===========================================================================
+
+/// Deferral thresholds the independence property runs at, besides
+/// `usize::MAX` (no deferral). At 1 every reference to a rule not yet
+/// evaluated defers once any expression is open, so the small generated
+/// programs defer at nearly every rule reference.
+const DEFERRAL_THRESHOLDS: [usize; 3] = [1, 2, 3];
+
+/// Everything an explain or fast call returns, byte for byte: values, kinds,
+/// metadata and the full explain trace, or the error with all its fields.
+fn raw_sparse(request: ExecutionRequest) -> String {
+    match catch_unwind(AssertUnwindSafe(|| execute_request(request))) {
+        Ok(Ok(response)) => serde_json::to_string(&response).expect("responses serialize"),
+        Ok(Err(error)) => format!("Err({error:?})"),
+        Err(payload) => format!("PANIC {}", panic_message(payload)),
+    }
+}
+
+/// Every dense output column, dtype and values, or the error, byte for byte.
+fn raw_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -> String {
+    let (dense, _) = match compile_dense(program) {
+        Ok(compiled) => compiled,
+        Err(outcome) => return format!("not compiled: {}", render_dense(&outcome)),
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        dense.execute(&model_period(), batch, outputs)
+    })) {
+        // `outputs` is a hash map; order it so only content is compared.
+        Ok(Ok(result)) => format!(
+            "{:?}",
+            result
+                .outputs
+                .iter()
+                .map(|(name, value)| (name, format!("{value:?}")))
+                .collect::<BTreeMap<_, _>>()
+        ),
+        Ok(Err(error)) => format!("Err({error:?})"),
+        Err(payload) => format!("PANIC {}", panic_message(payload)),
+    }
+}
+
+/// Run `run` with no deferral and at each of [`DEFERRAL_THRESHOLDS`]; every
+/// run must return exactly what the recursive run returns.
+fn same_at_every_threshold(what: &str, run: impl Fn() -> String) -> Result<(), String> {
+    let recursive = axiom_rules_engine::depth::with_suspend_depth(usize::MAX, &run);
+    for threshold in DEFERRAL_THRESHOLDS {
+        let deferred = axiom_rules_engine::depth::with_suspend_depth(threshold, &run);
+        if deferred != recursive {
+            return Err(format!(
+                "{what} changed when deferring at level {threshold}\n  recursive: {recursive}\n  deferred:  {deferred}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_deferral_independence(
+    case: &CaseG,
+    profile: Profile,
+    stats: &mut Stats,
+) -> Result<(), String> {
+    stats.cases += 1;
+    let lowered = lower(case, profile);
+    let mut checks = Vec::new();
+    for (label, program) in [
+        ("program", &lowered.program),
+        ("forced program", &lowered.forced),
+    ] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let what = format!("{label} in {mode:?} mode");
+            checks.push(same_at_every_threshold(&what, || {
+                raw_sparse(request(
+                    mode.clone(),
+                    program,
+                    &lowered.dataset,
+                    &lowered.queries,
+                ))
+            }));
+        }
+    }
+    if profile.name == DENSE.name {
+        let mut outputs = Vec::new();
+        for output in lowered
+            .queries
+            .first()
+            .map_or(&[][..], |query| &query.outputs)
+        {
+            if !outputs.contains(output) {
+                outputs.push(output.clone());
+            }
+        }
+        let referenced = referenced_inputs(&lowered.program);
+        let batch = lower_dense_batch(case, DENSE, &referenced);
+        checks.push(same_at_every_threshold("dense", || {
+            raw_dense(&lowered.program, batch.clone(), &outputs)
+        }));
+    }
+    checks
+        .into_iter()
+        .collect::<Result<Vec<()>, String>>()
+        .map(|_| ())
+        .map_err(|problem| render_case(profile, &lowered, &[("divergence", problem)]))
+}
+
+/// Deferring rules to the driver (src/depth.rs) never changes a result.
+/// Explain's full response (values, kinds, metadata, trace), fast's response
+/// and metadata, and dense's columns and dtypes, or the exact error each
+/// reports, are identical whether every reference to a rule not yet
+/// evaluated defers or none does. The forced program (every branch
+/// evaluated) covers errors that laziness hides.
+///
+/// Each case runs every mode four times, so the property runs a fifth of
+/// [`case_count`] per profile to keep the debug suite fast; the debug build
+/// also defers at level 8 throughout every other test in the suite.
+#[test]
+fn random_programs_are_independent_of_the_deferral_threshold() {
+    let cases = (case_count() / 5).max(1);
+    for (name, property, profile) in [
+        ("deferral: full generator", 11, FULL),
+        ("deferral: relation aggregation", 12, RELATIONS),
+        ("deferral: dense", 13, DENSE),
+    ] {
+        let stats = run_property_cases(name, property, profile, cases, |case, stats| {
+            check_deferral_independence(case, profile, stats)
+        });
+        assert!(report_only() || stats.cases > 0, "{name}: no cases ran");
+    }
 }

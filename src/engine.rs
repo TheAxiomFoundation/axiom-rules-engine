@@ -160,6 +160,9 @@ pub enum EvalError {
         derived: String,
         at: chrono::NaiveDate,
     },
+    /// Reported only for a hand-built `Program`: checked programs are acyclic.
+    #[error("derived `{0}` depends on itself, so its evaluation cannot finish")]
+    DependencyCycle(String),
     #[error("derived `{0}` is scalar, but a judgment was requested")]
     ExpectedJudgment(String),
     #[error("derived `{0}` is judgment, but a scalar was requested")]
@@ -370,6 +373,55 @@ pub(crate) struct CacheKey {
     pub(crate) period: Period,
 }
 
+/// A derived-rule evaluation the interpreter deferred to its driver instead of
+/// recursing into it (see [`crate::depth`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Deferred {
+    Scalar(CacheKey),
+    Judgment(CacheKey),
+}
+
+impl Deferred {
+    fn rule(&self) -> &str {
+        match self {
+            Self::Scalar(key) | Self::Judgment(key) => &key.derived,
+        }
+    }
+}
+
+/// Why an evaluation inside the interpreter stopped before producing a value:
+/// an evaluation error, or a rule deferred to the driver, which evaluates it
+/// and retries. Only the drivers see `Defer`; the public entry points return
+/// `EvalError`.
+#[derive(Debug)]
+enum Interrupt {
+    Error(EvalError),
+    Defer(Deferred),
+}
+
+impl Interrupt {
+    fn within_rule(self, rule: &str) -> Self {
+        match self {
+            Self::Error(error) => Self::Error(error.within_rule(rule)),
+            deferred => deferred,
+        }
+    }
+}
+
+impl From<EvalError> for Interrupt {
+    fn from(error: EvalError) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<ArithmeticError> for Interrupt {
+    fn from(error: ArithmeticError) -> Self {
+        Self::Error(error.into())
+    }
+}
+
+type Eval<T> = Result<T, Interrupt>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TraceSkipReason {
     ShortCircuit,
@@ -455,6 +507,11 @@ pub struct Engine<'a> {
     /// Whether to record the per-node trace. The bulk evaluator borrows this
     /// interpreter for per-entity relation work and never reads a trace.
     tracing: bool,
+    /// Expression levels on the stack since the driver's current task began.
+    depth: usize,
+    /// The level at which a reference to a rule not yet evaluated is deferred
+    /// to the driver (see [`crate::depth`]).
+    suspend_depth: usize,
 }
 
 impl<'a> Engine<'a> {
@@ -506,6 +563,8 @@ impl<'a> Engine<'a> {
             execution_trace: HashMap::new(),
             active_evaluations: Vec::new(),
             tracing,
+            depth: 0,
+            suspend_depth: crate::depth::suspend_depth(),
         }
     }
 
@@ -515,6 +574,82 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
+        self.drive(|engine| engine.scalar_rule(derived_name, entity_id, period))
+    }
+
+    pub fn evaluate_judgment(
+        &mut self,
+        derived_name: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Result<JudgmentOutcome, EvalError> {
+        self.drive(|engine| engine.judgment_rule(derived_name, entity_id, period))
+    }
+
+    /// Run `root` to completion. When it defers a rule (see [`crate::depth`]),
+    /// evaluate that rule as a task of its own, from level zero, and retry.
+    /// Tasks form a stack: a task can defer a rule it reaches, which runs
+    /// first. The first error ends the evaluation, as it would the recursive
+    /// one: an error propagates unchanged from the rule it occurs in to the
+    /// root, so a task's error is the root's.
+    fn drive<T>(&mut self, mut root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
+        let mut tasks: Vec<Deferred> = Vec::new();
+        let mut waiting: HashSet<Deferred> = HashSet::new();
+        loop {
+            self.depth = 0;
+            let interrupt = match tasks.last().cloned() {
+                None => match root(self) {
+                    Ok(value) => return Ok(value),
+                    Err(interrupt) => interrupt,
+                },
+                Some(task) => {
+                    let evaluated = match &task {
+                        Deferred::Scalar(key) => self
+                            .scalar_rule(&key.derived, &key.entity_id, &key.period)
+                            .map(|_| ()),
+                        Deferred::Judgment(key) => self
+                            .judgment_rule(&key.derived, &key.entity_id, &key.period)
+                            .map(|_| ()),
+                    };
+                    match evaluated {
+                        Ok(()) => {
+                            tasks.pop();
+                            waiting.remove(&task);
+                            continue;
+                        }
+                        Err(interrupt) => interrupt,
+                    }
+                }
+            };
+            match interrupt {
+                Interrupt::Error(error) => return Err(error),
+                // A rule deferred while a task waiting on it is still open
+                // reaches itself.
+                Interrupt::Defer(deferred) if waiting.contains(&deferred) => {
+                    return Err(EvalError::DependencyCycle(deferred.rule().to_string()));
+                }
+                Interrupt::Defer(deferred) => {
+                    waiting.insert(deferred.clone());
+                    tasks.push(deferred);
+                }
+            }
+        }
+    }
+
+    /// Evaluate one expression level: count it for the deferral threshold.
+    fn nested<T>(&mut self, evaluate: impl FnOnce(&mut Self) -> Eval<T>) -> Eval<T> {
+        self.depth += 1;
+        let result = evaluate(self);
+        self.depth -= 1;
+        result
+    }
+
+    fn scalar_rule(
+        &mut self,
+        derived_name: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Eval<ScalarValue> {
         let key = CacheKey {
             derived: derived_name.to_string(),
             entity_id: entity_id.to_string(),
@@ -522,6 +657,9 @@ impl<'a> Engine<'a> {
         };
         if let Some(value) = self.scalar_cache.get(&key) {
             return Ok(value.clone());
+        }
+        if self.depth >= self.suspend_depth {
+            return Err(Interrupt::Defer(Deferred::Scalar(key)));
         }
 
         let derived = self.get_derived(derived_name)?.clone();
@@ -537,9 +675,11 @@ impl<'a> Engine<'a> {
         }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
-            DerivedSemantics::Scalar(expr) => self.eval_scalar_expr(expr, entity_id, period),
+            DerivedSemantics::Scalar(expr) => {
+                self.eval_scalar_expr_inner(expr, entity_id, period, None)
+            }
             DerivedSemantics::Judgment(_) => {
-                Err(EvalError::ExpectedScalar(derived_name.to_string()))
+                Err(EvalError::ExpectedScalar(derived_name.to_string()).into())
             }
         };
         let finished = self
@@ -547,8 +687,9 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("scalar evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated
-            .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(derived_name)))?;
+        let value = evaluated.map_err(|interrupt| {
+            interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
+        })?;
         // Apply the rule's opt-in output rounding before caching, so the
         // rounded value is what both direct queries and dependent rules
         // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
@@ -562,12 +703,12 @@ impl<'a> Engine<'a> {
         Ok(rounded)
     }
 
-    pub fn evaluate_judgment(
+    fn judgment_rule(
         &mut self,
         derived_name: &str,
         entity_id: &str,
         period: &Period,
-    ) -> Result<JudgmentOutcome, EvalError> {
+    ) -> Eval<JudgmentOutcome> {
         let key = CacheKey {
             derived: derived_name.to_string(),
             entity_id: entity_id.to_string(),
@@ -575,6 +716,9 @@ impl<'a> Engine<'a> {
         };
         if let Some(value) = self.judgment_cache.get(&key) {
             return Ok(*value);
+        }
+        if self.depth >= self.suspend_depth {
+            return Err(Interrupt::Defer(Deferred::Judgment(key)));
         }
 
         let derived = self.get_derived(derived_name)?.clone();
@@ -590,9 +734,11 @@ impl<'a> Engine<'a> {
         }
         self.active_evaluations.push(key.clone());
         let evaluated = match semantics {
-            DerivedSemantics::Judgment(expr) => self.eval_judgment_expr(expr, entity_id, period),
+            DerivedSemantics::Judgment(expr) => {
+                self.eval_judgment_expr_inner(expr, entity_id, period, None)
+            }
             DerivedSemantics::Scalar(_) => {
-                Err(EvalError::ExpectedJudgment(derived_name.to_string()))
+                Err(EvalError::ExpectedJudgment(derived_name.to_string()).into())
             }
         };
         let finished = self
@@ -600,8 +746,9 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("judgment evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated
-            .map_err(|error| error.within_rule(derived.id.as_deref().unwrap_or(derived_name)))?;
+        let value = evaluated.map_err(|interrupt| {
+            interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
+        })?;
         self.judgment_cache.insert(key, value);
         Ok(value)
     }
@@ -832,13 +979,15 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
+    /// Evaluate an expression outside any rule, for the bulk evaluator's
+    /// per-entity relation aggregations.
     pub(crate) fn eval_scalar_expr(
         &mut self,
         expr: &ScalarExpr,
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        self.eval_scalar_expr_inner(expr, entity_id, period, None)
+        self.drive(|engine| engine.eval_scalar_expr_inner(expr, entity_id, period, None))
     }
 
     fn eval_scalar_expr_inner(
@@ -847,15 +996,25 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Result<ScalarValue, EvalError> {
+    ) -> Eval<ScalarValue> {
+        self.nested(|engine| engine.scalar_node(expr, entity_id, period, relation_context))
+    }
+
+    fn scalar_node(
+        &mut self,
+        expr: &ScalarExpr,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<ScalarValue> {
         match expr {
             ScalarExpr::Literal(value) => Ok(value.clone()),
-            ScalarExpr::Input(name) => self.lookup_input(name, entity_id, period),
+            ScalarExpr::Input(name) => Ok(self.lookup_input(name, entity_id, period)?),
             ScalarExpr::InputOrElse { name, default } => {
                 match self.lookup_input(name, entity_id, period) {
                     Ok(value) => Ok(value),
                     Err(EvalError::MissingInput { .. }) => Ok(default.clone()),
-                    Err(other) => Err(other),
+                    Err(other) => Err(other.into()),
                 }
             }
             ScalarExpr::Derived(name) => {
@@ -868,7 +1027,7 @@ impl<'a> Engine<'a> {
                     entity_id: target_entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.evaluate_scalar(name, target_entity_id, period)
+                self.scalar_rule(name, target_entity_id, period)
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 let lookup_key = self
@@ -879,7 +1038,7 @@ impl<'a> Engine<'a> {
                             "parameter key for `{parameter}` must be an integer"
                         ))
                     })?;
-                self.lookup_parameter(parameter, lookup_key, period)
+                Ok(self.lookup_parameter(parameter, lookup_key, period)?)
             }
             ScalarExpr::Add(items) => {
                 let mut total = Decimal::ZERO;
@@ -902,7 +1061,7 @@ impl<'a> Engine<'a> {
             ScalarExpr::Div(left, right) => {
                 let divisor = self.eval_decimal(right, entity_id, period, relation_context)?;
                 if divisor.is_zero() {
-                    return Err(EvalError::DivisionByZero);
+                    return Err(EvalError::DivisionByZero.into());
                 }
                 Ok(ScalarValue::Decimal(checked_div(
                     self.eval_decimal(left, entity_id, period, relation_context)?,
@@ -914,7 +1073,8 @@ impl<'a> Engine<'a> {
                 let Some(first) = iter.next() else {
                     return Err(EvalError::TypeMismatch(
                         "max() requires at least one operand".to_string(),
-                    ));
+                    )
+                    .into());
                 };
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
@@ -930,7 +1090,8 @@ impl<'a> Engine<'a> {
                 let Some(first) = iter.next() else {
                     return Err(EvalError::TypeMismatch(
                         "min() requires at least one operand".to_string(),
-                    ));
+                    )
+                    .into());
                 };
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
@@ -1113,13 +1274,13 @@ impl<'a> Engine<'a> {
             ScalarExpr::NoMatch { subject, patterns } => {
                 let value =
                     self.eval_scalar_expr_inner(subject, entity_id, period, relation_context)?;
-                Err(no_matching_arm(subject, &value, patterns))
+                Err(no_matching_arm(subject, &value, patterns).into())
             }
             // Cross-period reductions are only defined when a batch is supplied
             // per period (the dense lifetime surface). The sparse single-period
             // interpreter has no period axis to reduce over.
             ScalarExpr::OverPeriods { kind, .. } => {
-                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+                Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()).into())
             }
         }
     }
@@ -1129,7 +1290,7 @@ impl<'a> Engine<'a> {
         expr: &JudgmentExpr,
         entity_id: &str,
         period: &Period,
-    ) -> Result<JudgmentOutcome, EvalError> {
+    ) -> Eval<JudgmentOutcome> {
         self.eval_judgment_expr_inner(expr, entity_id, period, None)
     }
 
@@ -1139,7 +1300,17 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Result<JudgmentOutcome, EvalError> {
+    ) -> Eval<JudgmentOutcome> {
+        self.nested(|engine| engine.judgment_node(expr, entity_id, period, relation_context))
+    }
+
+    fn judgment_node(
+        &mut self,
+        expr: &JudgmentExpr,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
                 let left_value =
@@ -1164,7 +1335,7 @@ impl<'a> Engine<'a> {
                     entity_id: target_entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.evaluate_judgment(name, target_entity_id, period)
+                self.judgment_rule(name, target_entity_id, period)
             }
             JudgmentExpr::RelationMember {
                 relation,
@@ -1265,7 +1436,7 @@ impl<'a> Engine<'a> {
         value: &RelatedValueRef,
         entity_id: &str,
         period: &Period,
-    ) -> Result<Decimal, EvalError> {
+    ) -> Eval<Decimal> {
         let scalar = match value {
             RelatedValueRef::Input(name) => self.lookup_input(name, entity_id, period)?,
             RelatedValueRef::Derived(name) => {
@@ -1274,12 +1445,12 @@ impl<'a> Engine<'a> {
                     entity_id: entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.evaluate_scalar(name, entity_id, period)?
+                self.scalar_rule(name, entity_id, period)?
             }
         };
-        scalar.as_decimal().ok_or_else(|| {
+        Ok(scalar.as_decimal().ok_or_else(|| {
             EvalError::TypeMismatch("related aggregation requires numeric values".to_string())
-        })
+        })?)
     }
 
     fn eval_decimal(
@@ -1288,10 +1459,11 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Result<Decimal, EvalError> {
-        self.eval_scalar_expr_inner(expr, entity_id, period, relation_context)?
+    ) -> Eval<Decimal> {
+        Ok(self
+            .eval_scalar_expr_inner(expr, entity_id, period, relation_context)?
             .as_decimal()
-            .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))
+            .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?)
     }
 
     fn lookup_input(
@@ -1402,7 +1574,26 @@ impl<'a> Engine<'a> {
         related_slot: usize,
         entity_id: &str,
         period: &Period,
-    ) -> Result<Vec<String>, EvalError> {
+    ) -> Eval<Vec<String>> {
+        self.nested(|engine| {
+            engine.related_entity_ids_at_level(
+                relation,
+                current_slot,
+                related_slot,
+                entity_id,
+                period,
+            )
+        })
+    }
+
+    fn related_entity_ids_at_level(
+        &mut self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        entity_id: &str,
+        period: &Period,
+    ) -> Eval<Vec<String>> {
         let schema = self
             .program
             .relations
@@ -1412,7 +1603,8 @@ impl<'a> Engine<'a> {
             return Err(EvalError::TypeMismatch(format!(
                 "relation `{relation}` has arity {}, but slots {current_slot} and {related_slot} were requested",
                 schema.arity
-            )));
+            ))
+            .into());
         }
 
         let mut related_ids = self
@@ -1473,7 +1665,7 @@ impl<'a> Engine<'a> {
         current_id: &str,
         related_id: &str,
         period: &Period,
-    ) -> Result<bool, EvalError> {
+    ) -> Eval<bool> {
         Ok(self
             .related_entity_ids(relation, current_slot, related_slot, current_id, period)?
             .iter()
