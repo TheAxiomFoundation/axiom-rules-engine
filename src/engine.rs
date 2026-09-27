@@ -272,6 +272,15 @@ pub(crate) fn no_matching_arm(
     }
 }
 
+/// The error for a `relation_member` evaluated without a relation context:
+/// only a derived relation's predicate supplies one, so a `count`/`sum`
+/// `where` clause or a rule body that reaches it fails.
+pub(crate) fn relation_member_outside_derived_relation(relation: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "relation predicate `{relation}` can only be evaluated inside a derived relation"
+    ))
+}
+
 pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
     match expr {
         ScalarExpr::Literal(value) => describe_scalar_value(value),
@@ -1162,11 +1171,8 @@ impl<'a> Engine<'a> {
                 current_slot,
                 related_slot,
             } => {
-                let context = relation_context.ok_or_else(|| {
-                    EvalError::TypeMismatch(format!(
-                        "relation predicate `{relation}` can only be evaluated inside a derived relation"
-                    ))
-                })?;
+                let context = relation_context
+                    .ok_or_else(|| relation_member_outside_derived_relation(relation))?;
                 Ok(
                     if self.relation_contains(
                         relation,

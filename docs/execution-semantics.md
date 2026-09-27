@@ -107,10 +107,11 @@ that row, and a dense call fails exactly when explain would fail for some row.
 When several rows fail, the error is the first failing row's, then the first
 failing output's in the requested order.
 
-Three representation limits apply. They are properties of typed columns, not
-of evaluation order. A column's dtype never depends on which rows are live:
-dense still types a branch no row selects, and a parameter lookup's dtype is
-that of the selected table, not of the keys a batch happens to look up.
+Four representation limits apply. They are properties of typed columns and
+positional relation batches, not of evaluation order. A column's dtype never
+depends on which rows are live: dense still types a branch no row selects, and
+a parameter lookup's dtype is that of the selected table, not of the keys a
+batch happens to look up.
 
 1. **One dtype per column.** An integer and a decimal (or `f64`) branch combine
    into the executor's numeric dtype, so dense returns `1` as a decimal where
@@ -125,6 +126,20 @@ that of the selected table, not of the keys a batch happens to look up.
    column the caller does not supply is a missing input on every row. It is an
    error only if a live row reads it, exactly as a missing input record is in
    explain.
+4. **Relation batches carry base relations only.** A derived relation is its
+   base relation's batch filtered by its predicate, and related rows carry no
+   entity ids. Tuples a dataset supplies under a derived relation's own name,
+   which explain adds to the filtered ones, have no place in a batch. Inside a
+   derived relation's predicate, dense accepts a `relation_member` only when
+   it tests the relation's source, or a source further up its chain, with the
+   slots the chain reads it with: such a test holds for every filtered tuple.
+   The dense compiler rejects a predicate with any other membership test. A
+   `relation_member` in a `count`/`sum` `where` clause, or in a
+   related entity's rule that such a clause, a summed value or a predicate
+   reads, fails the rows that reach it, as in explain. One in a root entity's
+   rule, or in a current entity's rule that a compiled predicate reads, makes
+   the dense compiler reject the program, even where explain would never
+   reach it.
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no

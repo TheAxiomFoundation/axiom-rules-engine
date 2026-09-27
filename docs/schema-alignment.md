@@ -49,7 +49,10 @@ schema/runtime gaps are explicit:
 
 - `derived_relation` lowers into `ProgramSpec` and executes in explain mode,
   bulk fast mode, and the generic dense compiler for related-input predicates,
-  current/root predicates, and composed derived-relation source chains.
+  current/root predicates, membership tests of the relation's own sources
+  read with their derivation's slots, and composed derived-relation source
+  chains. The dense compiler rejects a predicate with any other membership
+  test.
 - `source_relation` records are validated as provenance metadata.
   Parameter-to-parameter and derived-to-derived `sets` records now lower into
   runtime bindings when both the upstream target and downstream value concepts
