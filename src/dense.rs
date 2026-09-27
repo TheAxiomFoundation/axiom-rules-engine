@@ -1149,6 +1149,9 @@ struct DenseCompiler<'a> {
     /// Nesting of the expression being inlined into a relation aggregation
     /// (see [`MAX_INLINE_DEPTH`]).
     inline_depth: usize,
+    /// Expression levels evaluated since compiling last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
 }
 
 /// How deep an expression inlined into a relation aggregation may nest.
@@ -1197,6 +1200,7 @@ impl<'a> DenseCompiler<'a> {
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             inline_depth: 0,
+            visits: 0,
         })
     }
 
@@ -1265,6 +1269,12 @@ impl<'a> DenseCompiler<'a> {
     /// references in the same order, so rules, inputs, relations and
     /// parameters are registered in the order the recursion registers them.
     fn compile_derived(&mut self, name: &str) -> Result<usize, DenseCompileError> {
+        let compiled = self.compile_tasks(name);
+        crate::depth::add_visits(std::mem::take(&mut self.visits));
+        compiled
+    }
+
+    fn compile_tasks(&mut self, name: &str) -> Result<usize, DenseCompileError> {
         let mut tasks: Vec<String> = Vec::new();
         loop {
             // A deferral unwinds every rule in progress; nothing is being
@@ -1366,6 +1376,7 @@ impl<'a> DenseCompiler<'a> {
         derived_name: &str,
         expr: &ScalarExpr,
     ) -> Compiling<CompiledScalarExpr> {
+        self.visits += 1;
         self.depth += 1;
         let compiled = self.compile_scalar_node(derived_name, expr);
         self.depth -= 1;
@@ -1556,6 +1567,7 @@ impl<'a> DenseCompiler<'a> {
         derived_name: &str,
         expr: &JudgmentExpr,
     ) -> Compiling<CompiledJudgmentExpr> {
+        self.visits += 1;
         self.depth += 1;
         let compiled = self.compile_judgment_node(derived_name, expr);
         self.depth -= 1;
@@ -2333,6 +2345,9 @@ trait Deferring {
     fn reset_depth(&mut self);
     /// Evaluate a deferred rule's rows, from level zero.
     fn run_deferred(&mut self, task: &Deferred) -> Flow<()>;
+    /// The expression levels evaluated since the last call (see
+    /// [`crate::depth::count_visits`]).
+    fn take_visits(&mut self) -> usize;
 }
 
 /// Run `root` to completion on `executor`. When it defers a rule (see
@@ -2342,6 +2357,16 @@ trait Deferring {
 /// itself; compiled dense programs are acyclic, so that is reported as a cycle
 /// rather than deferred forever.
 fn drive<X: Deferring, T>(
+    executor: &mut X,
+    root: impl FnMut(&mut X) -> Flow<T>,
+    rule_name: impl Fn(usize) -> String,
+) -> Result<T, EvalError> {
+    let result = run_tasks(executor, root, rule_name);
+    crate::depth::add_visits(executor.take_visits());
+    result
+}
+
+fn run_tasks<X: Deferring, T>(
     executor: &mut X,
     mut root: impl FnMut(&mut X) -> Flow<T>,
     rule_name: impl Fn(usize) -> String,
@@ -2840,12 +2865,19 @@ struct DenseExecutor<'a, N: DenseNum> {
     /// The level at which a rule's pending rows are deferred to the driver
     /// (see [`crate::depth`]).
     suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
     _numeric_mode: std::marker::PhantomData<N>,
 }
 
 impl<N: DenseNum> Deferring for DenseExecutor<'_, N> {
     fn reset_depth(&mut self) {
         self.depth = 0;
+    }
+
+    fn take_visits(&mut self) -> usize {
+        std::mem::take(&mut self.visits)
     }
 
     fn run_deferred(&mut self, task: &Deferred) -> Flow<()> {
@@ -2914,6 +2946,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             enforce_commencement,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
             _numeric_mode: std::marker::PhantomData,
         }
     }
@@ -3041,6 +3074,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     }
 
     fn eval_scalar_expr(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.scalar_node(expr, mask);
         self.depth -= 1;
@@ -3708,6 +3742,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         expr: &CompiledJudgmentExpr,
         mask: &RowMask,
     ) -> Flow<JudgmentEval> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.judgment_node(expr, mask);
         self.depth -= 1;
@@ -3775,11 +3810,18 @@ struct LifetimeExecutor<'a, N: DenseNum> {
     /// The level at which a rule's pending rows are deferred to the driver
     /// (see [`crate::depth`]).
     suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
 }
 
 impl<N: DenseNum> Deferring for LifetimeExecutor<'_, N> {
     fn reset_depth(&mut self) {
         self.depth = 0;
+    }
+
+    fn take_visits(&mut self) -> usize {
+        std::mem::take(&mut self.visits)
     }
 
     fn run_deferred(&mut self, task: &Deferred) -> Flow<()> {
@@ -3836,6 +3878,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
         }
     }
 
@@ -3921,6 +3964,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
     }
 
     fn eval_scalar(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.scalar_node(expr, mask);
         self.depth -= 1;
@@ -4353,6 +4397,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
     }
 
     fn eval_judgment(&mut self, expr: &CompiledJudgmentExpr, mask: &RowMask) -> Flow<JudgmentEval> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.judgment_node(expr, mask);
         self.depth -= 1;

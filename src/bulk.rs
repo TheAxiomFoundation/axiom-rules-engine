@@ -508,6 +508,9 @@ struct BulkEvaluator<'a> {
     /// The level at which a rule's pending rows are deferred to the driver
     /// (see [`crate::depth`]).
     suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
 }
 
 impl<'a> BulkEvaluator<'a> {
@@ -550,6 +553,7 @@ impl<'a> BulkEvaluator<'a> {
             engine: None,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
         }
     }
 
@@ -581,6 +585,12 @@ impl<'a> BulkEvaluator<'a> {
         name: &str,
         mask: &RowMask,
     ) -> Result<EvaluatedOutput, EvalError> {
+        let output = self.run_tasks(name, mask);
+        crate::depth::add_visits(std::mem::take(&mut self.visits));
+        output
+    }
+
+    fn run_tasks(&mut self, name: &str, mask: &RowMask) -> Result<EvaluatedOutput, EvalError> {
         let mut tasks: Vec<Deferred> = Vec::new();
         let mut waiting: HashSet<(String, bool)> = HashSet::new();
         loop {
@@ -799,6 +809,7 @@ impl<'a> BulkEvaluator<'a> {
     }
 
     fn eval_scalar_expr(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.scalar_node(expr, mask);
         self.depth -= 1;
@@ -1113,6 +1124,7 @@ impl<'a> BulkEvaluator<'a> {
     }
 
     fn eval_judgment_expr(&mut self, expr: &JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
+        self.visits += 1;
         self.depth += 1;
         let result = self.judgment_node(expr, mask);
         self.depth -= 1;

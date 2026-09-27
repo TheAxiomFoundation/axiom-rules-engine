@@ -512,6 +512,45 @@ pub struct Engine<'a> {
     /// The level at which a reference to a rule not yet evaluated is deferred
     /// to the driver (see [`crate::depth`]).
     suspend_depth: usize,
+    /// Where each `count`/`sum` over related entities that a deferral
+    /// interrupted stopped. Its retry resumes at the member that deferred
+    /// instead of evaluating every earlier member again, so the retries of an
+    /// aggregation whose members each defer cost what one pass costs.
+    resumes: HashMap<ResumeKey, Resume>,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
+}
+
+/// An aggregation evaluated for one entity and period. The node's address
+/// identifies it: the engine borrows the program for its whole life and never
+/// copies an expression it evaluates, so the address is fixed and unique.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ResumeKey {
+    node: usize,
+    entity_id: String,
+    period: Period,
+}
+
+impl ResumeKey {
+    fn new(node: &ScalarExpr, entity_id: &str, period: &Period) -> Self {
+        Self {
+            node: std::ptr::from_ref(node) as usize,
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+        }
+    }
+}
+
+/// An interrupted aggregation's progress: its related entities, the member
+/// that deferred (evaluated again, from its `where` clause, on the retry),
+/// and the count or total of the members before it.
+#[derive(Debug)]
+struct Resume {
+    related_ids: Vec<String>,
+    next: usize,
+    count: usize,
+    total: Decimal,
 }
 
 impl<'a> Engine<'a> {
@@ -565,6 +604,8 @@ impl<'a> Engine<'a> {
             tracing,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
+            resumes: HashMap::new(),
+            visits: 0,
         }
     }
 
@@ -592,7 +633,17 @@ impl<'a> Engine<'a> {
     /// first. The first error ends the evaluation, as it would the recursive
     /// one: an error propagates unchanged from the rule it occurs in to the
     /// root, so a task's error is the root's.
-    fn drive<T>(&mut self, mut root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
+    fn drive<T>(&mut self, root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
+        let result = self.run_tasks(root);
+        // Every retry reaches the aggregations its first attempt was
+        // interrupted in, and resumes them; only an error leaves one behind.
+        debug_assert!(result.is_err() || self.resumes.is_empty());
+        self.resumes.clear();
+        crate::depth::add_visits(std::mem::take(&mut self.visits));
+        result
+    }
+
+    fn run_tasks<T>(&mut self, mut root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
         let mut tasks: Vec<Deferred> = Vec::new();
         let mut waiting: HashSet<Deferred> = HashSet::new();
         loop {
@@ -638,6 +689,7 @@ impl<'a> Engine<'a> {
 
     /// Evaluate one expression level: count it for the deferral threshold.
     fn nested<T>(&mut self, evaluate: impl FnOnce(&mut Self) -> Eval<T>) -> Eval<T> {
+        self.visits += 1;
         self.depth += 1;
         let result = evaluate(self);
         self.depth -= 1;
@@ -662,8 +714,8 @@ impl<'a> Engine<'a> {
             return Err(Interrupt::Defer(Deferred::Scalar(key)));
         }
 
-        let derived = self.get_derived(derived_name)?.clone();
-        self.validate_unit(&derived)?;
+        let derived = self.get_derived(derived_name)?;
+        self.validate_unit(derived)?;
         let semantics = derived.semantics_at(period).ok_or_else(|| {
             EvalError::MissingDerivedFormulaVersion {
                 derived: derived_name.to_string(),
@@ -695,7 +747,7 @@ impl<'a> Engine<'a> {
         // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
         // rounding actually moves the value, keep the pre-rounding amount so the
         // trace can show the rounding step.
-        let rounded = apply_output_rounding(&derived, value.clone());
+        let rounded = apply_output_rounding(derived, value.clone());
         if self.tracing && rounded != value {
             self.pre_rounding_cache.insert(key.clone(), value);
         }
@@ -721,8 +773,8 @@ impl<'a> Engine<'a> {
             return Err(Interrupt::Defer(Deferred::Judgment(key)));
         }
 
-        let derived = self.get_derived(derived_name)?.clone();
-        self.validate_unit(&derived)?;
+        let derived = self.get_derived(derived_name)?;
+        self.validate_unit(derived)?;
         let semantics = derived.semantics_at(period).ok_or_else(|| {
             EvalError::MissingDerivedFormulaVersion {
                 derived: derived_name.to_string(),
@@ -963,8 +1015,12 @@ impl<'a> Engine<'a> {
         }
     }
 
-    fn get_derived(&self, name: &str) -> Result<&Derived, EvalError> {
-        self.program
+    /// The rule `name`, borrowed from the program rather than copied: an
+    /// aggregation's address in it identifies the aggregation (see
+    /// [`ResumeKey`]).
+    fn get_derived(&self, name: &str) -> Result<&'a Derived, EvalError> {
+        let program: &'a Program = self.program;
+        program
             .derived
             .get(name)
             .ok_or_else(|| EvalError::UnknownDerived(name.to_string()))
@@ -1193,25 +1249,14 @@ impl<'a> Engine<'a> {
                 related_slot,
                 where_clause,
             } => {
-                let related_ids = self.related_entity_ids(
-                    relation,
-                    *current_slot,
-                    *related_slot,
+                let (count, _) = self.fold_related(
+                    expr,
+                    (relation, *current_slot, *related_slot),
+                    where_clause.as_deref(),
+                    None,
                     entity_id,
                     period,
                 )?;
-                let mut count = 0_usize;
-                for related_id in related_ids {
-                    if let Some(predicate) = where_clause {
-                        if !self
-                            .eval_judgment_expr(predicate, &related_id, period)?
-                            .is_holds()
-                        {
-                            continue;
-                        }
-                    }
-                    count += 1;
-                }
                 // A count of collected ids fits in i64 on every supported target.
                 Ok(ScalarValue::Integer(count as i64))
             }
@@ -1222,25 +1267,14 @@ impl<'a> Engine<'a> {
                 value,
                 where_clause,
             } => {
-                let mut total = Decimal::ZERO;
-                for related_id in self.related_entity_ids(
-                    relation,
-                    *current_slot,
-                    *related_slot,
+                let (_, total) = self.fold_related(
+                    expr,
+                    (relation, *current_slot, *related_slot),
+                    where_clause.as_deref(),
+                    Some(value),
                     entity_id,
                     period,
-                )? {
-                    if let Some(predicate) = where_clause {
-                        if !self
-                            .eval_judgment_expr(predicate, &related_id, period)?
-                            .is_holds()
-                        {
-                            continue;
-                        }
-                    }
-                    total =
-                        checked_add(total, self.eval_related_value(value, &related_id, period)?)?;
-                }
+                )?;
                 Ok(ScalarValue::Decimal(total))
             }
             ScalarExpr::If {
@@ -1326,7 +1360,7 @@ impl<'a> Engine<'a> {
                 )
             }
             JudgmentExpr::Derived(name) => {
-                let derived = self.get_derived(name)?.clone();
+                let derived = self.get_derived(name)?;
                 let target_entity_id = relation_context
                     .and_then(|context| context.entity_id_for(&derived.entity))
                     .unwrap_or(entity_id);
@@ -1428,6 +1462,94 @@ impl<'a> Engine<'a> {
                     JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
                 },
             ),
+        }
+    }
+
+    /// Count the related entities of `entity_id` that `where_clause` selects,
+    /// and sum `value` over them, in order: a `count` passes no `value` and
+    /// reads only the count, a `sum` reads only the total.
+    ///
+    /// When a member defers a rule (see [`crate::depth`]), the fold records
+    /// where it stopped before unwinding, and the retry resumes at that member.
+    /// The members before it are not evaluated again: they read only cached
+    /// rules, and their trace records are already made. So an aggregation
+    /// whose every member defers costs one pass, not one pass per member.
+    fn fold_related(
+        &mut self,
+        node: &ScalarExpr,
+        (relation, current_slot, related_slot): (&str, usize, usize),
+        where_clause: Option<&JudgmentExpr>,
+        value: Option<&RelatedValueRef>,
+        entity_id: &str,
+        period: &Period,
+    ) -> Eval<(usize, Decimal)> {
+        let key = ResumeKey::new(node, entity_id, period);
+        let Resume {
+            related_ids,
+            mut next,
+            mut count,
+            mut total,
+        } = match self.resumes.remove(&key) {
+            Some(resume) => resume,
+            None => Resume {
+                related_ids: self.related_entity_ids(
+                    relation,
+                    current_slot,
+                    related_slot,
+                    entity_id,
+                    period,
+                )?,
+                next: 0,
+                count: 0,
+                total: Decimal::ZERO,
+            },
+        };
+        while let Some(related_id) = related_ids.get(next) {
+            match self.fold_member(where_clause, value, related_id, period) {
+                Ok(None) => {}
+                Ok(Some(amount)) => {
+                    count += 1;
+                    total = checked_add(total, amount)?;
+                }
+                Err(Interrupt::Defer(deferred)) => {
+                    self.resumes.insert(
+                        key,
+                        Resume {
+                            related_ids,
+                            next,
+                            count,
+                            total,
+                        },
+                    );
+                    return Err(Interrupt::Defer(deferred));
+                }
+                Err(error) => return Err(error),
+            }
+            next += 1;
+        }
+        Ok((count, total))
+    }
+
+    /// One related entity's part in a `count` or `sum`: `None` when the
+    /// `where` clause does not select it, else its value (zero for a count).
+    fn fold_member(
+        &mut self,
+        where_clause: Option<&JudgmentExpr>,
+        value: Option<&RelatedValueRef>,
+        related_id: &str,
+        period: &Period,
+    ) -> Eval<Option<Decimal>> {
+        if let Some(predicate) = where_clause {
+            if !self
+                .eval_judgment_expr(predicate, related_id, period)?
+                .is_holds()
+            {
+                return Ok(None);
+            }
+        }
+        match value {
+            Some(value) => Ok(Some(self.eval_related_value(value, related_id, period)?)),
+            None => Ok(Some(Decimal::ZERO)),
         }
     }
 

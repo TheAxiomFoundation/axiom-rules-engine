@@ -20,8 +20,18 @@
 //! is deterministic, so a retry reaches the same references in the same order
 //! and finds every rule it needs already cached; a rule's value, errors and
 //! trace do not depend on which stack computed them. Only the amount of work
-//! changes: a deferred segment is evaluated once up to the point of deferral
-//! and once in full.
+//! changes: a retry walks again, over cached values, what the interrupted
+//! evaluation did before the deferral.
+//!
+//! What a retry walks again depends on the program, not on the data. Explain's
+//! `count` and `sum` over related entities (fast evaluates them with explain)
+//! record the member a deferral stopped them at, and their retry resumes
+//! there, so a household whose every member defers is not walked once per
+//! member. The rest is the rules still open on the interrupted path and the
+//! operands they had evaluated. So a chain costs a constant factor more than
+//! recursion; a rule with `k` operands that each defer walks its earlier
+//! operands `k` times. [`count_visits`] measures this, and
+//! `tests/deferral_transparency.rs` pins it.
 //!
 //! A rule that is deferred while an evaluation it transitively started is
 //! still waiting for it depends on itself. The drivers report that as a cycle
@@ -46,6 +56,7 @@ const DEFAULT_SUSPEND_DEPTH: usize = 128;
 
 thread_local! {
     static SUSPEND_DEPTH: Cell<usize> = const { Cell::new(DEFAULT_SUSPEND_DEPTH) };
+    static VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The current thread's deferral threshold, in nesting levels. Always at
@@ -70,4 +81,24 @@ pub fn with_suspend_depth<R>(levels: usize, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(SUSPEND_DEPTH.with(|depth| depth.replace(levels.max(1))));
     f()
+}
+
+/// Run `f` and count the expression levels the evaluators visited on this
+/// thread meanwhile, retries included: explain's and fast's nodes, dense's
+/// compiled nodes, and the nodes of the rules the dense compiler compiles
+/// (not of what it inlines, which never defers). It measures work
+/// deterministically, so tests can show that deferral adds at most a constant
+/// factor to what recursion does, whatever the machine's load.
+///
+/// Not a stable API.
+#[doc(hidden)]
+pub fn count_visits<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    let before = VISITS.with(Cell::get);
+    let result = f();
+    (result, VISITS.with(Cell::get).wrapping_sub(before))
+}
+
+/// Report visits an evaluator counted (see [`count_visits`]).
+pub(crate) fn add_visits(visits: usize) {
+    VISITS.with(|total| total.set(total.get().wrapping_add(visits)));
 }
