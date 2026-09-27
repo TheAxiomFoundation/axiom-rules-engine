@@ -1449,3 +1449,162 @@ fn the_lifetime_gate_accepts_exactly_the_outputs_that_reduce_over_periods() {
         }
     });
 }
+
+/// Fast evaluates a deferred rule only for the rows that reach it. Only `h1`
+/// reaches the chain under `top`, and only a row that is not `h1` would reach
+/// the `days_between` at its bottom, which fast declines. So fast answers
+/// both households itself at every threshold. A driver that evaluated a
+/// deferred rule for rows that never reach it would decline, and the request
+/// would fall back to explain.
+#[test]
+fn fast_evaluates_a_deferred_rule_only_for_the_rows_that_reach_it() {
+    let flagged = || cmp(input("flag"), "eq", int(1));
+    let mut rules = chain(
+        "d",
+        "Household",
+        12,
+        |_| int(1),
+        if_then(
+            flagged(),
+            int(1),
+            json!({
+                "kind": "days_between",
+                "from": {"kind": "period_start"},
+                "to": {"kind": "period_end"},
+            }),
+        ),
+    );
+    rules.push(scalar(
+        "top",
+        "Household",
+        if_then(flagged(), derived("d0"), int(0)),
+    ));
+    let program = json!({"derived": rules});
+    let dataset = json!({
+        "inputs": [
+            input_record("Household", "h1", "flag", decimal_value("1")),
+            input_record("Household", "h2", "flag", decimal_value("0")),
+        ],
+        "relations": [],
+    });
+    let queries = json!([query("h1", 1, &["top"]), query("h2", 1, &["top"])]);
+    on_stack(512 * MIB, || {
+        let recursive =
+            with_suspend_depth(usize::MAX, || run("fast", &program, &dataset, &queries));
+        assert!(
+            recursive.contains("\"actual_mode\":\"fast\""),
+            "{recursive}"
+        );
+        for threshold in THRESHOLDS {
+            let deferred =
+                with_suspend_depth(threshold, || run("fast", &program, &dataset, &queries));
+            assert_eq!(deferred, recursive, "threshold {threshold}");
+        }
+    });
+}
+
+/// Dense registers root inputs, relations and their related inputs,
+/// parameters and rules in the order its recursion reaches them, and a
+/// retry after a deferral reaches them in the same order. So one program
+/// compiles to the same plan at every threshold: the same inputs, relations,
+/// related inputs, parameters and rules, each at the same index. (Which order
+/// the recursion starts from is `Program::derived`'s hash order, so the
+/// comparison compiles one program value.)
+#[test]
+fn dense_compiles_the_same_plan_at_every_threshold() {
+    let mut rules = Vec::new();
+    // Household chains that read root inputs and parameters on the way down
+    // and aggregate members' inputs at different depths.
+    for (prefix, input_name, related) in
+        [("a", "x0", "px0"), ("b", "x1", "px1"), ("c", "x2", "pf0")]
+    {
+        rules.extend(chain(
+            prefix,
+            "Household",
+            10,
+            |index| {
+                if index % 3 == 0 {
+                    param("p", int((index % 2) as i64))
+                } else {
+                    input(&format!("{input_name}_{index}"))
+                }
+            },
+            json!({
+                "kind": "sum_related", "relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "value": {"kind": "input", "name": related},
+            }),
+        ));
+    }
+    rules.push(judgment(
+        "head_ok",
+        "Person",
+        cmp(input("px2"), "gt", int(0)),
+    ));
+    rules.push(scalar(
+        "heads",
+        "Household",
+        count_related("head_of_household", 1, 0, Some(derived("head_ok"))),
+    ));
+    rules.push(scalar(
+        "top",
+        "Household",
+        add(vec![
+            derived("c0"),
+            derived("heads"),
+            derived("a0"),
+            derived("b0"),
+        ]),
+    ));
+    let spec: ProgramSpec = serde_json::from_value(json!({
+        "relations": [
+            members_relation(),
+            {"name": "head_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+        ],
+        "parameters": [{"name": "p", "unit": null, "indexed_by": "k", "versions": [
+            {"effective_from": "2026-01-01", "values": {
+                "0": decimal_value("1"), "1": decimal_value("2")}}]}],
+        "derived": rules,
+    }))
+    .expect("program deserializes");
+    let program = spec.to_program().expect("program converts");
+    let plans = on_stack(512 * MIB, || {
+        let plan = || {
+            let dense =
+                DenseCompiledProgram::from_program(&program, Some("Household")).expect("compiles");
+            // Everything but the name-to-index map, a hash map whose debug
+            // order varies between two compiles of the same plan.
+            let debug = format!("{dense:?}");
+            let plan = debug
+                .split(", derived_index: ")
+                .next()
+                .expect("a debug string")
+                .to_string();
+            format!(
+                "{:?}\n{:?}\n{:?}\n{plan}",
+                dense.root_inputs(),
+                dense.relations(),
+                dense.output_names()
+            )
+        };
+        let recursive = with_suspend_depth(usize::MAX, plan);
+        THRESHOLDS
+            .iter()
+            .map(|threshold| (*threshold, with_suspend_depth(*threshold, plan)))
+            .map(|(threshold, deferred)| {
+                (
+                    threshold,
+                    deferred == recursive,
+                    recursive.clone(),
+                    deferred,
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    for (threshold, same, recursive, deferred) in plans {
+        assert!(
+            same,
+            "threshold {threshold}:\nrecursive {recursive}\ndeferred  {deferred}"
+        );
+    }
+}
