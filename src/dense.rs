@@ -379,6 +379,8 @@ enum CompiledScalarExpr {
         default: ScalarValue,
     },
     Derived(usize),
+    /// A rule body inlined on root rows: `inline_scalars[index]`.
+    Inline(usize),
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledScalarExpr>,
@@ -452,6 +454,9 @@ enum CompiledRelatedScalarExpr {
         default: ScalarValue,
     },
     RootScalar(Box<CompiledScalarExpr>),
+    /// A related rule's body inlined on this relation's related rows:
+    /// `related_inline_scalars[index]`.
+    Inline(usize),
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledRelatedScalarExpr>,
@@ -542,6 +547,9 @@ enum CompiledRelatedJudgmentExpr {
         right: CompiledRelatedScalarExpr,
     },
     RootJudgment(Box<CompiledJudgmentExpr>),
+    /// A related rule's body inlined on this relation's related rows:
+    /// `related_inline_judgments[index]`.
+    Inline(usize),
     /// A `relation_member` outside a derived relation's own predicate: in a
     /// `count`/`sum` `where` clause, or in a related rule a predicate reads.
     /// Explain evaluates both without a relation context, so every related
@@ -562,6 +570,8 @@ enum CompiledJudgmentExpr {
         right: CompiledScalarExpr,
     },
     Derived(usize),
+    /// A rule body inlined on root rows: `inline_judgments[index]`.
+    Inline(usize),
     And(Vec<CompiledJudgmentExpr>),
     Or(Vec<CompiledJudgmentExpr>),
     Not(Box<CompiledJudgmentExpr>),
@@ -596,6 +606,37 @@ struct CompiledParameter {
     parameter: IndexedParameter,
 }
 
+/// A rule body dense inlines, compiled once and read through `Inline(index)`
+/// nodes. Dense inlines a rule wherever an aggregation, a `where` clause or a
+/// derived relation's predicate reads it, and inlines the rules that rule
+/// reads the same way. Inlining each copy afresh made a rule graph with
+/// shared dependencies (`p_i = p_{i-1} + p_{i-1}`) compile to a tree with one
+/// node per path, 2^k for k levels. Each body is now compiled once per place
+/// it is evaluated: a current-entity rule's body on root rows, and a related
+/// rule's body on one relation's related rows.
+///
+/// An inlined body keeps the inline semantics: it is the rule's unversioned
+/// formula (`Derived::semantics`), with no commencement check and no
+/// relabeling of its errors, and a `match` in it names the rule that owns it.
+#[derive(Clone, Debug)]
+struct InlineBody<E> {
+    body: E,
+    /// How many compiled nodes read this body. The executors cache the column
+    /// of a body read by more than one node, so a row is computed once however
+    /// many paths reach it; a body read by one node is evaluated in place, as
+    /// the inlined copy was.
+    references: usize,
+}
+
+/// Where dense inlines a rule's body: on root rows, or on one relation's
+/// related rows. A rule's body compiles to the same expression at every read
+/// from one site, so the site keys the shared body.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum InlineSite {
+    Current(String),
+    Related(usize, String),
+}
+
 #[derive(Clone, Debug)]
 pub struct DenseCompiledProgram {
     root_entity: String,
@@ -604,6 +645,10 @@ pub struct DenseCompiledProgram {
     parameters: Vec<CompiledParameter>,
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
+    inline_scalars: Vec<InlineBody<CompiledScalarExpr>>,
+    inline_judgments: Vec<InlineBody<CompiledJudgmentExpr>>,
+    related_inline_scalars: Vec<InlineBody<CompiledRelatedScalarExpr>>,
+    related_inline_judgments: Vec<InlineBody<CompiledRelatedJudgmentExpr>>,
 }
 
 impl DenseCompiledProgram {
@@ -932,6 +977,10 @@ impl DenseCompiledProgram {
             CompiledScalarExpr::Derived(index) => {
                 self.derived_reduces_over_periods_inner(*index, visiting)
             }
+            // An inlined body is compiled for a related expression, which
+            // refuses over-periods reductions, and is read only under an
+            // aggregation or a relation's predicate.
+            CompiledScalarExpr::Inline(_) => false,
             CompiledScalarExpr::ParameterLookup { index, .. } => {
                 self.scalar_reduces_over_periods(index, visiting)
             }
@@ -1001,6 +1050,8 @@ impl DenseCompiledProgram {
             CompiledJudgmentExpr::Derived(index) => {
                 self.derived_reduces_over_periods_inner(*index, visiting)
             }
+            // See `scalar_reduces_over_periods`.
+            CompiledJudgmentExpr::Inline(_) => false,
             CompiledJudgmentExpr::And(items) | CompiledJudgmentExpr::Or(items) => items
                 .iter()
                 .any(|item| self.judgment_reduces_over_periods(item, visiting)),
@@ -1119,6 +1170,16 @@ struct DenseCompiler<'a> {
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
     visiting: HashSet<String>,
+    inline_scalars: Vec<InlineBody<CompiledScalarExpr>>,
+    inline_judgments: Vec<InlineBody<CompiledJudgmentExpr>>,
+    related_inline_scalars: Vec<InlineBody<CompiledRelatedScalarExpr>>,
+    related_inline_judgments: Vec<InlineBody<CompiledRelatedJudgmentExpr>>,
+    /// Each inlined body's index in the table its site and kind select.
+    inline_index: HashMap<InlineSite, usize>,
+    /// The rules whose bodies are being inlined, outermost first. Reaching
+    /// one again means the rules inline each other in a cycle, which
+    /// compiling an artifact refuses but a raw `Program` does not.
+    inlining: HashSet<String>,
     /// The rules whose formulas are being compiled, innermost last. Related
     /// expressions inline a related entity's rules, so a `match` in one names
     /// the innermost rule here, as explain does.
@@ -1146,6 +1207,12 @@ impl<'a> DenseCompiler<'a> {
             derived: Vec::new(),
             derived_index: HashMap::new(),
             visiting: HashSet::new(),
+            inline_scalars: Vec::new(),
+            inline_judgments: Vec::new(),
+            related_inline_scalars: Vec::new(),
+            related_inline_judgments: Vec::new(),
+            inline_index: HashMap::new(),
+            inlining: HashSet::new(),
             related_rules: Vec::new(),
             membership_scope: None,
         })
@@ -1190,7 +1257,143 @@ impl<'a> DenseCompiler<'a> {
             parameters: self.parameters,
             derived: self.derived,
             derived_index: self.derived_index,
+            inline_scalars: self.inline_scalars,
+            inline_judgments: self.inline_judgments,
+            related_inline_scalars: self.related_inline_scalars,
+            related_inline_judgments: self.related_inline_judgments,
         }
+    }
+
+    /// The body already inlined at `site`, if any. Each read from a site
+    /// after the first shares the first read's body. The inlining helpers
+    /// below call the `compile_*` functions directly, not through closures,
+    /// so an inlined rule costs one small extra stack frame.
+    fn shared_inline(&self, site: &InlineSite) -> Option<usize> {
+        self.inline_index.get(site).copied()
+    }
+
+    /// Put `rule` on the inlining path while its body compiles. A rule that
+    /// inlines itself, directly or through others, is refused rather than
+    /// inlined forever.
+    fn enter_inline(&mut self, rule: &str) -> Result<(), DenseCompileError> {
+        if self.inlining.insert(rule.to_string()) {
+            Ok(())
+        } else {
+            Err(DenseCompileError::Unsupported(format!(
+                "cyclic dense compilation dependency involving `{rule}`"
+            )))
+        }
+    }
+
+    /// Take `rule` off the inlining path and record its compiled body as
+    /// `site`'s, at the end of `bodies`.
+    fn finish_inline<E>(
+        &mut self,
+        site: InlineSite,
+        rule: &str,
+        body: Result<E, DenseCompileError>,
+        bodies: fn(&mut Self) -> &mut Vec<InlineBody<E>>,
+    ) -> Result<usize, DenseCompileError> {
+        self.inlining.remove(rule);
+        let body = body?;
+        let table = bodies(self);
+        let index = table.len();
+        table.push(InlineBody {
+            body,
+            references: 1,
+        });
+        self.inline_index.insert(site, index);
+        Ok(index)
+    }
+
+    /// `rule`'s scalar body on root rows, compiled once (see [`InlineBody`]).
+    fn inline_current_scalar(
+        &mut self,
+        rule: &str,
+        entity: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledScalarExpr, DenseCompileError> {
+        let site = InlineSite::Current(rule.to_string());
+        if let Some(index) = self.shared_inline(&site) {
+            self.inline_scalars[index].references += 1;
+            return Ok(CompiledScalarExpr::Inline(index));
+        }
+        self.enter_inline(rule)?;
+        let body = self.compile_current_scalar_expr(rule, entity, expr);
+        let index =
+            self.finish_inline(site, rule, body, |compiler| &mut compiler.inline_scalars)?;
+        Ok(CompiledScalarExpr::Inline(index))
+    }
+
+    /// `rule`'s judgment body on root rows, compiled once.
+    fn inline_current_judgment(
+        &mut self,
+        rule: &str,
+        entity: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
+        let site = InlineSite::Current(rule.to_string());
+        if let Some(index) = self.shared_inline(&site) {
+            self.inline_judgments[index].references += 1;
+            return Ok(CompiledJudgmentExpr::Inline(index));
+        }
+        self.enter_inline(rule)?;
+        let body = self.compile_current_judgment_expr(rule, entity, expr);
+        let index =
+            self.finish_inline(site, rule, body, |compiler| &mut compiler.inline_judgments)?;
+        Ok(CompiledJudgmentExpr::Inline(index))
+    }
+
+    /// `rule`'s scalar body on `relation_index`'s related rows, compiled
+    /// once. It compiles with `rule` as the innermost rule, which names a
+    /// `match` in it, and outside any derived relation's own predicate, as
+    /// explain evaluates a rule body.
+    fn inline_related_scalar(
+        &mut self,
+        relation_index: usize,
+        rule: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
+        let site = InlineSite::Related(relation_index, rule.to_string());
+        if let Some(index) = self.shared_inline(&site) {
+            self.related_inline_scalars[index].references += 1;
+            return Ok(CompiledRelatedScalarExpr::Inline(index));
+        }
+        self.enter_inline(rule)?;
+        self.related_rules.push(rule.to_string());
+        let scope = self.membership_scope.take();
+        let body = self.compile_related_scalar(relation_index, expr);
+        self.membership_scope = scope;
+        self.related_rules.pop();
+        let index = self.finish_inline(site, rule, body, |compiler| {
+            &mut compiler.related_inline_scalars
+        })?;
+        Ok(CompiledRelatedScalarExpr::Inline(index))
+    }
+
+    /// `rule`'s judgment body on `relation_index`'s related rows, compiled
+    /// once, as [`Self::inline_related_scalar`] compiles a scalar body.
+    fn inline_related_judgment(
+        &mut self,
+        relation_index: usize,
+        rule: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
+        let site = InlineSite::Related(relation_index, rule.to_string());
+        if let Some(index) = self.shared_inline(&site) {
+            self.related_inline_judgments[index].references += 1;
+            return Ok(CompiledRelatedJudgmentExpr::Inline(index));
+        }
+        self.enter_inline(rule)?;
+        self.related_rules.push(rule.to_string());
+        let scope = self.membership_scope.take();
+        let body = self.compile_related_predicate(relation_index, expr);
+        self.membership_scope = scope;
+        self.related_rules.pop();
+        let index = self.finish_inline(site, rule, body, |compiler| {
+            &mut compiler.related_inline_judgments
+        })?;
+        Ok(CompiledRelatedJudgmentExpr::Inline(index))
     }
 
     fn compile_derived(&mut self, name: &str) -> Result<usize, DenseCompileError> {
@@ -1510,7 +1713,7 @@ impl<'a> DenseCompiler<'a> {
                     return match &derived.semantics {
                         DerivedSemantics::Judgment(expr) => {
                             Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
-                                self.compile_current_judgment_expr(name, &derived.entity, expr)?,
+                                self.inline_current_judgment(name, &derived.entity, expr)?,
                             )))
                         }
                         DerivedSemantics::Scalar(_) => {
@@ -1530,12 +1733,7 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &derived.semantics {
                     DerivedSemantics::Judgment(expr) => {
-                        self.related_rules.push(name.clone());
-                        let scope = self.membership_scope.take();
-                        let compiled = self.compile_related_predicate(relation_index, expr);
-                        self.membership_scope = scope;
-                        self.related_rules.pop();
-                        compiled
+                        self.inline_related_judgment(relation_index, name, expr)
                     }
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "where-clause predicates cannot reference scalar derived values (`{name}`)"
@@ -1614,7 +1812,7 @@ impl<'a> DenseCompiler<'a> {
                     return match &derived.semantics {
                         DerivedSemantics::Scalar(expr) => {
                             Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
-                                self.compile_current_scalar_expr(name, &derived.entity, expr)?,
+                                self.inline_current_scalar(name, &derived.entity, expr)?,
                             )))
                         }
                         DerivedSemantics::Judgment(_) => {
@@ -1634,12 +1832,7 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &derived.semantics {
                     DerivedSemantics::Scalar(expr) => {
-                        self.related_rules.push(name.clone());
-                        let scope = self.membership_scope.take();
-                        let compiled = self.compile_related_scalar(relation_index, expr);
-                        self.membership_scope = scope;
-                        self.related_rules.pop();
-                        compiled
+                        self.inline_related_scalar(relation_index, name, expr)
                     }
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "related scalar expressions cannot reference judgment derived values (`{name}`)"
@@ -1778,7 +1971,7 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &dependency.semantics {
                     DerivedSemantics::Scalar(expr) => {
-                        self.compile_current_scalar_expr(name, &dependency.entity, expr)
+                        self.inline_current_scalar(name, &dependency.entity, expr)
                     }
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "scalar expression cannot reference judgment derived value (`{name}`)"
@@ -1929,7 +2122,7 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &dependency.semantics {
                     DerivedSemantics::Judgment(expr) => {
-                        self.compile_current_judgment_expr(name, &dependency.entity, expr)
+                        self.inline_current_judgment(name, &dependency.entity, expr)
                     }
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "judgment expression cannot reference scalar derived value (`{name}`)"
@@ -2205,11 +2398,11 @@ fn merge_dense_rows<N: DenseNum>(
     })
 }
 
-fn merge_judgment(
-    cached: Option<DerivedColumn<Vec<JudgmentOutcome>>>,
+fn merge_judgment<T: Copy>(
+    cached: Option<DerivedColumn<Vec<T>>>,
     pending: RowMask,
-    (values, errors): JudgmentEval,
-) -> DerivedColumn<Vec<JudgmentOutcome>> {
+    (values, errors): (Vec<T>, RowErrors),
+) -> DerivedColumn<Vec<T>> {
     let Some(mut cached) = cached else {
         return DerivedColumn {
             values,
@@ -2223,6 +2416,58 @@ fn merge_judgment(
     cached.errors.absorb(errors);
     cached.computed = cached.computed.union(&pending);
     cached
+}
+
+/// The rows of `mask` of a column cached per row, as `evaluate_scalar`
+/// caches a derived rule's: `compute` evaluates only the rows of `mask` not
+/// computed yet (under an empty mask on the first read, to fix the dtype),
+/// and `merge` adds them to `cached`. Returns the column with the errors of
+/// `mask`'s rows, and the cache entry to keep.
+fn cached_rows<T: Clone>(
+    cached: Option<DerivedColumn<T>>,
+    mask: &RowMask,
+    compute: impl FnOnce(&RowMask) -> Result<(T, RowErrors), EvalError>,
+    merge: impl FnOnce(
+        Option<DerivedColumn<T>>,
+        RowMask,
+        (T, RowErrors),
+    ) -> Result<DerivedColumn<T>, EvalError>,
+) -> Result<((T, RowErrors), DerivedColumn<T>), EvalError> {
+    let pending = pending_rows(cached.as_ref(), mask);
+    let cached = match cached {
+        Some(cached) if pending.is_empty() => cached,
+        cached => {
+            let computed = compute(&pending)?;
+            merge(cached, pending, computed)?
+        }
+    };
+    Ok((
+        (cached.values.clone(), cached.errors.restricted_to(mask)),
+        cached,
+    ))
+}
+
+/// Per-executor columns of the inlined bodies read by more than one node
+/// (see [`InlineBody`]), computed so far.
+struct InlineCaches {
+    scalars: Vec<Option<DerivedColumn<DenseColumn>>>,
+    judgments: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
+    related_scalars: Vec<Option<DerivedColumn<DenseColumn>>>,
+    related_judgments: Vec<Option<DerivedColumn<Vec<bool>>>>,
+}
+
+impl InlineCaches {
+    fn new(program: &DenseCompiledProgram) -> Self {
+        fn empty<T>(len: usize) -> Vec<Option<T>> {
+            (0..len).map(|_| None).collect()
+        }
+        Self {
+            scalars: empty(program.inline_scalars.len()),
+            judgments: empty(program.inline_judgments.len()),
+            related_scalars: empty(program.related_inline_scalars.len()),
+            related_judgments: empty(program.related_inline_judgments.len()),
+        }
+    }
 }
 
 /// A column of placeholders of `N`'s dtype with `error` on every row of
@@ -2595,6 +2840,7 @@ struct DenseExecutor<'a, N: DenseNum> {
     enforce_commencement: bool,
     scalar_cache: Vec<Option<DerivedColumn<DenseColumn>>>,
     judgment_cache: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
+    inline_cache: InlineCaches,
     _numeric_mode: std::marker::PhantomData<N>,
 }
 
@@ -2659,6 +2905,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             period,
             scalar_cache: (0..program.derived.len()).map(|_| None).collect(),
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
+            inline_cache: InlineCaches::new(program),
             batch,
             enforce_commencement,
             _numeric_mode: std::marker::PhantomData,
@@ -2777,6 +3024,96 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         Ok((values, errors))
     }
 
+    /// An inlined body's column for the rows of `mask`. A body read by one
+    /// node is evaluated in place; a shared one is computed once per row.
+    fn evaluate_inline_scalar(
+        &mut self,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<DenseEval, EvalError> {
+        let program = self.program;
+        let inline = &program.inline_scalars[index];
+        if inline.references < 2 {
+            return self.eval_scalar_expr(&inline.body, mask);
+        }
+        let cached = self.inline_cache.scalars[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.eval_scalar_expr(&inline.body, pending),
+            merge_scalar::<N>,
+        )?;
+        self.inline_cache.scalars[index] = Some(cached);
+        Ok(result)
+    }
+
+    fn evaluate_inline_judgment(
+        &mut self,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<JudgmentEval, EvalError> {
+        let program = self.program;
+        let inline = &program.inline_judgments[index];
+        if inline.references < 2 {
+            return self.eval_judgment_expr(&inline.body, mask);
+        }
+        let cached = self.inline_cache.judgments[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.eval_judgment_expr(&inline.body, pending),
+            |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
+        )?;
+        self.inline_cache.judgments[index] = Some(cached);
+        Ok(result)
+    }
+
+    /// A related rule's inlined body on `relation`'s related rows, for the
+    /// rows of `mask`.
+    fn evaluate_related_inline_scalar(
+        &mut self,
+        relation: usize,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<DenseEval, EvalError> {
+        let program = self.program;
+        let inline = &program.related_inline_scalars[index];
+        if inline.references < 2 {
+            return self.resolve_related_scalar(relation, &inline.body, mask);
+        }
+        let cached = self.inline_cache.related_scalars[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.resolve_related_scalar(relation, &inline.body, pending),
+            merge_scalar::<N>,
+        )?;
+        self.inline_cache.related_scalars[index] = Some(cached);
+        Ok(result)
+    }
+
+    fn evaluate_related_inline_judgment(
+        &mut self,
+        relation: usize,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<(Vec<bool>, RowErrors), EvalError> {
+        let program = self.program;
+        let inline = &program.related_inline_judgments[index];
+        if inline.references < 2 {
+            return self.eval_related_predicate(relation, &inline.body, mask);
+        }
+        let cached = self.inline_cache.related_judgments[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.eval_related_predicate(relation, &inline.body, pending),
+            |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
+        )?;
+        self.inline_cache.related_judgments[index] = Some(cached);
+        Ok(result)
+    }
+
     fn eval_scalar_expr(
         &mut self,
         expr: &CompiledScalarExpr,
@@ -2810,6 +3147,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 RowErrors::new(),
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Inline(index) => self.evaluate_inline_scalar(*index, mask),
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
                 let live = mask.without(&errors);
@@ -3167,6 +3505,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 )?;
                 Ok((projected, self.lower_errors(relation, &root_errors, mask)))
             }
+            CompiledRelatedJudgmentExpr::Inline(index) => {
+                self.evaluate_related_inline_judgment(relation, *index, mask)
+            }
             CompiledRelatedJudgmentExpr::RelationMemberWithoutContext { relation: name } => {
                 let mut errors = RowErrors::new();
                 errors.record_all(mask, &relation_member_outside_derived_relation(name));
@@ -3242,6 +3583,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 },
                 RowErrors::new(),
             )),
+            CompiledRelatedScalarExpr::Inline(index) => {
+                self.evaluate_related_inline_scalar(relation, *index, mask)
+            }
             CompiledRelatedScalarExpr::RootScalar(expr) => {
                 let roots = self.root_rows_of(relation, mask);
                 let (values, root_errors) = self.eval_scalar_expr(expr, &roots)?;
@@ -3453,6 +3797,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok((outcomes, errors))
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
+            CompiledJudgmentExpr::Inline(index) => self.evaluate_inline_judgment(*index, mask),
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -3497,6 +3842,10 @@ struct LifetimeExecutor<'a, N: DenseNum> {
     /// applied before caching, mirroring the per-period path.
     scalar_cache: Vec<Option<DerivedColumn<DenseColumn>>>,
     judgment_cache: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
+    /// Lifetime-level columns of shared inlined bodies. An inlined body is
+    /// read only under an aggregation or a relation's predicate, which the
+    /// per-period executors evaluate, so these stay empty in practice.
+    inline_cache: InlineCaches,
 }
 
 impl<N: DenseNum> ColumnAxis<N, CompiledScalarExpr> for LifetimeExecutor<'_, N> {
@@ -3546,7 +3895,50 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             row_count,
             scalar_cache: (0..program.derived.len()).map(|_| None).collect(),
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
+            inline_cache: InlineCaches::new(program),
         }
+    }
+
+    fn evaluate_inline_scalar(
+        &mut self,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<DenseEval, EvalError> {
+        let program = self.program;
+        let inline = &program.inline_scalars[index];
+        if inline.references < 2 {
+            return self.eval_scalar(&inline.body, mask);
+        }
+        let cached = self.inline_cache.scalars[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.eval_scalar(&inline.body, pending),
+            merge_scalar::<N>,
+        )?;
+        self.inline_cache.scalars[index] = Some(cached);
+        Ok(result)
+    }
+
+    fn evaluate_inline_judgment(
+        &mut self,
+        index: usize,
+        mask: &RowMask,
+    ) -> Result<JudgmentEval, EvalError> {
+        let program = self.program;
+        let inline = &program.inline_judgments[index];
+        if inline.references < 2 {
+            return self.eval_judgment(&inline.body, mask);
+        }
+        let cached = self.inline_cache.judgments[index].take();
+        let (result, cached) = cached_rows(
+            cached,
+            mask,
+            |pending| self.eval_judgment(&inline.body, pending),
+            |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
+        )?;
+        self.inline_cache.judgments[index] = Some(cached);
+        Ok(result)
     }
 
     fn evaluate_scalar(
@@ -3653,6 +4045,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((broadcast_scalar_literal::<N>(value, len), RowErrors::new()))
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Inline(index) => self.evaluate_inline_scalar(*index, mask),
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 // Period-specific: resolve at the reference period. The index
                 // expression is itself lifetime-evaluated (typically a literal
@@ -4077,6 +4470,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((outcomes, errors))
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
+            CompiledJudgmentExpr::Inline(index) => self.evaluate_inline_judgment(*index, mask),
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -4125,6 +4519,7 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Input(_)
         | CompiledScalarExpr::InputOrElse { .. }
         | CompiledScalarExpr::Derived(_)
+        | CompiledScalarExpr::Inline(_)
         | CompiledScalarExpr::PeriodStart
         | CompiledScalarExpr::PeriodEnd
         | CompiledScalarExpr::CountRelated { .. }
