@@ -3,6 +3,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -306,15 +307,27 @@ pub struct DenseBatchSpec {
     pub relations: HashMap<DenseRelationKey, DenseRelationBatchSpec>,
 }
 
+/// One relation schema's view of its batch. Every link of a derived-relation
+/// chain is keyed to the chain's base relation, so the schemas that share a
+/// key share its offsets, owners and columns rather than each holding a copy.
 #[derive(Clone, Debug)]
 struct DenseRelationBatch {
-    offsets: Vec<usize>,
+    offsets: Rc<[usize]>,
     related_count: usize,
     /// The root row that owns each related row.
-    owners: Vec<usize>,
-    /// `None` is a column the caller did not supply: a missing input on every
-    /// related row, an error only for the rows that read it.
-    inputs: Vec<Option<DenseColumn>>,
+    owners: Rc<[usize]>,
+    /// This schema's `related_inputs`, index-aligned. `None` is a column the
+    /// caller did not supply: a missing input on every related row, an error
+    /// only for the rows that read it.
+    inputs: Vec<Option<Rc<DenseColumn>>>,
+}
+
+/// A relation key's batch, bound once for every schema keyed to it.
+struct BoundRelationKey {
+    offsets: Rc<[usize]>,
+    related_count: usize,
+    owners: Rc<[usize]>,
+    inputs: HashMap<String, Rc<DenseColumn>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1008,7 +1021,7 @@ impl DenseCompiledProgram {
         }
     }
 
-    fn bind_batch(&self, batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
+    fn bind_batch(&self, mut batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
         for (name, column) in &batch.inputs {
             if column.len() != batch.row_count {
                 return Err(EvalError::TypeMismatch(format!(
@@ -1022,55 +1035,47 @@ impl DenseCompiledProgram {
         // An absent input column is a missing input on every row. It fails
         // only the rows whose evaluation reads it, as a missing record does on
         // the explain path; a column read only on branches no row takes may be
-        // omitted.
+        // omitted. Root input names are distinct, so each column is moved out
+        // of the batch rather than copied.
         let bound_inputs = self
             .root_inputs
             .iter()
-            .map(|name| batch.inputs.get(name).cloned())
+            .map(|name| batch.inputs.remove(name))
             .collect::<Vec<Option<DenseColumn>>>();
 
+        // Every link of a derived-relation chain is keyed to the chain's base
+        // relation, so many schemas can share one key. Each key's batch is
+        // validated and bound once, when the first schema keyed to it is
+        // reached, and the schemas after it share those rows and columns.
+        // Schemas are still walked in order, so the first error reported is
+        // the one a per-schema binding reports: a key's offsets are checked
+        // for the first schema that reads it, and every schema checks its own
+        // columns' lengths.
+        let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for relation in &self.relations {
-            let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
-                EvalError::UnknownRelation(format!(
-                    "{}::{}/{}/{}",
-                    relation.key.name,
-                    relation.key.current_slot,
-                    relation.key.related_slot,
-                    self.root_entity
-                ))
-            })?;
-
-            if relation_batch.offsets.len() != batch.row_count + 1 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must have length {}",
-                    relation.key.name,
-                    batch.row_count + 1
-                )));
+            if !bound_keys.contains_key(&relation.key) {
+                let relation_batch = batch.relations.remove(&relation.key).ok_or_else(|| {
+                    EvalError::UnknownRelation(format!(
+                        "{}::{}/{}/{}",
+                        relation.key.name,
+                        relation.key.current_slot,
+                        relation.key.related_slot,
+                        self.root_entity
+                    ))
+                })?;
+                bound_keys.insert(
+                    &relation.key,
+                    Self::bind_relation_key(&relation.key, relation_batch, batch.row_count)?,
+                );
             }
-            if relation_batch.offsets.first().copied().unwrap_or_default() != 0 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must start at 0",
-                    relation.key.name
-                )));
-            }
-            if !relation_batch
-                .offsets
-                .windows(2)
-                .all(|pair| pair[0] <= pair[1])
-            {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must be non-decreasing",
-                    relation.key.name
-                )));
-            }
-
-            let related_count = *relation_batch.offsets.last().unwrap_or(&0);
+            let key = &bound_keys[&relation.key];
+            let related_count = key.related_count;
             let bound_inputs = relation
                 .related_inputs
                 .iter()
                 .map(|name| {
-                    let column = relation_batch.inputs.get(name).cloned();
+                    let column = key.inputs.get(name).cloned();
                     if let Some(column) = &column {
                         if column.len() != related_count {
                             return Err(EvalError::TypeMismatch(format!(
@@ -1084,16 +1089,12 @@ impl DenseCompiledProgram {
                     }
                     Ok(column)
                 })
-                .collect::<Result<Vec<Option<DenseColumn>>, EvalError>>()?;
+                .collect::<Result<Vec<Option<Rc<DenseColumn>>>, EvalError>>()?;
 
-            let mut owners = Vec::with_capacity(related_count);
-            for (row, pair) in relation_batch.offsets.windows(2).enumerate() {
-                owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
-            }
             bound_relations.push(DenseRelationBatch {
-                offsets: relation_batch.offsets.clone(),
+                offsets: Rc::clone(&key.offsets),
                 related_count,
-                owners,
+                owners: Rc::clone(&key.owners),
                 inputs: bound_inputs,
             });
         }
@@ -1102,6 +1103,51 @@ impl DenseCompiledProgram {
             row_count: batch.row_count,
             inputs: bound_inputs,
             relations: bound_relations,
+        })
+    }
+
+    /// Validate one relation key's offsets against `row_count` and take its
+    /// columns. Errors name `key`, which every schema keyed alike shares.
+    fn bind_relation_key(
+        key: &DenseRelationKey,
+        relation_batch: DenseRelationBatchSpec,
+        row_count: usize,
+    ) -> Result<BoundRelationKey, EvalError> {
+        let offsets = relation_batch.offsets;
+        if offsets.len() != row_count + 1 {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{}` offsets must have length {}",
+                key.name,
+                row_count + 1
+            )));
+        }
+        if offsets.first().copied().unwrap_or_default() != 0 {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{}` offsets must start at 0",
+                key.name
+            )));
+        }
+        if !offsets.windows(2).all(|pair| pair[0] <= pair[1]) {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{}` offsets must be non-decreasing",
+                key.name
+            )));
+        }
+
+        let related_count = *offsets.last().unwrap_or(&0);
+        let mut owners = Vec::with_capacity(related_count);
+        for (row, pair) in offsets.windows(2).enumerate() {
+            owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
+        }
+        Ok(BoundRelationKey {
+            offsets: offsets.into(),
+            related_count,
+            owners: owners.into(),
+            inputs: relation_batch
+                .inputs
+                .into_iter()
+                .map(|(name, column)| (name, Rc::new(column)))
+                .collect(),
         })
     }
 }
@@ -3219,7 +3265,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             )),
             CompiledRelatedScalarExpr::Input(index) => {
                 Ok(match &self.batch.relations[relation].inputs[*index] {
-                    Some(column) => (column.clone(), RowErrors::new()),
+                    Some(column) => (DenseColumn::clone(column), RowErrors::new()),
                     None => {
                         let schema = &self.program.relations[relation];
                         fail_numeric::<N>(
@@ -3237,7 +3283,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledRelatedScalarExpr::InputOrElse { input, default } => Ok((
                 match &self.batch.relations[relation].inputs[*input] {
-                    Some(column) => column.clone(),
+                    Some(column) => DenseColumn::clone(column),
                     None => broadcast_scalar_literal::<N>(default, length),
                 },
                 RowErrors::new(),
