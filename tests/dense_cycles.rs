@@ -261,6 +261,30 @@ fn a_root_rule_read_back_by_its_own_where_clause_is_refused() {
 }
 
 #[test]
+fn a_root_rule_read_directly_by_its_own_where_clause_is_refused() {
+    // The `where` clause hands `busy` to the current-entity compiler, which
+    // would inline its formula and only then refuse the nested `count`.
+    let spec = program(
+        vec![member_relation()],
+        vec![judgment(
+            "busy",
+            "Household",
+            positive(count("member", Some(derived("busy")))),
+        )],
+    );
+    assert_cycle_refused(&spec, &["busy"]);
+}
+
+#[test]
+fn a_root_rule_summed_by_its_own_sum_value_is_refused() {
+    let spec = program(
+        vec![member_relation()],
+        vec![scalar("total", "Household", sum("member", "total"))],
+    );
+    assert_cycle_refused(&spec, &["total"]);
+}
+
+#[test]
 fn a_derived_relation_derived_from_itself_is_refused() {
     let spec = program(
         vec![
