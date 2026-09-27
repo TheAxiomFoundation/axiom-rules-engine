@@ -1125,9 +1125,10 @@ struct DenseCompiler<'a> {
     related_rules: Vec<String>,
     /// The derived relation whose own predicate is being compiled, if any.
     /// Explain evaluates a `relation_member` there with the candidate tuple in
-    /// scope, including under `if` conditions and other operands. It is `None`
-    /// in `where` clauses and in the rules a predicate reads, which explain
-    /// evaluates without that scope.
+    /// scope, and selects a referenced rule's record by its declared entity,
+    /// including under `if` conditions and other operands. It is `None` in
+    /// `where` clauses, in `sum` values and in the rules a predicate reads,
+    /// which explain evaluates without that scope.
     membership_scope: Option<String>,
 }
 
@@ -1503,10 +1504,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related judgment dependency `{name}`"
                     ))
                 })?;
-                let relation = &self.relations[relation_index];
-                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
-                    || derived.entity == self.root_entity
-                {
+                if self.reads_current_record(relation_index, "predicate", name, &derived.entity)? {
                     return match &derived.semantics {
                         DerivedSemantics::Judgment(expr) => {
                             Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
@@ -1519,14 +1517,6 @@ impl<'a> DenseCompiler<'a> {
                             )))
                         }
                     };
-                }
-                if relation.related_entity.is_some()
-                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
-                {
-                    return Err(DenseCompileError::Unsupported(format!(
-                        "related predicate `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
-                        derived.entity, relation.key.name
-                    )));
                 }
                 match &derived.semantics {
                     DerivedSemantics::Judgment(expr) => {
@@ -1606,11 +1596,7 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related scalar dependency `{name}`"
                     ))
                 })?;
-                let relation = &self.relations[relation_index];
-                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
-                    || derived.entity == self.root_entity
-                    || derived.entity == SCALAR_ENTITY
-                {
+                if self.reads_current_record(relation_index, "scalar", name, &derived.entity)? {
                     return match &derived.semantics {
                         DerivedSemantics::Scalar(expr) => {
                             Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
@@ -1623,14 +1609,6 @@ impl<'a> DenseCompiler<'a> {
                             )))
                         }
                     };
-                }
-                if relation.related_entity.is_some()
-                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
-                {
-                    return Err(DenseCompileError::Unsupported(format!(
-                        "related scalar `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
-                        derived.entity, relation.key.name
-                    )));
                 }
                 match &derived.semantics {
                     DerivedSemantics::Scalar(expr) => {
@@ -2045,6 +2023,54 @@ impl<'a> DenseCompiler<'a> {
                 Ok(index)
             }
         }
+    }
+
+    /// Whether a rule that a related expression references is evaluated on the
+    /// current record (compiled for the root row and projected to its related
+    /// rows) rather than inlined on the related rows.
+    ///
+    /// Explain reads a referenced rule's declared entity only in a derived
+    /// relation's own predicate, where it selects the current record when the
+    /// entity is the relation's current slot entity and the related record
+    /// otherwise (`RelationEvalContext::entity_id_for`, falling back to the
+    /// related id). A `where` clause, a `sum`'s value and every rule body run
+    /// with no relation context, so explain evaluates each rule they reference
+    /// for the related entity, whatever entity the rule declares: a
+    /// `Household` rule in a `where` clause over household members is
+    /// evaluated for each member, and a `Person` rule in a `where` clause over
+    /// a person-to-person relation is evaluated for each related person, not
+    /// for the root person.
+    ///
+    /// In a predicate of a derived relation whose related slot entity is
+    /// declared, a rule of an entity that is neither slot's (other than an
+    /// entity-free `Scalar` rule) is declined rather than evaluated on the
+    /// related record as explain's fallback does.
+    fn reads_current_record(
+        &self,
+        relation_index: usize,
+        kind: &str,
+        name: &str,
+        entity: &str,
+    ) -> Result<bool, DenseCompileError> {
+        if self.membership_scope.is_none() {
+            return Ok(false);
+        }
+        let relation = &self.relations[relation_index];
+        if relation.current_entity.as_deref() == Some(entity) {
+            return Ok(true);
+        }
+        if entity != SCALAR_ENTITY
+            && relation
+                .related_entity
+                .as_deref()
+                .is_some_and(|related| related != entity)
+        {
+            return Err(DenseCompileError::Unsupported(format!(
+                "related {kind} `{name}` has entity `{entity}`, which is neither current nor related for relation `{}`",
+                relation.key.name
+            )));
+        }
+        Ok(false)
     }
 
     /// Whether dense accepts a `relation_member` of `relation` (with these
