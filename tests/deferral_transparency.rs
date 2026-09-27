@@ -10,8 +10,9 @@
 //!   before the deferral point, rules with output rounding (and their
 //!   pre-rounding trace values) as deferred tasks, `NoMatchingArm` naming the
 //!   innermost rule, errors in deferred rules, laziness, relation contexts,
-//!   `count`/`sum` whose members each defer, and one engine reused across
-//!   calls after an error. Explain's full response and fast's response are
+//!   `count`/`sum` whose members each defer, aggregations inside derived
+//!   relations' predicates, and one engine reused across calls after an
+//!   error. Explain's full response and fast's response are
 //!   byte-identical at every threshold and with deferral off;
 //! * an aggregation whose every member defers costs one pass: its retries
 //!   resume at the member that deferred;
@@ -661,6 +662,91 @@ fn deferring_members(members: usize, depth: usize) -> (Value, Value, Value) {
     (program, dataset, queries)
 }
 
+/// Two derived relations whose predicates each count, or sum over, a
+/// person's kids with a `where` clause reading a chain `depth` rules deep, and
+/// a household rule counting both. Each predicate's aggregation defers inside
+/// the other's evaluation order, so each resumes while the other is still
+/// pending: the resume must name the aggregation it belongs to, not whichever
+/// aggregation later occupies the same place in memory. (Resumes were keyed
+/// by address, and the predicate was evaluated from a per-call copy, so the
+/// second relation's count took over the first's progress and `top` came out
+/// 0 instead of 1 in explain at thresholds 1 to 8.)
+fn aggregations_in_predicates(depth: usize, sum: bool) -> (Value, Value, Value) {
+    let mut rules = Vec::new();
+    rules.extend(chain("ka", "Kid", depth, |_| int(1), input("ka_in")));
+    rules.extend(chain("kb", "Kid", depth, |_| int(1), input("kb_in")));
+    rules.push(judgment(
+        "ka_ok",
+        "Kid",
+        cmp(derived("ka0"), "gt", int(100)),
+    ));
+    rules.push(judgment(
+        "kb_ok",
+        "Kid",
+        cmp(derived("kb0"), "gt", int(100)),
+    ));
+    let aggregate = |kids: &str, ok: &str, value: &str| {
+        if sum {
+            sum_related(kids, 1, 0, value, Some(derived(ok)))
+        } else {
+            count_related(kids, 1, 0, Some(derived(ok)))
+        }
+    };
+    rules.push(scalar(
+        "top",
+        "Household",
+        add(vec![
+            count_related("fa", 1, 0, None),
+            count_related("fb", 1, 0, None),
+        ]),
+    ));
+    rules.push(scalar("n_fa", "Household", count_related("fa", 1, 0, None)));
+    rules.push(scalar("n_fb", "Household", count_related("fb", 1, 0, None)));
+    let filtered = |name: &str, predicate: Value| {
+        json!({
+            "name": name, "arity": 2, "slot_entities": ["Person", "Household"],
+            "derivation": {
+                "source_relation": "member_of_household", "current_slot": 1,
+                "related_slot": 0, "slot_entities": ["Person", "Household"],
+                "predicate": predicate,
+            },
+        })
+    };
+    let program = json!({
+        "relations": [
+            members_relation(),
+            {"name": "kid_a", "arity": 2, "slot_entities": ["Kid", "Person"]},
+            {"name": "kid_b", "arity": 2, "slot_entities": ["Kid", "Person"]},
+            filtered("fa", cmp(aggregate("kid_a", "ka_ok", "ka0"), "gte", int(1))),
+            filtered("fb", cmp(aggregate("kid_b", "kb_ok", "kb0"), "gte", int(1))),
+        ],
+        "derived": rules,
+    });
+    let mut inputs = Vec::new();
+    for (kid, a, b) in [
+        ("k1", "200", "200"),
+        ("k2", "200", "200"),
+        ("k3", "0", "200"),
+        ("k4", "0", "0"),
+    ] {
+        inputs.push(input_record("Kid", kid, "ka_in", decimal_value(a)));
+        inputs.push(input_record("Kid", kid, "kb_in", decimal_value(b)));
+    }
+    let dataset = json!({
+        "inputs": inputs,
+        "relations": [
+            relation_record("member_of_household", &["p1", "h1"]),
+            relation_record("member_of_household", &["p2", "h1"]),
+            relation_record("kid_a", &["k1", "p1"]),
+            relation_record("kid_a", &["k2", "p1"]),
+            relation_record("kid_a", &["k3", "p2"]),
+            relation_record("kid_b", &["k4", "p1"]),
+        ],
+    });
+    let queries = json!([query("h1", 1, &["top"]), query("h1", 1, &["n_fb", "n_fa"]),]);
+    (program, dataset, queries)
+}
+
 /// Errors inside deferred rules, and laziness around them.
 fn error_programs() -> Vec<(&'static str, Value, Value, Value)> {
     let mut programs = Vec::new();
@@ -900,6 +986,12 @@ fn handcrafted_programs_answer_the_same_at_every_threshold() {
             ("relation contexts", relation_contexts()),
             ("diamonds", diamonds()),
             ("deferring members", deferring_members(12, 6)),
+            ("counts in predicates", aggregations_in_predicates(3, false)),
+            ("sums in predicates", aggregations_in_predicates(3, true)),
+            (
+                "deep counts in predicates",
+                aggregations_in_predicates(12, false),
+            ),
         ] {
             divergences.extend(self::divergences(label, &program, &dataset, &queries));
         }

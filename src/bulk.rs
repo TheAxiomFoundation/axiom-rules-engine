@@ -808,7 +808,7 @@ impl<'a> BulkEvaluator<'a> {
         (ScalarColumn::placeholder(self.len()), errors)
     }
 
-    fn eval_scalar_expr(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
+    fn eval_scalar_expr(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         self.visits += 1;
         self.depth += 1;
         let result = self.scalar_node(expr, mask);
@@ -816,7 +816,7 @@ impl<'a> BulkEvaluator<'a> {
         result
     }
 
-    fn scalar_node(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
+    fn scalar_node(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         let len = self.len();
         if mask.is_empty() {
             return Ok((ScalarColumn::placeholder(len), RowErrors::new()));
@@ -939,7 +939,7 @@ impl<'a> BulkEvaluator<'a> {
     /// `errors`.
     fn eval_decimal_operand(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         mask: &RowMask,
         errors: &mut RowErrors,
     ) -> Flow<(Vec<Decimal>, RowMask)> {
@@ -957,8 +957,8 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_binary(
         &mut self,
-        left: &ScalarExpr,
-        right: &ScalarExpr,
+        left: &'a ScalarExpr,
+        right: &'a ScalarExpr,
         mask: &RowMask,
         operation: impl Fn(Decimal, Decimal) -> Result<Decimal, ArithmeticError>,
     ) -> Flow<Scalars> {
@@ -977,7 +977,7 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_unary(
         &mut self,
-        value: &ScalarExpr,
+        value: &'a ScalarExpr,
         mask: &RowMask,
         operation: impl Fn(Decimal) -> Decimal,
     ) -> Flow<Scalars> {
@@ -992,7 +992,7 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_extremum(
         &mut self,
-        items: &[ScalarExpr],
+        items: &'a [ScalarExpr],
         mask: &RowMask,
         function: &str,
         replaces: impl Fn(Decimal, Decimal) -> bool,
@@ -1054,7 +1054,7 @@ impl<'a> BulkEvaluator<'a> {
     fn eval_parameter_lookup(
         &mut self,
         parameter: &str,
-        index: &ScalarExpr,
+        index: &'a ScalarExpr,
         mask: &RowMask,
     ) -> Flow<Scalars> {
         let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
@@ -1104,7 +1104,7 @@ impl<'a> BulkEvaluator<'a> {
     /// Relation aggregations visit each row's related entities, so they run
     /// row by row on the reference interpreter: identical id resolution,
     /// derived-relation filtering, `where` laziness and related values.
-    fn eval_per_entity(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
+    fn eval_per_entity(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         let period = self.period.clone();
         let mut errors = RowErrors::new();
         let mut entries = Vec::with_capacity(mask.count());
@@ -1123,7 +1123,7 @@ impl<'a> BulkEvaluator<'a> {
         Ok((ScalarColumn::from_entries(self.len(), entries), errors))
     }
 
-    fn eval_judgment_expr(&mut self, expr: &JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
+    fn eval_judgment_expr(&mut self, expr: &'a JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
         self.visits += 1;
         self.depth += 1;
         let result = self.judgment_node(expr, mask);
@@ -1131,7 +1131,7 @@ impl<'a> BulkEvaluator<'a> {
         result
     }
 
-    fn judgment_node(&mut self, expr: &JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
+    fn judgment_node(&mut self, expr: &'a JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
         let len = self.len();
         if mask.is_empty() {
             return Ok((vec![JudgmentOutcome::NotHolds; len], RowErrors::new()));
@@ -1178,7 +1178,7 @@ impl<'a> BulkEvaluator<'a> {
     /// undetermined item and no decisive one is undetermined.
     fn eval_short_circuit(
         &mut self,
-        items: &[JudgmentExpr],
+        items: &'a [JudgmentExpr],
         mask: &RowMask,
         decisive: JudgmentOutcome,
     ) -> Flow<Judgments> {

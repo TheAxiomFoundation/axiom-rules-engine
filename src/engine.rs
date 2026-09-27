@@ -523,8 +523,10 @@ pub struct Engine<'a> {
 }
 
 /// An aggregation evaluated for one entity and period. The node's address
-/// identifies it: the engine borrows the program for its whole life and never
-/// copies an expression it evaluates, so the address is fixed and unique.
+/// identifies it, which is sound because every expression the engine
+/// evaluates is borrowed from the program for the engine's whole life: the
+/// evaluation functions take `&'a` expressions, so the compiler refuses to
+/// evaluate a copy, whose address could be reused by another aggregation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ResumeKey {
     node: usize,
@@ -941,7 +943,7 @@ impl<'a> Engine<'a> {
 
     fn record_skipped_scalar_dependencies(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -979,7 +981,7 @@ impl<'a> Engine<'a> {
 
     fn record_skipped_judgment_dependencies(
         &mut self,
-        expr: &JudgmentExpr,
+        expr: &'a JudgmentExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1039,7 +1041,7 @@ impl<'a> Engine<'a> {
     /// per-entity relation aggregations.
     pub(crate) fn eval_scalar_expr(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
@@ -1048,7 +1050,7 @@ impl<'a> Engine<'a> {
 
     fn eval_scalar_expr_inner(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1058,7 +1060,7 @@ impl<'a> Engine<'a> {
 
     fn scalar_node(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1321,7 +1323,7 @@ impl<'a> Engine<'a> {
 
     fn eval_judgment_expr(
         &mut self,
-        expr: &JudgmentExpr,
+        expr: &'a JudgmentExpr,
         entity_id: &str,
         period: &Period,
     ) -> Eval<JudgmentOutcome> {
@@ -1330,7 +1332,7 @@ impl<'a> Engine<'a> {
 
     fn eval_judgment_expr_inner(
         &mut self,
-        expr: &JudgmentExpr,
+        expr: &'a JudgmentExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1340,7 +1342,7 @@ impl<'a> Engine<'a> {
 
     fn judgment_node(
         &mut self,
-        expr: &JudgmentExpr,
+        expr: &'a JudgmentExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1476,10 +1478,10 @@ impl<'a> Engine<'a> {
     /// whose every member defers costs one pass, not one pass per member.
     fn fold_related(
         &mut self,
-        node: &ScalarExpr,
+        node: &'a ScalarExpr,
         (relation, current_slot, related_slot): (&str, usize, usize),
-        where_clause: Option<&JudgmentExpr>,
-        value: Option<&RelatedValueRef>,
+        where_clause: Option<&'a JudgmentExpr>,
+        value: Option<&'a RelatedValueRef>,
         entity_id: &str,
         period: &Period,
     ) -> Eval<(usize, Decimal)> {
@@ -1534,8 +1536,8 @@ impl<'a> Engine<'a> {
     /// `where` clause does not select it, else its value (zero for a count).
     fn fold_member(
         &mut self,
-        where_clause: Option<&JudgmentExpr>,
-        value: Option<&RelatedValueRef>,
+        where_clause: Option<&'a JudgmentExpr>,
+        value: Option<&'a RelatedValueRef>,
         related_id: &str,
         period: &Period,
     ) -> Eval<Option<Decimal>> {
@@ -1555,7 +1557,7 @@ impl<'a> Engine<'a> {
 
     fn eval_related_value(
         &mut self,
-        value: &RelatedValueRef,
+        value: &'a RelatedValueRef,
         entity_id: &str,
         period: &Period,
     ) -> Eval<Decimal> {
@@ -1577,7 +1579,7 @@ impl<'a> Engine<'a> {
 
     fn eval_decimal(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
@@ -1716,8 +1718,10 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Eval<Vec<String>> {
-        let schema = self
-            .program
+        // Borrowed from the program, not copied: a `count`/`sum` in the
+        // predicate is identified by its address (see [`ResumeKey`]).
+        let program: &'a Program = self.program;
+        let schema = program
             .relations
             .get(relation)
             .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
@@ -1738,7 +1742,7 @@ impl<'a> Engine<'a> {
             .filter_map(|record| record.tuple.get(related_slot).cloned())
             .collect::<Vec<String>>();
 
-        if let Some(derivation) = schema.derivation.clone() {
+        if let Some(derivation) = &schema.derivation {
             let mut derived_ids = Vec::new();
             for related_id in self.related_entity_ids(
                 &derivation.source_relation,
