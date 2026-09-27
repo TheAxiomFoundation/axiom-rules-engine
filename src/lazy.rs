@@ -69,6 +69,18 @@ impl RowMask {
         self.count == self.len
     }
 
+    /// Whether both masks hold exactly the same rows.
+    pub(crate) fn same_rows(&self, other: &RowMask) -> bool {
+        self.len == other.len
+            && self.count == other.count
+            && match (&self.bits, &other.bits) {
+                (Some(left), Some(right)) => Rc::ptr_eq(left, right) || left == right,
+                // A mask holding every row keeps no bits, so equal lengths
+                // and counts already decide the rest.
+                _ => true,
+            }
+    }
+
     pub(crate) fn contains(&self, row: usize) -> bool {
         match &self.bits {
             None => row < self.len,
