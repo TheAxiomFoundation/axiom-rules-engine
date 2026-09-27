@@ -2107,7 +2107,7 @@ impl RulesDocument {
                     rule: rule.name.clone(),
                     occurrences,
                     message: format!(
-                        "RuleSpec rule `{}` has {occurrences} non-exhaustive `match` {expression}; add a final `_ => <fallback>` arm to each match",
+                        "RuleSpec rule `{}` has {occurrences} non-exhaustive `match` {expression}; a subject no arm covers fails evaluation, so add a final `_ => <fallback>` arm to each match",
                         rule.name
                     ),
                 });
@@ -3205,6 +3205,12 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(then_expr, alias, relation_name);
             rewrite_relation_alias_in_scalar(else_expr, alias, relation_name);
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            rewrite_relation_alias_in_scalar(subject, alias, relation_name);
+            for pattern in patterns {
+                rewrite_relation_alias_in_scalar(pattern, alias, relation_name);
+            }
+        }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             rewrite_relation_alias_in_scalar(value, alias, relation_name);
             if let Some(n) = n {
@@ -3509,6 +3515,12 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(then_expr, names);
             collect_scalar_relation_names(else_expr, names);
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            collect_scalar_relation_names(subject, names);
+            for pattern in patterns {
+                collect_scalar_relation_names(pattern, names);
+            }
+        }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             collect_scalar_relation_names(value, names);
             if let Some(n) = n {
@@ -3739,6 +3751,24 @@ fn rewrite_scalar_relation_references(
                 derived_origin_targets,
             );
         }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            rewrite_scalar_relation_references(
+                subject,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+            for pattern in patterns {
+                rewrite_scalar_relation_references(
+                    pattern,
+                    origin_target,
+                    rewrites,
+                    unambiguous_short_rewrites,
+                    derived_origin_targets,
+                );
+            }
+        }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             rewrite_scalar_relation_references(
                 value,
@@ -3950,6 +3980,12 @@ fn scalar_uses_imported_derived(
             judgment_uses_imported_derived(condition, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(then_expr, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(else_expr, origin_target, derived_origin_targets)
+        }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            scalar_uses_imported_derived(subject, origin_target, derived_origin_targets)
+                || patterns.iter().any(|pattern| {
+                    scalar_uses_imported_derived(pattern, origin_target, derived_origin_targets)
+                })
         }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             scalar_uses_imported_derived(value, origin_target, derived_origin_targets)

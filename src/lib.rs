@@ -7,6 +7,7 @@ pub mod compile;
 pub mod dense;
 pub mod engine;
 mod formula;
+mod lazy;
 pub mod migrate;
 pub mod model;
 mod relation_direction;

@@ -69,6 +69,7 @@ thiserror = "2.0.17"
 
 [dev-dependencies]
 jsonschema = "0.46"
+proptest = { version = "1.7", default-features = false, features = ["std"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -1048,7 +1048,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
         ],
         relations: vec![],
     };
-    let queries = ["household-1", "household-2"]
+    let queries: Vec<ExecutionQuery> = ["household-1", "household-2"]
         .into_iter()
         .map(|entity_id| ExecutionQuery {
             assessment_date: None,
@@ -1061,13 +1061,34 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
     let response = execute_request(ExecutionRequest {
         relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request succeeds");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
         program,
         dataset,
         queries,
     })
-    .expect("fast request succeeds");
+    .expect("explain request succeeds");
 
     assert_eq!(response.metadata.actual_mode, ExecutionMode::Fast);
+    // Each row keeps the kind of the branch it selected, exactly as explain
+    // reports it: the decimal input on the first row, the integer literal on
+    // the second.
+    assert_eq!(
+        results_without_trace(&response),
+        results_without_trace(&explain)
+    );
+    assert!(matches!(
+        response.results[1].outputs.get("benefit"),
+        Some(OutputValue::Scalar {
+            value: ScalarValueSpec::Integer { value: 0 },
+            ..
+        })
+    ));
     assert_eq!(
         decimal_output(
             response.results[0]
@@ -1434,6 +1455,113 @@ rules:
     }
 }
 
+const NON_EXHAUSTIVE_MATCH_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              1 => 10
+              2 => 20
+"#;
+
+fn filing_status_request(mode: ExecutionMode, filers: &[(&str, i64)]) -> CompiledExecutionRequest {
+    let period = simple_period();
+    CompiledExecutionRequest {
+        mode,
+        dataset: DatasetSpec {
+            inputs: filers
+                .iter()
+                .map(|(entity_id, filing_status)| InputRecordSpec {
+                    name: "filing_status".to_string(),
+                    entity: "TaxUnit".to_string(),
+                    entity_id: entity_id.to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Integer {
+                        value: *filing_status,
+                    },
+                })
+                .collect(),
+            relations: Vec::new(),
+        },
+        queries: filers
+            .iter()
+            .map(|(entity_id, _)| ExecutionQuery {
+                assessment_date: None,
+                entity_id: entity_id.to_string(),
+                period: period.clone(),
+                outputs: vec!["filing_credit".to_string()],
+            })
+            .collect(),
+        pins: Vec::new(),
+    }
+}
+
+/// A `match` without `_` used to give an uncovered subject its last arm's
+/// value (filing status 9 got the joint amount). It is now an error naming
+/// the rule, the subject and its value, in explain and fast mode alike, while
+/// covered subjects keep their arm's value. The artifact goes through its JSON
+/// form, as a served artifact does.
+#[test]
+fn non_exhaustive_match_rejects_an_uncovered_subject_in_every_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(NON_EXHAUSTIVE_MATCH_RULESPEC)
+        .expect("a match without `_` still compiles");
+    let json = serde_json::to_string(&artifact).expect("artifact serialises");
+    assert!(json.contains(r#""kind":"no_match""#), "{json}");
+    let artifact: CompiledProgramArtifact =
+        serde_json::from_str(&json).expect("artifact deserialises");
+
+    let mut errors = Vec::new();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        // Rows take different arms, so the batch's innermost comparison
+        // (`== 2`) fails for a row that matched the outer arm: that row is
+        // covered and must not be reported.
+        let covered = execute_compiled_request(
+            artifact.clone(),
+            filing_status_request(mode.clone(), &[("filer-1", 1), ("filer-2", 2)]),
+        )
+        .unwrap_or_else(|error| panic!("covered subjects fail in {mode:?}: {error}"));
+        assert_eq!(covered.metadata.actual_mode, mode);
+        let values: Vec<i64> = covered
+            .results
+            .iter()
+            .map(|result| integer_output(&result.outputs["filing_credit"]))
+            .collect();
+        assert_eq!(values, vec![10, 20], "{mode:?}");
+
+        let error = execute_compiled_request(
+            artifact.clone(),
+            filing_status_request(
+                mode.clone(),
+                &[("filer-1", 1), ("filer-9", 9), ("filer-2", 2)],
+            ),
+        )
+        .expect_err("an uncovered subject is an error, not the last arm");
+        assert!(
+            matches!(
+                &error,
+                ApiError::Eval(EvalError::NoMatchingArm { rule, subject, value, patterns })
+                    if rule == "filing_credit"
+                        && subject == "filing_status"
+                        && value == "9"
+                        && patterns == "1, 2"
+            ),
+            "{mode:?}: {error:?}"
+        );
+        errors.push(error.to_string());
+    }
+    assert_eq!(errors[0], errors[1]);
+    assert!(errors[0].contains("add an arm for it or a final `_ =>` arm"));
+}
+
 fn integer_result(
     program: &ProgramSpec,
     mode: ExecutionMode,
@@ -1475,7 +1603,7 @@ fn integer_result(
 }
 
 #[test]
-fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
+fn fast_mode_aggregates_related_derived_values_like_explain() {
     let period = PeriodSpec {
         kind: PeriodKindSpec::Month,
         start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
@@ -1592,28 +1720,197 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("explain request succeeds");
 
+    // Aggregating a related derived value runs each row's aggregation on the
+    // reference interpreter, so fast mode answers it without falling back.
     assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
-    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
     assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
-    assert!(
-        fast.metadata
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("bulk execution does not yet support"),
-        "unexpected fallback reason: {:?}",
-        fast.metadata.fallback_reason
-    );
     assert_eq!(
-        serde_json::to_value(&fast.results).expect("fast results serialise"),
-        serde_json::to_value(&explain.results).expect("explain results serialise")
+        results_without_trace(&fast),
+        results_without_trace(&explain)
     );
 }
 
+#[test]
+fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
+    let (program, dataset, queries) = date_arithmetic_case(&[false, false]);
+
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request falls back");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+
+    assert_eq!(fast.metadata.requested_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(
+        fast.metadata.fallback_reason.as_deref(),
+        Some("bulk fast mode does not yet support days_between")
+    );
+    assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+}
+
+#[test]
+fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
+    // Every row selects the supported branch: the date arithmetic is dead code
+    // for this batch, so fast mode answers it.
+    let (program, dataset, queries) = date_arithmetic_case(&[true, true]);
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request succeeds");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+    assert_eq!(fast.metadata.fallback_reason, None);
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+
+    // One live row reaches the date arithmetic: fast declines and falls back.
+    let (program, dataset, queries) = date_arithmetic_case(&[true, false]);
+    let fast = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Fast,
+        program: program.clone(),
+        dataset: dataset.clone(),
+        queries: queries.clone(),
+    })
+    .expect("fast request falls back");
+    let explain = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program,
+        dataset,
+        queries,
+    })
+    .expect("explain request succeeds");
+    assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
+    assert!(fast.metadata.fallback_reason.is_some());
+    assert_eq!(
+        results_without_trace(&fast),
+        results_without_trace(&explain)
+    );
+}
+
+/// `benefit = if use_amount: amount else: days_between(period_start,
+/// period_end)`, one household per flag.
+fn date_arithmetic_case(flags: &[bool]) -> (ProgramSpec, DatasetSpec, Vec<ExecutionQuery>) {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        derived: vec![DerivedSpec {
+            id: None,
+            name: "benefit".to_string(),
+            entity: "Household".to_string(),
+            dtype: DTypeSpec::Integer,
+            unit: None,
+            rounding: None,
+            source: None,
+            period: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics: DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::If {
+                    condition: Box::new(axiom_rules_engine::spec::JudgmentExprSpec::Comparison {
+                        left: Box::new(ScalarExprSpec::Input {
+                            name: "use_amount".to_string(),
+                        }),
+                        op: ComparisonOpSpec::Eq,
+                        right: Box::new(ScalarExprSpec::Literal {
+                            value: ScalarValueSpec::Bool { value: true },
+                        }),
+                    }),
+                    then_expr: Box::new(ScalarExprSpec::Input {
+                        name: "amount".to_string(),
+                    }),
+                    else_expr: Box::new(ScalarExprSpec::DaysBetween {
+                        from: Box::new(ScalarExprSpec::PeriodStart),
+                        to: Box::new(ScalarExprSpec::PeriodEnd),
+                    }),
+                },
+            },
+            versions: vec![],
+        }],
+        ..ProgramSpec::default()
+    };
+    let mut inputs = Vec::new();
+    let mut queries = Vec::new();
+    for (index, use_amount) in flags.iter().enumerate() {
+        let entity_id = format!("household-{index}");
+        inputs.push(InputRecordSpec {
+            name: "use_amount".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.clone(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: *use_amount },
+        });
+        inputs.push(InputRecordSpec {
+            name: "amount".to_string(),
+            entity: "Household".to_string(),
+            entity_id: entity_id.clone(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: 7 },
+        });
+        queries.push(ExecutionQuery {
+            assessment_date: None,
+            entity_id,
+            period: period.clone(),
+            outputs: vec!["benefit".to_string()],
+        });
+    }
+    (
+        program,
+        DatasetSpec {
+            inputs,
+            relations: vec![],
+        },
+        queries,
+    )
+}
+
+/// A response's results as JSON with the explain-only trace removed, for
+/// comparing a fast response against an explain response exactly.
+fn results_without_trace(response: &ExecutionResponse) -> serde_json::Value {
+    let mut results = serde_json::to_value(&response.results).expect("results serialise");
+    for result in results.as_array_mut().expect("results are an array") {
+        result
+            .as_object_mut()
+            .expect("each result is an object")
+            .remove("trace");
+    }
+    results
+}
+
 /// A household program whose outputs fail in fast mode in different ways:
-/// `household_income` aggregates a related derived value and `period_start_date`
-/// reads the period start, two constructs bulk does not support (fallback, each
-/// with its own reason); `guarded_amount` never takes its `else` branch,
+/// `days_in_period` counts days between dates and `period_start_date` reads
+/// the period start, two constructs bulk does not support (fallback, each
+/// with its own reason); `household_income` aggregates a related derived
+/// value, which bulk answers on the reference interpreter; `guarded_amount` never takes its `else` branch,
 /// which reads the missing `absent_amount` (bulk skips it too, since every row
 /// agrees on the condition); `reads_first` and `reads_second` read genuinely
 /// missing inputs, and both `shares_failure` rules depend on `reads_first`.
@@ -1671,6 +1968,16 @@ fn fast_outcome_program() -> ProgramSpec {
                     else_expr: Box::new(input("absent_amount")),
                 },
             ),
+            DerivedSpec {
+                dtype: DTypeSpec::Integer,
+                ..household_rule(
+                    "days_in_period",
+                    ScalarExprSpec::DaysBetween {
+                        from: Box::new(ScalarExprSpec::PeriodStart),
+                        to: Box::new(ScalarExprSpec::PeriodEnd),
+                    },
+                )
+            },
             household_rule("reads_first", input("absent_first")),
             household_rule("reads_second", input("absent_second")),
             DerivedSpec {
@@ -1747,7 +2054,7 @@ fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionReque
 fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
     let explain = execute_request(fast_outcome_request(
         ExecutionMode::Explain,
-        &["household_income", "guarded_amount"],
+        &["period_start_date", "guarded_amount"],
     ))
     .expect("explain answers both outputs");
     let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
@@ -1755,14 +2062,10 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
         decimal_output(&explain.results[0].outputs["guarded_amount"]),
         decimal("7")
     );
-    assert_eq!(
-        decimal_output(&explain.results[0].outputs["household_income"]),
-        decimal("100")
-    );
 
     for outputs in [
-        ["household_income", "guarded_amount"],
-        ["guarded_amount", "household_income"],
+        ["period_start_date", "guarded_amount"],
+        ["guarded_amount", "period_start_date"],
     ] {
         for run in 0..64 {
             let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
@@ -1774,12 +2077,43 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
             assert_eq!(fast.metadata.actual_mode, ExecutionMode::Explain);
             assert_eq!(
                 fast.metadata.fallback_reason.as_deref(),
-                Some("bulk execution does not yet support aggregating related derived values"),
+                Some("bulk fast mode does not yet support period_start / period_end"),
                 "run {run} with outputs {outputs:?}"
             );
             assert_eq!(
                 serde_json::to_value(&fast.results).expect("results serialise"),
                 explain_results,
+                "run {run} with outputs {outputs:?}"
+            );
+        }
+    }
+
+    // Without an output that needs explain, the same guarded output and a
+    // related-derived aggregation are answered in fast mode on every run.
+    let explain = execute_request(fast_outcome_request(
+        ExecutionMode::Explain,
+        &["household_income", "guarded_amount"],
+    ))
+    .expect("explain answers both outputs");
+    assert_eq!(
+        decimal_output(&explain.results[0].outputs["household_income"]),
+        decimal("100")
+    );
+    for outputs in [
+        ["household_income", "guarded_amount"],
+        ["guarded_amount", "household_income"],
+    ] {
+        for run in 0..16 {
+            let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
+                .unwrap_or_else(|error| panic!("run {run} with outputs {outputs:?}: {error}"));
+            assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+            assert_eq!(fast.metadata.fallback_reason, None);
+            let fast_request_explain =
+                execute_request(fast_outcome_request(ExecutionMode::Explain, &outputs))
+                    .expect("explain answers both outputs");
+            assert_eq!(
+                results_without_trace(&fast),
+                results_without_trace(&fast_request_explain),
                 "run {run} with outputs {outputs:?}"
             );
         }
@@ -1791,12 +2125,13 @@ fn fast_mode_falls_back_deterministically_when_any_output_needs_explain() {
 /// after an output bulk answers.
 #[test]
 fn fast_mode_fallback_reason_is_the_first_in_request_order() {
-    const RELATED: &str = "bulk execution does not yet support aggregating related derived values";
+    const DAYS: &str = "bulk fast mode does not yet support days_between";
     const PERIOD: &str = "bulk fast mode does not yet support period_start / period_end";
     for (outputs, reason) in [
-        (["household_income", "period_start_date"], RELATED),
-        (["period_start_date", "household_income"], PERIOD),
+        (["days_in_period", "period_start_date"], DAYS),
+        (["period_start_date", "days_in_period"], PERIOD),
         (["guarded_amount", "period_start_date"], PERIOD),
+        (["household_income", "days_in_period"], DAYS),
     ] {
         for run in 0..16 {
             let fast = execute_request(fast_outcome_request(ExecutionMode::Fast, &outputs))
@@ -1954,11 +2289,12 @@ fn fast_mode_reports_explains_error_across_a_multi_query_batch() {
     }
 }
 
-/// Bulk evaluates both branches of a conditional for every row. When the rows
-/// disagree, the branch a row does not take can fail for that row; explain
-/// never evaluates it, so the request succeeds through explain.
+/// When the rows disagree on a conditional, each branch is evaluated only
+/// for the rows that select it. The branch household-a does not take reads an
+/// input household-a lacks, which explain never evaluates; fast mode answers
+/// the batch itself, as explain does.
 #[test]
-fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() {
+fn fast_mode_answers_a_batch_whose_rows_take_different_branches() {
     let input = |name: &str| ScalarExprSpec::Input {
         name: name.to_string(),
     };
@@ -1994,7 +2330,6 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
         )
     };
     let explain = execute_request(request(ExecutionMode::Explain)).expect("explain answers");
-    let explain_results = serde_json::to_value(&explain.results).expect("results serialise");
     assert_eq!(
         decimal_output(&explain.results[0].outputs["flagged_or_amount"]),
         decimal("7")
@@ -2005,23 +2340,12 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
     );
     for run in 0..16 {
         let fast = execute_request(request(ExecutionMode::Fast))
-            .unwrap_or_else(|error| panic!("run {run} failed instead of falling back: {error}"));
+            .unwrap_or_else(|error| panic!("run {run} failed: {error}"));
+        assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast, "run {run}");
+        assert_eq!(fast.metadata.fallback_reason, None, "run {run}");
         assert_eq!(
-            fast.metadata.actual_mode,
-            ExecutionMode::Explain,
-            "run {run}"
-        );
-        assert!(
-            fast.metadata
-                .fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("`amount`")),
-            "run {run}: {:?}",
-            fast.metadata.fallback_reason
-        );
-        assert_eq!(
-            serde_json::to_value(&fast.results).expect("results serialise"),
-            explain_results,
+            results_without_trace(&fast),
+            results_without_trace(&explain),
             "run {run}"
         );
     }
@@ -2029,9 +2353,9 @@ fn fast_mode_answers_through_explain_when_bulk_fails_on_a_branch_no_row_needs() 
 
 /// A parameter output anywhere in the request sends it to explain before
 /// bulk evaluates anything. Bulk evaluates both branches of `guarded` for
-/// every row, and household-a's untaken branch overflows (a panic, since
-/// arithmetic is unchecked), so warming `guarded` before seeing `rate` would
-/// crash a request that explain answers.
+/// every row, and household-a's untaken branch overflows, so warming
+/// `guarded` before seeing `rate` would name that overflow as the fallback
+/// reason (and, before evaluator arithmetic was checked, panicked).
 #[test]
 fn fast_mode_sends_a_parameter_request_to_explain_before_evaluating_anything() {
     const RULESPEC: &str = r#"
@@ -2911,6 +3235,346 @@ fn amount_compared(op: ComparisonOpSpec, value: i64) -> axiom_rules_engine::spec
         left: Box::new(input_expr("amount")),
         op,
         right: Box::new(decimal_literal(value)),
+    }
+}
+
+/// Ask each query for `output` alone, in explain and in fast mode, and return
+/// each mode's values, asserting fast answered natively rather than by
+/// falling back to explain.
+fn explain_and_fast_values(
+    program: &ProgramSpec,
+    dataset: &DatasetSpec,
+    queries: &[ExecutionQuery],
+    output: &str,
+) -> [Vec<Decimal>; 2] {
+    let queries: Vec<ExecutionQuery> = queries
+        .iter()
+        .map(|query| ExecutionQuery {
+            outputs: vec![output.to_string()],
+            ..query.clone()
+        })
+        .collect();
+    [ExecutionMode::Explain, ExecutionMode::Fast].map(|mode| {
+        let response = execute_request(ExecutionRequest {
+            mode: mode.clone(),
+            program: program.clone(),
+            dataset: dataset.clone(),
+            queries: queries.clone(),
+        })
+        .unwrap_or_else(|error| panic!("{mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode, "{mode:?} fell back");
+        response
+            .results
+            .iter()
+            .map(|result| decimal_output(&result.outputs[output]))
+            .collect()
+    })
+}
+
+/// A request may query one entity more than once. Bulk used to fill each
+/// entity's inputs into its last query row only, so an earlier row read an
+/// optional input as absent: fast answered [0, 15] where explain answers
+/// [15, 15].
+#[test]
+fn fast_mode_gives_every_query_of_an_entity_its_inputs() {
+    let program = ProgramSpec {
+        derived: vec![household_decimal_rule(
+            "optional_amount",
+            ScalarExprSpec::InputOrElse {
+                name: "amount".to_string(),
+                default: decimal_value("0"),
+            },
+        )],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let query = simple_queries(&period).remove(0);
+    let values = explain_and_fast_values(
+        &program,
+        &simple_dataset(&period),
+        &[query.clone(), query],
+        "optional_amount",
+    );
+    assert_eq!(values[0], vec![decimal("15"), decimal("15")]);
+    assert_eq!(values[1], values[0]);
+}
+
+/// With a relation of more than two slots, one related entity can appear in
+/// several tuples. Explain counts and sums each related entity once; bulk
+/// used to count tuples, so fast answered 2 and 10 where explain answers 1
+/// and 5.
+#[test]
+fn fast_mode_counts_and_sums_each_related_entity_once() {
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "household_member_role".to_string(),
+            arity: 3,
+            slot_entities: Vec::new(),
+            derivation: None,
+        }],
+        derived: vec![
+            household_decimal_rule(
+                "member_count",
+                ScalarExprSpec::CountRelated {
+                    relation: "household_member_role".to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    where_clause: None,
+                },
+            ),
+            household_decimal_rule(
+                "member_income",
+                ScalarExprSpec::SumRelated {
+                    relation: "household_member_role".to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    value: RelatedValueRefSpec::Input {
+                        name: "income".to_string(),
+                    },
+                    where_clause: None,
+                },
+            ),
+        ],
+        ..ProgramSpec::default()
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![InputRecordSpec {
+            name: "income".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "person-1".to_string(),
+            interval: interval.clone(),
+            value: decimal_value("5"),
+        }],
+        relations: ["head", "earner"]
+            .into_iter()
+            .map(|role| RelationRecordSpec {
+                name: "household_member_role".to_string(),
+                tuple: vec![
+                    "household-1".to_string(),
+                    "person-1".to_string(),
+                    role.to_string(),
+                ],
+                interval: interval.clone(),
+            })
+            .collect(),
+    };
+    let queries = [ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: vec!["member_count".to_string(), "member_income".to_string()],
+    }];
+    for (output, expected) in [("member_count", "1"), ("member_income", "5")] {
+        let values = explain_and_fast_values(&program, &dataset, &queries, output);
+        assert_eq!(values[0], vec![decimal(expected)], "{output}");
+        assert_eq!(values[1], values[0], "{output}");
+    }
+}
+
+/// The mirror of the uniformly true case below: when no row selects the
+/// `then` branch, fast mode must not evaluate it either.
+#[test]
+fn fast_mode_skips_a_then_branch_no_row_selects() {
+    let program = ProgramSpec {
+        derived: vec![household_decimal_rule(
+            "guarded_ratio",
+            ScalarExprSpec::If {
+                condition: Box::new(amount_compared(ComparisonOpSpec::Gt, 100)),
+                then_expr: Box::new(ScalarExprSpec::Div {
+                    left: Box::new(input_expr("amount")),
+                    right: Box::new(decimal_literal(0)),
+                }),
+                else_expr: Box::new(input_expr("amount")),
+            },
+        )],
+        ..ProgramSpec::default()
+    };
+    let period = simple_period();
+    let values = explain_and_fast_values(
+        &program,
+        &simple_dataset(&period),
+        &simple_queries(&period),
+        "guarded_ratio",
+    );
+    assert_eq!(values[0], vec![decimal("15"), decimal("20")]);
+    assert_eq!(values[1], values[0]);
+}
+
+/// Repeated queries of one household also see its relations: bulk used to
+/// give only the last row the household's tuples, so fast counted 0 for the
+/// first row where explain counts the two members with income.
+#[test]
+fn fast_mode_gives_every_query_of_an_entity_its_relations() {
+    use axiom_rules_engine::spec::JudgmentExprSpec;
+
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let program = ProgramSpec {
+        relations: vec![axiom_rules_engine::spec::RelationSpec {
+            name: "member_of_household".to_string(),
+            arity: 2,
+            slot_entities: Vec::new(),
+            derivation: None,
+        }],
+        derived: vec![household_decimal_rule(
+            "earning_members",
+            ScalarExprSpec::CountRelated {
+                relation: "member_of_household".to_string(),
+                current_slot: 1,
+                related_slot: 0,
+                where_clause: Some(Box::new(JudgmentExprSpec::Comparison {
+                    left: Box::new(input_expr("income")),
+                    op: ComparisonOpSpec::Gt,
+                    right: Box::new(decimal_literal(0)),
+                })),
+            },
+        )],
+        ..ProgramSpec::default()
+    };
+    let people = [("person-1", "100"), ("person-2", "0"), ("person-3", "50")];
+    let dataset = DatasetSpec {
+        inputs: people
+            .iter()
+            .map(|(person, income)| InputRecordSpec {
+                name: "income".to_string(),
+                entity: "Person".to_string(),
+                entity_id: person.to_string(),
+                interval: interval.clone(),
+                value: decimal_value(income),
+            })
+            .collect(),
+        relations: people
+            .iter()
+            .map(|(person, _)| RelationRecordSpec {
+                name: "member_of_household".to_string(),
+                tuple: vec![person.to_string(), "household-1".to_string()],
+                interval: interval.clone(),
+            })
+            .collect(),
+    };
+    let query = ExecutionQuery {
+        assessment_date: None,
+        entity_id: "household-1".to_string(),
+        period,
+        outputs: Vec::new(),
+    };
+    let values = explain_and_fast_values(
+        &program,
+        &dataset,
+        &[query.clone(), query],
+        "earning_members",
+    );
+    assert_eq!(values[0], vec![decimal("2"), decimal("2")]);
+    assert_eq!(values[1], values[0]);
+}
+
+/// A derived relation lists the source relation's related entities in the
+/// derivation's own slots. RuleSpec lowers `len(snap_unit)` to
+/// `count_related(snap_unit, 1, 0)` while the derivation reads its source in
+/// slots 0 and 1, so fast mode must take related entities from the
+/// derivation, not re-project source tuples with the call's slots.
+#[test]
+fn fast_mode_counts_a_derived_relation_as_explain_does() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: household_member
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: eligible_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_member
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: 2026-01-01
+        formula: eligible_member
+  - name: snap_unit_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(snap_unit)
+"#,
+    )
+    .expect("derived relation program compiles");
+    let period = simple_period();
+    let interval = IntervalSpec {
+        start: period.start,
+        end: period.end,
+    };
+    let members = [
+        ("household-1", "person-1", true),
+        ("household-1", "person-2", true),
+        ("household-1", "person-3", false),
+        ("household-2", "person-4", true),
+    ];
+    let dataset = DatasetSpec {
+        inputs: members
+            .iter()
+            .map(|(_, person, has_ssn)| InputRecordSpec {
+                name: "has_ssn".to_string(),
+                entity: "Person".to_string(),
+                entity_id: person.to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Bool { value: *has_ssn },
+            })
+            .collect(),
+        relations: members
+            .iter()
+            .map(|(household, person, _)| RelationRecordSpec {
+                name: "household_member".to_string(),
+                tuple: vec![household.to_string(), person.to_string()],
+                interval: interval.clone(),
+            })
+            .collect(),
+    };
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_compiled_request(
+            artifact.clone(),
+            CompiledExecutionRequest {
+                mode: mode.clone(),
+                dataset: dataset.clone(),
+                queries: ["household-1", "household-2"]
+                    .into_iter()
+                    .map(|household| ExecutionQuery {
+                        assessment_date: None,
+                        entity_id: household.to_string(),
+                        period: period.clone(),
+                        outputs: vec!["snap_unit_size".to_string()],
+                    })
+                    .collect(),
+                pins: Vec::new(),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{mode:?} request failed: {error}"));
+        assert_eq!(response.metadata.actual_mode, mode, "{mode:?} fell back");
+        let sizes: Vec<i64> = response
+            .results
+            .iter()
+            .map(|result| integer_output(&result.outputs["snap_unit_size"]))
+            .collect();
+        assert_eq!(sizes, vec![2, 1], "{mode:?}");
     }
 }
 
@@ -4258,4 +4922,821 @@ rules:
         row["value"],
         serde_json::json!({"kind": "integer", "value": 259})
     );
+}
+
+// ===========================================================================
+// Fast/explain parity regressions from the PR #195 review (2026-09-25)
+//
+// An independent review of #195 found two requests on main at b16ced0 where
+// fast mode answered and explain did not agree: a `relation_member` judgment
+// inside a `where` clause (explain errors, fast counted every related entity),
+// and a `count` in a decimal rule (explain reports an integer value, fast
+// converted it to a decimal). Both still reproduced at 2840b57 and stopped at
+// 5a29e03 (#201), which runs every relation aggregation on the reference
+// interpreter and keeps each row's value in the kind explain computes. The
+// tests below pin explain's semantics for both and for their neighbours, and
+// assert that fast mode agrees: on its own path, without falling back, where
+// explain answers, and with explain's exact error (which fast reports by
+// handing a failing request to explain) where explain fails.
+//
+// Requests are written as the JSON the CLI reads, so each one can be replayed
+// with `axiom-rules-engine < request.json` after setting `mode`.
+// ===========================================================================
+
+/// A request over `dataset`'s relations and the inputs `program` reads. The
+/// datasets below are shared across programs, and a request may not supply an
+/// input its program never reads.
+fn review_request(
+    program: serde_json::Value,
+    dataset: serde_json::Value,
+    queries: serde_json::Value,
+) -> serde_json::Value {
+    fn read_inputs(value: &serde_json::Value, names: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let (Some(kind), Some(name)) = (object.get("kind"), object.get("name"))
+                    && (kind == "input" || kind == "input_or_else")
+                {
+                    names.insert(name.as_str().expect("input name").to_string());
+                }
+                object.values().for_each(|value| read_inputs(value, names));
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().for_each(|value| read_inputs(value, names))
+            }
+            _ => {}
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    read_inputs(&program, &mut names);
+    let mut dataset = dataset;
+    if let Some(inputs) = dataset["inputs"].as_array_mut() {
+        inputs.retain(|input| names.contains(input["name"].as_str().expect("input name")));
+    }
+    serde_json::json!({ "program": program, "dataset": dataset, "queries": queries })
+}
+
+fn review_period() -> serde_json::Value {
+    serde_json::json!({ "period_kind": "month", "start": "2026-01-01", "end": "2026-01-31" })
+}
+
+fn review_interval() -> serde_json::Value {
+    serde_json::json!({ "start": "2026-01-01", "end": "2026-01-31" })
+}
+
+fn review_query(entity_id: &str, outputs: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "entity_id": entity_id, "period": review_period(), "outputs": outputs })
+}
+
+fn review_rule(
+    name: &str,
+    entity: &str,
+    dtype: &str,
+    expr: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "dtype": dtype,
+        "unit": null,
+        "semantics": "scalar",
+        "expr": expr,
+    })
+}
+
+fn review_judgment_rule(name: &str, entity: &str, expr: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "dtype": "judgment",
+        "unit": null,
+        "semantics": "judgment",
+        "expr": expr,
+    })
+}
+
+fn review_input(
+    name: &str,
+    entity: &str,
+    entity_id: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "entity": entity,
+        "entity_id": entity_id,
+        "interval": review_interval(),
+        "value": value,
+    })
+}
+
+fn review_tuple(relation: &str, tuple: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "name": relation, "tuple": tuple, "interval": review_interval() })
+}
+
+fn review_decimal(value: &str) -> serde_json::Value {
+    serde_json::json!({ "kind": "decimal", "value": value })
+}
+
+fn review_integer(value: i64) -> serde_json::Value {
+    serde_json::json!({ "kind": "integer", "value": value })
+}
+
+fn review_literal(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "kind": "literal", "value": value })
+}
+
+fn review_comparison(
+    left: serde_json::Value,
+    op: &str,
+    right: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({ "kind": "comparison", "left": left, "op": op, "right": right })
+}
+
+/// `member(household, person)`: the household is slot 0, the person slot 1.
+fn review_member_predicate() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "relation_member",
+        "relation": "member",
+        "current_slot": 0,
+        "related_slot": 1,
+    })
+}
+
+fn review_count_members(where_clause: Option<serde_json::Value>) -> serde_json::Value {
+    let mut count = serde_json::json!({
+        "kind": "count_related",
+        "relation": "member",
+        "current_slot": 0,
+        "related_slot": 1,
+    });
+    if let Some(where_clause) = where_clause {
+        count["where"] = where_clause;
+    }
+    count
+}
+
+/// A judgment that holds (`1 == 1`) or not (`1 == 2`) without reading data.
+fn review_constant_judgment(holds: bool) -> serde_json::Value {
+    review_comparison(
+        review_literal(review_integer(1)),
+        "eq",
+        review_literal(review_integer(if holds { 1 } else { 2 })),
+    )
+}
+
+fn review_mode_request(mode: ExecutionMode, request: &serde_json::Value) -> ExecutionRequest {
+    let mut request = request.clone();
+    request["mode"] = serde_json::to_value(&mode).expect("mode serialises");
+    serde_json::from_value(request).expect("request JSON parses")
+}
+
+/// Explain and fast agree on `request`: when explain answers, fast answers
+/// the same results (value kinds included) on its own path, without falling
+/// back; when explain fails, fast fails with the same error. Returns explain's
+/// results without traces, or its error message.
+fn assert_fast_agrees_with_explain(
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let explain = execute_request(review_mode_request(ExecutionMode::Explain, request));
+    let fast = execute_request(review_mode_request(ExecutionMode::Fast, request));
+    match (explain, fast) {
+        (Ok(explain), Ok(fast)) => {
+            assert_eq!(
+                (&fast.metadata.actual_mode, &fast.metadata.fallback_reason),
+                (&ExecutionMode::Fast, &None),
+                "fast mode fell back to explain on {request}"
+            );
+            let explain = results_without_trace(&explain);
+            assert_eq!(
+                results_without_trace(&fast),
+                explain,
+                "fast and explain differ on {request}"
+            );
+            Ok(explain)
+        }
+        (Err(explain), Err(fast)) => {
+            assert_eq!(
+                fast.to_string(),
+                explain.to_string(),
+                "fast and explain fail differently on {request}"
+            );
+            Err(explain.to_string())
+        }
+        (Ok(explain), Err(fast)) => panic!(
+            "explain answered {} but fast failed with `{fast}` on {request}",
+            results_without_trace(&explain)
+        ),
+        (Err(explain), Ok(fast)) => panic!(
+            "explain failed with `{explain}` but fast answered {} on {request}",
+            results_without_trace(&fast)
+        ),
+    }
+}
+
+/// Three members, all adults with income; enough for every where clause below
+/// to reach a related entity.
+fn review_members_dataset() -> serde_json::Value {
+    let people = [("p1", "100"), ("p2", "0"), ("p3", "50")];
+    serde_json::json!({
+        "inputs": people
+            .iter()
+            .map(|(person, income)| review_input("income", "Person", person, review_decimal(income)))
+            .collect::<Vec<_>>(),
+        "relations": people
+            .iter()
+            .map(|(person, _)| review_tuple("member", &["h1", person]))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn review_member_relations() -> serde_json::Value {
+    serde_json::json!([{ "name": "member", "arity": 2 }])
+}
+
+const RELATION_PREDICATE_OUTSIDE_DERIVED_RELATION: &str =
+    "type mismatch: relation predicate `member` can only be evaluated inside a derived relation";
+
+/// Explain evaluates a `count`/`sum` `where` clause once per related entity
+/// with no relation context (engine.rs `ScalarExpr::CountRelated` and
+/// `SumRelated` call `eval_judgment_expr`), and `JudgmentExpr::RelationMember`
+/// fails without one: only a derived relation's predicate supplies it. So a
+/// `relation_member` a `where` clause reaches is an error in explain, and fast
+/// mode must fail the same way. At b16ced0 fast answered the first request
+/// with a count of 3.
+#[test]
+fn relation_member_in_an_aggregation_where_clause_fails_in_fast_as_in_explain() {
+    let member = review_member_predicate();
+    let count_where = |where_clause: serde_json::Value| review_count_members(Some(where_clause));
+    let income_above_zero = review_comparison(
+        serde_json::json!({ "kind": "input", "name": "income" }),
+        "gt",
+        review_literal(review_decimal("0")),
+    );
+    let household = |expr: serde_json::Value| review_rule("n", "Household", "integer", expr);
+    let cases = vec![
+        // The reviewer's probe (t7.py, "PRE relation_member in where clause").
+        (
+            "count where relation_member",
+            vec![household(count_where(member.clone()))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "sum where relation_member",
+            vec![review_rule(
+                "n",
+                "Household",
+                "decimal",
+                serde_json::json!({
+                    "kind": "sum_related",
+                    "relation": "member",
+                    "current_slot": 0,
+                    "related_slot": 1,
+                    "value": { "kind": "input", "name": "income" },
+                    "where": member.clone(),
+                }),
+            )],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member after a held `and` item",
+            vec![household(count_where(serde_json::json!({
+                "kind": "and",
+                "items": [income_above_zero.clone(), member.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member after an unheld `or` item",
+            vec![household(count_where(serde_json::json!({
+                "kind": "or",
+                "items": [review_constant_judgment(false), member.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "negated relation_member",
+            vec![household(count_where(
+                serde_json::json!({ "kind": "not", "item": member.clone() }),
+            ))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member inside exactly_one",
+            vec![household(count_where(serde_json::json!({
+                "kind": "exactly_one",
+                "items": [member.clone(), income_above_zero.clone()],
+            })))],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member through a person judgment rule",
+            vec![
+                review_judgment_rule("is_member", "Person", member.clone()),
+                household(count_where(serde_json::json!({
+                    "kind": "derived",
+                    "name": "is_member",
+                }))),
+            ],
+            vec![review_query("h1", &["n"])],
+        ),
+        (
+            "relation_member under a household judgment",
+            vec![review_judgment_rule(
+                "has_members",
+                "Household",
+                review_comparison(
+                    count_where(member.clone()),
+                    "gt",
+                    review_literal(review_integer(0)),
+                ),
+            )],
+            vec![review_query("h1", &["has_members"])],
+        ),
+        (
+            "relation_member queried directly",
+            vec![review_judgment_rule("is_member", "Person", member.clone())],
+            vec![review_query("p1", &["is_member"])],
+        ),
+        (
+            // Only the second row reaches the where clause (h2 has no
+            // members), so explain fails there and fast must fail too.
+            "one row of a batch reaches it",
+            vec![household(count_where(member.clone()))],
+            vec![
+                review_query("h2", &["n"]),
+                review_query("h1", &["n"]),
+                review_query("h2", &["n"]),
+            ],
+        ),
+    ];
+    for (label, derived, queries) in cases {
+        let request = review_request(
+            serde_json::json!({ "relations": review_member_relations(), "derived": derived }),
+            review_members_dataset(),
+            serde_json::Value::Array(queries),
+        );
+        let error = assert_fast_agrees_with_explain(&request).expect_err(&format!(
+            "{label}: explain must reject the relation predicate"
+        ));
+        assert_eq!(
+            error, RELATION_PREDICATE_OUTSIDE_DERIVED_RELATION,
+            "{label}"
+        );
+    }
+}
+
+/// The error is a property of evaluation, not of the program: a `where` clause
+/// explain never evaluates (no related entities, a decided `or`, an `if` branch
+/// no row selects) cannot fail, and fast mode answers those requests itself.
+#[test]
+fn relation_member_a_where_clause_never_reaches_fails_neither_mode() {
+    let member = review_member_predicate();
+    let cases = vec![
+        (
+            "no related entities",
+            review_count_members(Some(member.clone())),
+            vec![
+                review_query("h2", &["n"]),
+                review_query("h3", &["n"]),
+                review_query("h2", &["n"]),
+            ],
+            vec![0, 0, 0],
+        ),
+        (
+            "an `or` decided before it",
+            review_count_members(Some(serde_json::json!({
+                "kind": "or",
+                "items": [review_constant_judgment(true), member.clone()],
+            }))),
+            vec![review_query("h1", &["n"]), review_query("h2", &["n"])],
+            vec![3, 0],
+        ),
+        (
+            "an `if` branch no row selects",
+            serde_json::json!({
+                "kind": "if",
+                "condition": review_constant_judgment(false),
+                "then_expr": review_count_members(Some(member.clone())),
+                "else_expr": review_count_members(None),
+            }),
+            vec![review_query("h1", &["n"]), review_query("h2", &["n"])],
+            vec![3, 0],
+        ),
+    ];
+    for (label, expr, queries, expected) in cases {
+        let request = review_request(
+            serde_json::json!({
+                "relations": review_member_relations(),
+                "derived": [review_rule("n", "Household", "integer", expr)],
+            }),
+            review_members_dataset(),
+            serde_json::Value::Array(queries),
+        );
+        let results = assert_fast_agrees_with_explain(&request)
+            .unwrap_or_else(|error| panic!("{label}: explain failed: {error}"));
+        let values = results
+            .as_array()
+            .expect("results are an array")
+            .iter()
+            .map(|result| result["outputs"]["n"]["value"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            expected.into_iter().map(review_integer).collect::<Vec<_>>(),
+            "{label}"
+        );
+    }
+}
+
+/// Inside a derived relation's predicate `relation_member` has its context and
+/// is evaluated: `adult_resident` keeps the members that are also residents
+/// and adults. Fast mode answers counts and sums over it, under integer,
+/// decimal and judgment rules, exactly as explain does.
+#[test]
+fn relation_member_in_a_derived_relation_predicate_is_answered_natively_like_explain() {
+    let adult_resident = |slot_entities: bool| {
+        let mut relation = serde_json::json!({
+            "name": "adult_resident",
+            "arity": 2,
+            "derivation": {
+                "source_relation": "member",
+                "current_slot": 0,
+                "related_slot": 1,
+                "predicate": {
+                    "kind": "and",
+                    "items": [
+                        {
+                            "kind": "relation_member",
+                            "relation": "resident",
+                            "current_slot": 0,
+                            "related_slot": 1,
+                        },
+                        { "kind": "derived", "name": "is_adult" },
+                    ],
+                },
+            },
+        });
+        if slot_entities {
+            relation["slot_entities"] = serde_json::json!(["Household", "Person"]);
+            relation["derivation"]["slot_entities"] = serde_json::json!(["Household", "Person"]);
+        }
+        relation
+    };
+    let over_adult_residents = |kind: &str| {
+        let mut expr = serde_json::json!({
+            "kind": kind,
+            "relation": "adult_resident",
+            "current_slot": 0,
+            "related_slot": 1,
+        });
+        if kind == "sum_related" {
+            expr["value"] = serde_json::json!({ "kind": "input", "name": "income" });
+        }
+        expr
+    };
+    let derived = serde_json::json!([
+        review_judgment_rule(
+            "is_adult",
+            "Person",
+            review_comparison(
+                serde_json::json!({
+                    "kind": "input_or_else",
+                    "name": "age",
+                    "default": review_integer(0),
+                }),
+                "gte",
+                review_literal(review_integer(18)),
+            ),
+        ),
+        review_rule(
+            "n",
+            "Household",
+            "integer",
+            over_adult_residents("count_related")
+        ),
+        review_rule(
+            "n_decimal",
+            "Household",
+            "decimal",
+            over_adult_residents("count_related")
+        ),
+        review_rule(
+            "income",
+            "Household",
+            "decimal",
+            over_adult_residents("sum_related")
+        ),
+        review_judgment_rule(
+            "any",
+            "Household",
+            review_comparison(
+                over_adult_residents("count_related"),
+                "gt",
+                review_literal(review_integer(0)),
+            ),
+        ),
+    ]);
+    // p1 is an adult resident; p2 an adult who is not a resident; p3 a
+    // resident child; p4 an adult resident of h2 with no age on record.
+    let dataset = serde_json::json!({
+        "inputs": [
+            review_input("age", "Person", "p1", review_integer(30)),
+            review_input("age", "Person", "p2", review_integer(40)),
+            review_input("age", "Person", "p3", review_integer(10)),
+            review_input("income", "Person", "p1", review_decimal("100")),
+            review_input("income", "Person", "p2", review_decimal("200")),
+            review_input("income", "Person", "p3", review_decimal("5")),
+            review_input("income", "Person", "p4", review_decimal("7")),
+        ],
+        "relations": [
+            review_tuple("member", &["h1", "p1"]),
+            review_tuple("member", &["h1", "p2"]),
+            review_tuple("member", &["h1", "p3"]),
+            review_tuple("member", &["h2", "p4"]),
+            review_tuple("resident", &["h1", "p1"]),
+            review_tuple("resident", &["h1", "p3"]),
+            review_tuple("resident", &["h2", "p4"]),
+        ],
+    });
+    let outputs = ["n", "n_decimal", "income", "any"];
+    for slot_entities in [false, true] {
+        let request = review_request(
+            serde_json::json!({
+                "relations": [
+                    { "name": "member", "arity": 2 },
+                    { "name": "resident", "arity": 2 },
+                    adult_resident(slot_entities),
+                ],
+                "derived": derived,
+            }),
+            dataset.clone(),
+            serde_json::json!([
+                review_query("h1", &outputs),
+                review_query("h2", &outputs),
+                review_query("h3", &outputs),
+                review_query("h1", &["n"]),
+            ]),
+        );
+        let results = assert_fast_agrees_with_explain(&request)
+            .unwrap_or_else(|error| panic!("explain failed: {error}"));
+        let h1 = &results[0]["outputs"];
+        assert_eq!(h1["n"]["value"], review_integer(1));
+        assert_eq!(h1["n_decimal"]["dtype"], "decimal");
+        assert_eq!(h1["n_decimal"]["value"], review_integer(1));
+        assert_eq!(h1["income"]["value"], review_decimal("100"));
+        assert_eq!(h1["any"]["outcome"], "holds");
+        // p4 has no age, so `is_adult` reads the default and does not hold.
+        assert_eq!(results[1]["outputs"]["n"]["value"], review_integer(0));
+        assert_eq!(results[2]["outputs"]["any"]["outcome"], "not_holds");
+    }
+}
+
+/// The reviewer's probe (t9.py): a `count` in a rule declared `decimal`.
+/// Explain reports the declared dtype and the value its expression computes,
+/// an integer; at b16ced0 fast converted the value to a decimal.
+#[test]
+fn count_related_in_a_decimal_rule_reports_explains_integer_value_in_fast_mode() {
+    let people = [("person-1", "100"), ("person-2", "0"), ("person-3", "50")];
+    let request = review_request(
+        serde_json::json!({
+            "relations": [{ "name": "member_of_household", "arity": 2 }],
+            "derived": [review_rule(
+                "earning_members",
+                "Household",
+                "decimal",
+                serde_json::json!({
+                    "kind": "count_related",
+                    "relation": "member_of_household",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": review_comparison(
+                        serde_json::json!({ "kind": "input", "name": "income" }),
+                        "gt",
+                        review_literal(review_decimal("0")),
+                    ),
+                }),
+            )],
+        }),
+        serde_json::json!({
+            "inputs": people
+                .iter()
+                .map(|(person, income)| review_input("income", "Person", person, review_decimal(income)))
+                .collect::<Vec<_>>(),
+            "relations": people
+                .iter()
+                .map(|(person, _)| review_tuple("member_of_household", &[person, "household-1"]))
+                .collect::<Vec<_>>(),
+        }),
+        serde_json::json!([
+            review_query("household-1", &["earning_members"]),
+            review_query("household-1", &["earning_members"]),
+        ]),
+    );
+    let results = assert_fast_agrees_with_explain(&request).expect("explain answers");
+    for result in results.as_array().expect("results are an array") {
+        assert_eq!(
+            result["outputs"]["earning_members"],
+            serde_json::json!({
+                "kind": "scalar",
+                "name": "earning_members",
+                "dtype": "decimal",
+                "unit": null,
+                "value": { "kind": "integer", "value": 2 },
+            })
+        );
+    }
+}
+
+/// Explain never converts a rule's value to its declared dtype
+/// (`Engine::evaluate_scalar` caches what the expression returns and
+/// `execute_explain` serialises it as is), so the value kind is a function of
+/// the expression and, for an `if`, of the branch each row takes. Fast mode
+/// must report the same kind for every declared dtype, every row.
+#[test]
+fn fast_reports_explains_value_kind_under_every_declared_dtype() {
+    let count = review_count_members(None);
+    let income = serde_json::json!({ "kind": "input", "name": "income" });
+    let sum = |value: serde_json::Value| {
+        serde_json::json!({
+            "kind": "sum_related",
+            "relation": "member",
+            "current_slot": 0,
+            "related_slot": 1,
+            "value": value,
+        })
+    };
+    let expressions = vec![
+        ("count", count.clone()),
+        (
+            "count where",
+            review_count_members(Some(review_comparison(
+                income.clone(),
+                "gt",
+                review_literal(review_decimal("0")),
+            ))),
+        ),
+        ("sum of decimals", sum(income.clone())),
+        (
+            "sum of integers",
+            sum(serde_json::json!({ "kind": "input", "name": "units" })),
+        ),
+        ("integer literal", review_literal(review_integer(7))),
+        ("decimal literal", review_literal(review_decimal("7"))),
+        (
+            "integer input",
+            serde_json::json!({ "kind": "input", "name": "size" }),
+        ),
+        (
+            "decimal input",
+            serde_json::json!({ "kind": "input", "name": "rent" }),
+        ),
+        (
+            "absent input's integer default",
+            serde_json::json!({
+                "kind": "input_or_else",
+                "name": "absent",
+                "default": review_integer(0),
+            }),
+        ),
+        (
+            "counts added",
+            serde_json::json!({ "kind": "add", "items": [count.clone(), count.clone()] }),
+        ),
+        (
+            "max of a count",
+            serde_json::json!({ "kind": "max", "items": [count.clone()] }),
+        ),
+        (
+            "integer table keyed by a count",
+            serde_json::json!({
+                "kind": "parameter_lookup",
+                "parameter": "per_member",
+                "index": count.clone(),
+            }),
+        ),
+        (
+            // h1 (three members) takes the integer branch; h2 and h3 (none)
+            // take the decimal one.
+            "if with an integer and a decimal branch",
+            serde_json::json!({
+                "kind": "if",
+                "condition": review_comparison(
+                    count.clone(),
+                    "gt",
+                    review_literal(review_integer(1)),
+                ),
+                "then_expr": count.clone(),
+                "else_expr": review_literal(review_decimal("0.5")),
+            }),
+        ),
+        (
+            "reference to an integer count rule",
+            serde_json::json!({ "kind": "derived", "name": "member_count" }),
+        ),
+    ];
+    let households = ["h1", "h2", "h3"];
+    let mut inputs = vec![
+        review_input("income", "Person", "p1", review_decimal("100")),
+        review_input("income", "Person", "p2", review_decimal("0")),
+        review_input("income", "Person", "p3", review_decimal("50")),
+    ];
+    for person in ["p1", "p2", "p3"] {
+        inputs.push(review_input("units", "Person", person, review_integer(2)));
+    }
+    for household in households {
+        inputs.push(review_input(
+            "size",
+            "Household",
+            household,
+            review_integer(3),
+        ));
+        inputs.push(review_input(
+            "rent",
+            "Household",
+            household,
+            review_decimal("12.5"),
+        ));
+    }
+    let members = ["p1", "p2", "p3"]
+        .iter()
+        .map(|person| review_tuple("member", &["h1", person]))
+        .collect::<Vec<_>>();
+    let dataset = serde_json::json!({ "inputs": inputs, "relations": members });
+    let parameters = serde_json::json!([{
+        "name": "per_member",
+        "unit": null,
+        "indexed_by": "members",
+        "versions": [{
+            "effective_from": "2020-01-01",
+            "values": { "0": review_integer(0), "3": review_integer(30) },
+        }],
+    }]);
+    let mut kinds_seen = std::collections::BTreeSet::new();
+    for dtype in ["integer", "decimal", "bool", "text", "date", "judgment"] {
+        for rounding in [None, Some("half_up")] {
+            for (label, expr) in &expressions {
+                let mut rule = review_rule("value", "Household", dtype, expr.clone());
+                if let Some(rounding) = rounding {
+                    // Rounding applies only to a currency unit, and rounds
+                    // decimal values only; an integer passes through.
+                    rule["rounding"] = serde_json::json!(rounding);
+                    rule["unit"] = serde_json::json!("USD");
+                }
+                let request = review_request(
+                    serde_json::json!({
+                        "units": [{ "name": "USD", "kind": "currency", "minor_units": 0 }],
+                        "relations": review_member_relations(),
+                        "parameters": parameters,
+                        "derived": [
+                            rule,
+                            review_rule("member_count", "Household", "integer", count.clone()),
+                            // Referenced on other rows, so the batch reads
+                            // `value` both as an output and as a dependency.
+                            review_rule(
+                                "value_again",
+                                "Household",
+                                "decimal",
+                                serde_json::json!({ "kind": "derived", "name": "value" }),
+                            ),
+                        ],
+                    }),
+                    dataset.clone(),
+                    serde_json::json!([
+                        review_query("h1", &["value"]),
+                        review_query("h2", &["value_again"]),
+                        review_query("h3", &["value", "value_again"]),
+                        review_query("h1", &["value_again", "value"]),
+                    ]),
+                );
+                let results = assert_fast_agrees_with_explain(&request)
+                    .unwrap_or_else(|error| panic!("{dtype} {label}: explain failed: {error}"));
+                for result in results.as_array().expect("results are an array") {
+                    for output in result["outputs"].as_object().expect("outputs").values() {
+                        kinds_seen.insert((
+                            output["dtype"].as_str().unwrap_or_default().to_string(),
+                            output["value"]["kind"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // The matrix exercises both directions of the dropped conversion: integer
+    // values under non-integer dtypes and decimal values under `integer`.
+    for (dtype, kind) in [
+        ("decimal", "integer"),
+        ("bool", "integer"),
+        ("text", "integer"),
+        ("integer", "decimal"),
+    ] {
+        assert!(
+            kinds_seen.contains(&(dtype.to_string(), kind.to_string())),
+            "no {kind} value was reported under dtype {dtype}: {kinds_seen:?}"
+        );
+    }
 }

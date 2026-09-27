@@ -1,0 +1,8 @@
+# src/engine.rs, src/bulk.rs and src/dense.rs deny
+# clippy::arithmetic_side_effects: rust_decimal and chrono operators panic on
+# overflow, so evaluator arithmetic goes through the checked helpers in
+# src/engine.rs and returns an EvalError instead. usize is exempt: it holds row
+# indices, counts and dense relation offsets, whose bounds the batch binding
+# checks. The lint does not see method-call panics (chrono's
+# TimeDelta::days, Iterator::sum over Decimal, Decimal::powi) or `as` casts.
+arithmetic-side-effects-allowed = ["usize"]
