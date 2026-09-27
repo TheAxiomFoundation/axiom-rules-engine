@@ -508,7 +508,8 @@ struct DerivedMembers {
 }
 
 /// A derived relation's predicate part-way through its candidates, stopped
-/// because a candidate needed a relation that must be resolved first.
+/// because testing a candidate deferred a rule or another relation's members
+/// to the driver (see [`crate::depth`]).
 #[derive(Debug)]
 struct PendingMembers {
     candidates: Rc<[String]>,
@@ -714,6 +715,10 @@ impl<'a> Engine<'a> {
         // interrupted in, and resumes them; only an error leaves one behind.
         debug_assert!(result.is_err() || self.resumes.is_empty());
         self.resumes.clear();
+        // Likewise every retry reaches the relation predicates a deferral
+        // stopped part-way through their candidates.
+        debug_assert!(result.is_err() || self.pending_members.is_empty());
+        self.pending_members.clear();
         crate::depth::add_visits(std::mem::take(&mut self.visits));
         result
     }
@@ -2142,10 +2147,6 @@ impl<'a> Engine<'a> {
             .map(String::as_str);
         let mut failure = None;
         for (index, candidate) in candidates.iter().enumerate().skip(next) {
-            let recorded = self
-                .member_captures
-                .last()
-                .map_or(0, |(_, effects)| effects.len());
             let context = RelationEvalContext {
                 current_id: &level.entity_id,
                 related_id: candidate,
@@ -2165,12 +2166,17 @@ impl<'a> Engine<'a> {
                 }
                 Err(Interrupt::Defer(deferred)) => {
                     // This candidate is tested again from the start once the
-                    // driver has evaluated what it deferred.
-                    let (_, mut effects) = self
+                    // driver has evaluated what it deferred. Its records so
+                    // far are kept: a `count` or `sum` in the predicate
+                    // resumes at the member that deferred (see `Resume`), so
+                    // the retry does not record the members before it again.
+                    // Records the retry does repeat are recorded once on
+                    // replay, in first-occurrence order, as recursion
+                    // records them.
+                    let (_, effects) = self
                         .member_captures
                         .pop()
                         .expect("the capture pushed above");
-                    effects.truncate(recorded);
                     self.pending_members.insert(
                         level.clone(),
                         PendingMembers {
