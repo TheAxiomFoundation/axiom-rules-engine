@@ -46,6 +46,26 @@ rules:
         formula: base_amount + amount
 "#;
 
+const NESTED_COMPOSITION: &str = r#"
+format: rulespec/v1
+module:
+  kind: composition
+  source_verification:
+    corpus_citation_path: us/guidance/test/nested-composition
+imports:
+  - us:policies/base
+rules:
+  - name: nested_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: base_amount + amount
+"#;
+
 fn fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let temp = std::env::temp_dir()
         .canonicalize()
@@ -136,6 +156,45 @@ fn composed_compile_resolves_atomic_imports_and_keeps_root_rules_originless() {
 }
 
 #[test]
+fn composed_compile_resolves_nested_compositions_and_preserves_their_origin() {
+    let (temp, root, _, composed) = fixture("nested-success");
+    let nested = root.join("us/policies/nested.yaml");
+    std::fs::write(&nested, NESTED_COMPOSITION).expect("nested composition");
+    std::fs::write(
+        &composed,
+        COMPOSITION.replace("us:policies/base", "us:policies/nested"),
+    )
+    .expect("root composition");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical root");
+
+    let artifact = CompiledProgramArtifact::from_composed_rulespec_file(&composed, &roots)
+        .expect("nested composition compiles");
+    let nested_amount = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "nested_amount")
+        .expect("nested composition rule");
+    assert_eq!(
+        nested_amount.id.as_deref(),
+        Some("us:policies/nested#nested_amount")
+    );
+    assert_eq!(
+        nested_amount.corpus_citation_path.as_deref(),
+        Some("us/guidance/test/nested-composition")
+    );
+
+    let root_amount = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "adjusted_amount")
+        .expect("root composition rule");
+    assert_eq!(root_amount.id, None, "composed root rules stay originless");
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
 fn atomic_and_composed_entry_points_are_not_interchangeable() {
     let (temp, root, atomic, composed) = fixture("separation");
     let in_root_composition = root.join("us/policies/composition.yaml");
@@ -177,6 +236,27 @@ fn atomic_and_composed_entry_points_are_not_interchangeable() {
     .expect("composed compile command");
     assert!(!composed_cli.status.success());
     assert!(stderr(&composed_cli).contains("composed output must be outside"));
+    std::fs::remove_dir_all(temp).ok();
+}
+
+#[test]
+fn atomic_compile_still_rejects_nested_compositions() {
+    let (temp, root, atomic, _) = fixture("nested-atomic-separation");
+    let nested = root.join("us/policies/nested.yaml");
+    std::fs::write(&nested, NESTED_COMPOSITION).expect("nested composition");
+    std::fs::write(
+        &atomic,
+        ATOMIC_MODULE.replace(
+            "format: rulespec/v1\n",
+            "format: rulespec/v1\nimports: [us:policies/nested]\n",
+        ),
+    )
+    .expect("atomic importer");
+    let roots = CanonicalRuleSpecRoots::new([&root]).expect("canonical root");
+
+    let error = CompiledProgramArtifact::from_rulespec_file(&atomic, &roots)
+        .expect_err("atomic surface must reject a composition dependency");
+    assert!(error.to_string().contains("module.kind"), "{error}");
     std::fs::remove_dir_all(temp).ok();
 }
 
