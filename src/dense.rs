@@ -1106,6 +1106,14 @@ impl DenseCompiledProgram {
     }
 }
 
+/// The refusal of a rule or derived relation reached again while it is being
+/// compiled.
+fn cyclic_dependency(name: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "cyclic dense compilation dependency involving `{name}`"
+    ))
+}
+
 struct DenseCompiler<'a> {
     program: &'a Program,
     root_entity: String,
@@ -1118,7 +1126,15 @@ struct DenseCompiler<'a> {
     parameter_index: HashMap<String, usize>,
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
+    /// The rules on the current compilation path: each root rule being
+    /// compiled into its own column and each rule being inlined into a related
+    /// or current-entity expression. Reaching one again means the rules form a
+    /// cycle, which compiling an artifact refuses but a raw `Program` does
+    /// not, so compiling it again would recurse until the stack overflowed.
     visiting: HashSet<String>,
+    /// The derived relations whose source chains are being resolved. Reaching
+    /// one again means the chain returns to it.
+    visiting_relations: HashSet<String>,
     /// The rules whose formulas are being compiled, innermost last. Related
     /// expressions inline a related entity's rules, so a `match` in one names
     /// the innermost rule here, as explain does.
@@ -1146,6 +1162,7 @@ impl<'a> DenseCompiler<'a> {
             derived: Vec::new(),
             derived_index: HashMap::new(),
             visiting: HashSet::new(),
+            visiting_relations: HashSet::new(),
             related_rules: Vec::new(),
             membership_scope: None,
         })
@@ -1198,9 +1215,7 @@ impl<'a> DenseCompiler<'a> {
             return Ok(index);
         }
         if self.visiting.contains(name) {
-            return Err(DenseCompileError::Unsupported(format!(
-                "cyclic dense compilation dependency involving `{name}`"
-            )));
+            return Err(cyclic_dependency(name));
         }
 
         let derived =
@@ -1258,6 +1273,23 @@ impl<'a> DenseCompiler<'a> {
         });
         self.derived_index.insert(name.to_string(), index);
         Ok(index)
+    }
+
+    /// Run `compile`, which inlines `rule`'s formula, with `rule` on the
+    /// compilation path. Inlined rules are compiled afresh each time they are
+    /// read rather than cached, so a rule already on the path is refused:
+    /// inlining it again would never end.
+    fn inline_rule<T>(
+        &mut self,
+        rule: &str,
+        compile: impl FnOnce(&mut Self) -> Result<T, DenseCompileError>,
+    ) -> Result<T, DenseCompileError> {
+        if !self.visiting.insert(rule.to_string()) {
+            return Err(cyclic_dependency(rule));
+        }
+        let compiled = compile(self);
+        self.visiting.remove(rule);
+        compiled
     }
 
     fn compile_scalar_expr(
@@ -1508,11 +1540,15 @@ impl<'a> DenseCompiler<'a> {
                     || derived.entity == self.root_entity
                 {
                     return match &derived.semantics {
-                        DerivedSemantics::Judgment(expr) => {
+                        DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
                             Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
-                                self.compile_current_judgment_expr(name, &derived.entity, expr)?,
+                                compiler.compile_current_judgment_expr(
+                                    name,
+                                    &derived.entity,
+                                    expr,
+                                )?,
                             )))
-                        }
+                        }),
                         DerivedSemantics::Scalar(_) => {
                             Err(DenseCompileError::Unsupported(format!(
                                 "where-clause predicates cannot reference scalar derived values (`{name}`)"
@@ -1529,14 +1565,14 @@ impl<'a> DenseCompiler<'a> {
                     )));
                 }
                 match &derived.semantics {
-                    DerivedSemantics::Judgment(expr) => {
-                        self.related_rules.push(name.clone());
-                        let scope = self.membership_scope.take();
-                        let compiled = self.compile_related_predicate(relation_index, expr);
-                        self.membership_scope = scope;
-                        self.related_rules.pop();
+                    DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
+                        compiler.related_rules.push(name.clone());
+                        let scope = compiler.membership_scope.take();
+                        let compiled = compiler.compile_related_predicate(relation_index, expr);
+                        compiler.membership_scope = scope;
+                        compiler.related_rules.pop();
                         compiled
-                    }
+                    }),
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "where-clause predicates cannot reference scalar derived values (`{name}`)"
                     ))),
@@ -1612,11 +1648,15 @@ impl<'a> DenseCompiler<'a> {
                     || derived.entity == SCALAR_ENTITY
                 {
                     return match &derived.semantics {
-                        DerivedSemantics::Scalar(expr) => {
+                        DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
                             Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
-                                self.compile_current_scalar_expr(name, &derived.entity, expr)?,
+                                compiler.compile_current_scalar_expr(
+                                    name,
+                                    &derived.entity,
+                                    expr,
+                                )?,
                             )))
-                        }
+                        }),
                         DerivedSemantics::Judgment(_) => {
                             Err(DenseCompileError::Unsupported(format!(
                                 "related scalar expressions cannot reference judgment derived values (`{name}`)"
@@ -1633,14 +1673,14 @@ impl<'a> DenseCompiler<'a> {
                     )));
                 }
                 match &derived.semantics {
-                    DerivedSemantics::Scalar(expr) => {
-                        self.related_rules.push(name.clone());
-                        let scope = self.membership_scope.take();
-                        let compiled = self.compile_related_scalar(relation_index, expr);
-                        self.membership_scope = scope;
-                        self.related_rules.pop();
+                    DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
+                        compiler.related_rules.push(name.clone());
+                        let scope = compiler.membership_scope.take();
+                        let compiled = compiler.compile_related_scalar(relation_index, expr);
+                        compiler.membership_scope = scope;
+                        compiler.related_rules.pop();
                         compiled
-                    }
+                    }),
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "related scalar expressions cannot reference judgment derived values (`{name}`)"
                     ))),
@@ -1777,9 +1817,9 @@ impl<'a> DenseCompiler<'a> {
                     });
                 }
                 match &dependency.semantics {
-                    DerivedSemantics::Scalar(expr) => {
-                        self.compile_current_scalar_expr(name, &dependency.entity, expr)
-                    }
+                    DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
+                        compiler.compile_current_scalar_expr(name, &dependency.entity, expr)
+                    }),
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "scalar expression cannot reference judgment derived value (`{name}`)"
                     ))),
@@ -1928,9 +1968,9 @@ impl<'a> DenseCompiler<'a> {
                     });
                 }
                 match &dependency.semantics {
-                    DerivedSemantics::Judgment(expr) => {
-                        self.compile_current_judgment_expr(name, &dependency.entity, expr)
-                    }
+                    DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
+                        compiler.compile_current_judgment_expr(name, &dependency.entity, expr)
+                    }),
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "judgment expression cannot reference scalar derived value (`{name}`)"
                     ))),
@@ -1988,6 +2028,11 @@ impl<'a> DenseCompiler<'a> {
                     current_slot: derivation.current_slot,
                     related_slot: derivation.related_slot,
                 };
+                // `name` is recorded only once its source chain resolves, so a
+                // chain that returns to it would otherwise recurse forever.
+                if !self.visiting_relations.insert(name.to_string()) {
+                    return Err(cyclic_dependency(name));
+                }
                 let parent_relation = self
                     .program
                     .relations
@@ -2000,7 +2045,9 @@ impl<'a> DenseCompiler<'a> {
                             derivation.related_slot,
                         )
                     })
-                    .transpose()?;
+                    .transpose();
+                self.visiting_relations.remove(name);
+                let parent_relation = parent_relation?;
                 let key = parent_relation
                     .map(|parent| self.relations[parent].key.clone())
                     .unwrap_or(source_key);
