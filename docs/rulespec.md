@@ -294,12 +294,15 @@ not an atomic module. The CLI built from current `main` compiles that output
 with the separate `compile-composed` command. Its input must be an absolute,
 real, unaliased `.yaml` outside every RuleSpec checkout with exact
 `module.kind: composition`; it still requires one or more explicit
-`--rulespec-root` arguments. Only fragmentless canonical atomic imports are
-allowed, and synthesized root rules remain originless. The removed top-level
-`extends` directive is rejected on both surfaces. On current `main`, the
-ordinary `compile` command rejects the ephemeral file, while `compile-composed`
-rejects atomic modules and declarative ProgramSpecs. Release v0.1.1 does not
-provide `compile-composed`.
+`--rulespec-root` arguments. Only fragmentless canonical module imports are
+allowed; those targets may declare `module.kind: composition` and
+are recursively merged only on the composed-program surface. Their rules keep
+their canonical module origins and source citations, while synthesized root
+rules remain originless. The removed top-level `extends` directive is rejected
+on both surfaces. On current `main`, the ordinary `compile` command rejects
+composition modules at any depth, while `compile-composed` rejects atomic entry
+modules and declarative ProgramSpecs. Release v0.1.1 does not provide
+`compile-composed`.
 
 Compiled artifacts make the input boundary explicit in
 `metadata.input_catalog`. Each runtime slot has a deterministic
