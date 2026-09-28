@@ -208,17 +208,20 @@ entity id, so a SNAP unit backed by `household-1` is queried with
 Derived relations execute in explain mode, bulk fast mode (which evaluates each
 row's relation aggregations on the explain interpreter), and the generic dense
 compiler for predicates that can be evaluated from related inputs, related
-judgment rules, current/root entity judgment or scalar rules, and membership of
-the relation's own source (`member_of_household` in `snap_unit` above). A
-`source_relation` may also point at another `derived_relation`; the runtime
-applies the parent filter before the child filter, and a predicate may then
+judgment rules, judgment or scalar rules of the relation's current slot entity,
+entity-free `Scalar` rules, and membership of the relation's own source
+(`member_of_household` in `snap_unit` above). A `source_relation` may also
+point at another `derived_relation`; the runtime applies the parent filter
+before the child filter, and a predicate may then
 also test membership of a source further up that chain. Each such test must
 read the relation with the slots its derivation reads it with, as a bare
 relation name in a formula does unless the derivation sets `current_slot` or
 `related_slot`. The dense compiler rejects a predicate with any other
-membership test, because a dense batch carries no tuples for it, and may still
-reject membership predicates that aggregate another relation from inside a
-current/root predicate.
+membership test, because a dense batch carries no tuples for it, rejects a
+predicate that reads a rule of an entity that is neither of the relation's
+declared slot entities (explain evaluates such a rule for the related record),
+and may still reject membership predicates that aggregate another relation from
+inside a current-entity rule.
 
 Inside a derived-relation predicate, a referenced scalar rule uses its declared
 entity to select the current or related record, just as a referenced judgment
@@ -228,6 +231,15 @@ preserved through arithmetic, parameter indices, date expressions and scalar
 conditionals, including dependency traces. Bare input references still read the
 related record; use an entity-scoped scalar rule for a current-record value.
 Conditional scalar membership operands evaluate in every mode.
+
+Only a derived relation's own predicate selects a record this way. A
+`count`/`sum` `where` clause, a summed value and the body of every rule are
+evaluated with no relation context, so each rule they reference is evaluated
+for the related record, whatever entity it declares: a `Household` rule in a
+`where` clause over household members is evaluated for each member, not for
+the household, and a `Person` rule in a `where` clause over a
+person-to-person relation is evaluated for each related person. See
+[execution-semantics.md](execution-semantics.md).
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach
