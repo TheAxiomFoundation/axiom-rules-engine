@@ -371,7 +371,11 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # MAINTENANCE LINE: release/v0.1 publishes patch releases after v0.2.x exists.
+          # Without --latest=false, GitHub marks each new release Latest, so a v0.1.x patch
+          # would displace the newest v0.2.x release as Latest (and as the target of
+          # releases/latest/download URLs). Main keeps the default.
+          gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --latest=false --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:
     needs:
