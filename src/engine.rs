@@ -512,47 +512,87 @@ pub struct Engine<'a> {
     /// The level at which a reference to a rule not yet evaluated is deferred
     /// to the driver (see [`crate::depth`]).
     suspend_depth: usize,
-    /// Where each `count`/`sum` over related entities that a deferral
-    /// interrupted stopped. Its retry resumes at the member that deferred
-    /// instead of evaluating every earlier member again, so the retries of an
-    /// aggregation whose members each defer cost what one pass costs.
-    resumes: HashMap<ResumeKey, Resume>,
+    /// How far each `count`/`sum` over related entities has got in the
+    /// current drive (see [`Step`]).
+    folds: HashMap<Step, Progress<FoldResume, (usize, Decimal)>>,
+    /// How far each resolution of a relation's members has got in the current
+    /// drive (see [`Step`]).
+    members: HashMap<Step, Progress<MembersResume, Vec<String>>>,
     /// Expression levels evaluated since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
 }
 
-/// An aggregation evaluated for one entity and period. The node's address
-/// identifies it, which is sound because every expression the engine
-/// evaluates is borrowed from the program for the engine's whole life: the
-/// evaluation functions take `&'a` expressions, so the compiler refuses to
-/// evaluate a copy, whose address could be reused by another aggregation.
+/// A loop over data that a deferral can interrupt: a `count`/`sum` over one
+/// entity's related entities, or the resolution of one entity's members of a
+/// relation, which tests a derived relation's predicate on each candidate.
+/// A deferral inside one retries the rule evaluation it runs in, which reaches
+/// the loop again. Without a record of where it stood, the retry would walk
+/// every member before the one that deferred again, and every loop the
+/// evaluation had already finished, so a household whose members each defer
+/// would cost a pass per member.
+///
+/// So the drive records each loop's progress under its `Step`, and the retry
+/// resumes an interrupted loop at the member that deferred and reuses a
+/// finished loop's result. A step is keyed by the rule evaluation it runs in
+/// (`parent`) as well as by what it evaluates: a loop's trace records go to
+/// that evaluation, and the retry of the same evaluation already holds them
+/// (records are deduplicated by first occurrence), while any other evaluation
+/// walks the loop itself and records them there, as recursion does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ResumeKey {
-    node: usize,
+struct Step {
+    site: Site,
     entity_id: String,
     period: Period,
+    parent: Option<CacheKey>,
 }
 
-impl ResumeKey {
-    fn new(node: &ScalarExpr, entity_id: &str, period: &Period) -> Self {
-        Self {
-            node: std::ptr::from_ref(node) as usize,
-            entity_id: entity_id.to_string(),
-            period: period.clone(),
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Site {
+    /// A `count`/`sum`, identified by its node's address. That is sound
+    /// because every expression the engine evaluates is borrowed from the
+    /// program for the engine's whole life: the evaluation functions take
+    /// `&'a` expressions, so the compiler refuses to evaluate a copy, whose
+    /// address another expression could reuse.
+    Fold(usize),
+    /// A relation's members, read from one slot to another.
+    Members {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+    },
 }
 
-/// An interrupted aggregation's progress: its related entities, the member
-/// that deferred (evaluated again, from its `where` clause, on the retry),
-/// and the count or total of the members before it.
+/// A loop's progress in the current drive.
 #[derive(Debug)]
-struct Resume {
+enum Progress<P, D> {
+    /// Interrupted by a deferral; the retry resumes here.
+    Pending(P),
+    /// Finished; the retry reuses the result.
+    Done(D),
+}
+
+/// An interrupted aggregation: its related entities, the member that
+/// deferred (evaluated again, from its `where` clause, on the retry), and the
+/// count and total of the members before it.
+#[derive(Debug)]
+struct FoldResume {
     related_ids: Vec<String>,
     next: usize,
     count: usize,
     total: Decimal,
+}
+
+/// An interrupted resolution of a derived relation's members: the members
+/// the relation's own tuples give, the candidates its source relation gives,
+/// the candidate whose predicate deferred, and the candidates before it that
+/// the predicate selected.
+#[derive(Debug)]
+struct MembersResume {
+    direct: Vec<String>,
+    candidates: Vec<String>,
+    next: usize,
+    selected: Vec<String>,
 }
 
 impl<'a> Engine<'a> {
@@ -606,7 +646,8 @@ impl<'a> Engine<'a> {
             tracing,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
-            resumes: HashMap::new(),
+            folds: HashMap::new(),
+            members: HashMap::new(),
             visits: 0,
         }
     }
@@ -637,10 +678,21 @@ impl<'a> Engine<'a> {
     /// root, so a task's error is the root's.
     fn drive<T>(&mut self, root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
         let result = self.run_tasks(root);
-        // Every retry reaches the aggregations its first attempt was
-        // interrupted in, and resumes them; only an error leaves one behind.
-        debug_assert!(result.is_err() || self.resumes.is_empty());
-        self.resumes.clear();
+        // Every retry reaches the loops its first attempt was interrupted in,
+        // and resumes them; only an error leaves one pending.
+        debug_assert!(
+            result.is_err()
+                || (self
+                    .folds
+                    .values()
+                    .all(|progress| matches!(progress, Progress::Done(_)))
+                    && self
+                        .members
+                        .values()
+                        .all(|progress| matches!(progress, Progress::Done(_))))
+        );
+        self.folds.clear();
+        self.members.clear();
         crate::depth::add_visits(std::mem::take(&mut self.visits));
         result
     }
@@ -1019,7 +1071,7 @@ impl<'a> Engine<'a> {
 
     /// The rule `name`, borrowed from the program rather than copied: an
     /// aggregation's address in it identifies the aggregation (see
-    /// [`ResumeKey`]).
+    /// [`Site::Fold`]).
     fn get_derived(&self, name: &str) -> Result<&'a Derived, EvalError> {
         let program: &'a Program = self.program;
         program
@@ -1485,15 +1537,23 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Eval<(usize, Decimal)> {
-        let key = ResumeKey::new(node, entity_id, period);
-        let Resume {
+        let key = self.step(
+            Site::Fold(std::ptr::from_ref(node) as usize),
+            entity_id,
+            period,
+        );
+        let FoldResume {
             related_ids,
             mut next,
             mut count,
             mut total,
-        } = match self.resumes.remove(&key) {
-            Some(resume) => resume,
-            None => Resume {
+        } = match self.folds.remove(&key) {
+            Some(Progress::Done(result)) => {
+                self.folds.insert(key, Progress::Done(result));
+                return Ok(result);
+            }
+            Some(Progress::Pending(resume)) => resume,
+            None => FoldResume {
                 related_ids: self.related_entity_ids(
                     relation,
                     current_slot,
@@ -1514,14 +1574,14 @@ impl<'a> Engine<'a> {
                     total = checked_add(total, amount)?;
                 }
                 Err(Interrupt::Defer(deferred)) => {
-                    self.resumes.insert(
+                    self.folds.insert(
                         key,
-                        Resume {
+                        Progress::Pending(FoldResume {
                             related_ids,
                             next,
                             count,
                             total,
-                        },
+                        }),
                     );
                     return Err(Interrupt::Defer(deferred));
                 }
@@ -1529,7 +1589,19 @@ impl<'a> Engine<'a> {
             }
             next += 1;
         }
+        self.folds.insert(key, Progress::Done((count, total)));
         Ok((count, total))
+    }
+
+    /// The key of a loop at `site` for this entity and period, in the rule
+    /// evaluation now running (see [`Step`]).
+    fn step(&self, site: Site, entity_id: &str, period: &Period) -> Step {
+        Step {
+            site,
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+            parent: self.active_evaluations.last().cloned(),
+        }
     }
 
     /// One related entity's part in a `count` or `sum`: `None` when the
@@ -1719,7 +1791,7 @@ impl<'a> Engine<'a> {
         period: &Period,
     ) -> Eval<Vec<String>> {
         // Borrowed from the program, not copied: a `count`/`sum` in the
-        // predicate is identified by its address (see [`ResumeKey`]).
+        // predicate is identified by its address (see [`Site::Fold`]).
         let program: &'a Program = self.program;
         let schema = program
             .relations
@@ -1732,28 +1804,65 @@ impl<'a> Engine<'a> {
             ))
             .into());
         }
+        let key = self.step(
+            Site::Members {
+                relation: relation.to_string(),
+                current_slot,
+                related_slot,
+            },
+            entity_id,
+            period,
+        );
+        let resume = match self.members.remove(&key) {
+            Some(Progress::Done(related_ids)) => {
+                self.members
+                    .insert(key, Progress::Done(related_ids.clone()));
+                return Ok(related_ids);
+            }
+            Some(Progress::Pending(resume)) => Some(resume),
+            None => None,
+        };
 
-        let mut related_ids = self
-            .relation_index
-            .get(&(relation.to_string(), current_slot, entity_id.to_string()))
-            .into_iter()
-            .flat_map(|records| records.iter().copied())
-            .filter(|record| record.interval.contains_period(period))
-            .filter_map(|record| record.tuple.get(related_slot).cloned())
-            .collect::<Vec<String>>();
+        let MembersResume {
+            direct,
+            candidates,
+            mut next,
+            mut selected,
+        } = match resume {
+            Some(resume) => resume,
+            None => {
+                let direct = self
+                    .relation_index
+                    .get(&(relation.to_string(), current_slot, entity_id.to_string()))
+                    .into_iter()
+                    .flat_map(|records| records.iter().copied())
+                    .filter(|record| record.interval.contains_period(period))
+                    .filter_map(|record| record.tuple.get(related_slot).cloned())
+                    .collect::<Vec<String>>();
+                let candidates = match &schema.derivation {
+                    Some(derivation) => self.related_entity_ids(
+                        &derivation.source_relation,
+                        derivation.current_slot,
+                        derivation.related_slot,
+                        entity_id,
+                        period,
+                    )?,
+                    None => Vec::new(),
+                };
+                MembersResume {
+                    direct,
+                    candidates,
+                    next: 0,
+                    selected: Vec::new(),
+                }
+            }
+        };
 
         if let Some(derivation) = &schema.derivation {
-            let mut derived_ids = Vec::new();
-            for related_id in self.related_entity_ids(
-                &derivation.source_relation,
-                derivation.current_slot,
-                derivation.related_slot,
-                entity_id,
-                period,
-            )? {
+            while let Some(related_id) = candidates.get(next) {
                 let context = RelationEvalContext {
                     current_id: entity_id,
-                    related_id: &related_id,
+                    related_id,
                     current_entity: derivation
                         .slot_entities
                         .get(derivation.current_slot)
@@ -1763,23 +1872,41 @@ impl<'a> Engine<'a> {
                         .get(derivation.related_slot)
                         .map(String::as_str),
                 };
-                if self
-                    .eval_judgment_expr_inner(
-                        &derivation.predicate,
-                        &related_id,
-                        period,
-                        Some(context),
-                    )?
-                    .is_holds()
-                {
-                    derived_ids.push(related_id);
+                match self.eval_judgment_expr_inner(
+                    &derivation.predicate,
+                    related_id,
+                    period,
+                    Some(context),
+                ) {
+                    Ok(outcome) => {
+                        if outcome.is_holds() {
+                            selected.push(related_id.clone());
+                        }
+                    }
+                    Err(Interrupt::Defer(deferred)) => {
+                        self.members.insert(
+                            key,
+                            Progress::Pending(MembersResume {
+                                direct,
+                                candidates,
+                                next,
+                                selected,
+                            }),
+                        );
+                        return Err(Interrupt::Defer(deferred));
+                    }
+                    Err(error) => return Err(error),
                 }
+                next += 1;
             }
-            related_ids.extend(derived_ids);
         }
 
+        let mut related_ids = direct;
+        related_ids.extend(selected);
         related_ids.sort();
         related_ids.dedup();
+        self.members
+            .insert(key, Progress::Done(related_ids.clone()));
         Ok(related_ids)
     }
 

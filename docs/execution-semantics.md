@@ -200,19 +200,23 @@ levels in release builds, so an evaluation that never nests that deep never
 retries, and 8 in debug builds, whose frames are about thirty times larger;
 deferring early also exercises deferral throughout the debug test suite.
 
-What a retry walks again is bounded by the program, not the data. A `count`
-or `sum` over related entities that a member's deferral interrupts resumes
-at that member, so a household whose members each defer is not walked again
-for every member (explain does this; fast evaluates these aggregations with
-explain, and dense inlines the rules they read, so their members never
-defer). The rest is the rules
-still open on the interrupted path and the operands they had evaluated. So
-work grows linearly with a chain's length, and a rule with `k` operands that
-each defer walks its earlier operands `k` times.
-`tests/deferral_transparency.rs` measures work in nodes visited, which does
-not depend on the machine: a 20,000-rule chain costs four times a 5,000-rule
-one in every mode, and 1,000 members that each defer cost 1.6 times what
-recursion costs.
+What a retry walks again is bounded by the program, not the data. Explain
+records the progress of every loop over data that a deferral can interrupt:
+a `count` or `sum` over related entities, and the resolution of a relation's
+members, which tests a derived relation's predicate on each candidate. The
+retry of the same rule evaluation resumes an interrupted loop at the member
+that deferred, and reuses a loop that had finished, so a household whose
+members each defer is not walked again for every member. (Fast evaluates
+these aggregations with explain; dense inlines the rules they read, so their
+members never defer.) The rest is the rules still open on the interrupted
+path and the operands they had evaluated. So work grows linearly with a
+chain's length, and a rule with `k` operands that each defer walks its
+earlier operands `k` times. `tests/deferral_transparency.rs` measures work in
+nodes visited, which does not depend on the machine: a 20,000-rule chain
+costs four times a 5,000-rule one in every mode, 1,000 members that each
+defer cost 1.6 times what recursion costs, and a derived relation whose
+predicate defers for each of 256 members costs twice what recursion costs
+(each bounded there at three times, whatever the member count).
 
 Deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. Inlined dense expressions have no rule

@@ -23,13 +23,16 @@
 //! changes: a retry walks again, over cached values, what the interrupted
 //! evaluation did before the deferral.
 //!
-//! What a retry walks again depends on the program, not on the data. Explain's
-//! `count` and `sum` over related entities (fast evaluates them with explain)
-//! record the member a deferral stopped them at, and their retry resumes
-//! there, so a household whose every member defers is not walked once per
-//! member. The rest is the rules still open on the interrupted path and the
-//! operands they had evaluated. So a chain costs a constant factor more than
-//! recursion; a rule with `k` operands that each defer walks its earlier
+//! What a retry walks again depends on the program, not on the data. Explain
+//! (and fast, which evaluates relation aggregations with explain) records the
+//! progress of every loop over data a deferral can interrupt: a `count` or
+//! `sum` over related entities, and the resolution of a relation's members,
+//! which tests a derived relation's predicate on each candidate. The retry
+//! resumes an interrupted loop at the member that deferred and reuses a
+//! finished one, so a household whose every member defers is not walked once
+//! per member. The rest is the rules still open on the interrupted path and
+//! the operands they had evaluated. So a chain costs a constant factor more
+//! than recursion; a rule with `k` operands that each defer walks its earlier
 //! operands `k` times. [`count_visits`] measures this, and
 //! `tests/deferral_transparency.rs` pins it.
 //!

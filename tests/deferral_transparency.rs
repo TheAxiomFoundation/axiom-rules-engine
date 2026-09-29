@@ -992,6 +992,7 @@ fn handcrafted_programs_answer_the_same_at_every_threshold() {
                 "deep counts in predicates",
                 aggregations_in_predicates(12, false),
             ),
+            ("deferring loops", deferring_loops(12)),
         ] {
             divergences.extend(self::divergences(label, &program, &dataset, &queries));
         }
@@ -1617,5 +1618,157 @@ fn dense_compiles_the_same_plan_at_every_threshold() {
             same,
             "threshold {threshold}:\nrecursive {recursive}\ndeferred  {deferred}"
         );
+    }
+}
+
+/// A household with `members` members. `eligible` is derived from
+/// membership by a predicate that reads a person chain 12 rules deep, and
+/// `top` counts the eligible members and, beside that, sums a second chain
+/// over all members: `top` is `members + 12 * members`. At a low threshold
+/// every member's predicate defers, and so does every member of the sum after
+/// the count has finished.
+fn deferring_loops(members: usize) -> (Value, Value, Value) {
+    let mut rules = chain("p", "Person", 12, |_| int(0), int(1));
+    rules.extend(chain("q", "Person", 12, |_| int(1), int(0)));
+    rules.push(scalar(
+        "top",
+        "Household",
+        add(vec![
+            count_related("eligible", 1, 0, None),
+            sum_related("member_of_household", 1, 0, "q0", None),
+        ]),
+    ));
+    let program = json!({
+        "relations": [
+            members_relation(),
+            {"name": "eligible", "arity": 2, "slot_entities": ["Person", "Household"],
+             "derivation": {
+                "source_relation": "member_of_household", "current_slot": 1,
+                "related_slot": 0, "slot_entities": ["Person", "Household"],
+                "predicate": cmp(derived("p0"), "gt", int(0)),
+             }},
+        ],
+        "derived": rules,
+    });
+    let relations: Vec<Value> = (0..members)
+        .map(|member| relation_record("member_of_household", &[&format!("p{member:05}"), "h1"]))
+        .collect();
+    let dataset = json!({"inputs": [], "relations": relations});
+    let queries = json!([query("h1", 1, &["top"])]);
+    (program, dataset, queries)
+}
+
+/// Loops over data that a deferral interrupts are not walked again for every
+/// deferring member. A derived relation's members are resolved by testing its
+/// predicate on each candidate; when a candidate's predicate defers, the
+/// retry resumes at that candidate. A `count` or `sum` that has finished is
+/// not walked again when a later one in the same rule defers. Explain and
+/// fast (whose aggregations run on explain) visit a constant multiple of the
+/// nodes recursion visits at 256 members; walking the loops again, as the
+/// first versions of deferral did, cost 26 and 50 times recursion there, and
+/// the ratio doubled with the members.
+#[test]
+fn loops_over_members_are_not_walked_again_for_each_deferral() {
+    let (program, dataset, queries) = deferring_loops(256);
+    on_stack(512 * MIB, move || {
+        for mode in ["explain", "fast"] {
+            let (recursive, recursive_visits) = with_suspend_depth(usize::MAX, || {
+                count_visits(|| run(mode, &program, &dataset, &queries))
+            });
+            let (deferred, deferred_visits) = with_suspend_depth(8, || {
+                count_visits(|| run(mode, &program, &dataset, &queries))
+            });
+            assert_eq!(deferred, recursive, "{mode}: deferral changed the response");
+            assert!(
+                recursive.contains("\"value\":\"3328\"")
+                    && recursive.contains(&format!("\"actual_mode\":\"{mode}\"")),
+                "{mode}: {}",
+                &recursive[..recursive.len().min(400)]
+            );
+            assert!(
+                deferred_visits <= 3 * recursive_visits,
+                "{mode}: deferral visited {deferred_visits} nodes, recursion {recursive_visits}"
+            );
+        }
+    });
+}
+
+/// Dense extends a rule's cached column with the rows a later reference
+/// reaches, as recursion does, even when a deferral interrupts the extension.
+/// `a` is text on the flagged row and the end of an integer chain on the
+/// other; `xo` reads it on the flagged row, then `yo` on the other. Recursion
+/// merges the two stretches and reports the type mismatch. When a deferral
+/// dropped the cached stretch, the retry computed only the integer row, and
+/// dense answered instead of failing.
+#[test]
+fn dense_keeps_a_rules_computed_rows_across_a_deferral() {
+    let text = |value: &str| json!({"kind": "literal", "value": {"kind": "text", "value": value}});
+    let flagged = || cmp(input("f"), "eq", int(1));
+    let typed = |name: &str, dtype: &str, expr: Value| {
+        json!({
+            "name": name, "entity": "Household", "dtype": dtype, "unit": null,
+            "semantics": "scalar", "expr": expr,
+        })
+    };
+    let mut rules = Vec::new();
+    for index in 0..20 {
+        rules.push(typed(
+            &format!("c{index}"),
+            "integer",
+            derived(&format!("c{}", index + 1)),
+        ));
+    }
+    rules.push(typed("c20", "integer", int(7)));
+    rules.push(typed(
+        "a",
+        "text",
+        if_then(flagged(), text("x"), derived("c0")),
+    ));
+    rules.push(typed(
+        "xo",
+        "integer",
+        if_then(
+            flagged(),
+            if_then(cmp(derived("a"), "eq", text("x")), int(1), int(2)),
+            int(3),
+        ),
+    ));
+    rules.push(typed(
+        "yo",
+        "integer",
+        if_then(flagged(), int(0), add(vec![derived("a"), int(0)])),
+    ));
+    let spec: ProgramSpec =
+        serde_json::from_value(json!({"derived": rules})).expect("program deserializes");
+    let program = spec.to_program().expect("program converts");
+    let answer = || {
+        let dense =
+            DenseCompiledProgram::from_program(&program, Some("Household")).expect("compiles");
+        let batch = DenseBatchSpec {
+            row_count: 2,
+            inputs: HashMap::from([("f".to_string(), DenseColumn::Integer(vec![1, 0]))]),
+            relations: HashMap::new(),
+        };
+        match dense.execute(
+            &model_period(),
+            batch,
+            &["xo".to_string(), "yo".to_string()],
+        ) {
+            Ok(result) => format!("{:?} {:?}", result.outputs["xo"], result.outputs["yo"]),
+            Err(error) => format!("Err({error:?})"),
+        }
+    };
+    let answers = on_stack(512 * MIB, || {
+        let recursive = with_suspend_depth(usize::MAX, answer);
+        let deferred: Vec<(usize, String)> = THRESHOLDS
+            .iter()
+            .map(|threshold| (*threshold, with_suspend_depth(*threshold, answer)))
+            .collect();
+        (recursive, deferred)
+    });
+    let (recursive, deferred) = answers;
+    assert!(recursive.starts_with("Err(TypeMismatch"), "{recursive}");
+    for (threshold, answer) in deferred {
+        assert_eq!(answer, recursive, "threshold {threshold}");
     }
 }
