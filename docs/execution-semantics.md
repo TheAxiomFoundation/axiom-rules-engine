@@ -47,7 +47,9 @@ output's formula is evaluated for that entity and period as follows.
   member); and inside a derived relation's own predicate, the current entity
   when the rule's declared entity is the relation's current slot entity, and
   the related entity otherwise. The referenced rule's body is then evaluated
-  for that entity, with no relation context.
+  for that entity, with no relation context. Its declared output rounding
+  applies before any dependent reads the value, including when dense inlines
+  the rule into an aggregation or predicate.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
