@@ -39,11 +39,17 @@ output's formula is evaluated for that entity and period as follows.
   then (for `sum`) the summed value. A stage is evaluated only for entities that
   passed the previous one.
 - **Derived rules are values.** A rule referenced from a formula is evaluated
-  for the referencing entity (or, inside a relation predicate, the entity its
-  declared entity kind selects) when evaluation reaches the reference, and not
-  otherwise. Its declared output rounding applies before any dependent reads
-  the value, including when dense inlines the rule into an aggregation or
-  predicate.
+  when evaluation reaches the reference, and not otherwise, for the entity the
+  reference is evaluated for: in a rule body, the entity that rule is being
+  evaluated for; in a `count`/`sum` `where` clause or summed value, each
+  related entity, whatever entity the referenced rule declares (a `Household`
+  rule in a `where` clause over household members is evaluated for each
+  member); and inside a derived relation's own predicate, the current entity
+  when the rule's declared entity is the relation's current slot entity, and
+  the related entity otherwise. The referenced rule's body is then evaluated
+  for that entity, with no relation context. Its declared output rounding
+  applies before any dependent reads the value, including when dense inlines
+  the rule into an aggregation or predicate.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
@@ -136,12 +142,21 @@ batch happens to look up.
    it tests the relation's source, or a source further up its chain, with the
    slots the chain reads it with: such a test holds for every filtered tuple.
    The dense compiler rejects a predicate with any other membership test. A
-   `relation_member` in a `count`/`sum` `where` clause, or in a
-   related entity's rule that such a clause, a summed value or a predicate
-   reads, fails the rows that reach it, as in explain. One in a root entity's
-   rule, or in a current entity's rule that a compiled predicate reads, makes
-   the dense compiler reject the program, even where explain would never
-   reach it.
+   `relation_member` in a `count`/`sum` `where` clause, in any rule such a
+   clause or a summed value reads, or in a related entity's rule that a
+   predicate reads, fails the rows that reach it, as in explain. One in a
+   rule dense evaluates on the root row (a root entity's rule outside related
+   expressions, or a current entity's rule that a predicate reads) makes the
+   dense compiler reject the program, even where explain would never reach
+   it.
+
+Dense evaluates the rules a `where` clause, a summed value or a related rule's
+body reads on the related rows, for the related entity as explain does. Only a
+derived relation's own predicate reads a rule of the relation's current slot
+entity on the root row. In that predicate, a rule of an entity that is neither
+slot entity of a relation that declares them (other than an entity-free
+`Scalar` rule) makes the dense compiler reject the program; explain evaluates
+it for the related entity.
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
@@ -176,7 +191,10 @@ carry the reference control flow as data:
 - **Relation aggregations** in fast run row by row on the explain
   interpreter itself, so related-id resolution, derived-relation filtering and
   `where` laziness match by construction. Dense masks related rows by stage:
-  derived-relation filters, then the `where` clause, then the summed value.
+  derived-relation filters, then the `where` clause, then the summed value,
+  and evaluates the rules each stage reads on the related rows, except the
+  current-entity rules a derived relation's own predicate reads, which it
+  evaluates on the root row and projects to its related rows.
 - **Declining is structural.** Fast declines (and falls back to explain) only
   when a live row reaches a construct fast does not implement.
 

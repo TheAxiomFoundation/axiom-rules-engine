@@ -111,9 +111,12 @@ cargo run -- compile-composed \
 
 `compile-composed` requires exact `format: rulespec/v1` and
 `module.kind: composition`, keeps the composition's synthesized root rules
-originless, and permits only canonical atomic imports resolved through the
-explicit roots. Atomic files, declarative ProgramSpecs, relative dependencies,
-and composition files inside a RuleSpec checkout are rejected.
+originless, and permits only canonical imports resolved through the explicit
+roots. Imported compositions are recursively merged on this surface and keep
+their canonical rule origins and source citations; the ordinary atomic loader
+continues to reject them. Atomic entry files, declarative ProgramSpecs,
+relative dependencies, and composition entry files inside a RuleSpec checkout
+are rejected.
 
 Every compiled artifact publishes `metadata.input_catalog`. Each entry records
 the internal runtime `slot`, one deterministic `canonical_request_name`, and all

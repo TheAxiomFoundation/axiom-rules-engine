@@ -20,8 +20,10 @@
 //!   indexed parameter lookups with missing and fractional keys, `count`/`sum`
 //!   over a members relation (and over a derived relation filtering it) with
 //!   `where` clauses, `relation_member` judgments both inside that derived
-//!   relation's predicate and where explain rejects them, currency output
-//!   rounding, and `input_or_else`. Datasets
+//!   relation's predicate and where explain rejects them, `count`/`sum` over a
+//!   household-to-household relation whose `where` clauses and summed values
+//!   read household rules for the linked household (dense profile), currency
+//!   output rounding, and `input_or_else`. Datasets
 //!   drop input records per row (or per column for dense), rows request
 //!   different outputs, and person rows can share the batch. Every case runs
 //!   through explain, fast and (for the dense-compatible profile) dense, and the
@@ -87,6 +89,11 @@ const FILTERED: &str = "filtered_members";
 /// Declared alongside [`FILTERED`] so a membership test in its predicate can
 /// fail for some members.
 const HEADS: &str = "head_of_household";
+/// `linked_household(household, household)`: households of the batch each
+/// household is linked to, read from slot 0 to slot 1. A relation between two
+/// entities of the root's kind: explain evaluates the household rules its
+/// `where` clauses and summed values read for the linked household.
+const LINKED: &str = "linked_household";
 const INT_TABLE: &str = "int_table";
 const DEC_TABLE: &str = "dec_table";
 const CURRENCY: &str = "USD";
@@ -131,6 +138,9 @@ enum NumG {
     /// set and the program declares it.
     Count(bool, Option<PBoolG>),
     Sum(bool, PValG, Option<PBoolG>),
+    /// `count` over [`LINKED`], or with a value a `sum` of an earlier numeric
+    /// household rule (a `count` when there is none).
+    Linked(Option<u8>, Option<LinkedPredG>),
     Param(bool, Box<NumG>),
     Add(Vec<NumG>),
     Sub(Box<NumG>, Box<NumG>),
@@ -216,6 +226,21 @@ enum PBoolG {
     Not(Box<PBoolG>),
 }
 
+/// A `where` clause over [`LINKED`]. Its leaves are earlier household rules
+/// that aggregate nothing ([`Cx::plain`]), so evaluating them for the
+/// aggregating household instead of the linked one can change an answer only
+/// through the inputs those rules read.
+#[derive(Clone, Debug)]
+enum LinkedPredG {
+    /// An earlier judgment rule.
+    Rule(u8),
+    /// An earlier numeric rule compared with a literal.
+    NumRule(u8, ComparisonOpSpec, u8),
+    And(Vec<LinkedPredG>),
+    Or(Vec<LinkedPredG>),
+    Not(Box<LinkedPredG>),
+}
+
 #[derive(Clone, Debug)]
 enum PValG {
     Input(u8),
@@ -245,6 +270,10 @@ enum PersonRuleG {
 
 #[derive(Clone, Debug)]
 struct ProgramG {
+    /// Household rules drawn without `count` or `sum`, declared before
+    /// `rules` (as `q0`, `q1`): rules a [`LINKED`] `where` clause or summed
+    /// value can read with dense still running (see [`Cx::plain`]).
+    plain_rules: Vec<RuleG>,
     rules: Vec<RuleG>,
     person_rules: Vec<PersonRuleG>,
     /// The predicate of the derived relation [`FILTERED`], when the program
@@ -271,6 +300,9 @@ struct RowG {
     text: u8,
     text_present: bool,
     members: Vec<PersonG>,
+    /// [`LINKED`] tuples from this household: batch rows, taken modulo the
+    /// row count.
+    links: Vec<u8>,
 }
 
 /// Whole-column presence, used instead of per-row presence by dense profiles.
@@ -344,6 +376,10 @@ struct Profile {
     /// as [`filter_strategy`] describes. Dense declines a program whose
     /// aggregated filter tests [`HEADS`] (issue #202).
     source_membership_weight: u32,
+    /// Counts and sums over [`LINKED`], each leaf with twice the aggregation
+    /// weight, rows linked to one or two rows of the batch, and one or two
+    /// aggregation-free rules ([`ProgramG::plain_rules`]) for them to read.
+    linked_relation: bool,
 }
 
 /// Evaluation order in isolation: lazy `if`, short-circuit `and`/`or`, divisor
@@ -363,6 +399,7 @@ const EVAL_ORDER: Profile = Profile {
     derived_relation: false,
     aggregation_weight: 1,
     source_membership_weight: 1,
+    linked_relation: false,
 };
 
 /// Everything the generator knows.
@@ -383,6 +420,7 @@ const FULL: Profile = Profile {
     derived_relation: true,
     aggregation_weight: 1,
     source_membership_weight: 1,
+    linked_relation: false,
 };
 
 /// Relation aggregation in depth, the shapes behind the two divergences the
@@ -405,6 +443,7 @@ const RELATIONS: Profile = Profile {
     derived_relation: true,
     aggregation_weight: 3,
     source_membership_weight: 1,
+    linked_relation: false,
 };
 
 /// The dense-compatible subset: every row requests every household rule,
@@ -428,6 +467,20 @@ const DENSE: Profile = Profile {
     derived_relation: true,
     aggregation_weight: 2,
     source_membership_weight: 4,
+    linked_relation: false,
+};
+
+/// [`DENSE`] with counts and sums over [`LINKED`], a relation between two
+/// households, whose `where` clauses and summed values read household rules:
+/// explain evaluates them for the linked household, and dense evaluated them
+/// for the aggregating one, the root row. `relation_member` stays inside
+/// [`FILTERED`]'s predicate, where it evaluates, so its errors elsewhere do not
+/// mask the linked reads; [`DENSE`] covers them.
+const LINKED_DENSE: Profile = Profile {
+    name: "linked-dense",
+    relation_member_weight: 0,
+    linked_relation: true,
+    ..DENSE
 };
 
 // ===========================================================================
@@ -609,6 +662,22 @@ fn filter_strategy(profile: Profile) -> BoxedStrategy<PBoolG> {
     .boxed()
 }
 
+fn linked_pred_strategy() -> BoxedStrategy<LinkedPredG> {
+    prop_oneof![
+        (0..MAX_RULES).prop_map(LinkedPredG::Rule),
+        (0..MAX_RULES, any_op(), literal_index())
+            .prop_map(|(rule, op, literal)| LinkedPredG::NumRule(rule, op, literal)),
+    ]
+    .prop_recursive(1, 4, 2, |inner| {
+        prop_oneof![
+            vec(inner.clone(), 1..=2).prop_map(LinkedPredG::And),
+            vec(inner.clone(), 1..=2).prop_map(LinkedPredG::Or),
+            inner.prop_map(|item| LinkedPredG::Not(Box::new(item))),
+        ]
+    })
+    .boxed()
+}
+
 fn pval_strategy() -> BoxedStrategy<PValG> {
     prop_oneof![
         (0..P_NUM_INPUTS).prop_map(PValG::Input),
@@ -654,6 +723,21 @@ fn num_strategy(profile: Profile) -> BoxedStrategy<NumG> {
         };
         leaves.push((profile.aggregation_weight, count));
         leaves.push((profile.aggregation_weight, sum));
+    }
+    if profile.linked_relation {
+        let predicate = || proptest::option::weighted(0.8, linked_pred_strategy());
+        leaves.push((
+            2 * profile.aggregation_weight,
+            predicate()
+                .prop_map(|predicate| NumG::Linked(None, predicate))
+                .boxed(),
+        ));
+        leaves.push((
+            2 * profile.aggregation_weight,
+            (0..MAX_RULES, predicate())
+                .prop_map(|(value, predicate)| NumG::Linked(Some(value), predicate))
+                .boxed(),
+        ));
     }
     // A `match` subject is a leaf, as in real rules (a filing status, a
     // rule's code), which keeps generated trees shallow.
@@ -884,18 +968,36 @@ fn program_strategy(profile: Profile) -> BoxedStrategy<ProgramG> {
     } else {
         Just(None).boxed()
     };
+    let plain_rules = if profile.linked_relation {
+        vec(
+            rule_strategy(Profile {
+                relations: false,
+                derived_relation: false,
+                linked_relation: false,
+                ..profile
+            }),
+            1..=2,
+        )
+        .boxed()
+    } else {
+        Just(Vec::new()).boxed()
+    };
     (
         vec(rule_strategy(profile), 1..=MAX_RULES as usize),
         person_rules,
         proptest::array::uniform3(any::<bool>()),
         filter,
+        plain_rules,
     )
-        .prop_map(|(rules, person_rules, integer_inputs, filter)| ProgramG {
-            rules,
-            person_rules,
-            filter,
-            integer_inputs,
-        })
+        .prop_map(
+            |(rules, person_rules, integer_inputs, filter, plain_rules)| ProgramG {
+                plain_rules,
+                rules,
+                person_rules,
+                filter,
+                integer_inputs,
+            },
+        )
         .boxed()
 }
 
@@ -929,6 +1031,13 @@ fn row_strategy(profile: Profile) -> BoxedStrategy<RowG> {
     } else {
         Just(Vec::new()).boxed()
     };
+    // Drawn only where the profile aggregates over LINKED, so other profiles
+    // generate exactly the cases they did before.
+    let links = if profile.linked_relation {
+        vec(any::<u8>(), 1..=2).boxed()
+    } else {
+        Just(Vec::new()).boxed()
+    };
     (
         proptest::array::uniform3(value_index()),
         proptest::array::uniform3(present()),
@@ -937,9 +1046,10 @@ fn row_strategy(profile: Profile) -> BoxedStrategy<RowG> {
         0..TEXT_VALUES.len() as u8,
         present(),
         members,
+        links,
     )
         .prop_map(
-            |(nums, num_present, flags, flag_present, text, text_present, members)| RowG {
+            |(nums, num_present, flags, flag_present, text, text_present, members, links)| RowG {
                 nums,
                 num_present,
                 flags,
@@ -947,6 +1057,7 @@ fn row_strategy(profile: Profile) -> BoxedStrategy<RowG> {
                 text,
                 text_present,
                 members,
+                links,
             },
         )
         .boxed()
@@ -1023,11 +1134,20 @@ struct Cx<'a> {
     earlier: &'a [(String, RuleTag)],
     /// Person rules visible from here.
     person: &'a [(String, RuleTag)],
+    /// The rules of `earlier` that aggregate nothing, themselves or through
+    /// the rules they read. [`LINKED`] `where` clauses and summed values read
+    /// only these: dense inlines them on the linked rows, and declines a
+    /// nested aggregate there.
+    plain: &'a [(String, RuleTag)],
     /// Rewrite every lazy construct so explain evaluates all of its operands
     /// (used only to measure how often a case hides an error in a dead branch).
     force: bool,
     /// The program declares the derived relation [`FILTERED`].
     filtered: bool,
+    /// Lower each [`LINKED`] aggregate as dense computed it before it read a
+    /// `where` clause's or summed value's rules for the linked household: on
+    /// the aggregating household's own row (used only by [`links_decide`]).
+    root_reads: bool,
     /// Lowering [`FILTERED`]'s own predicate, the one place explain gives a
     /// `relation_member` its context.
     in_relation_predicate: bool,
@@ -1257,6 +1377,61 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
                 .as_ref()
                 .map(|predicate| Box::new(lower_pbool(predicate, cx))),
         },
+        NumG::Linked(value, predicate) => {
+            let where_clause = predicate
+                .as_ref()
+                .map(|predicate| lower_linked_pred(predicate, cx));
+            // Without an earlier numeric rule a sum is a count, so every value
+            // the aggregate reads is a rule's.
+            let value = value.and_then(|index| Cx::pick(cx.plain, RuleTag::Num, index));
+            let count = |where_clause: Option<JudgmentExprSpec>| {
+                let count = ScalarExprSpec::CountRelated {
+                    relation: LINKED.to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    where_clause: where_clause.map(Box::new),
+                };
+                if integer_kinds {
+                    count
+                } else {
+                    ScalarExprSpec::Add { items: vec![count] }
+                }
+            };
+            if cx.root_reads {
+                // Every rule read once, for the aggregating household, and only
+                // when it has a linked household to reach them.
+                let zero = if value.is_some() {
+                    dec_lit("0")
+                } else {
+                    lit(num_literal(0, integer_kinds))
+                };
+                let all = count(None);
+                let total = match value {
+                    Some(name) => ScalarExprSpec::Mul {
+                        left: Box::new(all.clone()),
+                        right: Box::new(derived(name)),
+                    },
+                    None => all.clone(),
+                };
+                let selected = match where_clause {
+                    Some(predicate) => if_expr(predicate, total, zero.clone()),
+                    None => total,
+                };
+                return if_expr(cmp(all, ComparisonOpSpec::Eq, zero.clone()), zero, selected);
+            }
+            match value {
+                Some(name) => ScalarExprSpec::SumRelated {
+                    relation: LINKED.to_string(),
+                    current_slot: 0,
+                    related_slot: 1,
+                    value: RelatedValueRefSpec::Derived {
+                        name: name.to_string(),
+                    },
+                    where_clause: where_clause.map(Box::new),
+                },
+                None => count(where_clause),
+            }
+        }
         NumG::Param(integer_table, index) => ScalarExprSpec::ParameterLookup {
             parameter: if *integer_table && integer_kinds {
                 INT_TABLE
@@ -1397,6 +1572,83 @@ fn lower_bool(expr: &BoolG, cx: &Cx<'_>) -> JudgmentExprSpec {
         }
         BoolG::Not(item) => JudgmentExprSpec::Not {
             item: Box::new(lower_bool(item, cx)),
+        },
+    }
+}
+
+/// A [`LINKED`] `where` clause. Without an earlier rule of the right kind a
+/// leaf is a literal comparison, which reads nothing.
+fn lower_linked_pred(expr: &LinkedPredG, cx: &Cx<'_>) -> JudgmentExprSpec {
+    let integer_kinds = cx.profile.integer_kinds;
+    let items = |items: &[LinkedPredG]| {
+        items
+            .iter()
+            .map(|item| lower_linked_pred(item, cx))
+            .collect::<Vec<_>>()
+    };
+    match expr {
+        // Each leaf falls back to a rule of the other kind, and to a literal
+        // comparison only when no plain rule precedes it.
+        LinkedPredG::Rule(index) => match (
+            Cx::pick(cx.plain, RuleTag::Judg, *index),
+            Cx::pick(cx.plain, RuleTag::Num, *index),
+        ) {
+            (Some(name), _) => JudgmentExprSpec::Derived {
+                name: name.to_string(),
+            },
+            (None, Some(name)) => cmp(
+                derived(name),
+                ComparisonOpSpec::Ne,
+                lit(num_literal(0, integer_kinds)),
+            ),
+            (None, None) => always(),
+        },
+        LinkedPredG::NumRule(index, op, literal) => match (
+            Cx::pick(cx.plain, RuleTag::Num, *index),
+            Cx::pick(cx.plain, RuleTag::Judg, *index),
+        ) {
+            (Some(name), _) => cmp(
+                derived(name),
+                *op,
+                lit(num_literal(*literal, integer_kinds)),
+            ),
+            (None, Some(name)) => JudgmentExprSpec::Derived {
+                name: name.to_string(),
+            },
+            (None, None) => cmp(
+                lit(num_literal(*index, integer_kinds)),
+                *op,
+                lit(num_literal(*literal, integer_kinds)),
+            ),
+        },
+        LinkedPredG::And(inner) => {
+            let items = items(inner);
+            if cx.force {
+                force_all(
+                    &items,
+                    JudgmentExprSpec::And {
+                        items: items.clone(),
+                    },
+                )
+            } else {
+                JudgmentExprSpec::And { items }
+            }
+        }
+        LinkedPredG::Or(inner) => {
+            let items = items(inner);
+            if cx.force {
+                force_all(
+                    &items,
+                    JudgmentExprSpec::Or {
+                        items: items.clone(),
+                    },
+                )
+            } else {
+                JudgmentExprSpec::Or { items }
+            }
+        }
+        LinkedPredG::Not(item) => JudgmentExprSpec::Not {
+            item: Box::new(lower_linked_pred(item, cx)),
         },
     }
 }
@@ -1684,6 +1936,15 @@ struct LoweredProgram {
 }
 
 fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredProgram {
+    lower_program_reading(program, profile, force, false)
+}
+
+fn lower_program_reading(
+    program: &ProgramG,
+    profile: Profile,
+    force: bool,
+    root_reads: bool,
+) -> LoweredProgram {
     let filter = program.filter.as_ref().filter(|_| profile.derived_relation);
     let filtered = filter.is_some();
     let mut person_rules: Vec<(String, RuleTag)> = Vec::new();
@@ -1694,8 +1955,10 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
             profile,
             earlier: &[],
             person: &person_rules,
+            plain: &[],
             force,
             filtered,
+            root_reads,
             in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
@@ -1730,14 +1993,28 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
     }
 
     let mut rules: Vec<(String, RuleTag)> = Vec::new();
-    for (index, rule) in program.rules.iter().enumerate() {
-        let name = format!("r{index}");
+    let mut plain: Vec<(String, RuleTag)> = Vec::new();
+    let named = program
+        .plain_rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (format!("q{index}"), rule))
+        .chain(
+            program
+                .rules
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| (format!("r{index}"), rule)),
+        );
+    for (name, rule) in named {
         let cx = Cx {
             profile,
             earlier: &rules,
             person: &person_rules,
+            plain: &plain,
             force,
             filtered,
+            root_reads,
             in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
@@ -1797,11 +2074,30 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
                 ),
             ),
         };
+        let mut aggregates = false;
+        walk_semantics(&spec.semantics, &mut |reference| match reference {
+            Ref::Aggregate => aggregates = true,
+            Ref::Derived(name) if !plain.iter().any(|(plain, _)| plain == name) => {
+                aggregates = true
+            }
+            _ => {}
+        });
+        if !aggregates {
+            plain.push((name.clone(), tag));
+        }
         derived_specs.push(spec);
         rules.push((name, tag));
     }
 
     let mut relations = vec![members_relation()];
+    if profile.linked_relation {
+        relations.push(RelationSpec {
+            name: LINKED.to_string(),
+            arity: 2,
+            slot_entities: vec![HOUSEHOLD.to_string(), HOUSEHOLD.to_string()],
+            derivation: None,
+        });
+    }
     if filtered {
         relations.push(RelationSpec {
             name: HEADS.to_string(),
@@ -1816,8 +2112,10 @@ fn lower_program(program: &ProgramG, profile: Profile, force: bool) -> LoweredPr
             profile,
             earlier: &[],
             person: &person_rules,
+            plain: &[],
             force,
             filtered,
+            root_reads,
             in_relation_predicate: true,
         };
         relations.push(RelationSpec {
@@ -1872,7 +2170,7 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
         ScalarExprSpec::Input { name } | ScalarExprSpec::InputOrElse { name, .. } => {
             visit(Ref::Input(name))
         }
-        ScalarExprSpec::Derived { .. } => visit(Ref::Derived),
+        ScalarExprSpec::Derived { name } => visit(Ref::Derived(name)),
         ScalarExprSpec::ParameterLookup { parameter, index } => {
             visit(Ref::Parameter(parameter));
             walk_scalar(index, visit);
@@ -1913,6 +2211,7 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(to, visit);
         }
         ScalarExprSpec::CountRelated { where_clause, .. } => {
+            visit(Ref::Aggregate);
             if let Some(predicate) = where_clause {
                 walk_judgment(predicate, visit);
             }
@@ -1922,9 +2221,10 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             where_clause,
             ..
         } => {
+            visit(Ref::Aggregate);
             match value {
                 RelatedValueRefSpec::Input { name } => visit(Ref::Input(name)),
-                RelatedValueRefSpec::Derived { .. } => visit(Ref::Derived),
+                RelatedValueRefSpec::Derived { name } => visit(Ref::Derived(name)),
             }
             if let Some(predicate) = where_clause {
                 walk_judgment(predicate, visit);
@@ -1954,7 +2254,7 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(left, visit);
             walk_scalar(right, visit);
         }
-        JudgmentExprSpec::Derived { .. } => visit(Ref::Derived),
+        JudgmentExprSpec::Derived { name } => visit(Ref::Derived(name)),
         JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
@@ -1969,8 +2269,10 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
 
 enum Ref<'a> {
     Input(&'a str),
-    Derived,
+    Derived(&'a str),
     Parameter(&'a str),
+    /// A `count` or `sum`.
+    Aggregate,
 }
 
 fn walk_semantics(semantics: &DerivedSemanticsSpec, visit: &mut dyn FnMut(Ref<'_>)) {
@@ -2110,30 +2412,6 @@ fn num_value(value: u8, integer: bool) -> ScalarValueSpec {
         ScalarValueSpec::Decimal {
             value: DEC_VALUES[value as usize % DEC_VALUES.len()].to_string(),
         }
-    }
-}
-
-fn num_column(values: Vec<ScalarValueSpec>) -> DenseColumn {
-    if values
-        .iter()
-        .all(|value| matches!(value, ScalarValueSpec::Integer { .. }))
-    {
-        DenseColumn::Integer(
-            values
-                .iter()
-                .map(|value| match value {
-                    ScalarValueSpec::Integer { value } => *value,
-                    _ => unreachable!(),
-                })
-                .collect(),
-        )
-    } else {
-        DenseColumn::Decimal(
-            values
-                .iter()
-                .map(|value| spec_decimal(value).expect("numeric input value"))
-                .collect(),
-        )
     }
 }
 
@@ -2312,8 +2590,40 @@ fn lower_dataset(case: &CaseG, profile: Profile, referenced: &BTreeSet<String>) 
                 .chain(head)
             })
         })
+        .chain(
+            linked_targets(case, profile)
+                .into_iter()
+                .enumerate()
+                .flat_map(|(row, targets)| {
+                    targets.into_iter().map(move |target| RelationRecordSpec {
+                        name: LINKED.to_string(),
+                        tuple: vec![household_id(row), household_id(target)],
+                        interval: period_interval(),
+                    })
+                }),
+        )
         .collect();
     DatasetSpec { inputs, relations }
+}
+
+/// Each row's [`LINKED`] targets, as batch rows, when the profile has them:
+/// distinct and in id order, as explain resolves related ids. A dense batch is
+/// positional, so a repeated tuple would be a second related row there.
+fn linked_targets(case: &CaseG, profile: Profile) -> Vec<Vec<usize>> {
+    case.rows
+        .iter()
+        .map(|row| {
+            if !profile.linked_relation {
+                return Vec::new();
+            }
+            row.links
+                .iter()
+                .map(|link| *link as usize % case.rows.len())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .collect()
 }
 
 fn resolve_outputs(indices: &[u8], names: &[String]) -> Vec<String> {
@@ -2369,14 +2679,18 @@ fn lower_queries(case: &CaseG, profile: Profile, lowered: &LoweredProgram) -> Ve
 }
 
 /// The dense batch for a dense-profile case: household columns for every
-/// referenced, present input, and the members relation with person columns.
+/// referenced, present input, the members relation with person columns, and
+/// (with [`Profile::linked_relation`]) [`LINKED`] with each linked household's
+/// columns.
 fn lower_dense_batch(
     case: &CaseG,
     profile: Profile,
     referenced: &BTreeSet<String>,
 ) -> DenseBatchSpec {
+    let targets = linked_targets(case, profile);
     let mut inputs = HashMap::new();
     let mut person_inputs = HashMap::new();
+    let mut linked_inputs = HashMap::new();
     for slot in input_slots(case, profile) {
         if !referenced.contains(&slot.name) || !slot.column_present {
             continue;
@@ -2386,24 +2700,16 @@ fn lower_dense_batch(
             .iter()
             .map(|(_, value, _)| value.clone())
             .collect::<Vec<_>>();
-        let column = match values.first() {
-            Some(ScalarValueSpec::Bool { .. }) => DenseColumn::Bool(
-                values
-                    .iter()
-                    .map(|value| matches!(value, ScalarValueSpec::Bool { value: true }))
-                    .collect(),
-            ),
-            Some(ScalarValueSpec::Text { .. }) => DenseColumn::Text(
-                values
-                    .iter()
-                    .map(|value| match value {
-                        ScalarValueSpec::Text { value } => value.clone(),
-                        _ => unreachable!(),
-                    })
-                    .collect(),
-            ),
-            _ => num_column(values),
-        };
+        if slot.entity == HOUSEHOLD && profile.linked_relation {
+            // A linked household's column holds that household's values.
+            let linked = targets
+                .iter()
+                .flatten()
+                .map(|target| values[*target].clone())
+                .collect::<Vec<_>>();
+            linked_inputs.insert(slot.name.clone(), dense_column(&values, linked));
+        }
+        let column = dense_column(&values, values.clone());
         if slot.entity == HOUSEHOLD {
             inputs.insert(slot.name, column);
         } else {
@@ -2414,16 +2720,76 @@ fn lower_dense_batch(
     for row in &case.rows {
         offsets.push(offsets.last().copied().unwrap_or(0) + row.members.len());
     }
+    let mut relations = HashMap::from([(
+        members_key(),
+        DenseRelationBatchSpec {
+            offsets,
+            inputs: person_inputs,
+        },
+    )]);
+    if profile.linked_relation {
+        let mut offsets = vec![0];
+        for row in &targets {
+            offsets.push(offsets.last().copied().unwrap_or(0) + row.len());
+        }
+        relations.insert(
+            DenseRelationKey {
+                name: LINKED.to_string(),
+                current_slot: 0,
+                related_slot: 1,
+            },
+            DenseRelationBatchSpec {
+                offsets,
+                inputs: linked_inputs,
+            },
+        );
+    }
     DenseBatchSpec {
         row_count: case.rows.len(),
         inputs,
-        relations: HashMap::from([(
-            members_key(),
-            DenseRelationBatchSpec {
-                offsets,
-                inputs: person_inputs,
-            },
-        )]),
+        relations,
+    }
+}
+
+/// `values` as a column of the dtype of the slot whose values are `slot`
+/// (which `values` may be drawn from, possibly none of them).
+fn dense_column(slot: &[ScalarValueSpec], values: Vec<ScalarValueSpec>) -> DenseColumn {
+    match slot.first() {
+        Some(ScalarValueSpec::Bool { .. }) => DenseColumn::Bool(
+            values
+                .iter()
+                .map(|value| matches!(value, ScalarValueSpec::Bool { value: true }))
+                .collect(),
+        ),
+        Some(ScalarValueSpec::Text { .. }) => DenseColumn::Text(
+            values
+                .iter()
+                .map(|value| match value {
+                    ScalarValueSpec::Text { value } => value.clone(),
+                    _ => unreachable!(),
+                })
+                .collect(),
+        ),
+        _ if slot
+            .iter()
+            .all(|value| matches!(value, ScalarValueSpec::Integer { .. })) =>
+        {
+            DenseColumn::Integer(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        ScalarValueSpec::Integer { value } => *value,
+                        _ => unreachable!(),
+                    })
+                    .collect(),
+            )
+        }
+        _ => DenseColumn::Decimal(
+            values
+                .iter()
+                .map(|value| spec_decimal(value).expect("numeric input value"))
+                .collect(),
+        ),
     }
 }
 
@@ -3175,16 +3541,23 @@ fn render_dataset(dataset: &DatasetSpec) -> String {
             .push(format!("{}={}", input.name, fmt_value(&input.value)));
     }
     let mut members: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut links: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for relation in &dataset.relations {
-        members
-            .entry(relation.tuple[1].as_str())
+        // LINKED reads from slot 0 to slot 1; the others from slot 1 to 0.
+        let (list, owner, other) = if relation.name == LINKED {
+            (&mut links, 0, 1)
+        } else {
+            (&mut members, 1, 0)
+        };
+        list.entry(relation.tuple[owner].as_str())
             .or_default()
-            .push(relation.tuple[0].as_str());
+            .push(relation.tuple[other].as_str());
     }
     let mut text = String::new();
     let entities = by_entity
         .keys()
         .chain(members.keys())
+        .chain(links.keys())
         .copied()
         .collect::<BTreeSet<_>>();
     for entity in entities {
@@ -3198,6 +3571,9 @@ fn render_dataset(dataset: &DatasetSpec) -> String {
         );
         if let Some(list) = members.get(entity) {
             let _ = write!(text, " members=[{}]", list.join(", "));
+        }
+        if let Some(list) = links.get(entity) {
+            let _ = write!(text, " links=[{}]", list.join(", "));
         }
     }
     text
@@ -3299,6 +3675,13 @@ struct Stats {
     dense_refusals: u32,
     /// Explain failed on a `relation_member` outside a derived relation.
     relation_member_errors: u32,
+    /// Explain succeeded, and reading the household rules of every
+    /// [`LINKED`] `where` clause and summed value for the aggregating
+    /// household instead of the linked one, as dense used to, changes its
+    /// answer (see [`links_decide`]).
+    decisive_links: u32,
+    /// Dense ran on a case with decisive links.
+    dense_decisive_links: u32,
     /// Explain succeeded, and fixing every membership test in the derived
     /// relation's predicate to hold, or not to, changes its answer: a
     /// `relation_member` was evaluated where explain allows it, and decided an
@@ -3316,7 +3699,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {}; relation_member errors {} / decisive memberships {}; kind crossings {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {} / decisive links {}; relation_member errors {} / decisive memberships {} / decisive links {}; kind crossings {}; reference panics {}; divergences {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -3331,8 +3714,10 @@ impl Stats {
             self.dense_decisive_memberships,
             self.dense_membership_declines,
             self.dense_refusals,
+            self.dense_decisive_links,
             self.relation_member_errors,
             self.decisive_memberships,
+            self.decisive_links,
             self.kind_crossings,
             self.reference_panics,
             self.divergences
@@ -3356,6 +3741,8 @@ fn run_property(
         // dtypes across derived-cache extensions), so it searches longer.
         cases: if profile.name == DENSE.name {
             case_count().saturating_mul(6)
+        } else if profile.name == LINKED_DENSE.name {
+            case_count().saturating_mul(2)
         } else {
             case_count()
         },
@@ -3568,6 +3955,24 @@ fn record_dense(explain: &Outcome, dense: &DenseOutcome, decisive: bool, stats: 
     }
 }
 
+/// Whether dense's former answer for [`LINKED`] aggregates differs from
+/// explain's successful one: explain on the program lowered with
+/// [`Cx::root_reads`], which reads every linked `where` clause's and summed
+/// value's rules for the aggregating household, as dense did.
+fn links_decide(case: &CaseG, profile: Profile, lowered: &Lowered, explain: &Outcome) -> bool {
+    if case.rows.iter().all(|row| row.links.is_empty()) {
+        return false;
+    }
+    let root_reads = lower_program_reading(&case.program, profile, false, true);
+    let former = run_sparse(request(
+        ExecutionMode::Explain,
+        &root_reads.program,
+        &lowered.dataset,
+        &lowered.queries,
+    ));
+    compare_sparse(explain, &former).is_err()
+}
+
 fn record_fast(outcome: &Outcome, stats: &mut Stats) {
     if let Outcome::Ok { fell_back, .. } = outcome {
         if *fell_back {
@@ -3649,6 +4054,59 @@ fn random_programs_fast_matches_explain_on_relation_aggregation() {
     assert_relation_regressions_exercised("relations", &stats);
 }
 
+/// Dense must hold explain's value for every row and output of a dense-profile
+/// case, fail exactly when explain fails for some row (same error variant), and
+/// give columns that do not depend on the order outputs are requested in.
+fn check_dense(case: &CaseG, profile: Profile, stats: &mut Stats) -> Result<(), String> {
+    let lowered = lower(case, profile);
+    let decisive_before = stats.decisive_memberships;
+    let Some(explain) = explain_reference(&lowered, stats) else {
+        return Ok(());
+    };
+    let decisive = stats.decisive_memberships > decisive_before;
+    let decisive_links = explain.is_ok() && links_decide(case, profile, &lowered, &explain);
+    if decisive_links {
+        stats.decisive_links += 1;
+    }
+    // Every row of a dense-profile case requests the same outputs; dense
+    // evaluates exactly those, for every row.
+    let mut outputs = Vec::new();
+    for output in lowered
+        .queries
+        .first()
+        .map_or(&[][..], |query| &query.outputs)
+    {
+        if !outputs.contains(output) {
+            outputs.push(output.clone());
+        }
+    }
+    let referenced = referenced_inputs(&lowered.program);
+    let batch = lower_dense_batch(case, profile, &referenced);
+    let dense = run_dense(&lowered.program, batch.clone(), &outputs);
+    record_dense(&explain, &dense, decisive, stats);
+    if decisive_links
+        && !matches!(
+            dense,
+            DenseOutcome::Unsupported(_) | DenseOutcome::Refused { .. }
+        )
+    {
+        stats.dense_decisive_links += 1;
+    }
+    compare_dense(&explain, &dense, &outputs)
+        .and_then(|()| check_dense_order_independence(&lowered.program, &batch, &outputs))
+        .map_err(|problem| {
+            render_case(
+                profile,
+                &lowered,
+                &[
+                    ("divergence", problem),
+                    ("explain", explain.render()),
+                    ("dense", render_dense(&dense)),
+                ],
+            )
+        })
+}
+
 /// Dense must hold explain's value for every row and output, and fail exactly
 /// when explain fails for some row (same error variant).
 #[test]
@@ -3657,43 +4115,7 @@ fn random_programs_dense_matches_explain() {
         "random_programs_dense_matches_explain",
         3,
         DENSE,
-        |case, stats| {
-            let lowered = lower(case, DENSE);
-            let decisive_before = stats.decisive_memberships;
-            let Some(explain) = explain_reference(&lowered, stats) else {
-                return Ok(());
-            };
-            let decisive = stats.decisive_memberships > decisive_before;
-            // Every row of a dense-profile case requests the same outputs; dense
-            // evaluates exactly those, for every row.
-            let mut outputs = Vec::new();
-            for output in lowered
-                .queries
-                .first()
-                .map_or(&[][..], |query| &query.outputs)
-            {
-                if !outputs.contains(output) {
-                    outputs.push(output.clone());
-                }
-            }
-            let referenced = referenced_inputs(&lowered.program);
-            let batch = lower_dense_batch(case, DENSE, &referenced);
-            let dense = run_dense(&lowered.program, batch.clone(), &outputs);
-            record_dense(&explain, &dense, decisive, stats);
-            compare_dense(&explain, &dense, &outputs)
-                .and_then(|()| check_dense_order_independence(&lowered.program, &batch, &outputs))
-                .map_err(|problem| {
-                    render_case(
-                        DENSE,
-                        &lowered,
-                        &[
-                            ("divergence", problem),
-                            ("explain", explain.render()),
-                            ("dense", render_dense(&dense)),
-                        ],
-                    )
-                })
-        },
+        |case, stats| check_dense(case, DENSE, stats),
     );
     assert_exercised("dense", &stats, 0.05);
     if !report_only() && stats.cases >= 200 {
@@ -3735,6 +4157,33 @@ fn random_programs_dense_matches_explain() {
                 stats.summary("dense")
             );
         }
+    }
+}
+
+/// Dense must match explain on counts and sums over [`LINKED`], whose `where`
+/// clauses and summed values read household rules for the linked household,
+/// and the run must reach cases where reading them for the aggregating
+/// household instead, as dense did, changes the answer.
+#[test]
+fn random_programs_dense_matches_explain_over_linked_households() {
+    let stats = run_property(
+        "random_programs_dense_matches_explain_over_linked_households",
+        7,
+        LINKED_DENSE,
+        |case, stats| check_dense(case, LINKED_DENSE, stats),
+    );
+    assert_exercised("linked-dense", &stats, 0.05);
+    if !report_only() && stats.cases >= 200 {
+        assert!(
+            stats.dense_declined <= stats.cases * 2 / 10,
+            "the dense compiler declined too many generated programs: {}",
+            stats.summary("linked-dense")
+        );
+        assert!(
+            f64::from(stats.dense_decisive_links) >= 0.01 * f64::from(stats.cases),
+            "linked-dense: too few cases run where household rules read for a linked household decide an output: {}",
+            stats.summary("linked-dense")
+        );
     }
 }
 
