@@ -3058,7 +3058,16 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let cached = match self.scalar_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_scalar(derived_index, &pending)?;
+                let computed = match self.compute_scalar(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.scalar_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_scalar::<N>(cached, pending, computed)?
             }
         };
@@ -3129,7 +3138,16 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let cached = match self.judgment_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_judgment(derived_index, &pending)?;
+                let computed = match self.compute_judgment(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.judgment_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_judgment(cached, pending, computed)
             }
         };
@@ -3979,7 +3997,16 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let cached = match self.scalar_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_scalar(derived_index, &pending)?;
+                let computed = match self.compute_scalar(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.scalar_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_scalar::<N>(cached, pending, computed)?
             }
         };
@@ -4023,7 +4050,16 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let cached = match self.judgment_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_judgment(derived_index, &pending)?;
+                let computed = match self.compute_judgment(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.judgment_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_judgment(cached, pending, computed)
             }
         };
