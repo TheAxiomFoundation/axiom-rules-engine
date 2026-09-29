@@ -22,8 +22,8 @@
 //!   `where` clauses, `relation_member` judgments both inside that derived
 //!   relation's predicate and where explain rejects them, `count`/`sum` over a
 //!   household-to-household relation whose `where` clauses and summed values
-//!   read household rules for the linked household (dense profile), and
-//!   `input_or_else`. Datasets
+//!   read household rules for the linked household (dense profile), currency
+//!   output rounding, and `input_or_else`. Datasets
 //!   drop input records per row (or per column for dense), rows request
 //!   different outputs, and person rows can share the batch. Every case runs
 //!   through explain, fast and (for the dense-compatible profile) dense, and the
@@ -64,7 +64,8 @@ use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
     IndexedParameterSpec, InputRecordSpec, IntervalSpec, JudgmentExprSpec, JudgmentOutcomeSpec,
     ParameterVersionSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationDerivationSpec, RelationRecordSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    RelationDerivationSpec, RelationRecordSpec, RelationSpec, RoundingModeSpec, ScalarExprSpec,
+    ScalarValueSpec, UnitKindSpec, UnitSpec,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -95,6 +96,7 @@ const HEADS: &str = "head_of_household";
 const LINKED: &str = "linked_household";
 const INT_TABLE: &str = "int_table";
 const DEC_TABLE: &str = "dec_table";
+const CURRENCY: &str = "USD";
 
 /// Literal pool. Integer-looking entries keep integer kind only in profiles
 /// that exercise kinds; elsewhere they lower to decimal literals.
@@ -247,7 +249,11 @@ enum PValG {
 
 #[derive(Clone, Debug)]
 enum RuleG {
-    Num { expr: NumG, integer_dtype: bool },
+    Num {
+        expr: NumG,
+        integer_dtype: bool,
+        rounding: Option<RoundingModeSpec>,
+    },
     Judg(BoolG),
     Bool(BoolValG),
     Text(TextValG),
@@ -255,7 +261,10 @@ enum RuleG {
 
 #[derive(Clone, Debug)]
 enum PersonRuleG {
-    Num(PNumG),
+    Num {
+        expr: PNumG,
+        rounding: Option<RoundingModeSpec>,
+    },
     Judg(PBoolG),
 }
 
@@ -889,15 +898,29 @@ fn text_value_strategy(profile: Profile, num: BoxedStrategy<NumG>) -> BoxedStrat
     .boxed()
 }
 
+fn rounding_strategy() -> BoxedStrategy<Option<RoundingModeSpec>> {
+    prop_oneof![
+        2 => Just(None),
+        1 => prop_oneof![
+            Just(RoundingModeSpec::HalfUp),
+            Just(RoundingModeSpec::HalfEven),
+            Just(RoundingModeSpec::Floor),
+            Just(RoundingModeSpec::Ceil),
+        ].prop_map(Some),
+    ]
+    .boxed()
+}
+
 fn rule_strategy(profile: Profile) -> BoxedStrategy<RuleG> {
     let num = num_strategy(profile);
     let mut alternatives = vec![
         (
             6,
-            (num.clone(), any::<bool>())
-                .prop_map(|(expr, integer_dtype)| RuleG::Num {
+            (num.clone(), any::<bool>(), rounding_strategy())
+                .prop_map(|(expr, integer_dtype, rounding)| RuleG::Num {
                     expr,
                     integer_dtype,
+                    rounding,
                 })
                 .boxed(),
         ),
@@ -927,7 +950,8 @@ fn rule_strategy(profile: Profile) -> BoxedStrategy<RuleG> {
 
 fn person_rule_strategy(profile: Profile) -> BoxedStrategy<PersonRuleG> {
     prop_oneof![
-        2 => pnum_strategy(profile).prop_map(PersonRuleG::Num),
+        2 => (pnum_strategy(profile), rounding_strategy())
+            .prop_map(|(expr, rounding)| PersonRuleG::Num { expr, rounding }),
         1 => pbool_strategy(profile).prop_map(PersonRuleG::Judg),
     ]
     .boxed()
@@ -1834,6 +1858,30 @@ fn derived_spec(
     }
 }
 
+fn with_rounding(mut spec: DerivedSpec, rounding: Option<RoundingModeSpec>) -> DerivedSpec {
+    if let Some(mode) = rounding {
+        spec.unit = Some(CURRENCY.to_string());
+        spec.rounding = Some(mode);
+        spec.dtype = DTypeSpec::Decimal;
+        // Explain leaves integer values unchanged under output rounding. Keep
+        // rounded formulas decimal-valued so this exercises value rounding
+        // without introducing a separate dense integer-kind divergence.
+        if let DerivedSemanticsSpec::Scalar { expr } = spec.semantics {
+            spec.semantics = DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::Add {
+                    items: vec![
+                        expr,
+                        lit(ScalarValueSpec::Decimal {
+                            value: "0".to_string(),
+                        }),
+                    ],
+                },
+            };
+        }
+    }
+    spec
+}
+
 fn parameter_tables() -> Vec<IndexedParameterSpec> {
     let table = |name: &str, values: Vec<(i64, ScalarValueSpec)>| IndexedParameterSpec {
         id: None,
@@ -1914,15 +1962,18 @@ fn lower_program_reading(
             in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
-            PersonRuleG::Num(expr) => (
+            PersonRuleG::Num { expr, rounding } => (
                 RuleTag::Num,
-                derived_spec(
-                    &name,
-                    PERSON,
-                    DTypeSpec::Decimal,
-                    DerivedSemanticsSpec::Scalar {
-                        expr: lower_pnum(expr, &cx),
-                    },
+                with_rounding(
+                    derived_spec(
+                        &name,
+                        PERSON,
+                        DTypeSpec::Decimal,
+                        DerivedSemanticsSpec::Scalar {
+                            expr: lower_pnum(expr, &cx),
+                        },
+                    ),
+                    *rounding,
                 ),
             ),
             PersonRuleG::Judg(expr) => (
@@ -1970,19 +2021,23 @@ fn lower_program_reading(
             RuleG::Num {
                 expr,
                 integer_dtype,
+                rounding,
             } => (
                 RuleTag::Num,
-                derived_spec(
-                    &name,
-                    HOUSEHOLD,
-                    if *integer_dtype && profile.integer_kinds {
-                        DTypeSpec::Integer
-                    } else {
-                        DTypeSpec::Decimal
-                    },
-                    DerivedSemanticsSpec::Scalar {
-                        expr: lower_num(expr, &cx),
-                    },
+                with_rounding(
+                    derived_spec(
+                        &name,
+                        HOUSEHOLD,
+                        if *integer_dtype && profile.integer_kinds {
+                            DTypeSpec::Integer
+                        } else {
+                            DTypeSpec::Decimal
+                        },
+                        DerivedSemanticsSpec::Scalar {
+                            expr: lower_num(expr, &cx),
+                        },
+                    ),
+                    *rounding,
                 ),
             ),
             RuleG::Judg(expr) => (
@@ -2079,6 +2134,14 @@ fn lower_program_reading(
         });
     }
     let mut spec = ProgramSpec {
+        units: if derived_specs.iter().any(|rule| rule.rounding.is_some()) {
+            vec![UnitSpec {
+                name: CURRENCY.to_string(),
+                kind: UnitKindSpec::Currency { minor_units: 0 },
+            }]
+        } else {
+            Vec::new()
+        },
         relations,
         derived: derived_specs,
         ..ProgramSpec::default()
@@ -3447,6 +3510,9 @@ fn render_program(program: &ProgramSpec) -> String {
             "\n    {} [{}, {:?}] = {}",
             rule.name, rule.entity, rule.dtype, body
         );
+        if let Some(rounding) = rule.rounding {
+            let _ = write!(text, " (rounding: {rounding:?}, unit: {:?})", rule.unit);
+        }
     }
     for parameter in &program.parameters {
         let values = parameter

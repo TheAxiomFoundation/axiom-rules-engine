@@ -267,12 +267,13 @@ fn round_dense_column<N: DenseNum>(
 ) -> DenseColumn {
     match column {
         DenseColumn::Bool(_) | DenseColumn::Text(_) | DenseColumn::Date(_) => column,
-        numeric => N::into_column(
-            numeric_values::<N>(&numeric, live, errors)
-                .into_iter()
-                .map(|value| value.round_to(rounding))
-                .collect(),
-        ),
+        numeric => {
+            let mut values = numeric_values::<N>(&numeric, live, errors);
+            for row in live.without(errors).rows() {
+                values[row] = values[row].round_to(rounding);
+            }
+            N::into_column(values)
+        }
     }
 }
 
@@ -379,6 +380,11 @@ enum CompiledScalarExpr {
         default: ScalarValue,
     },
     Derived(usize),
+    /// An inlined rule's output rounding, applied before its dependent reads it.
+    Round {
+        value: Box<CompiledScalarExpr>,
+        rounding: Rounding,
+    },
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledScalarExpr>,
@@ -452,6 +458,11 @@ enum CompiledRelatedScalarExpr {
         default: ScalarValue,
     },
     RootScalar(Box<CompiledScalarExpr>),
+    /// An inlined related rule's output rounding, under the related-row mask.
+    Round {
+        value: Box<CompiledRelatedScalarExpr>,
+        rounding: Rounding,
+    },
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledRelatedScalarExpr>,
@@ -955,7 +966,9 @@ impl DenseCompiledProgram {
                 self.scalar_reduces_over_periods(left, reduces)
                     || self.scalar_reduces_over_periods(right, reduces)
             }
-            CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
+            CompiledScalarExpr::Ceil(value)
+            | CompiledScalarExpr::Floor(value)
+            | CompiledScalarExpr::Round { value, .. } => {
                 self.scalar_reduces_over_periods(value, reduces)
             }
             CompiledScalarExpr::DateAddDays { date, days } => {
@@ -1786,13 +1799,19 @@ impl<'a> DenseCompiler<'a> {
                 if self.reads_current_record(relation_index, "scalar", name, &derived.entity)? {
                     return match &derived.semantics {
                         DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
-                            Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
-                                compiler.compile_current_scalar_expr(
-                                    name,
-                                    &derived.entity,
-                                    expr,
-                                )?,
-                            )))
+                            let value = compiler.compile_current_scalar_expr(
+                                name,
+                                &derived.entity,
+                                expr,
+                            )?;
+                            let value = match derived.rounding {
+                                Some(rounding) => CompiledScalarExpr::Round {
+                                    value: Box::new(value),
+                                    rounding,
+                                },
+                                None => value,
+                            };
+                            Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(value)))
                         }),
                         DerivedSemantics::Judgment(_) => {
                             Err(DenseCompileError::Unsupported(format!(
@@ -1808,7 +1827,14 @@ impl<'a> DenseCompiler<'a> {
                         let compiled = compiler.compile_related_scalar(relation_index, expr);
                         compiler.membership_scope = scope;
                         compiler.related_rules.pop();
-                        compiled
+                        let value = compiled?;
+                        Ok(match derived.rounding {
+                            Some(rounding) => CompiledRelatedScalarExpr::Round {
+                                value: Box::new(value),
+                                rounding,
+                            },
+                            None => value,
+                        })
                     }),
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "related scalar expressions cannot reference judgment derived values (`{name}`)"
@@ -1958,7 +1984,15 @@ impl<'a> DenseCompiler<'a> {
                 }
                 match &dependency.semantics {
                     DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
-                        compiler.compile_current_scalar_expr(name, &dependency.entity, expr)
+                        let value =
+                            compiler.compile_current_scalar_expr(name, &dependency.entity, expr)?;
+                        Ok(match dependency.rounding {
+                            Some(rounding) => CompiledScalarExpr::Round {
+                                value: Box::new(value),
+                                rounding,
+                            },
+                            None => value,
+                        })
                     }),
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "scalar expression cannot reference judgment derived value (`{name}`)"
@@ -2793,6 +2827,18 @@ fn eval_extremum<N: DenseNum, E, A: ColumnAxis<N, E>>(
     Ok((N::into_column(best), errors))
 }
 
+fn eval_round<N: DenseNum, E, A: ColumnAxis<N, E>>(
+    axis: &mut A,
+    value: &E,
+    rounding: Rounding,
+    mask: &RowMask,
+) -> Flow<DenseEval> {
+    let (column, mut errors) = axis.eval_column(value, mask)?;
+    let live = mask.without(&errors);
+    let column = round_dense_column::<N>(column, rounding, &live, &mut errors);
+    Ok((column, errors))
+}
+
 fn eval_unary<N: DenseNum, E, A: ColumnAxis<N, E>>(
     axis: &mut A,
     value: &E,
@@ -3211,6 +3257,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 RowErrors::new(),
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Round { value, rounding } => {
+                eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
+            }
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
                 let live = mask.without(&errors);
@@ -3643,6 +3692,15 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 },
                 RowErrors::new(),
             )),
+            CompiledRelatedScalarExpr::Round { value, rounding } => eval_round::<N, _, _>(
+                &mut RelatedAxis {
+                    executor: self,
+                    relation,
+                },
+                value.as_ref(),
+                *rounding,
+                mask,
+            ),
             CompiledRelatedScalarExpr::RootScalar(expr) => {
                 let roots = self.root_rows_of(relation, mask);
                 let (values, root_errors) = self.eval_scalar_expr(expr, &roots)?;
@@ -4111,6 +4169,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((broadcast_scalar_literal::<N>(value, len), RowErrors::new()))
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Round { value, rounding } => {
+                eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
+            }
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 // Period-specific: resolve at the reference period. The index
                 // expression is itself lifetime-evaluated (typically a literal
@@ -4600,9 +4661,9 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Div(left, right) => {
             nested_over_periods_kind(left).or_else(|| nested_over_periods_kind(right))
         }
-        CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
-            nested_over_periods_kind(value)
-        }
+        CompiledScalarExpr::Ceil(value)
+        | CompiledScalarExpr::Floor(value)
+        | CompiledScalarExpr::Round { value, .. } => nested_over_periods_kind(value),
         CompiledScalarExpr::DateAddDays { date, days } => {
             nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
         }
