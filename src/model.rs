@@ -752,6 +752,13 @@ pub(crate) struct RelationUsage {
     pub citing_rule: String,
 }
 
+/// Entity kinds of the (current, related) IDs a derived relation binds while
+/// its predicate runs, or `None` outside a derived relation's predicate. The
+/// evaluator keeps this context through comparisons, `if` conditions and
+/// branches, and arithmetic, and drops it inside a nested aggregation's
+/// `where` clause; usage collection follows the same scoping.
+type RelationUsageContext<'a> = Option<(Option<&'a str>, Option<&'a str>)>;
+
 /// Consensus executable orientation for a used relation. A position stays
 /// unknown when uses do not constrain it or when different uses conflict.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -883,7 +890,7 @@ fn collect_semantics_relation_usages(
 ) {
     match semantics {
         DerivedSemantics::Scalar(expr) => {
-            collect_scalar_relation_usages(program, expr, Some(entity), citing_rule, usages);
+            collect_scalar_relation_usages(program, expr, Some(entity), None, citing_rule, usages);
         }
         DerivedSemantics::Judgment(expr) => {
             collect_judgment_relation_usages(
@@ -902,9 +909,22 @@ fn collect_scalar_relation_usages(
     program: &Program,
     expr: &ScalarExpr,
     entity: Option<&str>,
+    relation_context: RelationUsageContext<'_>,
     citing_rule: &str,
     usages: &mut Vec<RelationUsage>,
 ) {
+    // Every operand below runs on the same ID as `expr`, so it keeps the
+    // enclosing derived relation's context (see `eval_scalar_expr_inner`).
+    let operand = |child: &ScalarExpr, usages: &mut Vec<RelationUsage>| {
+        collect_scalar_relation_usages(
+            program,
+            child,
+            entity,
+            relation_context,
+            citing_rule,
+            usages,
+        );
+    };
     match expr {
         ScalarExpr::Literal(_)
         | ScalarExpr::Input(_)
@@ -914,35 +934,33 @@ fn collect_scalar_relation_usages(
         | ScalarExpr::PeriodEnd => {}
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => {
-            collect_scalar_relation_usages(program, index, entity, citing_rule, usages);
-        }
+        | ScalarExpr::Floor(index) => operand(index, usages),
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
             for item in items {
-                collect_scalar_relation_usages(program, item, entity, citing_rule, usages);
+                operand(item, usages);
             }
         }
         ScalarExpr::Sub(left, right)
         | ScalarExpr::Mul(left, right)
         | ScalarExpr::Div(left, right) => {
-            collect_scalar_relation_usages(program, left, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, right, entity, citing_rule, usages);
+            operand(left, usages);
+            operand(right, usages);
         }
         ScalarExpr::DateAddDays { date, days } => {
-            collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, days, entity, citing_rule, usages);
+            operand(date, usages);
+            operand(days, usages);
         }
         ScalarExpr::DateAddMonths { date, months } => {
-            collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, months, entity, citing_rule, usages);
+            operand(date, usages);
+            operand(months, usages);
         }
         ScalarExpr::DateAddYears { date, years } => {
-            collect_scalar_relation_usages(program, date, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, years, entity, citing_rule, usages);
+            operand(date, usages);
+            operand(years, usages);
         }
         ScalarExpr::DaysBetween { from, to } => {
-            collect_scalar_relation_usages(program, from, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, to, entity, citing_rule, usages);
+            operand(from, usages);
+            operand(to, usages);
         }
         ScalarExpr::CountRelated {
             relation,
@@ -965,6 +983,9 @@ fn collect_scalar_relation_usages(
                 &mut stack,
             );
             if let Some(where_clause) = where_clause {
+                // The `where` clause runs on each related ID with no relation
+                // context (`eval_judgment_expr`), even inside a derived
+                // relation's predicate.
                 collect_judgment_relation_usages(
                     program,
                     where_clause,
@@ -997,6 +1018,7 @@ fn collect_scalar_relation_usages(
                 &mut stack,
             );
             if let Some(where_clause) = where_clause {
+                // As in `count_related`, the clause starts without context.
                 collect_judgment_relation_usages(
                     program,
                     where_clause,
@@ -1012,20 +1034,25 @@ fn collect_scalar_relation_usages(
             then_expr,
             else_expr,
         } => {
-            collect_judgment_relation_usages(program, condition, entity, None, citing_rule, usages);
-            collect_scalar_relation_usages(program, then_expr, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, else_expr, entity, citing_rule, usages);
+            collect_judgment_relation_usages(
+                program,
+                condition,
+                entity,
+                relation_context,
+                citing_rule,
+                usages,
+            );
+            operand(then_expr, usages);
+            operand(else_expr, usages);
         }
-        ScalarExpr::NoMatch { subject, patterns } => {
-            collect_scalar_relation_usages(program, subject, entity, citing_rule, usages);
-            for pattern in patterns {
-                collect_scalar_relation_usages(program, pattern, entity, citing_rule, usages);
-            }
-        }
+        // Patterns only label the no-match error; no evaluator runs them.
+        ScalarExpr::NoMatch { subject, .. } => operand(subject, usages),
+        // Lifetime execution reduces these operands on the rule's own row, but
+        // no evaluator runs a reduction inside a derived relation's predicate
+        // (explain rejects it everywhere, dense inside related expressions).
         ScalarExpr::OverPeriods { value, n, .. } => {
-            collect_scalar_relation_usages(program, value, entity, citing_rule, usages);
-            if let Some(n) = n {
-                collect_scalar_relation_usages(program, n, entity, citing_rule, usages);
+            for child in std::iter::once(value).chain(n) {
+                collect_scalar_relation_usages(program, child, entity, None, citing_rule, usages);
             }
         }
     }
@@ -1035,7 +1062,7 @@ fn collect_judgment_relation_usages(
     program: &Program,
     expr: &JudgmentExpr,
     entity: Option<&str>,
-    relation_context: Option<(Option<&str>, Option<&str>)>,
+    relation_context: RelationUsageContext<'_>,
     citing_rule: &str,
     usages: &mut Vec<RelationUsage>,
 ) {
@@ -1045,8 +1072,22 @@ fn collect_judgment_relation_usages(
             // independently constrain their related slot through a predicate
             // or value rule. Preserve that partial usage instead of treating
             // the nested relation as unused.
-            collect_scalar_relation_usages(program, left, entity, citing_rule, usages);
-            collect_scalar_relation_usages(program, right, entity, citing_rule, usages);
+            collect_scalar_relation_usages(
+                program,
+                left,
+                entity,
+                relation_context,
+                citing_rule,
+                usages,
+            );
+            collect_scalar_relation_usages(
+                program,
+                right,
+                entity,
+                relation_context,
+                citing_rule,
+                usages,
+            );
         }
         JudgmentExpr::Derived(_) => {}
         JudgmentExpr::RelationMember {
@@ -1054,7 +1095,12 @@ fn collect_judgment_relation_usages(
             current_slot,
             related_slot,
         } => {
-            let (current_kind, related_kind) = relation_context.unwrap_or((entity, None));
+            // Membership tests the two IDs a derived relation binds for its
+            // predicate. Anywhere else explain rejects it at run time, so it
+            // says nothing about the relation's orientation.
+            let Some((current_kind, related_kind)) = relation_context else {
+                return;
+            };
             let mut stack = Vec::new();
             add_relation_usage(
                 program,
@@ -1627,5 +1673,336 @@ mod rounding_tests {
         assert_eq!(RoundingMode::HalfEven.as_str(), "half_even");
         assert_eq!(RoundingMode::Floor.as_str(), "floor");
         assert_eq!(RoundingMode::Ceil.as_str(), "ceil");
+    }
+}
+
+#[cfg(test)]
+mod relation_usage_tests {
+    use super::relation_usage_records;
+    use crate::spec::ProgramSpec;
+    use serde_json::{Value, json};
+
+    const HEAD_IN_DECLARED_ORDER: [Option<&str>; 2] = [Some("Person"), Some("Household")];
+
+    fn int(value: i64) -> Value {
+        json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
+    }
+
+    fn member(current_slot: usize, related_slot: usize) -> Value {
+        json!({
+            "kind": "relation_member",
+            "relation": "head",
+            "current_slot": current_slot,
+            "related_slot": related_slot
+        })
+    }
+
+    /// 1 when `head` holds for the IDs in scope, else 0.
+    fn indicator(member: Value) -> Value {
+        json!({"kind": "if", "condition": member, "then_expr": int(1), "else_expr": int(0)})
+    }
+
+    fn equals_one(scalar: Value) -> Value {
+        json!({"kind": "comparison", "left": scalar, "op": "eq", "right": int(1)})
+    }
+
+    /// Every scalar position that engine.rs evaluates on the same ID as its
+    /// parent, holding `operand`. Static collection does not evaluate, so
+    /// types and values do not matter; every position must keep the context.
+    fn same_id_positions(operand: &Value) -> Vec<(&'static str, Value)> {
+        let date = json!({"kind": "period_start"});
+        vec![
+            (
+                "parameter index",
+                json!({"kind": "parameter_lookup", "parameter": "rate", "index": operand}),
+            ),
+            ("add", json!({"kind": "add", "items": [int(0), operand]})),
+            (
+                "sub left",
+                json!({"kind": "sub", "left": operand, "right": int(0)}),
+            ),
+            (
+                "sub right",
+                json!({"kind": "sub", "left": int(0), "right": operand}),
+            ),
+            (
+                "mul left",
+                json!({"kind": "mul", "left": operand, "right": int(1)}),
+            ),
+            (
+                "mul right",
+                json!({"kind": "mul", "left": int(1), "right": operand}),
+            ),
+            (
+                "div left",
+                json!({"kind": "div", "left": operand, "right": int(1)}),
+            ),
+            (
+                "div right",
+                json!({"kind": "div", "left": int(1), "right": operand}),
+            ),
+            ("max", json!({"kind": "max", "items": [int(0), operand]})),
+            ("min", json!({"kind": "min", "items": [operand, int(1)]})),
+            ("ceil", json!({"kind": "ceil", "value": operand})),
+            ("floor", json!({"kind": "floor", "value": operand})),
+            (
+                "date_add_days date",
+                json!({"kind": "date_add_days", "date": operand, "days": int(0)}),
+            ),
+            (
+                "date_add_days days",
+                json!({"kind": "date_add_days", "date": date, "days": operand}),
+            ),
+            (
+                "date_add_months date",
+                json!({"kind": "date_add_months", "date": operand, "months": int(0)}),
+            ),
+            (
+                "date_add_months months",
+                json!({"kind": "date_add_months", "date": date, "months": operand}),
+            ),
+            (
+                "date_add_years date",
+                json!({"kind": "date_add_years", "date": operand, "years": int(0)}),
+            ),
+            (
+                "date_add_years years",
+                json!({"kind": "date_add_years", "date": date, "years": operand}),
+            ),
+            (
+                "days_between from",
+                json!({"kind": "days_between", "from": operand, "to": date}),
+            ),
+            (
+                "days_between to",
+                json!({"kind": "days_between", "from": date, "to": operand}),
+            ),
+            (
+                "if condition",
+                json!({"kind": "if", "condition": equals_one(operand.clone()), "then_expr": int(1), "else_expr": int(0)}),
+            ),
+            (
+                "if then",
+                json!({"kind": "if", "condition": equals_one(int(1)), "then_expr": operand, "else_expr": int(0)}),
+            ),
+            (
+                "if else",
+                json!({"kind": "if", "condition": equals_one(int(1)), "then_expr": int(0), "else_expr": operand}),
+            ),
+            (
+                "not",
+                indicator(json!({"kind": "not", "item": equals_one(operand.clone())})),
+            ),
+            (
+                "and",
+                indicator(
+                    json!({"kind": "and", "items": [equals_one(int(1)), equals_one(operand.clone())]}),
+                ),
+            ),
+            (
+                "or",
+                indicator(
+                    json!({"kind": "or", "items": [equals_one(operand.clone()), equals_one(int(1))]}),
+                ),
+            ),
+            (
+                "comparison right",
+                indicator(
+                    json!({"kind": "comparison", "left": int(1), "op": "eq", "right": operand}),
+                ),
+            ),
+            (
+                "no_match subject",
+                json!({"kind": "no_match", "subject": operand, "patterns": [int(2)]}),
+            ),
+        ]
+    }
+
+    /// `head` usage records, as (slot kinds, citing rule), for a program whose
+    /// derived relation `heads` keeps the members of a household (current ID,
+    /// slot 1) that satisfy `predicate`, plus the given derived rules.
+    fn head_usages(predicate: Value, derived: Value) -> Vec<(Vec<Option<String>>, String)> {
+        let spec: ProgramSpec = serde_json::from_value(json!({
+            "relations": [
+                {"name": "member", "arity": 2, "slot_entities": ["Person", "Household"]},
+                {"name": "head", "arity": 2, "slot_entities": ["Person", "Household"]},
+                {
+                    "name": "heads",
+                    "arity": 2,
+                    "slot_entities": ["Person", "Household"],
+                    "derivation": {
+                        "source_relation": "member",
+                        "current_slot": 1,
+                        "related_slot": 0,
+                        "slot_entities": ["Person", "Household"],
+                        "predicate": predicate
+                    }
+                }
+            ],
+            "derived": derived
+        }))
+        .expect("program spec parses");
+        let program = spec.to_program().expect("program builds");
+        relation_usage_records(&program)
+            .into_iter()
+            .filter(|usage| usage.relation == "head")
+            .map(|usage| (usage.slot_entities, usage.citing_rule))
+            .collect()
+    }
+
+    fn declared_head_usage_by(citing_rule: &str) -> Vec<(Vec<Option<String>>, String)> {
+        vec![(
+            HEAD_IN_DECLARED_ORDER
+                .map(|kind| kind.map(str::to_string))
+                .to_vec(),
+            citing_rule.to_string(),
+        )]
+    }
+
+    #[test]
+    fn membership_keeps_derived_relation_context_in_every_same_id_position() {
+        let operand = indicator(member(1, 0));
+        let expected = declared_head_usage_by("heads");
+        assert_eq!(
+            head_usages(equals_one(operand.clone()), json!([])),
+            expected
+        );
+        for (inner_name, inner) in same_id_positions(&operand) {
+            for (outer_name, outer) in same_id_positions(&inner) {
+                assert_eq!(
+                    head_usages(equals_one(outer), json!([])),
+                    expected,
+                    "{outer_name} holding {inner_name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn membership_outside_a_derived_relation_predicate_records_no_usage() {
+        // Slots (0, 1) under a Household owner: taking the owner as the current
+        // kind would record `[Household, Person]`, the reverse of the
+        // declaration, so a leaked usage cannot pass for the declared one.
+        let operand = indicator(member(0, 1));
+        let always = equals_one(int(1));
+        for (name, scalar) in same_id_positions(&operand)
+            .into_iter()
+            .chain([("bare", operand.clone())])
+        {
+            let rule = json!([{
+                "name": "headed",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": scalar
+            }]);
+            assert_eq!(head_usages(always.clone(), rule), [], "rule, {name}");
+
+            let rule_where = json!([{
+                "name": "headed",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "count_related",
+                    "relation": "member",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": equals_one(scalar.clone())
+                }
+            }]);
+            assert_eq!(
+                head_usages(always.clone(), rule_where),
+                [],
+                "rule where, {name}"
+            );
+
+            // A nested aggregation's `where` clause runs on the aggregation's
+            // related IDs with no relation context, even inside a predicate.
+            let predicate_where = equals_one(json!({
+                "kind": "sum_related",
+                "relation": "member",
+                "current_slot": 0,
+                "related_slot": 1,
+                "value": {"kind": "input", "name": "hh_size"},
+                "where": equals_one(scalar)
+            }));
+            assert_eq!(
+                head_usages(predicate_where, json!([])),
+                [],
+                "predicate where, {name}"
+            );
+        }
+        let judgment_rule = json!([{
+            "name": "headed",
+            "entity": "Household",
+            "dtype": "judgment",
+            "semantics": "judgment",
+            "expr": member(0, 1)
+        }]);
+        assert_eq!(head_usages(always, judgment_rule), [], "judgment rule");
+    }
+
+    #[test]
+    fn membership_in_operands_no_predicate_evaluates_records_no_usage() {
+        // `no_match` patterns only label an error, and no evaluator runs a
+        // reduction inside a predicate. Slots (0, 1) under the predicate's
+        // context would record `[Household, Person]` if either leaked.
+        let operand = indicator(member(0, 1));
+        let pattern = json!({"kind": "no_match", "subject": int(0), "patterns": [operand]});
+        let unselected = json!({
+            "kind": "if", "condition": equals_one(int(1)), "then_expr": int(1), "else_expr": pattern
+        });
+        assert_eq!(head_usages(equals_one(unselected), json!([])), []);
+        for reduction in [
+            json!({"kind": "over_periods", "over": "sum", "value": operand}),
+            json!({"kind": "over_periods", "over": "sum_top_n", "value": int(1), "n": operand}),
+        ] {
+            assert_eq!(head_usages(equals_one(reduction), json!([])), []);
+        }
+        // A rule-level reduction still runs its aggregations in lifetime mode.
+        let spec: ProgramSpec = serde_json::from_value(json!({
+            "relations": [{"name": "member", "arity": 2, "slot_entities": ["Person", "Household"]}],
+            "derived": [{
+                "name": "members_over_time",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {"kind": "over_periods", "over": "sum", "value": {
+                    "kind": "count_related", "relation": "member", "current_slot": 1, "related_slot": 0
+                }}
+            }]
+        }))
+        .expect("program spec parses");
+        let program = spec.to_program().expect("program builds");
+        assert!(
+            relation_usage_records(&program)
+                .iter()
+                .any(|usage| usage.relation == "member"),
+            "aggregations under a rule-level reduction are executable uses"
+        );
+    }
+
+    #[test]
+    fn membership_beside_a_nested_aggregation_keeps_the_outer_context() {
+        // The aggregation resets context for its own clause only; a sibling
+        // operand of the same comparison still runs in the derived relation.
+        let aggregation = json!({
+            "kind": "count_related",
+            "relation": "member",
+            "current_slot": 0,
+            "related_slot": 1,
+            "where": member(1, 0)
+        });
+        let predicate = json!({
+            "kind": "comparison",
+            "left": {"kind": "add", "items": [aggregation, indicator(member(1, 0))]},
+            "op": "gt",
+            "right": int(0)
+        });
+        assert_eq!(
+            head_usages(predicate, json!([])),
+            declared_head_usage_by("heads")
+        );
     }
 }
