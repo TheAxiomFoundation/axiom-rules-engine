@@ -1207,9 +1207,9 @@ fn an_aggregation_whose_members_each_defer_costs_one_pass() {
     });
 }
 
-/// Dense's answer for `r0` of an `add` chain of `n` rules, and the nodes the
-/// compiler and executor visited.
-fn dense_add_chain(n: usize) -> (String, usize) {
+/// Dense's answer for `r0` of an `add` chain of `n` rules over a batch of
+/// `rows` rows, and the nodes the compiler and executor visited.
+fn dense_add_chain(n: usize, rows: usize) -> (String, usize) {
     let rules = chain("r", "Household", n, |_| int(1), int(0));
     let spec: ProgramSpec =
         serde_json::from_value(json!({"derived": rules})).expect("program deserializes");
@@ -1218,7 +1218,7 @@ fn dense_add_chain(n: usize) -> (String, usize) {
         let dense =
             DenseCompiledProgram::from_program(&program, Some("Household")).expect("compiles");
         let batch = DenseBatchSpec {
-            row_count: 1,
+            row_count: rows,
             inputs: HashMap::new(),
             relations: HashMap::new(),
         };
@@ -1232,7 +1232,8 @@ fn dense_add_chain(n: usize) -> (String, usize) {
 /// A 20,000-rule `add` chain answers in explain, fast and dense on a 1 MiB
 /// thread (stricter than the 2 MiB of a spawned Rust thread), and costs about
 /// four times a 5,000-rule chain in each: nodes visited grow linearly with
-/// the chain, retries included. The wall-clock bound is deliberately loose;
+/// the chain, retries included. Dense is also measured over an empty batch,
+/// where no row reaches any rule. The wall-clock bound is deliberately loose;
 /// the visit counts carry the linearity claim.
 #[test]
 fn a_long_chain_costs_linear_work_in_every_mode_on_a_small_stack() {
@@ -1266,13 +1267,23 @@ fn a_long_chain_costs_linear_work_in_every_mode_on_a_small_stack() {
                 "{mode}: {LONG} rules visited {long_visits} nodes, {SHORT} rules {short_visits}"
             );
         }
-        let (short, short_visits) = dense_add_chain(SHORT);
-        let (long, long_visits) = dense_add_chain(LONG);
+        let (short, short_visits) = dense_add_chain(SHORT, 1);
+        let (long, long_visits) = dense_add_chain(LONG, 1);
         assert_eq!(short, format!("Scalar(Decimal([{SHORT}]))"));
         assert_eq!(long, format!("Scalar(Decimal([{LONG}]))"));
         assert!(
             long_visits * 10 <= short_visits * 44,
             "dense: {LONG} rules visited {long_visits} nodes, {SHORT} rules {short_visits}"
+        );
+        // An empty batch computes every rule once, under an empty mask, to
+        // fix its dtype; that defers and stays linear too.
+        let (short, short_visits) = dense_add_chain(SHORT, 0);
+        let (long, long_visits) = dense_add_chain(LONG, 0);
+        assert_eq!(short, "Scalar(Decimal([]))");
+        assert_eq!(long, "Scalar(Decimal([]))");
+        assert!(
+            long_visits * 10 <= short_visits * 44,
+            "dense, empty batch: {LONG} rules visited {long_visits} nodes, {SHORT} rules {short_visits}"
         );
     });
     assert!(

@@ -657,3 +657,166 @@ fn lifetime_execution_answers_deep_chains_on_both_sides_of_a_reduction() {
         other => panic!("unexpected lifetime column {other:?}"),
     }
 }
+
+/// Dense computes a rule it has never computed even when no row reaches it,
+/// to fix the rule's dtype, so a deep chain that no row reaches used to be
+/// walked without deferring: deferral fired only for a rule with rows still
+/// to compute. Three ways no row reaches a chain, each on a 1 MiB thread:
+/// the untaken branch of an `if` (and the short-circuited operand of an
+/// `or`), an empty batch, and the untaken branch around a lifetime
+/// reduction. Each answers, and answers what it answers with deferral off.
+#[test]
+fn dense_answers_deep_chains_that_no_row_reaches() {
+    const RULES: usize = 20_000;
+    let one_row = || DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::new(),
+        relations: HashMap::new(),
+    };
+    let compile = |rules: Vec<Value>| {
+        let spec: ProgramSpec =
+            serde_json::from_value(json!({"derived": rules})).expect("program deserializes");
+        let program = spec.to_program().expect("program converts");
+        DenseCompiledProgram::from_program(&program, Some("Household")).expect("compiles")
+    };
+    on_stack(MIB, move || {
+        // A scalar chain under an `if` no row takes the else branch of.
+        let mut rules = Shape::Add.rules(RULES);
+        rules.push(household(
+            "top",
+            "decimal",
+            json!({"kind": "if", "condition": always(), "then_expr": int(1), "else_expr": derived("r0")}),
+        ));
+        let dense = compile(rules);
+        let result = dense
+            .execute(&model_period(), one_row(), &["top".to_string()])
+            .expect("executes");
+        assert_eq!(
+            format!("{:?}", result.outputs["top"]),
+            "Scalar(Decimal([1]))",
+            "if"
+        );
+        // An empty batch: no row reaches anything.
+        let empty = DenseBatchSpec {
+            row_count: 0,
+            inputs: HashMap::new(),
+            relations: HashMap::new(),
+        };
+        let result = dense
+            .execute(&model_period(), empty, &["r0".to_string()])
+            .expect("executes an empty batch");
+        assert_eq!(
+            format!("{:?}", result.outputs["r0"]),
+            "Scalar(Decimal([]))",
+            "empty batch"
+        );
+
+        // A judgment chain behind an `or` whose first operand decides.
+        let mut rules = Shape::And.rules(RULES);
+        rules.push(rule(
+            "top",
+            "Household",
+            "judgment",
+            "judgment",
+            json!({"kind": "or", "items": [always(), derived("r0")]}),
+        ));
+        let result = compile(rules)
+            .execute(&model_period(), one_row(), &["top".to_string()])
+            .expect("executes");
+        assert_eq!(
+            format!("{:?}", result.outputs["top"]),
+            "Judgment([Holds])",
+            "or"
+        );
+
+        // Lifetime: `total` takes the reduction; the chain under its else
+        // branch, itself ending in a reduction, is reached by no row.
+        let mut rules = vec![household(
+            "total",
+            "decimal",
+            json!({
+                "kind": "if", "condition": always(),
+                "then_expr": {"kind": "over_periods", "over": "sum", "value": {"kind": "input", "name": "x"}},
+                "else_expr": derived("t0"),
+            }),
+        )];
+        for index in 0..RULES {
+            rules.push(household(
+                &format!("t{index}"),
+                "decimal",
+                json!({"kind": "add", "items": [derived(&format!("t{}", index + 1)), int(1)]}),
+            ));
+        }
+        rules.push(household(
+            &format!("t{RULES}"),
+            "decimal",
+            json!({"kind": "over_periods", "over": "sum", "value": {"kind": "input", "name": "x"}}),
+        ));
+        let years = (2020..2023)
+            .map(|year| Period {
+                kind: PeriodKind::TaxYear,
+                start: chrono::NaiveDate::from_ymd_opt(year, 1, 1).expect("date"),
+                end: chrono::NaiveDate::from_ymd_opt(year, 12, 31).expect("date"),
+            })
+            .collect::<Vec<_>>();
+        let batches = || {
+            [1, 2, 3]
+                .into_iter()
+                .map(|x| DenseBatchSpec {
+                    row_count: 1,
+                    inputs: HashMap::from([("x".to_string(), DenseColumn::Integer(vec![x]))]),
+                    relations: HashMap::new(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let result = compile(rules)
+            .execute_lifetime(&years, batches(), &["total".to_string()])
+            .expect("executes a lifetime");
+        assert_eq!(
+            format!("{:?}", result.outputs["total"]),
+            "Scalar(Decimal([6]))",
+            "lifetime"
+        );
+
+        // Lifetime judgments: `holds` decides on its first operand, so the
+        // judgment chain behind it, ending in a comparison of a reduction,
+        // is reached by no row.
+        let reduction_positive = json!({
+            "kind": "comparison",
+            "left": {"kind": "over_periods", "over": "sum", "value": {"kind": "input", "name": "x"}},
+            "op": "gt",
+            "right": int(0),
+        });
+        let mut rules = vec![rule(
+            "holds",
+            "Household",
+            "judgment",
+            "judgment",
+            json!({"kind": "or", "items": [reduction_positive.clone(), derived("j0")]}),
+        )];
+        for index in 0..RULES {
+            rules.push(rule(
+                &format!("j{index}"),
+                "Household",
+                "judgment",
+                "judgment",
+                json!({"kind": "and", "items": [derived(&format!("j{}", index + 1)), always()]}),
+            ));
+        }
+        rules.push(rule(
+            &format!("j{RULES}"),
+            "Household",
+            "judgment",
+            "judgment",
+            reduction_positive,
+        ));
+        let result = compile(rules)
+            .execute_lifetime(&years, batches(), &["holds".to_string()])
+            .expect("executes a lifetime judgment");
+        assert_eq!(
+            format!("{:?}", result.outputs["holds"]),
+            "Judgment([Holds])",
+            "lifetime judgment"
+        );
+    });
+}

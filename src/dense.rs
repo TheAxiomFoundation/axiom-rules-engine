@@ -2487,6 +2487,16 @@ fn pending_rows<T>(cached: Option<&DerivedColumn<T>>, mask: &RowMask) -> RowMask
     }
 }
 
+/// Whether evaluating a rule computes it: when rows are pending, or when it
+/// has never been computed, which it is even under an empty mask to fix its
+/// dtype. Deferral must cover both. A rule no row reaches still reads the
+/// rules its formula references, so a deep chain behind an untaken branch,
+/// or in an empty batch, recursed through every link when only pending rows
+/// deferred.
+fn computes<T>(cached: Option<&DerivedColumn<T>>, pending: &RowMask) -> bool {
+    cached.is_none() || !pending.is_empty()
+}
+
 fn merge_scalar<N: DenseNum>(
     cached: Option<DerivedColumn<DenseColumn>>,
     pending: RowMask,
@@ -3036,7 +3046,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     /// for rows no earlier reference asked for.
     fn evaluate_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let pending = pending_rows(self.scalar_cache[derived_index].as_ref(), mask);
-        if !pending.is_empty() && self.depth >= self.suspend_depth {
+        if computes(self.scalar_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
             return Err(Stop::Defer(Deferred {
                 derived: derived_index,
                 judgment: false,
@@ -3105,7 +3117,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
 
     fn evaluate_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let pending = pending_rows(self.judgment_cache[derived_index].as_ref(), mask);
-        if !pending.is_empty() && self.depth >= self.suspend_depth {
+        if computes(self.judgment_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
             return Err(Stop::Defer(Deferred {
                 derived: derived_index,
                 judgment: true,
@@ -3953,7 +3967,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
 
     fn evaluate_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let pending = pending_rows(self.scalar_cache[derived_index].as_ref(), mask);
-        if !pending.is_empty() && self.depth >= self.suspend_depth {
+        if computes(self.scalar_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
             return Err(Stop::Defer(Deferred {
                 derived: derived_index,
                 judgment: false,
@@ -3995,7 +4011,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
 
     fn evaluate_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let pending = pending_rows(self.judgment_cache[derived_index].as_ref(), mask);
-        if !pending.is_empty() && self.depth >= self.suspend_depth {
+        if computes(self.judgment_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
             return Err(Stop::Defer(Deferred {
                 derived: derived_index,
                 judgment: true,

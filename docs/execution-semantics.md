@@ -214,7 +214,10 @@ recursion costs.
 
 Deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. Inlined dense expressions have no rule
-references, which is why dense bounds them (see above).
+references, which is why dense bounds them (see above). Dense computes a rule
+it has never computed even when no row reaches it (to fix the rule's dtype),
+so it defers that computation too: a deep chain behind an untaken branch, or
+in an empty batch, runs in segments like any other.
 
 A rule that is deferred while an evaluation it transitively started still
 waits for it depends on itself. The drivers report that as
