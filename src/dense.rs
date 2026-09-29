@@ -1187,6 +1187,9 @@ struct DenseCompiler<'a> {
 /// and evaluating them recurse through the whole chain. Past this bound dense
 /// declines the program; the generic API evaluates it. The bound is a property
 /// of the program alone, so every build and host declines the same programs.
+/// It also caps the stack inlining uses: measured in a release build, a
+/// chain at the bound compiles and evaluates on a 1 MiB thread, not on
+/// 512 KiB. Debug frames are far larger.
 pub const MAX_INLINE_DEPTH: usize = 512;
 
 /// Why compiling a rule stopped: an error, or a dependency deferred to the

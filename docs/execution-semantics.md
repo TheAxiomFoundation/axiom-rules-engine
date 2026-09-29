@@ -176,7 +176,10 @@ the chain of rules it inlines. Past `dense::MAX_INLINE_DEPTH` (512) levels the
 compiler returns `DenseCompileError::Unsupported` and the generic API
 evaluates the program. The bound depends on the program alone. It is a
 compile-time decline, like the other unsupported shapes, not an evaluation
-error.
+error. Inlined levels do not defer, so the bound, not the deferral
+threshold, caps the stack they use: a chain of rules at the bound compiles
+and evaluates on a 1 MiB thread in a release build but not on 512 KiB, and a
+debug build needs far more.
 
 ## Deep programs
 
