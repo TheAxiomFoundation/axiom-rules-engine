@@ -518,7 +518,8 @@ pub struct Engine<'a> {
     /// How far each resolution of a relation's members has got in the current
     /// drive (see [`Step`]).
     members: HashMap<Step, Progress<MembersResume, Vec<String>>>,
-    /// Expression levels evaluated since the driver last reported them (see
+    /// Expression levels evaluated, members a `count`/`sum` walked and
+    /// relation tuples read since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
 }

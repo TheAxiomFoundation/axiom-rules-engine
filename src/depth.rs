@@ -101,10 +101,12 @@ pub fn with_suspend_depth<R>(levels: usize, f: impl FnOnce() -> R) -> R {
 /// retries included: explain's and fast's expression levels, plus each member
 /// a `count` or `sum` walks and each relation tuple read in resolving a
 /// relation's members; dense's compiled nodes; and the nodes of the rules the
-/// dense compiler compiles (not of what it inlines, which never defers). It
-/// measures work deterministically, so tests can show that deferral adds at
-/// most a constant factor to what recursion does, whatever the machine's
-/// load.
+/// dense compiler compiles (not of what it inlines, which never defers). The
+/// count does not depend on the machine's load, so tests can show that
+/// deferral adds at most a constant factor to what recursion does. Explain's
+/// and fast's counts repeat exactly; the dense compiler's vary slightly from
+/// one load of a program to the next, because it compiles rules in `HashMap`
+/// order.
 ///
 /// Not a stable API.
 #[doc(hidden)]
