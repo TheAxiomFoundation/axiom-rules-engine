@@ -3,7 +3,8 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use axiom_rules_engine::api::{
-    CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
+    CompiledExecutionRequest, ExecutionRequest, RelationBinding, execute_compiled_request,
+    execute_request,
 };
 use axiom_rules_engine::compile::{
     ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
@@ -21,6 +22,7 @@ fn main() {
 enum TopLevelCommand {
     Compile,
     CompileComposed,
+    Run,
     RunCompiled,
     #[cfg(feature = "unit-derivation")]
     CompileUnitAggregation,
@@ -59,6 +61,12 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
             "Compile an originless `module.kind: composition` produced by",
             "axiom-compose.",
         ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Run,
+        name: "run",
+        aliases: &[],
+        description: &["Execute a self-contained JSON request on stdin."],
     },
     CommandMetadata {
         command: TopLevelCommand::RunCompiled,
@@ -165,6 +173,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             TopLevelCommand::Compile => return run_compile(args.collect(), false),
             TopLevelCommand::CompileComposed => return run_compile(args.collect(), true),
+            TopLevelCommand::Run => return run_request(args.collect()),
             TopLevelCommand::RunCompiled => return run_compiled(args.collect()),
             #[cfg(feature = "unit-derivation")]
             TopLevelCommand::CompileUnitAggregation => {
@@ -182,6 +191,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    run_request(Vec::new())
+}
+
+fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut relation_binding = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--help" | "-h" => {
+                println!("{RUN_USAGE}");
+                return Ok(());
+            }
+            _ => return Err(format!("unknown run argument `{arg}`").into()),
+        }
+    }
+
     // Reading a request from stdin is the documented pipeline entry point, but a person who
     // runs the bare binary got `EOF while parsing a value at line 1 column 0`, which reads as
     // a crash rather than as "I expected JSON on stdin". Only consume stdin when it is
@@ -193,7 +219,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let request: ExecutionRequest = serde_json::from_str(&input)?;
+    let mut request: ExecutionRequest = serde_json::from_str(&input)?;
+    if let Some(policy) = relation_binding {
+        request.relation_binding = policy;
+    }
+    warn_lenient_relation_binding(request.relation_binding);
     let response = execute_request(request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
@@ -300,7 +330,12 @@ Run `axiom-rules-engine <command> --help` for the options of a specific command.
 With no command and a piped stdin, a self-contained JSON `ExecutionRequest` is read
 from stdin and its response written to stdout:
 
+  axiom-rules-engine run < request.json
   axiom-rules-engine run-compiled --artifact compiled.json < request.json
+
+Relation tuple kind mismatches are errors by default. Both requests accept
+\"relation_binding\": \"lenient\"; run and run-compiled also accept
+--relation-binding lenient. The selected policy is echoed in response metadata.
 
 Note: the released v0.1.1 binary has a different compile interface from this one —
 its `compile` takes only --program and --output, and it has no `compile-composed`.
@@ -418,12 +453,55 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+const RUN_USAGE: &str = "\
+usage: axiom-rules-engine run [--relation-binding strict|lenient] < request.json
+
+Execute a self-contained ExecutionRequest. Relation tuple kind mismatches are
+errors by default. The flag overrides the request's relation_binding field.
+Lenient execution retains mismatched tuples and reports the policy in metadata
+and on stderr.";
+
+const RUN_COMPILED_USAGE: &str = "\
+usage: axiom-rules-engine run-compiled --artifact <compiled.json> [--relation-binding strict|lenient] < request.json
+
+Execute a CompiledExecutionRequest. Relation tuple kind mismatches are errors by
+default. The flag overrides the request's relation_binding field. Lenient
+execution retains mismatched tuples and reports the policy in metadata and on
+stderr.";
+
+fn parse_relation_binding(
+    value: Option<String>,
+) -> Result<RelationBinding, Box<dyn std::error::Error>> {
+    match value.as_deref() {
+        Some("strict") => Ok(RelationBinding::Strict),
+        Some("lenient") => Ok(RelationBinding::Lenient),
+        Some(other) => {
+            Err(format!("invalid relation binding `{other}`; use `strict` or `lenient`").into())
+        }
+        None => Err("missing `--relation-binding` value; use `strict` or `lenient`".into()),
+    }
+}
+
+fn warn_lenient_relation_binding(policy: RelationBinding) {
+    if policy == RelationBinding::Lenient {
+        eprintln!(
+            "warning[lenient_relation_binding]: relation_binding is lenient; mismatched relation tuples are accepted without reordering"
+        );
+    }
+}
+
 fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut artifact_path: Option<PathBuf> = None;
+    let mut relation_binding = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--help" | "-h" => {
+                println!("{RUN_COMPILED_USAGE}");
+                return Ok(());
+            }
             "--artifact" => {
                 artifact_path = iter.next().map(PathBuf::from);
             }
@@ -439,7 +517,11 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let request: CompiledExecutionRequest = serde_json::from_str(&input)?;
+    let mut request: CompiledExecutionRequest = serde_json::from_str(&input)?;
+    if let Some(policy) = relation_binding {
+        request.relation_binding = policy;
+    }
+    warn_lenient_relation_binding(request.relation_binding);
     let response = execute_compiled_request(artifact, request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())

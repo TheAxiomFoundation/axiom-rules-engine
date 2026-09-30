@@ -236,6 +236,7 @@ fn in_memory_module_source_compiles_and_executes_without_filesystem() {
         end: "2026-01-31".parse().expect("valid date"),
     };
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -388,6 +389,7 @@ fn source_relation_sets_bind_state_parameter_into_federal_formula() {
     };
     let output_id = "us:regulations/42-cfr/435/118#child_medicaid_eligible".to_string();
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -464,6 +466,7 @@ fn source_relation_sets_bind_state_derived_into_federal_formula_hook() {
     };
     let output_id = "us:regulations/7-cfr/273/9#snap_total_allowable_shelter_expenses".to_string();
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
