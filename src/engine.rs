@@ -583,13 +583,12 @@ struct FoldResume {
     total: Decimal,
 }
 
-/// An interrupted resolution of a derived relation's members: the members
-/// the relation's own tuples give, the candidates its source relation gives,
-/// the candidate whose predicate deferred, and the candidates before it that
-/// the predicate selected.
+/// An interrupted resolution of a derived relation's members: the candidates
+/// its source relation gives, the candidate whose predicate deferred, and the
+/// candidates before it that the predicate selected. The relation's own
+/// tuples are read once the resolution finishes, so no retry reads them.
 #[derive(Debug)]
 struct MembersResume {
-    direct: Vec<String>,
     candidates: Vec<String>,
     next: usize,
     selected: Vec<String>,
@@ -1824,21 +1823,15 @@ impl<'a> Engine<'a> {
         };
 
         let MembersResume {
-            direct,
             candidates,
             mut next,
             mut selected,
         } = match resume {
             Some(resume) => resume,
             None => {
-                let direct = self
-                    .relation_index
-                    .get(&(relation.to_string(), current_slot, entity_id.to_string()))
-                    .into_iter()
-                    .flat_map(|records| records.iter().copied())
-                    .filter(|record| record.interval.contains_period(period))
-                    .filter_map(|record| record.tuple.get(related_slot).cloned())
-                    .collect::<Vec<String>>();
+                // Resolving the source's members can defer, and a retry must
+                // not read this relation's own tuples again, so they are read
+                // once the resolution finishes.
                 let candidates = match &schema.derivation {
                     Some(derivation) => self.related_entity_ids(
                         &derivation.source_relation,
@@ -1850,7 +1843,6 @@ impl<'a> Engine<'a> {
                     None => Vec::new(),
                 };
                 MembersResume {
-                    direct,
                     candidates,
                     next: 0,
                     selected: Vec::new(),
@@ -1887,7 +1879,6 @@ impl<'a> Engine<'a> {
                         self.members.insert(
                             key,
                             Progress::Pending(MembersResume {
-                                direct,
                                 candidates,
                                 next,
                                 selected,
@@ -1901,13 +1892,40 @@ impl<'a> Engine<'a> {
             }
         }
 
-        let mut related_ids = direct;
+        // Reading the relation's own tuples makes no trace record and cannot
+        // fail, and the members are sorted, so reading them last changes
+        // nothing recursion would show.
+        let mut related_ids =
+            self.direct_related_ids(relation, current_slot, related_slot, entity_id, period);
         related_ids.extend(selected);
         related_ids.sort();
         related_ids.dedup();
         self.members
             .insert(key, Progress::Done(related_ids.clone()));
         Ok(related_ids)
+    }
+
+    /// The ids `relation`'s own tuples relate to `entity_id` in `period`.
+    /// Each tuple read counts as a visit (see [`crate::depth::count_visits`]),
+    /// so work over a relation's tuples is measured like work over rules.
+    fn direct_related_ids(
+        &mut self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        entity_id: &str,
+        period: &Period,
+    ) -> Vec<String> {
+        let records = self
+            .relation_index
+            .get(&(relation.to_string(), current_slot, entity_id.to_string()))
+            .map_or(&[][..], Vec::as_slice);
+        self.visits += records.len();
+        records
+            .iter()
+            .filter(|record| record.interval.contains_period(period))
+            .filter_map(|record| record.tuple.get(related_slot).cloned())
+            .collect()
     }
 
     fn relation_contains(

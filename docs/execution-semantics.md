@@ -190,14 +190,19 @@ same way. Each counts its nesting levels. At a reference to a rule it has not
 evaluated yet, once that count reaches a threshold, it does not recurse.
 Instead it returns to a driver loop and names the rule. The driver evaluates
 that rule from level zero, then retries the evaluation it interrupted, which
-now finds the rule cached. A long chain therefore runs in segments, each on a
-stack no deeper than the threshold plus one rule's own expression nesting,
-whatever the chain's length and the host's stack (`src/depth.rs`).
+now finds the rule cached. A long chain of rules therefore runs in segments,
+each on a stack no deeper than the threshold plus one rule's own expression
+nesting, whatever the chain's length: a 20,000-rule chain answers on a 1 MiB
+thread in every mode (`src/depth.rs`). Fast's relation aggregations, which
+run on the explain engine fast embeds, and dense's lifetime reductions, which
+drive each period's executor, nest one bounded drive inside another and can
+use twice that. Expressions dense inlines are bounded separately (see above),
+and chains of derived relations are not covered here (#211).
 
-Deferral changes no result. Evaluating a rule for an entity and period is
-deterministic, so a retry reaches the same references in the same order. Every
-value, value kind, error and explain trace is what uninterrupted recursion
-would produce. Only work changes: a retry walks again, over cached values,
+Deferral changes no result for an acyclic program, which every checked program
+is. Evaluating a rule for an entity and period is deterministic, so a retry
+reaches the same references in the same order. Every value, value kind, error
+and explain trace is what uninterrupted recursion would produce. Only work changes: a retry walks again, over cached values,
 what the interrupted evaluation did before the deferral. The threshold is 128
 levels in release builds, so an evaluation that never nests that deep never
 retries, and 8 in debug builds, whose frames are about thirty times larger;
@@ -209,9 +214,12 @@ a `count` or `sum` over related entities, and the resolution of a relation's
 members, which tests a derived relation's predicate on each candidate. The
 retry of the same rule evaluation resumes an interrupted loop at the member
 that deferred, and reuses a loop that had finished, so a household whose
-members each defer is not walked again for every member. (Fast evaluates
-these aggregations with explain; dense inlines the rules they read, so their
-members never defer.) The rest is the rules still open on the interrupted
+members each defer is not walked again for every member. A relation's own
+tuples are read once, when its members are resolved. Fast evaluates each
+row's relation aggregation as a drive of its own on the explain engine, so
+the same holds within that row; when fast itself retries a column, it
+evaluates the row's aggregation again, once per retry. Dense inlines the
+rules an aggregation reads, so their members never defer. The rest is the rules still open on the interrupted
 path and the operands they had evaluated. So work grows linearly with a
 chain's length, and a rule with `k` operands that each defer walks its
 earlier operands `k` times. `tests/deferral_transparency.rs` measures work in
@@ -233,6 +241,7 @@ waits for it depends on itself. The drivers report that as
 `EvalError::DependencyCycle` (or the dense compiler's cyclic-dependency error)
 instead of deferring forever. Compiled artifacts and `execute_request` refuse
 cyclic programs before evaluating, so only a hand-built `Program` can reach it.
+Which rule of the cycle the error names can depend on the threshold.
 
 ## How the columnar evaluators implement this
 

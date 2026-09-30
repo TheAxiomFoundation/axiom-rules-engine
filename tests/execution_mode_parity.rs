@@ -4513,7 +4513,7 @@ fn check_deferral_independence(
             }));
         }
     }
-    if profile.name == DENSE.name {
+    if profile.name == DENSE.name || profile.name == LINKED_DENSE.name {
         let mut outputs = Vec::new();
         for output in lowered
             .queries
@@ -4525,7 +4525,7 @@ fn check_deferral_independence(
             }
         }
         let referenced = referenced_inputs(&lowered.program);
-        let batch = lower_dense_batch(case, DENSE, &referenced);
+        let batch = lower_dense_batch(case, profile, &referenced);
         checks.push(same_at_every_threshold("dense", || {
             raw_dense(&lowered.program, batch.clone(), &outputs)
         }));
@@ -4554,6 +4554,10 @@ fn random_programs_are_independent_of_the_deferral_threshold() {
         ("deferral: full generator", 11, FULL),
         ("deferral: relation aggregation", 12, RELATIONS),
         ("deferral: dense", 13, DENSE),
+        // Aggregations over related households, whose folds evaluate rules
+        // for an entity other than the row's.
+        ("deferral: linked dense", 14, LINKED_DENSE),
+        ("deferral: evaluation order", 15, EVAL_ORDER),
     ] {
         let stats = run_property_cases(name, property, profile, cases, |case, stats| {
             check_deferral_independence(case, profile, stats)

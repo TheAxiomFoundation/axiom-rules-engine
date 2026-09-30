@@ -11,36 +11,47 @@
 //! [`suspend_depth`], it stops recursing: it unwinds to its driver loop,
 //! naming the rule it needs. The driver evaluates that rule from level zero,
 //! then retries what it was doing, which now finds the rule cached. Chains
-//! longer than the threshold therefore run in segments, each on a stack no
-//! deeper than the threshold plus one rule's own expression nesting, whatever
-//! the chain's length or the host's stack size (a 2 MiB test thread, a Python
-//! thread, a 1 MiB wasm stack).
+//! of rules longer than the threshold therefore run in segments, each on a
+//! stack no deeper than the threshold plus one rule's own expression nesting,
+//! whatever the chain's length (a 20,000-rule chain answers on a 1 MiB
+//! thread). Two evaluations nest one drive inside another and can use twice
+//! that: fast's relation aggregations run on the explain engine it embeds,
+//! and dense's lifetime reductions drive each period's executor. What this
+//! does not bound: expressions dense inlines into a relation aggregation,
+//! which have no rule to defer and are capped by `dense::MAX_INLINE_DEPTH`
+//! instead, and chains of derived relations (#211).
 //!
-//! Deferral changes no result. Evaluation of a rule for an entity and period
-//! is deterministic, so a retry reaches the same references in the same order
+//! Deferral changes no result for an acyclic program, which every checked
+//! program is. Evaluation of a rule for an entity and period is
+//! deterministic, so a retry reaches the same references in the same order
 //! and finds every rule it needs already cached; a rule's value, errors and
 //! trace do not depend on which stack computed them. Only the amount of work
 //! changes: a retry walks again, over cached values, what the interrupted
 //! evaluation did before the deferral.
 //!
-//! What a retry walks again depends on the program, not on the data. Explain
-//! (and fast, which evaluates relation aggregations with explain) records the
-//! progress of every loop over data a deferral can interrupt: a `count` or
-//! `sum` over related entities, and the resolution of a relation's members,
-//! which tests a derived relation's predicate on each candidate. The retry
-//! resumes an interrupted loop at the member that deferred and reuses a
-//! finished one, so a household whose every member defers is not walked once
-//! per member. The rest is the rules still open on the interrupted path and
-//! the operands they had evaluated. So a chain costs a constant factor more
+//! What a retry walks again depends on the program, not on the data. Within
+//! one drive, explain records the progress of every loop over data a deferral
+//! can interrupt: a `count` or `sum` over related entities, and the
+//! resolution of a relation's members, which tests a derived relation's
+//! predicate on each candidate and reads the relation's own tuples once, at
+//! the end. The retry resumes an interrupted loop at the member that deferred
+//! and reuses a finished one, so a household whose every member defers is not
+//! walked once per member. Fast evaluates each row's relation aggregation as
+//! a drive of its own on the explain engine it embeds, so the same holds
+//! within that row; when fast itself retries a column, it evaluates the
+//! aggregation for its rows again, once per retry, which is linear in the
+//! rows. The rest is the rules still open on the interrupted path and the
+//! operands they had evaluated. So a chain costs a constant factor more
 //! than recursion; a rule with `k` operands that each defer walks its earlier
 //! operands `k` times. [`count_visits`] measures this, and
 //! `tests/deferral_transparency.rs` pins it.
 //!
 //! A rule that is deferred while an evaluation it transitively started is
 //! still waiting for it depends on itself. The drivers report that as a cycle
-//! instead of deferring forever. Checked programs are acyclic (see
-//! `compile::validate_dependency_graph`); only a hand-built [`crate::model::Program`]
-//! can reach it.
+//! instead of deferring forever. Which rule of the cycle the error names can
+//! depend on the threshold, because it is whichever rule deferred twice.
+//! Checked programs are acyclic (see `compile::validate_dependency_graph`);
+//! only a hand-built [`crate::model::Program`] can reach it.
 
 use std::cell::Cell;
 

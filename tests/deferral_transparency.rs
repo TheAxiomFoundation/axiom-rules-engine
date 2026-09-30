@@ -1772,3 +1772,73 @@ fn dense_keeps_a_rules_computed_rows_across_a_deferral() {
         assert_eq!(answer, recursive, "threshold {threshold}");
     }
 }
+
+/// A derived relation `outer`, derived from `elig`, whose predicate reads a
+/// 12-rule person chain, with `tuples` explicit `outer` tuples of its own for
+/// the household beside the `candidates` members `elig` filters.
+fn relation_with_own_tuples(candidates: usize, tuples: usize) -> (Value, Value, Value) {
+    let mut rules = chain("p", "Person", 12, |_| int(0), int(1));
+    rules.push(scalar(
+        "top",
+        "Household",
+        count_related("outer", 1, 0, None),
+    ));
+    let derived_relation = |name: &str, source: &str, predicate: Value| {
+        json!({
+            "name": name, "arity": 2, "slot_entities": ["Person", "Household"],
+            "derivation": {
+                "source_relation": source, "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"], "predicate": predicate,
+            },
+        })
+    };
+    let program = json!({
+        "relations": [
+            members_relation(),
+            derived_relation("elig", "member_of_household", cmp(derived("p0"), "gt", int(0))),
+            derived_relation("outer", "elig", cmp(int(1), "eq", int(1))),
+        ],
+        "derived": rules,
+    });
+    let mut relations: Vec<Value> = (0..candidates)
+        .map(|member| relation_record("member_of_household", &[&format!("m{member:05}"), "h1"]))
+        .collect();
+    relations.extend(
+        (0..tuples).map(|tuple| relation_record("outer", &[&format!("t{tuple:05}"), "h1"])),
+    );
+    let dataset = json!({"inputs": [], "relations": relations});
+    let queries = json!([query("h1", 1, &["top"])]);
+    (program, dataset, queries)
+}
+
+/// Resolving a derived relation's members reads the relation's own tuples
+/// once, however many times the resolution of its source is interrupted.
+/// Reading them before resolving the source, as the first versions of the
+/// resumable resolution did, read them again on every retry: 20,256 tuples
+/// under recursion against 5,140,256 with deferral, for 256 deferring
+/// candidates and 20,000 tuples. Tuple reads count as visits.
+#[test]
+fn a_derived_relations_own_tuples_are_read_once() {
+    let (program, dataset, queries) = relation_with_own_tuples(128, 4_000);
+    on_stack(512 * MIB, move || {
+        for mode in ["explain", "fast"] {
+            let (recursive, recursive_visits) = with_suspend_depth(usize::MAX, || {
+                count_visits(|| run(mode, &program, &dataset, &queries))
+            });
+            let (deferred, deferred_visits) = with_suspend_depth(8, || {
+                count_visits(|| run(mode, &program, &dataset, &queries))
+            });
+            assert_eq!(deferred, recursive, "{mode}: deferral changed the response");
+            assert!(
+                recursive.contains("\"value\":4128")
+                    && recursive.contains(&format!("\"actual_mode\":\"{mode}\"")),
+                "{mode}: {}",
+                &recursive[..recursive.len().min(400)]
+            );
+            assert!(
+                deferred_visits <= 3 * recursive_visits,
+                "{mode}: deferral visited {deferred_visits} nodes, recursion {recursive_visits}"
+            );
+        }
+    });
+}

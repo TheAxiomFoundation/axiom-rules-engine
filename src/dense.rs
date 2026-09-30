@@ -949,7 +949,9 @@ impl DenseCompiledProgram {
             | CompiledScalarExpr::PeriodStart
             | CompiledScalarExpr::PeriodEnd => false,
             CompiledScalarExpr::Derived(index) => {
-                // Earlier in index order, so already decided.
+                // Earlier in index order, so already decided: a rule is
+                // compiled after every rule it reads.
+                debug_assert!(*index < reduces.len(), "a rule reads a later rule");
                 reduces.get(*index).copied().unwrap_or(false)
             }
             CompiledScalarExpr::ParameterLookup { index, .. } => {
@@ -1017,7 +1019,9 @@ impl DenseCompiledProgram {
                     || self.scalar_reduces_over_periods(right, reduces)
             }
             CompiledJudgmentExpr::Derived(index) => {
-                // Earlier in index order, so already decided.
+                // Earlier in index order, so already decided: a rule is
+                // compiled after every rule it reads.
+                debug_assert!(*index < reduces.len(), "a rule reads a later rule");
                 reduces.get(*index).copied().unwrap_or(false)
             }
             CompiledJudgmentExpr::And(items) | CompiledJudgmentExpr::Or(items) => items
