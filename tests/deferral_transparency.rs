@@ -1662,11 +1662,13 @@ fn deferring_loops(members: usize) -> (Value, Value, Value) {
 /// deferring member. A derived relation's members are resolved by testing its
 /// predicate on each candidate; when a candidate's predicate defers, the
 /// retry resumes at that candidate. A `count` or `sum` that has finished is
-/// not walked again when a later one in the same rule defers. Explain and
-/// fast (whose aggregations run on explain) visit a constant multiple of the
-/// nodes recursion visits at 256 members; walking the loops again, as the
-/// first versions of deferral did, cost 26 and 50 times recursion there, and
-/// the ratio doubled with the members.
+/// not walked again when a later one in the same rule defers; each member a
+/// `count` walks is a visit, so walking it again shows even though a bare
+/// `count` evaluates nothing per member. Explain and fast (whose aggregations
+/// run on explain) visit 1.6 times the nodes recursion visits at 256 members;
+/// walking the loops again, as the first versions of deferral did, cost 26
+/// and 50 times recursion there, and the ratio doubled with the members.
+/// Walking only the finished `count` again costs 4.8 times.
 #[test]
 fn loops_over_members_are_not_walked_again_for_each_deferral() {
     let (program, dataset, queries) = deferring_loops(256);
@@ -1838,6 +1840,102 @@ fn a_derived_relations_own_tuples_are_read_once() {
             assert!(
                 deferred_visits <= 3 * recursive_visits,
                 "{mode}: deferral visited {deferred_visits} nodes, recursion {recursive_visits}"
+            );
+        }
+    });
+}
+
+/// A rule's trace is the same whether it is queried alone or reached after
+/// another rule evaluation, in the same drive, resolved the same members.
+/// `top` resolves person `a`'s `good_kids` inside a `where` clause, then sums
+/// `n_kids`, which resolves them again for `a`. Loop progress is keyed by the
+/// rule evaluation a loop runs in, so `n_kids` walks the resolution itself and
+/// records the kids' rules as its own dependencies, as recursion does; keyed
+/// without it, `n_kids` reused `top`'s finished resolution and lost them, at
+/// every threshold, including with deferral off.
+#[test]
+fn a_rules_trace_does_not_depend_on_who_resolved_its_members_first() {
+    let derived_relation = |name: &str, source: &str, predicate: Value| {
+        json!({
+            "name": name, "arity": 2, "slot_entities": ["Kid", "Person"],
+            "derivation": {
+                "source_relation": source, "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Kid", "Person"], "predicate": predicate,
+            },
+        })
+    };
+    let mut rules = chain("kc", "Kid", 3, |_| int(1), input_or("kage", "0"));
+    rules.push(scalar(
+        "n_kids",
+        "Person",
+        count_related("good_kids", 1, 0, None),
+    ));
+    rules.push(scalar(
+        "top",
+        "Household",
+        add(vec![
+            count_related(
+                "member_of_household",
+                1,
+                0,
+                Some(cmp(count_related("good_kids", 1, 0, None), "gte", int(1))),
+            ),
+            sum_related("member_of_household", 1, 0, "n_kids", None),
+        ]),
+    ));
+    let program = json!({
+        "relations": [
+            members_relation(),
+            {"name": "kid_of", "arity": 2, "slot_entities": ["Kid", "Person"]},
+            derived_relation("good_kids", "kid_of", cmp(derived("kc0"), "gt", int(4))),
+        ],
+        "derived": rules,
+    });
+    let dataset = json!({
+        "inputs": [
+            input_record("Kid", "k1", "kage", decimal_value("0")),
+            input_record("Kid", "k2", "kage", decimal_value("2")),
+        ],
+        "relations": [
+            relation_record("member_of_household", &["a", "h1"]),
+            relation_record("kid_of", &["k1", "a"]),
+            relation_record("kid_of", &["k2", "a"]),
+        ],
+    });
+    let n_kids_dependencies = |response: &str| -> Value {
+        let response: Value = serde_json::from_str(response).expect(response);
+        for result in response["results"].as_array().expect("results") {
+            if let Some(trace) = result["trace"].as_object() {
+                for (key, node) in trace {
+                    if key == "n_kids" || key.starts_with("n_kids@") {
+                        return node["dependencies"].clone();
+                    }
+                }
+            }
+        }
+        panic!("no n_kids trace in {response}");
+    };
+    on_stack(64 * MIB, move || {
+        let ask = |entity_id: &str, output: &str| {
+            run(
+                "explain",
+                &program,
+                &dataset,
+                &json!([query(entity_id, 1, &[output])]),
+            )
+        };
+        for threshold in [usize::MAX, 8, 1] {
+            let alone = with_suspend_depth(threshold, || ask("a", "n_kids"));
+            let through_top = with_suspend_depth(threshold, || ask("h1", "top"));
+            let alone = n_kids_dependencies(&alone);
+            assert!(
+                alone.to_string().contains("kc0"),
+                "threshold {threshold}: {alone}"
+            );
+            assert_eq!(
+                alone,
+                n_kids_dependencies(&through_top),
+                "threshold {threshold}"
             );
         }
     });

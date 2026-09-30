@@ -97,12 +97,14 @@ pub fn with_suspend_depth<R>(levels: usize, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Run `f` and count the expression levels the evaluators visited on this
-/// thread meanwhile, retries included: explain's and fast's nodes, dense's
-/// compiled nodes, and the nodes of the rules the dense compiler compiles
-/// (not of what it inlines, which never defers). It measures work
-/// deterministically, so tests can show that deferral adds at most a constant
-/// factor to what recursion does, whatever the machine's load.
+/// Run `f` and count the work the evaluators did on this thread meanwhile,
+/// retries included: explain's and fast's expression levels, plus each member
+/// a `count` or `sum` walks and each relation tuple read in resolving a
+/// relation's members; dense's compiled nodes; and the nodes of the rules the
+/// dense compiler compiles (not of what it inlines, which never defers). It
+/// measures work deterministically, so tests can show that deferral adds at
+/// most a constant factor to what recursion does, whatever the machine's
+/// load.
 ///
 /// Not a stable API.
 #[doc(hidden)]

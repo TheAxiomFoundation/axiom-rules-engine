@@ -202,11 +202,12 @@ and chains of derived relations are not covered here (#211).
 Deferral changes no result for an acyclic program, which every checked program
 is. Evaluating a rule for an entity and period is deterministic, so a retry
 reaches the same references in the same order. Every value, value kind, error
-and explain trace is what uninterrupted recursion would produce. Only work changes: a retry walks again, over cached values,
-what the interrupted evaluation did before the deferral. The threshold is 128
-levels in release builds, so an evaluation that never nests that deep never
-retries, and 8 in debug builds, whose frames are about thirty times larger;
-deferring early also exercises deferral throughout the debug test suite.
+and explain trace is what uninterrupted recursion would produce. Only work
+changes: a retry walks again, over cached values, what the interrupted
+evaluation did before the deferral. The threshold is 128 levels in release
+builds, so an evaluation that never nests that deep never retries, and 8 in
+debug builds, whose frames are about thirty times larger; deferring early also
+exercises deferral throughout the debug test suite.
 
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
@@ -219,15 +220,17 @@ tuples are read once, when its members are resolved. Fast evaluates each
 row's relation aggregation as a drive of its own on the explain engine, so
 the same holds within that row; when fast itself retries a column, it
 evaluates the row's aggregation again, once per retry. Dense inlines the
-rules an aggregation reads, so their members never defer. The rest is the rules still open on the interrupted
-path and the operands they had evaluated. So work grows linearly with a
-chain's length, and a rule with `k` operands that each defer walks its
-earlier operands `k` times. `tests/deferral_transparency.rs` measures work in
-nodes visited, which does not depend on the machine: a 20,000-rule chain
-costs four times a 5,000-rule one in every mode, 1,000 members that each
-defer cost 1.6 times what recursion costs, and a derived relation whose
-predicate defers for each of 256 members costs twice what recursion costs
-(each bounded there at three times, whatever the member count).
+rules an aggregation reads, so their members never defer. The rest is the
+rules still open on the interrupted path and the operands they had evaluated.
+So work grows linearly with a chain's length, and a rule with `k` operands
+that each defer walks its earlier operands `k` times.
+`tests/deferral_transparency.rs` measures work in nodes visited, counting
+each expression level, each member a `count` or `sum` walks and each tuple
+read, which does not depend on the machine: a 20,000-rule chain costs four
+times a 5,000-rule one in every mode, and 1,000 members that each defer, or
+a derived relation whose predicate defers for each of 256 members, cost 1.6
+times what recursion costs (each bounded there at three times, whatever the
+member count).
 
 Deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. Inlined dense expressions have no rule

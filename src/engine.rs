@@ -1566,6 +1566,9 @@ impl<'a> Engine<'a> {
             },
         };
         while let Some(related_id) = related_ids.get(next) {
+            // Each member counts as a visit, so a fold walked again shows in
+            // `count_visits` even when its members read nothing.
+            self.visits += 1;
             match self.fold_member(where_clause, value, related_id, period) {
                 Ok(None) => {}
                 Ok(Some(amount)) => {

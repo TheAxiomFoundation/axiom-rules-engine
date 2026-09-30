@@ -4475,8 +4475,8 @@ fn raw_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -
 }
 
 /// Run `run` with no deferral and at each of [`DEFERRAL_THRESHOLDS`]; every
-/// run must return exactly what the recursive run returns.
-fn same_at_every_threshold(what: &str, run: impl Fn() -> String) -> Result<(), String> {
+/// run must return exactly what the recursive run returns, which is returned.
+fn same_at_every_threshold(what: &str, run: impl Fn() -> String) -> Result<String, String> {
     let recursive = axiom_rules_engine::depth::with_suspend_depth(usize::MAX, &run);
     for threshold in DEFERRAL_THRESHOLDS {
         let deferred = axiom_rules_engine::depth::with_suspend_depth(threshold, &run);
@@ -4486,7 +4486,7 @@ fn same_at_every_threshold(what: &str, run: impl Fn() -> String) -> Result<(), S
             ));
         }
     }
-    Ok(())
+    Ok(recursive)
 }
 
 fn check_deferral_independence(
@@ -4503,14 +4503,22 @@ fn check_deferral_independence(
     ] {
         for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
             let what = format!("{label} in {mode:?} mode");
-            checks.push(same_at_every_threshold(&what, || {
+            let checked = same_at_every_threshold(&what, || {
                 raw_sparse(request(
                     mode.clone(),
                     program,
                     &lowered.dataset,
                     &lowered.queries,
                 ))
-            }));
+            });
+            if let (Ok(response), "program", ExecutionMode::Explain) = (&checked, label, &mode) {
+                if response.starts_with("Err(") {
+                    stats.explain_err += 1;
+                } else {
+                    stats.explain_ok += 1;
+                }
+            }
+            checks.push(checked);
         }
     }
     if profile.name == DENSE.name || profile.name == LINKED_DENSE.name {
@@ -4526,13 +4534,21 @@ fn check_deferral_independence(
         }
         let referenced = referenced_inputs(&lowered.program);
         let batch = lower_dense_batch(case, profile, &referenced);
-        checks.push(same_at_every_threshold("dense", || {
+        let checked = same_at_every_threshold("dense", || {
             raw_dense(&lowered.program, batch.clone(), &outputs)
-        }));
+        });
+        if let Ok(response) = &checked {
+            if response.starts_with("not compiled") {
+                stats.dense_declined += 1;
+            } else {
+                stats.dense_ran += 1;
+            }
+        }
+        checks.push(checked);
     }
     checks
         .into_iter()
-        .collect::<Result<Vec<()>, String>>()
+        .collect::<Result<Vec<String>, String>>()
         .map(|_| ())
         .map_err(|problem| render_case(profile, &lowered, &[("divergence", problem)]))
 }
