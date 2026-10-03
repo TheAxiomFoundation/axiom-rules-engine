@@ -14,7 +14,7 @@
 //! overflow fails its row like any other evaluation error.
 #![deny(clippy::arithmetic_side_effects)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rust_decimal::Decimal;
 
@@ -466,6 +466,33 @@ struct DerivedColumn<T> {
 type Scalars = (ScalarColumn, RowErrors);
 type Judgments = (Vec<JudgmentOutcome>, RowErrors);
 
+/// A derived rule's rows the evaluator deferred to its driver instead of
+/// recursing into them (see [`crate::depth`]).
+#[derive(Debug)]
+struct Deferred {
+    rule: String,
+    judgment: bool,
+    rows: RowMask,
+}
+
+/// Why a column evaluation stopped before producing a column: the batch
+/// reached a construct fast mode declines (the request falls back to
+/// explain), or a rule was deferred to the driver, which evaluates it and
+/// retries. Row-level errors are values in [`RowErrors`], never a `Stop`.
+#[derive(Debug)]
+enum Stop {
+    Decline(EvalError),
+    Defer(Deferred),
+}
+
+impl From<EvalError> for Stop {
+    fn from(error: EvalError) -> Self {
+        Self::Decline(error)
+    }
+}
+
+type Flow<T> = Result<T, Stop>;
+
 struct BulkEvaluator<'a> {
     program: &'a Program,
     data: &'a DataSet,
@@ -477,6 +504,14 @@ struct BulkEvaluator<'a> {
     /// The reference interpreter, built on first use, for per-entity relation
     /// aggregation.
     engine: Option<Engine<'a>>,
+    /// Expression levels on the stack since the driver's current task began.
+    depth: usize,
+    /// The level at which a rule's pending rows are deferred to the driver
+    /// (see [`crate::depth`]).
+    suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
 }
 
 impl<'a> BulkEvaluator<'a> {
@@ -517,6 +552,9 @@ impl<'a> BulkEvaluator<'a> {
             scalar_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
             engine: None,
+            depth: 0,
+            suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
         }
     }
 
@@ -537,13 +575,66 @@ impl<'a> BulkEvaluator<'a> {
             .get_or_insert_with(|| Engine::new_untraced(program, data))
     }
 
-    /// Evaluate a requested output for the rows in `mask`, in the order the
-    /// explain path checks it: formula version, then the rule itself.
+    /// Evaluate a requested output for the rows in `mask`. When the
+    /// evaluation defers a rule (see [`crate::depth`]), evaluate that rule's
+    /// rows as a task of its own, from level zero, and retry. Tasks form a
+    /// stack: a task can defer a rule it reaches, which runs first. A rule
+    /// deferred while a task waiting on it is still open reaches itself, which
+    /// bulk declines; explain then reports the cycle.
     fn evaluate_output(
         &mut self,
         name: &str,
         mask: &RowMask,
     ) -> Result<EvaluatedOutput, EvalError> {
+        let output = self.run_tasks(name, mask);
+        crate::depth::add_visits(std::mem::take(&mut self.visits));
+        output
+    }
+
+    fn run_tasks(&mut self, name: &str, mask: &RowMask) -> Result<EvaluatedOutput, EvalError> {
+        let mut tasks: Vec<Deferred> = Vec::new();
+        let mut waiting: HashSet<(String, bool)> = HashSet::new();
+        loop {
+            self.depth = 0;
+            let stop = match tasks.last() {
+                None => match self.output_columns(name, mask) {
+                    Ok(output) => return Ok(output),
+                    Err(stop) => stop,
+                },
+                Some(task) => {
+                    let (rule, rows) = (task.rule.clone(), task.rows.clone());
+                    let evaluated = if task.judgment {
+                        self.evaluate_judgment(&rule, &rows).map(|_| ())
+                    } else {
+                        self.evaluate_scalar(&rule, &rows).map(|_| ())
+                    };
+                    match evaluated {
+                        Ok(()) => {
+                            let done = tasks.pop().expect("a task was running");
+                            waiting.remove(&(done.rule, done.judgment));
+                            continue;
+                        }
+                        Err(stop) => stop,
+                    }
+                }
+            };
+            match stop {
+                Stop::Decline(error) => return Err(error),
+                Stop::Defer(deferred) => {
+                    let key = (deferred.rule.clone(), deferred.judgment);
+                    if waiting.contains(&key) {
+                        return Err(EvalError::DependencyCycle(deferred.rule));
+                    }
+                    waiting.insert(key);
+                    tasks.push(deferred);
+                }
+            }
+        }
+    }
+
+    /// One attempt at a requested output's column, in the order the explain
+    /// path checks it: formula version, then the rule itself.
+    fn output_columns(&mut self, name: &str, mask: &RowMask) -> Flow<EvaluatedOutput> {
         let derived = self.get_derived(name)?;
         match derived.semantics_at(&self.period) {
             Some(DerivedSemantics::Judgment(_)) => {
@@ -579,11 +670,18 @@ impl<'a> BulkEvaluator<'a> {
 
     /// A derived scalar's column for the rows in `mask`, computing it only for
     /// rows no earlier reference asked for.
-    fn evaluate_scalar(&mut self, name: &str, mask: &RowMask) -> Result<Scalars, EvalError> {
+    fn evaluate_scalar(&mut self, name: &str, mask: &RowMask) -> Flow<Scalars> {
         let pending = match self.scalar_cache.get(name) {
             Some(cached) => mask.difference(&cached.computed),
             None => mask.clone(),
         };
+        if !pending.is_empty() && self.depth >= self.suspend_depth {
+            return Err(Stop::Defer(Deferred {
+                rule: name.to_string(),
+                judgment: false,
+                rows: pending,
+            }));
+        }
         if !pending.is_empty() {
             let (values, errors) = self.compute_scalar(name, &pending)?;
             match self.scalar_cache.get_mut(name) {
@@ -612,7 +710,7 @@ impl<'a> BulkEvaluator<'a> {
         })
     }
 
-    fn compute_scalar(&mut self, name: &str, mask: &RowMask) -> Result<Scalars, EvalError> {
+    fn compute_scalar(&mut self, name: &str, mask: &RowMask) -> Flow<Scalars> {
         let expr = match self.derived_formula(name) {
             Ok(DerivedSemantics::Scalar(expr)) => expr,
             Ok(DerivedSemantics::Judgment(_)) => {
@@ -629,11 +727,18 @@ impl<'a> BulkEvaluator<'a> {
         Ok((values, errors))
     }
 
-    fn evaluate_judgment(&mut self, name: &str, mask: &RowMask) -> Result<Judgments, EvalError> {
+    fn evaluate_judgment(&mut self, name: &str, mask: &RowMask) -> Flow<Judgments> {
         let pending = match self.judgment_cache.get(name) {
             Some(cached) => mask.difference(&cached.computed),
             None => mask.clone(),
         };
+        if !pending.is_empty() && self.depth >= self.suspend_depth {
+            return Err(Stop::Defer(Deferred {
+                rule: name.to_string(),
+                judgment: true,
+                rows: pending,
+            }));
+        }
         if !pending.is_empty() {
             let (values, errors) = self.compute_judgment(name, &pending)?;
             match self.judgment_cache.get_mut(name) {
@@ -665,7 +770,7 @@ impl<'a> BulkEvaluator<'a> {
         })
     }
 
-    fn compute_judgment(&mut self, name: &str, mask: &RowMask) -> Result<Judgments, EvalError> {
+    fn compute_judgment(&mut self, name: &str, mask: &RowMask) -> Flow<Judgments> {
         let expr = match self.derived_formula(name) {
             Ok(DerivedSemantics::Judgment(expr)) => expr,
             Ok(DerivedSemantics::Scalar(_)) => {
@@ -704,11 +809,15 @@ impl<'a> BulkEvaluator<'a> {
         (ScalarColumn::placeholder(self.len()), errors)
     }
 
-    fn eval_scalar_expr(
-        &mut self,
-        expr: &ScalarExpr,
-        mask: &RowMask,
-    ) -> Result<Scalars, EvalError> {
+    fn eval_scalar_expr(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.scalar_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn scalar_node(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         let len = self.len();
         if mask.is_empty() {
             return Ok((ScalarColumn::placeholder(len), RowErrors::new()));
@@ -716,7 +825,7 @@ impl<'a> BulkEvaluator<'a> {
         match expr {
             ScalarExpr::Literal(value) => {
                 if matches!(value, ScalarValue::Date(_)) {
-                    return Err(unsupported("date literals"));
+                    return Err(unsupported("date literals").into());
                 }
                 Ok((ScalarColumn::broadcast(value, len), RowErrors::new()))
             }
@@ -778,12 +887,12 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::Ceil(value) => self.eval_unary(value, mask, |value| value.ceil()),
             ScalarExpr::Floor(value) => self.eval_unary(value, mask, |value| value.floor()),
             ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => {
-                Err(unsupported("period_start / period_end"))
+                Err(unsupported("period_start / period_end").into())
             }
-            ScalarExpr::DateAddDays { .. } => Err(unsupported("date_add_days")),
-            ScalarExpr::DateAddMonths { .. } => Err(unsupported("date_add_months")),
-            ScalarExpr::DateAddYears { .. } => Err(unsupported("date_add_years")),
-            ScalarExpr::DaysBetween { .. } => Err(unsupported("days_between")),
+            ScalarExpr::DateAddDays { .. } => Err(unsupported("date_add_days").into()),
+            ScalarExpr::DateAddMonths { .. } => Err(unsupported("date_add_months").into()),
+            ScalarExpr::DateAddYears { .. } => Err(unsupported("date_add_years").into()),
+            ScalarExpr::DaysBetween { .. } => Err(unsupported("days_between").into()),
             ScalarExpr::OverPeriods { kind, .. } => Ok(self.fail_all(
                 mask,
                 EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()),
@@ -831,10 +940,10 @@ impl<'a> BulkEvaluator<'a> {
     /// `errors`.
     fn eval_decimal_operand(
         &mut self,
-        expr: &ScalarExpr,
+        expr: &'a ScalarExpr,
         mask: &RowMask,
         errors: &mut RowErrors,
-    ) -> Result<(Vec<Decimal>, RowMask), EvalError> {
+    ) -> Flow<(Vec<Decimal>, RowMask)> {
         let (column, operand_errors) = self.eval_scalar_expr(expr, mask)?;
         let mut live = mask.without(&operand_errors);
         errors.absorb(operand_errors);
@@ -849,11 +958,11 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_binary(
         &mut self,
-        left: &ScalarExpr,
-        right: &ScalarExpr,
+        left: &'a ScalarExpr,
+        right: &'a ScalarExpr,
         mask: &RowMask,
         operation: impl Fn(Decimal, Decimal) -> Result<Decimal, ArithmeticError>,
-    ) -> Result<Scalars, EvalError> {
+    ) -> Flow<Scalars> {
         let mut errors = RowErrors::new();
         let (left, live) = self.eval_decimal_operand(left, mask, &mut errors)?;
         let (right, live) = self.eval_decimal_operand(right, &live, &mut errors)?;
@@ -869,10 +978,10 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_unary(
         &mut self,
-        value: &ScalarExpr,
+        value: &'a ScalarExpr,
         mask: &RowMask,
         operation: impl Fn(Decimal) -> Decimal,
-    ) -> Result<Scalars, EvalError> {
+    ) -> Flow<Scalars> {
         let mut errors = RowErrors::new();
         let (values, live) = self.eval_decimal_operand(value, mask, &mut errors)?;
         let mut result = vec![Decimal::ZERO; self.len()];
@@ -884,11 +993,11 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_extremum(
         &mut self,
-        items: &[ScalarExpr],
+        items: &'a [ScalarExpr],
         mask: &RowMask,
         function: &str,
         replaces: impl Fn(Decimal, Decimal) -> bool,
-    ) -> Result<Scalars, EvalError> {
+    ) -> Flow<Scalars> {
         let Some((first, rest)) = items.split_first() else {
             return Ok(self.fail_all(
                 mask,
@@ -914,7 +1023,7 @@ impl<'a> BulkEvaluator<'a> {
         name: &str,
         default: Option<&ScalarValue>,
         mask: &RowMask,
-    ) -> Result<Scalars, EvalError> {
+    ) -> Flow<Scalars> {
         let cells = self.query_input_cells.get(name);
         let mut errors = RowErrors::new();
         let mut entries = Vec::with_capacity(mask.count());
@@ -936,7 +1045,7 @@ impl<'a> BulkEvaluator<'a> {
                 }
             };
             if matches!(value, ScalarValue::Date(_)) {
-                return Err(unsupported("date inputs"));
+                return Err(unsupported("date inputs").into());
             }
             entries.push((row, value));
         }
@@ -946,9 +1055,9 @@ impl<'a> BulkEvaluator<'a> {
     fn eval_parameter_lookup(
         &mut self,
         parameter: &str,
-        index: &ScalarExpr,
+        index: &'a ScalarExpr,
         mask: &RowMask,
-    ) -> Result<Scalars, EvalError> {
+    ) -> Flow<Scalars> {
         let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
         let live = mask.without(&errors);
         let definition = self.program.parameters.get(parameter);
@@ -986,7 +1095,7 @@ impl<'a> BulkEvaluator<'a> {
                 continue;
             };
             if matches!(value, ScalarValue::Date(_)) {
-                return Err(unsupported("date parameter values"));
+                return Err(unsupported("date parameter values").into());
             }
             entries.push((row, value.clone()));
         }
@@ -996,7 +1105,7 @@ impl<'a> BulkEvaluator<'a> {
     /// Relation aggregations visit each row's related entities, so they run
     /// row by row on the reference interpreter: identical id resolution,
     /// derived-relation filtering, `where` laziness and related values.
-    fn eval_per_entity(&mut self, expr: &ScalarExpr, mask: &RowMask) -> Result<Scalars, EvalError> {
+    fn eval_per_entity(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         let period = self.period.clone();
         let mut errors = RowErrors::new();
         let mut entries = Vec::with_capacity(mask.count());
@@ -1005,7 +1114,7 @@ impl<'a> BulkEvaluator<'a> {
             match self.engine().eval_scalar_expr(expr, &entity_id, &period) {
                 Ok(value) => {
                     if matches!(value, ScalarValue::Date(_)) {
-                        return Err(unsupported("date values"));
+                        return Err(unsupported("date values").into());
                     }
                     entries.push((row, value));
                 }
@@ -1015,11 +1124,15 @@ impl<'a> BulkEvaluator<'a> {
         Ok((ScalarColumn::from_entries(self.len(), entries), errors))
     }
 
-    fn eval_judgment_expr(
-        &mut self,
-        expr: &JudgmentExpr,
-        mask: &RowMask,
-    ) -> Result<Judgments, EvalError> {
+    fn eval_judgment_expr(&mut self, expr: &'a JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.judgment_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn judgment_node(&mut self, expr: &'a JudgmentExpr, mask: &RowMask) -> Flow<Judgments> {
         let len = self.len();
         if mask.is_empty() {
             return Ok((vec![JudgmentOutcome::NotHolds; len], RowErrors::new()));
@@ -1066,10 +1179,10 @@ impl<'a> BulkEvaluator<'a> {
     /// undetermined item and no decisive one is undetermined.
     fn eval_short_circuit(
         &mut self,
-        items: &[JudgmentExpr],
+        items: &'a [JudgmentExpr],
         mask: &RowMask,
         decisive: JudgmentOutcome,
-    ) -> Result<Judgments, EvalError> {
+    ) -> Flow<Judgments> {
         let exhausted = match decisive {
             JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
             _ => JudgmentOutcome::NotHolds,

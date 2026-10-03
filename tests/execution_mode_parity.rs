@@ -22,8 +22,8 @@
 //!   `where` clauses, `relation_member` judgments both inside that derived
 //!   relation's predicate and where explain rejects them, `count`/`sum` over a
 //!   household-to-household relation whose `where` clauses and summed values
-//!   read household rules for the linked household (dense profile), and
-//!   `input_or_else`. Datasets
+//!   read household rules for the linked household (dense profile), currency
+//!   output rounding, and `input_or_else`. Datasets
 //!   drop input records per row (or per column for dense), rows request
 //!   different outputs, and person rows can share the batch. Every case runs
 //!   through explain, fast and (for the dense-compatible profile) dense, and the
@@ -64,7 +64,8 @@ use axiom_rules_engine::spec::{
     ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
     IndexedParameterSpec, InputRecordSpec, IntervalSpec, JudgmentExprSpec, JudgmentOutcomeSpec,
     ParameterVersionSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationDerivationSpec, RelationRecordSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    RelationDerivationSpec, RelationRecordSpec, RelationSpec, RoundingModeSpec, ScalarExprSpec,
+    ScalarValueSpec, UnitKindSpec, UnitSpec,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -95,6 +96,7 @@ const HEADS: &str = "head_of_household";
 const LINKED: &str = "linked_household";
 const INT_TABLE: &str = "int_table";
 const DEC_TABLE: &str = "dec_table";
+const CURRENCY: &str = "USD";
 
 /// Literal pool. Integer-looking entries keep integer kind only in profiles
 /// that exercise kinds; elsewhere they lower to decimal literals.
@@ -247,7 +249,11 @@ enum PValG {
 
 #[derive(Clone, Debug)]
 enum RuleG {
-    Num { expr: NumG, integer_dtype: bool },
+    Num {
+        expr: NumG,
+        integer_dtype: bool,
+        rounding: Option<RoundingModeSpec>,
+    },
     Judg(BoolG),
     Bool(BoolValG),
     Text(TextValG),
@@ -255,7 +261,10 @@ enum RuleG {
 
 #[derive(Clone, Debug)]
 enum PersonRuleG {
-    Num(PNumG),
+    Num {
+        expr: PNumG,
+        rounding: Option<RoundingModeSpec>,
+    },
     Judg(PBoolG),
 }
 
@@ -889,15 +898,29 @@ fn text_value_strategy(profile: Profile, num: BoxedStrategy<NumG>) -> BoxedStrat
     .boxed()
 }
 
+fn rounding_strategy() -> BoxedStrategy<Option<RoundingModeSpec>> {
+    prop_oneof![
+        2 => Just(None),
+        1 => prop_oneof![
+            Just(RoundingModeSpec::HalfUp),
+            Just(RoundingModeSpec::HalfEven),
+            Just(RoundingModeSpec::Floor),
+            Just(RoundingModeSpec::Ceil),
+        ].prop_map(Some),
+    ]
+    .boxed()
+}
+
 fn rule_strategy(profile: Profile) -> BoxedStrategy<RuleG> {
     let num = num_strategy(profile);
     let mut alternatives = vec![
         (
             6,
-            (num.clone(), any::<bool>())
-                .prop_map(|(expr, integer_dtype)| RuleG::Num {
+            (num.clone(), any::<bool>(), rounding_strategy())
+                .prop_map(|(expr, integer_dtype, rounding)| RuleG::Num {
                     expr,
                     integer_dtype,
+                    rounding,
                 })
                 .boxed(),
         ),
@@ -927,7 +950,8 @@ fn rule_strategy(profile: Profile) -> BoxedStrategy<RuleG> {
 
 fn person_rule_strategy(profile: Profile) -> BoxedStrategy<PersonRuleG> {
     prop_oneof![
-        2 => pnum_strategy(profile).prop_map(PersonRuleG::Num),
+        2 => (pnum_strategy(profile), rounding_strategy())
+            .prop_map(|(expr, rounding)| PersonRuleG::Num { expr, rounding }),
         1 => pbool_strategy(profile).prop_map(PersonRuleG::Judg),
     ]
     .boxed()
@@ -1834,6 +1858,30 @@ fn derived_spec(
     }
 }
 
+fn with_rounding(mut spec: DerivedSpec, rounding: Option<RoundingModeSpec>) -> DerivedSpec {
+    if let Some(mode) = rounding {
+        spec.unit = Some(CURRENCY.to_string());
+        spec.rounding = Some(mode);
+        spec.dtype = DTypeSpec::Decimal;
+        // Explain leaves integer values unchanged under output rounding. Keep
+        // rounded formulas decimal-valued so this exercises value rounding
+        // without introducing a separate dense integer-kind divergence.
+        if let DerivedSemanticsSpec::Scalar { expr } = spec.semantics {
+            spec.semantics = DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::Add {
+                    items: vec![
+                        expr,
+                        lit(ScalarValueSpec::Decimal {
+                            value: "0".to_string(),
+                        }),
+                    ],
+                },
+            };
+        }
+    }
+    spec
+}
+
 fn parameter_tables() -> Vec<IndexedParameterSpec> {
     let table = |name: &str, values: Vec<(i64, ScalarValueSpec)>| IndexedParameterSpec {
         id: None,
@@ -1914,15 +1962,18 @@ fn lower_program_reading(
             in_relation_predicate: false,
         };
         let (tag, spec) = match rule {
-            PersonRuleG::Num(expr) => (
+            PersonRuleG::Num { expr, rounding } => (
                 RuleTag::Num,
-                derived_spec(
-                    &name,
-                    PERSON,
-                    DTypeSpec::Decimal,
-                    DerivedSemanticsSpec::Scalar {
-                        expr: lower_pnum(expr, &cx),
-                    },
+                with_rounding(
+                    derived_spec(
+                        &name,
+                        PERSON,
+                        DTypeSpec::Decimal,
+                        DerivedSemanticsSpec::Scalar {
+                            expr: lower_pnum(expr, &cx),
+                        },
+                    ),
+                    *rounding,
                 ),
             ),
             PersonRuleG::Judg(expr) => (
@@ -1970,19 +2021,23 @@ fn lower_program_reading(
             RuleG::Num {
                 expr,
                 integer_dtype,
+                rounding,
             } => (
                 RuleTag::Num,
-                derived_spec(
-                    &name,
-                    HOUSEHOLD,
-                    if *integer_dtype && profile.integer_kinds {
-                        DTypeSpec::Integer
-                    } else {
-                        DTypeSpec::Decimal
-                    },
-                    DerivedSemanticsSpec::Scalar {
-                        expr: lower_num(expr, &cx),
-                    },
+                with_rounding(
+                    derived_spec(
+                        &name,
+                        HOUSEHOLD,
+                        if *integer_dtype && profile.integer_kinds {
+                            DTypeSpec::Integer
+                        } else {
+                            DTypeSpec::Decimal
+                        },
+                        DerivedSemanticsSpec::Scalar {
+                            expr: lower_num(expr, &cx),
+                        },
+                    ),
+                    *rounding,
                 ),
             ),
             RuleG::Judg(expr) => (
@@ -2079,6 +2134,14 @@ fn lower_program_reading(
         });
     }
     let mut spec = ProgramSpec {
+        units: if derived_specs.iter().any(|rule| rule.rounding.is_some()) {
+            vec![UnitSpec {
+                name: CURRENCY.to_string(),
+                kind: UnitKindSpec::Currency { minor_units: 0 },
+            }]
+        } else {
+            Vec::new()
+        },
         relations,
         derived: derived_specs,
         ..ProgramSpec::default()
@@ -3448,6 +3511,9 @@ fn render_program(program: &ProgramSpec) -> String {
             "\n    {} [{}, {:?}] = {}",
             rule.name, rule.entity, rule.dtype, body
         );
+        if let Some(rounding) = rule.rounding {
+            let _ = write!(text, " (rounding: {rounding:?}, unit: {:?})", rule.unit);
+        }
     }
     for parameter in &program.parameters {
         let values = parameter
@@ -3669,18 +3735,29 @@ fn run_property(
     profile: Profile,
     check: impl Fn(&CaseG, &mut Stats) -> Result<(), String>,
 ) -> Stats {
+    // Dense cases are cheap and dense has the most per-case state (column
+    // dtypes across derived-cache extensions), so it searches longer.
+    let cases = if profile.name == DENSE.name {
+        case_count().saturating_mul(6)
+    } else if profile.name == LINKED_DENSE.name {
+        case_count().saturating_mul(2)
+    } else {
+        case_count()
+    };
+    run_property_cases(name, property, profile, cases, check)
+}
+
+fn run_property_cases(
+    name: &str,
+    property: u64,
+    profile: Profile,
+    cases: u32,
+    check: impl Fn(&CaseG, &mut Stats) -> Result<(), String>,
+) -> Stats {
     let stats = RefCell::new(Stats::default());
     let report_only = report_only();
     let config = Config {
-        // Dense cases are cheap and dense has the most per-case state (column
-        // dtypes across derived-cache extensions), so it searches longer.
-        cases: if profile.name == DENSE.name {
-            case_count().saturating_mul(6)
-        } else if profile.name == LINKED_DENSE.name {
-            case_count().saturating_mul(2)
-        } else {
-            case_count()
-        },
+        cases,
         failure_persistence: None,
         max_shrink_iters: 20_000,
         ..Config::default()
@@ -4354,4 +4431,155 @@ fn random_batches_equal_concatenated_singletons_and_permute() {
         },
     );
     assert_exercised("metamorphic", &stats, 0.05);
+}
+
+// ===========================================================================
+// Deferral (#206)
+// ===========================================================================
+
+/// Deferral thresholds the independence property runs at, besides
+/// `usize::MAX` (no deferral). At 1 every reference to a rule not yet
+/// evaluated defers once any expression is open, so the small generated
+/// programs defer at nearly every rule reference.
+const DEFERRAL_THRESHOLDS: [usize; 3] = [1, 2, 3];
+
+/// Everything an explain or fast call returns, byte for byte: values, kinds,
+/// metadata and the full explain trace, or the error with all its fields.
+fn raw_sparse(request: ExecutionRequest) -> String {
+    match catch_unwind(AssertUnwindSafe(|| execute_request(request))) {
+        Ok(Ok(response)) => serde_json::to_string(&response).expect("responses serialize"),
+        Ok(Err(error)) => format!("Err({error:?})"),
+        Err(payload) => format!("PANIC {}", panic_message(payload)),
+    }
+}
+
+/// Every dense output column, dtype and values, or the error, byte for byte.
+fn raw_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -> String {
+    let (dense, _) = match compile_dense(program) {
+        Ok(compiled) => compiled,
+        Err(outcome) => return format!("not compiled: {}", render_dense(&outcome)),
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        dense.execute(&model_period(), batch, outputs)
+    })) {
+        // `outputs` is a hash map; order it so only content is compared.
+        Ok(Ok(result)) => format!(
+            "{:?}",
+            result
+                .outputs
+                .iter()
+                .map(|(name, value)| (name, format!("{value:?}")))
+                .collect::<BTreeMap<_, _>>()
+        ),
+        Ok(Err(error)) => format!("Err({error:?})"),
+        Err(payload) => format!("PANIC {}", panic_message(payload)),
+    }
+}
+
+/// Run `run` with no deferral and at each of [`DEFERRAL_THRESHOLDS`]; every
+/// run must return exactly what the recursive run returns, which is returned.
+fn same_at_every_threshold(what: &str, run: impl Fn() -> String) -> Result<String, String> {
+    let recursive = axiom_rules_engine::depth::with_suspend_depth(usize::MAX, &run);
+    for threshold in DEFERRAL_THRESHOLDS {
+        let deferred = axiom_rules_engine::depth::with_suspend_depth(threshold, &run);
+        if deferred != recursive {
+            return Err(format!(
+                "{what} changed when deferring at level {threshold}\n  recursive: {recursive}\n  deferred:  {deferred}"
+            ));
+        }
+    }
+    Ok(recursive)
+}
+
+fn check_deferral_independence(
+    case: &CaseG,
+    profile: Profile,
+    stats: &mut Stats,
+) -> Result<(), String> {
+    stats.cases += 1;
+    let lowered = lower(case, profile);
+    let mut checks = Vec::new();
+    for (label, program) in [
+        ("program", &lowered.program),
+        ("forced program", &lowered.forced),
+    ] {
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            let what = format!("{label} in {mode:?} mode");
+            let checked = same_at_every_threshold(&what, || {
+                raw_sparse(request(
+                    mode.clone(),
+                    program,
+                    &lowered.dataset,
+                    &lowered.queries,
+                ))
+            });
+            if let (Ok(response), "program", ExecutionMode::Explain) = (&checked, label, &mode) {
+                if response.starts_with("Err(") {
+                    stats.explain_err += 1;
+                } else {
+                    stats.explain_ok += 1;
+                }
+            }
+            checks.push(checked);
+        }
+    }
+    if profile.name == DENSE.name || profile.name == LINKED_DENSE.name {
+        let mut outputs = Vec::new();
+        for output in lowered
+            .queries
+            .first()
+            .map_or(&[][..], |query| &query.outputs)
+        {
+            if !outputs.contains(output) {
+                outputs.push(output.clone());
+            }
+        }
+        let referenced = referenced_inputs(&lowered.program);
+        let batch = lower_dense_batch(case, profile, &referenced);
+        let checked = same_at_every_threshold("dense", || {
+            raw_dense(&lowered.program, batch.clone(), &outputs)
+        });
+        if let Ok(response) = &checked {
+            if response.starts_with("not compiled") {
+                stats.dense_declined += 1;
+            } else {
+                stats.dense_ran += 1;
+            }
+        }
+        checks.push(checked);
+    }
+    checks
+        .into_iter()
+        .collect::<Result<Vec<String>, String>>()
+        .map(|_| ())
+        .map_err(|problem| render_case(profile, &lowered, &[("divergence", problem)]))
+}
+
+/// Deferring rules to the driver (src/depth.rs) never changes a result.
+/// Explain's full response (values, kinds, metadata, trace), fast's response
+/// and metadata, and dense's columns and dtypes, or the exact error each
+/// reports, are identical whether every reference to a rule not yet
+/// evaluated defers or none does. The forced program (every branch
+/// evaluated) covers errors that laziness hides.
+///
+/// Each case runs every mode four times, so the property runs a fifth of
+/// [`case_count`] per profile to keep the debug suite fast; the debug build
+/// also defers at level 8 throughout every other test in the suite.
+#[test]
+fn random_programs_are_independent_of_the_deferral_threshold() {
+    let cases = (case_count() / 5).max(1);
+    for (name, property, profile) in [
+        ("deferral: full generator", 11, FULL),
+        ("deferral: relation aggregation", 12, RELATIONS),
+        ("deferral: dense", 13, DENSE),
+        // Aggregations over related households, whose folds evaluate rules
+        // for an entity other than the row's.
+        ("deferral: linked dense", 14, LINKED_DENSE),
+        ("deferral: evaluation order", 15, EVAL_ORDER),
+    ] {
+        let stats = run_property_cases(name, property, profile, cases, |case, stats| {
+            check_deferral_independence(case, profile, stats)
+        });
+        assert!(report_only() || stats.cases > 0, "{name}: no cases ran");
+    }
 }

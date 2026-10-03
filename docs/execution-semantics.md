@@ -47,7 +47,9 @@ output's formula is evaluated for that entity and period as follows.
   member); and inside a derived relation's own predicate, the current entity
   when the rule's declared entity is the relation's current slot entity, and
   the related entity otherwise. The referenced rule's body is then evaluated
-  for that entity, with no relation context.
+  for that entity, with no relation context. Its declared output rounding
+  applies before any dependent reads the value, including when dense inlines
+  the rule into an aggregation or predicate.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
@@ -167,6 +169,83 @@ the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
 period.
 
+The dense compiler also declines one shape by depth. A `count`/`sum` inlines
+the rules its `where` clause and summed value read, and a current-entity rule
+read there inlines the same way, so the compiled expression nests as deep as
+the chain of rules it inlines. Past `dense::MAX_INLINE_DEPTH` (512) levels the
+compiler returns `DenseCompileError::Unsupported` and the generic API
+evaluates the program. The bound depends on the program alone. It is a
+compile-time decline, like the other unsupported shapes, not an evaluation
+error. Inlined levels do not defer, so the bound, not the deferral
+threshold, caps the stack they use: a chain of rules at the bound compiles
+and evaluates on a 1 MiB thread in a release build but not on 512 KiB, and a
+debug build needs far more.
+
+## Deep programs
+
+A program's rules can reference each other in arbitrarily long chains, and
+every mode answers them. Explain, fast and dense evaluate a rule by recursing
+into the rules its formula references, and the dense compiler compiles one the
+same way. Each counts its nesting levels. At a reference to a rule it has not
+evaluated yet, once that count reaches a threshold, it does not recurse.
+Instead it returns to a driver loop and names the rule. The driver evaluates
+that rule from level zero, then retries the evaluation it interrupted, which
+now finds the rule cached. A long chain of rules therefore runs in segments,
+each on a stack no deeper than the threshold plus one rule's own expression
+nesting, whatever the chain's length: a 20,000-rule chain answers on a 1 MiB
+thread in every mode (`src/depth.rs`). Fast's relation aggregations, which
+run on the explain engine fast embeds, and dense's lifetime reductions, which
+drive each period's executor, nest one bounded drive inside another and can
+use twice that. Expressions dense inlines are bounded separately (see above),
+and chains of derived relations are not covered here (#211).
+
+Deferral changes no result for an acyclic program, which every checked program
+is. Evaluating a rule for an entity and period is deterministic, so a retry
+reaches the same references in the same order. Every value, value kind, error
+and explain trace is what uninterrupted recursion would produce. Only work
+changes: a retry walks again, over cached values, what the interrupted
+evaluation did before the deferral. The threshold is 128 levels in release
+builds, so an evaluation that never nests that deep never retries, and 8 in
+debug builds, whose frames are about thirty times larger; deferring early also
+exercises deferral throughout the debug test suite.
+
+What a retry walks again is bounded by the program, not the data. Explain
+records the progress of every loop over data that a deferral can interrupt:
+a `count` or `sum` over related entities, and the resolution of a relation's
+members, which tests a derived relation's predicate on each candidate. The
+retry of the same rule evaluation resumes an interrupted loop at the member
+that deferred, and reuses a loop that had finished, so a household whose
+members each defer is not walked again for every member. A relation's own
+tuples are read once, when its members are resolved. Fast evaluates each
+row's relation aggregation as a drive of its own on the explain engine, so
+the same holds within that row; when fast itself retries a column, it
+evaluates the row's aggregation again, once per retry. Dense inlines the
+rules an aggregation reads, so their members never defer. The rest is the
+rules still open on the interrupted path and the operands they had evaluated.
+So work grows linearly with a chain's length, and a rule with `k` operands
+that each defer walks its earlier operands `k` times.
+`tests/deferral_transparency.rs` measures work in nodes visited, counting
+each expression level, each member a `count` or `sum` walks and each tuple
+read, which does not depend on the machine: a 20,000-rule chain costs four
+times a 5,000-rule one in every mode, and 1,000 members that each defer, or
+a derived relation whose predicate defers for each of 256 members, cost 1.6
+times what recursion costs (each bounded there at three times, whatever the
+member count).
+
+Deferral happens only at rule references, so one rule's own expression
+nesting is still recursed through. Inlined dense expressions have no rule
+references, which is why dense bounds them (see above). Dense computes a rule
+it has never computed even when no row reaches it (to fix the rule's dtype),
+so it defers that computation too: a deep chain behind an untaken branch, or
+in an empty batch, runs in segments like any other.
+
+A rule that is deferred while an evaluation it transitively started still
+waits for it depends on itself. The drivers report that as
+`EvalError::DependencyCycle` (or the dense compiler's cyclic-dependency error)
+instead of deferring forever. Compiled artifacts and `execute_request` refuse
+cyclic programs before evaluating, so only a hand-built `Program` can reach it.
+Which rule of the cycle the error names can depend on the threshold.
+
 ## How the columnar evaluators implement this
 
 Fast and dense evaluate one expression node for many rows at once, so they
@@ -196,10 +275,15 @@ carry the reference control flow as data:
 - **Declining is structural.** Fast declines (and falls back to explain) only
   when a live row reaches a construct fast does not implement.
 
+`tests/evaluation_depth.rs` checks deep programs in every mode, including
+chains around explicit thresholds, a 20,000-rule chain on a 1 MiB thread, and
+the requests that reproduced #206.
 `tests/execution_mode_parity.rs` checks this contract differentially: it
 generates programs with dead branches, zero divisors, missing inputs, mixed
 integer/decimal branches, pins and relations, runs them through explain, fast
 and dense, and shrinks any disagreement to a minimal counterexample. It also
 checks that a batch equals its concatenated single-query runs and that
-permuting the queries permutes the results. `tests/lazy_branches.rs` holds
+permuting the queries permutes the results, and that every response, trace
+and error is identical with deferral at every rule reference and with none.
+`tests/lazy_branches.rs` holds
 named cases for the `rulespec-us` idioms that failed before masking.
