@@ -135,6 +135,7 @@ fn run(
     execute_compiled_request(
         artifact.clone(),
         CompiledExecutionRequest {
+            relation_binding: Default::default(),
             mode,
             dataset: dataset(households),
             queries: queries(households, outputs),
@@ -638,6 +639,7 @@ fn a_mixed_entity_fast_batch_evaluates_each_output_for_the_rows_that_request_it(
         value: V::D(Box::leak(value.to_string().into_boxed_str())).spec(),
     };
     let request = |mode| ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: artifact.program.clone(),
         dataset: DatasetSpec {

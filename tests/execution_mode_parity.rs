@@ -2810,6 +2810,7 @@ fn request(
     queries: &[ExecutionQuery],
 ) -> ExecutionRequest {
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -4191,6 +4192,7 @@ fn random_pins_match_explain_and_never_read_original_inputs() {
                 run_compiled(
                     &lowered.program,
                     CompiledExecutionRequest {
+                        relation_binding: Default::default(),
                         mode,
                         dataset: dataset.clone(),
                         queries: lowered.queries.clone(),
