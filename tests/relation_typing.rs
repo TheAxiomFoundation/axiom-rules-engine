@@ -2111,3 +2111,42 @@ fn migration_ignores_filters_above_a_contradicting_ancestor() {
         other => panic!("UnitF must not map to Organization through `inner`: {other:?}"),
     }
 }
+
+/// A chain link that names other slots than its derived source traverses
+/// with maps its entity through the wrong slot, so migration ignores it.
+#[test]
+fn migration_ignores_filters_whose_chain_changes_direction() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [{"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "s",
+                              "current_slot": 1, "related_slot": 0}}]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        "outer" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("UnitF must not map to Person through `outer`: {other:?}"),
+    }
+}

@@ -966,10 +966,11 @@ fn execution_filter_kinds(
     crate::relation_typing::filtered_entity_kinds_among(model, &consistent_derivations(model))
 }
 
-/// Derived relations whose declared kinds agree with their source's, all the
-/// way down their source chain: a filter that declares nothing still inherits
-/// whatever an ancestor declares, so one contradicting ancestor poisons every
-/// derived relation above it. A cyclic chain is never consistent.
+/// Derived relations whose declared kinds agree with their source's, and
+/// whose slots match a derived source's, all the way down their source chain:
+/// a filter that declares nothing still inherits whatever an ancestor
+/// declares, so one contradicting ancestor poisons every derived relation
+/// above it. A cyclic chain is never consistent.
 fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
     let locally_consistent = |name: &str| {
         let Some(schema) = model.relations.get(name) else {
@@ -978,6 +979,17 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         let Some(derivation) = schema.derivation.as_ref() else {
             return true;
         };
+        // A derived source traverses with its own slots; a link naming other
+        // slots maps its entity through the wrong one.
+        if let Some(source) = model
+            .relations
+            .get(&derivation.source_relation)
+            .and_then(|source| source.derivation.as_ref())
+            && (source.current_slot, source.related_slot)
+                != (derivation.current_slot, derivation.related_slot)
+        {
+            return false;
+        }
         let source =
             crate::relation_typing::effective_slot_entities(model, &derivation.source_relation);
         let agrees = |declared: &Vec<String>| {
