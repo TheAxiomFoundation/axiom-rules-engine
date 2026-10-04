@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -465,45 +466,67 @@ fn build_batch(
         }
     }
 
+    // Every link of a derived-relation chain is keyed to the chain's base
+    // relation, so several schemas can share one key, each reading its own
+    // related inputs. A key's batch carries the union of those inputs: its
+    // offsets are read once, for the first schema keyed to it, and each column
+    // once, for the first schema that reads it. Schemas are walked in order,
+    // so a malformed batch fails with the error the first schema reading it
+    // raises.
     let relation_batches = relations.unwrap_or_else(|| PyDict::new(inputs.py()));
-    let mut bound_relations = HashMap::new();
+    let mut bound_relations: HashMap<
+        DenseRelationKey,
+        (DenseRelationBatchSpec, Bound<'_, PyDict>),
+    > = HashMap::new();
     for schema in compiled.relations() {
-        let key = relation_key(&schema.key);
-        let value = relation_batches.get_item(&key)?.ok_or_else(|| {
-            PyValueError::new_err(format!("missing dense relation batch `{key}`"))
-        })?;
-        let relation_dict = value.cast::<PyDict>()?;
-        let offsets = extract_index_vec(
-            &relation_dict
-                .get_item("offsets")?
-                .ok_or_else(|| PyValueError::new_err("missing dense relation offsets"))?,
-        )?;
-        let raw_inputs = relation_dict
-            .get_item("inputs")?
-            .ok_or_else(|| PyValueError::new_err("missing dense relation inputs"))?;
-        let input_dict = raw_inputs.cast::<PyDict>()?;
+        let (batch, input_dict) = match bound_relations.entry(schema.key.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let key = relation_key(&schema.key);
+                let value = relation_batches.get_item(&key)?.ok_or_else(|| {
+                    PyValueError::new_err(format!("missing dense relation batch `{key}`"))
+                })?;
+                let relation_dict = value.cast::<PyDict>()?;
+                let offsets = extract_index_vec(
+                    &relation_dict
+                        .get_item("offsets")?
+                        .ok_or_else(|| PyValueError::new_err("missing dense relation offsets"))?,
+                )?;
+                let raw_inputs = relation_dict
+                    .get_item("inputs")?
+                    .ok_or_else(|| PyValueError::new_err("missing dense relation inputs"))?;
+                let input_dict = raw_inputs.cast::<PyDict>()?.clone();
+                entry.insert((
+                    DenseRelationBatchSpec {
+                        offsets,
+                        inputs: HashMap::new(),
+                    },
+                    input_dict,
+                ))
+            }
+        };
         // Only collect the related inputs the caller supplied. An absent one
         // is a missing input on every related row, which fails only the rows
         // whose evaluation reads it, as for root inputs.
-        let mut related_inputs = HashMap::new();
         for input_name in &schema.related_inputs {
+            if batch.inputs.contains_key(input_name) {
+                continue;
+            }
             if let Some(column) = input_dict.get_item(input_name)? {
-                related_inputs.insert(input_name.clone(), dense_column_from_python(&column)?);
+                batch
+                    .inputs
+                    .insert(input_name.clone(), dense_column_from_python(&column)?);
             }
         }
-        bound_relations.insert(
-            schema.key.clone(),
-            DenseRelationBatchSpec {
-                offsets,
-                inputs: related_inputs,
-            },
-        );
     }
 
     Ok(DenseBatchSpec {
         row_count,
         inputs: root_inputs,
-        relations: bound_relations,
+        relations: bound_relations
+            .into_iter()
+            .map(|(key, (batch, _))| (key, batch))
+            .collect(),
     })
 }
 
