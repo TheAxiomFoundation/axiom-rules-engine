@@ -1499,3 +1499,164 @@ fn dense_compilation_refuses_an_untyped_artifact() {
         "{error}"
     );
 }
+
+/// Household and SnapUnit rules both read `extra_members`; SnapUnit ids are
+/// household ids.
+const SNAP_UNIT_AND_HOUSEHOLD_READ_EXTRA: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: extra_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: EXTRA_KINDS
+  - name: member_is_extra
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: extra_flag
+  - name: unit_extra_count
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+  - name: household_extra_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+"#;
+
+fn snap_unit_and_household(extra_kinds: &str) -> String {
+    SNAP_UNIT_AND_HOUSEHOLD_READ_EXTRA.replace("EXTRA_KINDS", extra_kinds)
+}
+
+/// A slot declared with a filtered entity holds that entity's source ids, so
+/// `[Person, SnapUnit]` and `[Person, Household]` are the same physical
+/// relation for typing, direction, and binding alike.
+#[test]
+fn a_filtered_entity_slot_kind_is_its_source_kind() {
+    for kinds in ["[Person, Household]", "[Person, SnapUnit]"] {
+        let program = CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household(kinds))
+            .unwrap_or_else(|error| panic!("{kinds}: {error}"))
+            .program;
+        let dataset = DatasetSpec {
+            inputs: vec![
+                bool_input("extra_flag", "Person", "p1", true),
+                bool_input("eligible", "Person", "p1", true),
+            ],
+            relations: vec![
+                tuple("member_of_household", &["p1", "h1"]),
+                tuple("extra_members", &["p1", "h1"]),
+            ],
+        };
+        let model = program.to_program().unwrap();
+        for entity in ["Household", "SnapUnit"] {
+            dataset
+                .to_dataset_for_queries_with_options(
+                    &model,
+                    &[("h1".to_string(), entity.to_string())],
+                    DatasetBindingOptions::strict(),
+                )
+                .unwrap_or_else(|error| panic!("{kinds} {entity}: {error}"));
+        }
+        for mode in BOTH_MODES {
+            let response = run(
+                mode.clone(),
+                program.clone(),
+                dataset.clone(),
+                vec![query("h1", &["unit_extra_count", "household_extra_count"])],
+            )
+            .unwrap();
+            let outputs = &outputs(&response)[0];
+            assert_eq!(outputs["unit_extra_count"], 1, "{kinds} {mode:?}");
+            assert_eq!(outputs["household_extra_count"], 1, "{kinds} {mode:?}");
+        }
+    }
+}
+
+fn without_kinds(artifact: &CompiledProgramArtifact, relations: &[&str]) -> String {
+    let mut value = serde_json::to_value(artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        if relations.contains(&relation["name"].as_str().unwrap()) {
+            let relation = relation.as_object_mut().unwrap();
+            relation.remove("slot_entities");
+            if let Some(derivation) = relation.get_mut("derivation") {
+                derivation.as_object_mut().unwrap().remove("slot_entities");
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap()
+}
+
+/// Uses that name a filtered entity and its source kind agree once each use
+/// is mapped to the ids it reads, so migration infers the relation.
+#[test]
+fn migration_combines_household_and_filtered_entity_uses() {
+    let fresh =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap();
+    let legacy = without_kinds(&fresh, &["extra_members"]);
+    let migration =
+        migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(migration.changes[0].source, "inferred");
+    assert_eq!(
+        serde_json::to_value(&migration.artifact).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+}
+
+/// With every kind stripped, the filtered entity maps to nothing until the
+/// override types its source; the overrides must be read in that light.
+#[test]
+fn migration_applies_overrides_before_mapping_filtered_entities() {
+    let fresh =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap();
+    let legacy = without_kinds(
+        &fresh,
+        &["member_of_household", "extra_members", "snap_unit"],
+    );
+    let overrides = BTreeMap::from([
+        (
+            "member_of_household".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+        (
+            "extra_members".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+    ]);
+    let migration = migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("the overrides agree with execution once SnapUnit maps to Household");
+    assert_eq!(migration.changes.len(), 2);
+    let typed = serde_json::to_string(&migration.artifact).unwrap();
+    CompiledProgramArtifact::from_json_str(&typed).expect("the migrated artifact loads");
+}

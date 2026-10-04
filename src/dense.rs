@@ -635,9 +635,10 @@ impl DenseCompiledProgram {
     /// (`CompiledProgramArtifact::compile`, or load one with `from_json_*`)
     /// and pass that to [`Self::from_artifact`], which does not check again.
     ///
-    /// Relation entity typing is checked here, as at every other execution
-    /// entry point, because an artifact deserialized directly (rather than
+    /// Relation entity typing is checked here, as at the request and artifact
+    /// entry points, because an artifact deserialized directly (rather than
     /// through `from_json_*`) or a program built in Rust has not been checked.
+    /// (`Engine::new` alone evaluates a `Program` as given.)
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,

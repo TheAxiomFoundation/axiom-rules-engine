@@ -245,16 +245,20 @@ impl Resolver<'_> {
         let Some(kinds) = self.relations.typed.get(relation) else {
             return Ok(String::new());
         };
-        // A filtered entity's ids are its source's current-slot ids.
-        let entity = self
-            .relations
-            .filtered
-            .get(entity)
-            .map_or(entity, String::as_str);
+        // A filtered entity's ids are its source's current-slot ids, whether
+        // it is the rule's entity or a declared slot kind.
+        let id_kind = |kind: &'_ str| -> String {
+            self.relations
+                .filtered
+                .get(kind)
+                .cloned()
+                .unwrap_or_else(|| kind.to_string())
+        };
+        let entity_kind = id_kind(entity);
         let matches = kinds
             .iter()
             .enumerate()
-            .filter(|(_, kind)| kind.as_str() == entity)
+            .filter(|(_, kind)| id_kind(kind) == entity_kind)
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         match matches.as_slice() {

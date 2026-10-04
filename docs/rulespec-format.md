@@ -298,11 +298,13 @@ An aggregate over a `derived_relation` uses the derivation's `current_slot` and
 `related_slot`. A derived relation takes its source's slot kinds; if it
 declares `slot_entities`, they must match the source's.
 
-A relation name a module aggregates without declaring it (a composition root,
-or a module relying on an import) takes the kinds of the same-named
-declarations in the import-merged closure when they all agree; if they
-disagree, compilation fails, and with no typed declaration the relation is
-untyped.
+A relation name a module aggregates without declaring it (a composition
+root, or a module relying on an import) is that module's own relation,
+separate from any same-named declaration in its imports, and it has no
+declared kinds: executing it is an `untyped_relation` error whose message
+names those declarations. Declare the relation, typed, in the module that
+aggregates it, or aggregate the imported relation through the module that
+declares it (see axiom-rules-engine#226 on aliasing).
 
 Compiled artifacts written before typing became mandatory can execute untyped
 relations. Loading one fails with a message naming

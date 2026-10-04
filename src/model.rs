@@ -759,13 +759,6 @@ pub(crate) struct RelationUsage {
 /// `where` clause; usage collection follows the same scoping.
 type RelationUsageContext<'a> = Option<(Option<&'a str>, Option<&'a str>)>;
 
-/// Consensus executable orientation for a used relation. A position stays
-/// unknown when uses do not constrain it or when different uses conflict.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RelationUsageOrientation {
-    pub slot_entities: Vec<Option<String>>,
-}
-
 pub(crate) fn relation_usage_records(program: &Program) -> Vec<RelationUsage> {
     let mut usages = Vec::new();
     let mut derived_names = program.derived.keys().cloned().collect::<Vec<_>>();
@@ -845,40 +838,6 @@ pub(crate) fn relation_usage_records(program: &Program) -> Vec<RelationUsage> {
     });
     usages.dedup();
     usages
-}
-
-pub(crate) fn relation_usage_orientations(
-    program: &Program,
-) -> BTreeMap<String, RelationUsageOrientation> {
-    let mut candidates = BTreeMap::<String, Vec<BTreeSet<String>>>::new();
-    for usage in relation_usage_records(program) {
-        let slots = candidates
-            .entry(usage.relation)
-            .or_insert_with(|| vec![BTreeSet::new(); usage.slot_entities.len()]);
-        if slots.len() < usage.slot_entities.len() {
-            slots.resize_with(usage.slot_entities.len(), BTreeSet::new);
-        }
-        for (slot, entity) in usage.slot_entities.into_iter().enumerate() {
-            if let Some(entity) = entity {
-                slots[slot].insert(entity);
-            }
-        }
-    }
-
-    candidates
-        .into_iter()
-        .map(|(relation, slots)| {
-            let slot_entities = slots
-                .into_iter()
-                .map(|entities| {
-                    (entities.len() == 1)
-                        .then(|| entities.into_iter().next())
-                        .flatten()
-                })
-                .collect();
-            (relation, RelationUsageOrientation { slot_entities })
-        })
-        .collect()
 }
 
 fn collect_semantics_relation_usages(

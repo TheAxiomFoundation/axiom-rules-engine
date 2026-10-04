@@ -736,28 +736,6 @@ pub fn migrate_artifact_relation_typing(
         crate::compile::CompiledProgramArtifact::from_json_str_for_relation_migration(
             source, path,
         )?;
-    let model = artifact.program.to_program()?;
-    // Usage names the entity a rule evaluates; a filtered entity's ids are
-    // its source's current-slot ids, so stamp that kind instead.
-    let filtered = crate::relation_typing::filtered_entity_kinds(&model);
-    let executed = crate::model::relation_usage_orientations(&model)
-        .into_iter()
-        .map(|(relation, mut usage)| {
-            for kind in usage.slot_entities.iter_mut().flatten() {
-                if let Some(canonical) = filtered.get(kind.as_str()) {
-                    *kind = canonical.clone();
-                }
-            }
-            (relation, usage)
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let canonical = |kind: &str| {
-        filtered
-            .get(kind)
-            .cloned()
-            .unwrap_or_else(|| kind.to_string())
-    };
-
     let mut resolved_overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
     for (name, kinds) in overrides {
         let data_relations = artifact
@@ -810,25 +788,84 @@ pub fn migrate_artifact_relation_typing(
                 .join(", ")
         )
     };
+    let is_data = |relation: &crate::spec::RelationSpec| relation.derivation.is_none();
+    for relation in artifact.program.relations.iter().filter(|r| is_data(r)) {
+        if let Some(kinds) = resolved_overrides.get(&relation.name)
+            && kinds.len() != relation.arity
+        {
+            return Err(ArtifactRelationMigrationError::OverrideArity {
+                relation: relation.name.clone(),
+                arity: relation.arity,
+                found: kinds.len(),
+            });
+        }
+    }
+    let original = artifact
+        .program
+        .relations
+        .iter()
+        .filter(|r| is_data(r))
+        .map(|relation| (relation.name.clone(), relation.slot_entities.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    // Apply overrides first, so the filtered-entity mapping and usage see the
+    // source kinds the caller asserts. Then stamp every untyped relation whose
+    // usage fixes all its slots, and repeat: a newly typed source can map a
+    // filtered entity that settles another relation's usage.
+    for relation in &mut artifact.program.relations {
+        if let Some(kinds) = resolved_overrides.get(&relation.name)
+            && is_data(relation)
+        {
+            relation.slot_entities = kinds.clone();
+        }
+    }
+    let (executed, filtered) = loop {
+        let model = artifact.program.to_program()?;
+        let filtered = crate::relation_typing::filtered_entity_kinds(&model);
+        let executed = canonical_usage(&model, &filtered);
+        let mut stamped = false;
+        for relation in &mut artifact.program.relations {
+            if !is_data(relation) || !relation.slot_entities.is_empty() {
+                continue;
+            }
+            if let Some(usage) = executed.get(&relation.name)
+                && usage.len() == relation.arity
+                && usage.iter().all(Option::is_some)
+            {
+                relation.slot_entities = usage.iter().flatten().cloned().collect();
+                stamped = true;
+            }
+        }
+        if !stamped {
+            break (executed, filtered);
+        }
+    };
+    let canonical = |kind: &str| {
+        filtered
+            .get(kind)
+            .cloned()
+            .unwrap_or_else(|| kind.to_string())
+    };
+    // An override is checked against what execution fixes without it: usage
+    // otherwise completes a relation's open slot from its own declared kinds.
+    let unhinted = {
+        let mut program = artifact.program.clone();
+        for relation in &mut program.relations {
+            if resolved_overrides.contains_key(&relation.name) {
+                relation.slot_entities.clear();
+            }
+        }
+        canonical_usage(&program.to_program()?, &filtered)
+    };
+
     let mut changes = Vec::new();
     let mut uninferable = Vec::new();
-    for relation in &mut artifact.program.relations {
-        if relation.derivation.is_some() {
-            continue;
-        }
-        let usage = executed
-            .get(&relation.name)
-            .map(|usage| &usage.slot_entities);
-        if let Some(kinds) = resolved_overrides.get(&relation.name) {
-            if kinds.len() != relation.arity {
-                return Err(ArtifactRelationMigrationError::OverrideArity {
-                    relation: relation.name.clone(),
-                    arity: relation.arity,
-                    found: kinds.len(),
-                });
-            }
-            if let Some(usage) = usage {
-                for (slot, (given, executed)) in kinds.iter().zip(usage).enumerate() {
+    for relation in artifact.program.relations.iter().filter(|r| is_data(r)) {
+        let usage = executed.get(&relation.name);
+        let previous = original.get(&relation.name).cloned().unwrap_or_default();
+        if let Some(given) = resolved_overrides.get(&relation.name) {
+            if let Some(usage) = unhinted.get(&relation.name) {
+                for (slot, (given, executed)) in given.iter().zip(usage).enumerate() {
                     if let Some(executed) = executed
                         && *executed != canonical(given)
                     {
@@ -843,58 +880,50 @@ pub fn migrate_artifact_relation_typing(
                     }
                 }
             }
-            if &relation.slot_entities != kinds {
+            if &previous != given {
                 changes.push(RelationTypingChange {
                     relation: relation.name.clone(),
-                    previous: relation.slot_entities.clone(),
-                    slot_entities: kinds.clone(),
+                    previous,
+                    slot_entities: given.clone(),
                     source: "override",
                 });
-                relation.slot_entities = kinds.clone();
             }
             continue;
         }
         let Some(usage) = usage else {
             continue;
         };
-        if !relation.slot_entities.is_empty() {
-            let contradicts =
-                relation
-                    .slot_entities
-                    .iter()
-                    .zip(usage)
-                    .any(|(declared, executed)| {
-                        executed
-                            .as_ref()
-                            .is_some_and(|executed| *executed != canonical(declared))
-                    });
+        if !previous.is_empty() {
+            let contradicts = previous.iter().zip(usage).any(|(declared, executed)| {
+                executed
+                    .as_ref()
+                    .is_some_and(|executed| *executed != canonical(declared))
+            });
             if contradicts {
                 return Err(
                     ArtifactRelationMigrationError::DeclarationContradictsExecution {
                         relation: relation.name.clone(),
-                        declared: relation.slot_entities.clone(),
+                        declared: previous,
                         executed: format_executed(usage),
                     },
                 );
             }
             continue;
         }
-        if usage.len() == relation.arity && usage.iter().all(Option::is_some) {
-            let kinds = usage.iter().flatten().cloned().collect::<Vec<_>>();
-            changes.push(RelationTypingChange {
-                relation: relation.name.clone(),
-                previous: Vec::new(),
-                slot_entities: kinds.clone(),
-                source: "inferred",
-            });
-            relation.slot_entities = kinds;
-        } else {
+        if relation.slot_entities.is_empty() {
             uninferable.push(format!(
                 "  {} (arity {}; executable usage determines {})",
                 relation.name,
                 relation.arity,
                 format_executed(usage)
             ));
+        } else {
+            changes.push(RelationTypingChange {
+                relation: relation.name.clone(),
+                previous,
+                slot_entities: relation.slot_entities.clone(),
+                source: "inferred",
+            });
         }
     }
     if !uninferable.is_empty() {
@@ -905,4 +934,41 @@ pub fn migrate_artifact_relation_typing(
     crate::relation_typing::check_program(&artifact.program.to_program()?)
         .map_err(ArtifactRelationMigrationError::StillIllTyped)?;
     Ok(ArtifactRelationMigration { artifact, changes })
+}
+
+/// Executable usage per relation, each use's kinds mapped to the kinds of the
+/// ids it reads (a filtered entity as its source kind) before uses are
+/// combined. A slot is known when every use that constrains it agrees.
+fn canonical_usage(
+    model: &crate::model::Program,
+    filtered: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+    let mut slots =
+        std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
+    for usage in crate::model::relation_usage_records(model) {
+        let entry = slots.entry(usage.relation).or_default();
+        if entry.len() < usage.slot_entities.len() {
+            entry.resize_with(usage.slot_entities.len(), Default::default);
+        }
+        for (slot, kind) in usage.slot_entities.into_iter().enumerate() {
+            if let Some(kind) = kind {
+                let kind = filtered.get(&kind).cloned().unwrap_or(kind);
+                entry[slot].insert(kind);
+            }
+        }
+    }
+    slots
+        .into_iter()
+        .map(|(relation, slots)| {
+            let kinds = slots
+                .into_iter()
+                .map(|kinds| {
+                    (kinds.len() == 1)
+                        .then(|| kinds.into_iter().next())
+                        .flatten()
+                })
+                .collect();
+            (relation, kinds)
+        })
+        .collect()
 }

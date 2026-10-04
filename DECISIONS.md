@@ -7,13 +7,16 @@ entry per decision, most recent first.
 ## 2026-09-25 — Relation entity typing is mandatory
 
 **Decision.** Every relation that a `count_related`, `sum_related`, or
-membership node executes must declare one entity kind per slot, and the slot
-a node keys on must hold the entity evaluating it. The check
-(`relation_typing`) runs at compile, at artifact load, and on raw-program
-requests; there is no opt-out. RuleSpec lowering refuses a direction it would
-have to guess (every slot holds the rule's entity), aggregates over a derived
-relation use the derivation's slots, and an undeclared short-name relation
-takes the kinds of the same-named declarations only when they all agree.
+membership node executes must have one entity kind per slot (declared, or
+inherited by a derived relation from its source), and the slot a node keys
+on must hold the entity evaluating it. The check (`relation_typing`) runs at
+compile, at artifact load, on raw-program requests, and in the dense
+compiler; there is no opt-out (`Engine::new` evaluates a `Program` as given
+and documents that its callers check). RuleSpec lowering refuses a direction
+it would have to guess (every slot holds the rule's entity), aggregates and
+membership tests over a derived relation use the derivation's slots, and an
+undeclared short-name relation stays untyped, so executing it is an error
+that names its same-named declarations.
 Binding uses queries as kind evidence alongside input records and rejects
 tuples whose length differs from the arity. The artifact format stays 2:
 artifacts that pass the typing check (including relation-free ones) load as
@@ -36,10 +39,14 @@ testing between modes could not see it. Four commits in two weeks (78e9442,
 artifacts that are already safe and move engine, rulespec-us, the Python
 package, and axiom-api in lockstep; the capability string carries the same
 signal without that. A legacy load flag would reintroduce the silent zero the
-change exists to remove. Keeping undeclared short names untyped would fail
-every composition root that aggregates `member_of_household` until
-axiom-compose can emit `arguments`. Making dataset binding strict by default
-is a separate call (#190).
+change exists to remove. Giving an undeclared short name the kinds of its
+same-named imported declarations (as an earlier head of this change did)
+would type a relation that is still separate from that declaration, so
+tuples supplied under the declaration's id would leave it empty: a silent
+zero the error now exposes. Whether such a name should alias the imported
+relation is #226; until axiom-compose can emit `arguments`, composition roots
+that aggregate an undeclared `member_of_household` fail to compile. Making
+dataset binding strict by default is a separate call (#190).
 
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 

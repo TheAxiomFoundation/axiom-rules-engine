@@ -410,7 +410,7 @@ impl<'a> Checker<'a> {
                 related_entity = Some(kinds[related].clone());
                 if let Some(entity) = context.entity
                     && entity != current_kind
-                    && self.id_kind(entity) != current_kind
+                    && self.id_kind(entity) != self.id_kind(current_kind)
                 {
                     self.push(
                         RelationTypingCode::CurrentSlotEntityMismatch,
@@ -443,7 +443,7 @@ impl<'a> Checker<'a> {
                     };
                     if rule.entity == SCALAR_ENTITY
                         || rule.entity == related_kind
-                        || self.id_kind(&rule.entity) == related_kind
+                        || self.id_kind(&rule.entity) == self.id_kind(related_kind)
                     {
                         continue;
                     }
@@ -523,6 +523,7 @@ impl<'a> Checker<'a> {
         for (slot, expected_kind) in expected {
             if let Some(expected_kind) = expected_kind
                 && kinds[slot] != expected_kind
+                && self.id_kind(&kinds[slot]) != self.id_kind(expected_kind)
             {
                 self.push(
                     RelationTypingCode::MembershipSlotEntityMismatch,
@@ -655,7 +656,7 @@ impl<'a> Checker<'a> {
                 || routed_current.is_some_and(|kind| kind == entity)
                 || routed_related.is_some_and(|kind| kind == entity)
                 || entity == effective_related
-                || self.id_kind(entity) == effective_related
+                || self.id_kind(entity) == self.id_kind(&effective_related)
             {
                 continue;
             }

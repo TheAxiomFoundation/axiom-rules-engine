@@ -657,14 +657,10 @@ rules:
 /// module compiles cleanly, the household-first head tuple binds strictly and
 /// is the household's head, and the person-first one warns and is not.
 ///
-/// KNOWN FAILURE, reported rather than papered over: RuleSpec lowering
-/// (`src/relation_direction.rs`) re-keys a membership test from the declared
-/// kinds only when it is the predicate itself or sits under `and`, `or`,
-/// `exactly_one` or `not`. Inside a comparison operand, and so inside an `if`
-/// condition, it keeps formula lowering's default slots (1, 0), which read
-/// this declaration backwards, and the typing check, which keeps the binding
-/// there as explain does, refuses the well-typed module with
-/// `relation_membership_slot_entity_mismatch`.
+/// Lowering carries the membership binding into comparison operands and `if`
+/// conditions as explain does, so it re-keys the test there too rather than
+/// keeping formula lowering's default slots (1, 0), which would read this
+/// declaration backwards.
 #[test]
 fn rulespec_membership_in_an_if_condition_follows_a_household_first_declaration() {
     let module = |formula: &str| {

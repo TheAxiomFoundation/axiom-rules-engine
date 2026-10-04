@@ -638,7 +638,8 @@ fn is_minor() -> Value {
 /// 2. The rule would run on the ids in `member`'s `Person` slot, so the
 /// program is ill-typed and every mode refuses it, with or without the input;
 /// with `member` untyped, every mode refuses the untyped relation. Given the
-/// raw program, explain's evaluator and dense still give explain's answers.
+/// raw program, explain's evaluator still gives its answers and the dense
+/// compiler refuses it for its typing.
 #[test]
 fn a_household_rule_in_a_where_clause_over_members_is_refused_in_every_mode() {
     let hh_flag = judgment_rule("hh_flag", "Household", is_true("f"));
@@ -811,7 +812,8 @@ fn scalar_entity_rule_in_a_where_clause_reads_the_related_entity() {
 /// A `where` clause over a derived relation has no relation context either:
 /// the `Household` rule would run on each adult member's id, the related slot
 /// of `adult_member`, which declares `Person`, so every mode refuses it.
-/// Given the raw program, explain's evaluator and dense still agree.
+/// Given the raw program, explain's evaluator still answers and the dense
+/// compiler refuses it for its typing.
 #[test]
 fn a_household_rule_in_a_where_clause_over_a_derived_relation_is_refused_in_every_mode() {
     let adult = judgment_rule(
@@ -1056,9 +1058,8 @@ fn person_rows_read_row_rules_for_each_row() {
 /// which read `g` for the member. A `SnapUnit` is queried with household ids,
 /// so the rule would run on an id of another kind than its entity's: every
 /// mode refuses the program. Given the raw program, explain's evaluator still
-/// reads `g` for the member, and dense still declines the rule rather than
-/// evaluate it for either record; it used to evaluate a root-entity rule on
-/// the root row.
+/// reads `g` for the member, and the dense compiler refuses it for its
+/// typing (it once evaluated a root-entity rule on the root row).
 #[test]
 fn a_derived_relation_predicate_rule_of_neither_slot_entity_is_refused() {
     let program = program(
