@@ -35,7 +35,9 @@ use axiom_rules_engine::dense::{
     DenseRelationBatchSpec,
 };
 use axiom_rules_engine::engine::EvalError;
-use axiom_rules_engine::spec::{JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec};
+use axiom_rules_engine::spec::{
+    JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec, SpecError,
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
@@ -321,7 +323,28 @@ fn number(value: Decimal) -> String {
 }
 
 fn sparse(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer {
-    let request: ExecutionRequest = serde_json::from_value(json!({
+    sparse_bound(mode, program, data, outputs, "strict")
+}
+
+/// Explain or fast under `"lenient"` relation binding. Two tests here pin
+/// how the modes evaluate a program whose relation usage contradicts the
+/// dataset's entity labels (a `Household` rule read for each `Person` member,
+/// a `SnapUnit` id in a `Household` slot). The default strict binding refuses
+/// those requests before evaluation (see `strict_binding_refuses`), so they
+/// opt out to reach the evaluators.
+fn sparse_lenient(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer {
+    sparse_bound(mode, program, data, outputs, "lenient")
+}
+
+fn request_json(
+    mode: &str,
+    program: &Value,
+    data: &Data,
+    outputs: &[&str],
+    binding: &str,
+) -> Value {
+    json!({
+        "relation_binding": binding,
         "mode": mode,
         "program": program,
         "dataset": data.dataset(),
@@ -330,8 +353,37 @@ fn sparse(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer 
             .iter()
             .map(|row| json!({ "entity_id": row.id, "period": period(), "outputs": outputs }))
             .collect::<Vec<_>>(),
-    }))
-    .expect("request JSON parses");
+    })
+}
+
+/// Strict binding (the default) refuses the request with a dataset binding
+/// error naming the relation, in explain and fast alike.
+fn strict_binding_refuses(label: &str, program: &Value, data: &Data, outputs: &[&str]) {
+    for mode in ["explain", "fast"] {
+        let request: ExecutionRequest =
+            serde_json::from_value(request_json(mode, program, data, outputs, "strict"))
+                .expect("request JSON parses");
+        match execute_request(request) {
+            Err(ApiError::Spec(SpecError::StrictDatasetBindingDiagnostics(report))) => assert!(
+                report.to_string().contains(data.relation),
+                "{label}: {mode}: binding error should name `{}`: {report}",
+                data.relation
+            ),
+            other => panic!("{label}: {mode}: expected a strict binding refusal, got {other:?}"),
+        }
+    }
+}
+
+fn sparse_bound(
+    mode: &str,
+    program: &Value,
+    data: &Data,
+    outputs: &[&str],
+    binding: &str,
+) -> Answer {
+    let request: ExecutionRequest =
+        serde_json::from_value(request_json(mode, program, data, outputs, binding))
+            .expect("request JSON parses");
     match execute_request(request) {
         Ok(response) => Answer::Rows(
             response
@@ -405,6 +457,26 @@ fn assert_all_modes(label: &str, program: &Value, data: &Data, outputs: &[&str],
     assert_eq!(explain, expected, "{label}: explain");
     assert_eq!(
         sparse("fast", program, data, outputs),
+        explain,
+        "{label}: fast and explain differ"
+    );
+    let dense = dense(program, data, outputs)
+        .unwrap_or_else(|error| panic!("{label}: dense declined the program: {error}"));
+    assert_eq!(dense, explain, "{label}: dense and explain differ");
+}
+
+/// `assert_all_modes` with explain and fast under lenient relation binding.
+fn assert_all_modes_lenient(
+    label: &str,
+    program: &Value,
+    data: &Data,
+    outputs: &[&str],
+    expected: Answer,
+) {
+    let explain = sparse_lenient("explain", program, data, outputs);
+    assert_eq!(explain, expected, "{label}: explain");
+    assert_eq!(
+        sparse_lenient("fast", program, data, outputs),
         explain,
         "{label}: fast and explain differ"
     );
@@ -504,23 +576,32 @@ fn where_clause_reads_a_household_rule_for_each_member() {
         vec![relation("member", &["Household", "Person"])],
         vec![hh_flag, n],
     );
-    assert_all_modes(
+    assert_all_modes_lenient(
         "members without the input",
         &program,
         &households([vec![], vec![]]),
         &["n"],
         missing("f"),
     );
-    assert_all_modes(
+    assert_all_modes_lenient(
         "members with the input",
         &program,
         &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
         &["n"],
         rows(&[&["1"], &["0"]]),
     );
+    // The members are labelled `Person` while the `where` clause evaluates a
+    // `Household` rule for each of them, so the default strict binding
+    // refuses the request before evaluation.
+    strict_binding_refuses(
+        "typed relation",
+        &program,
+        &households([vec![], vec![]]),
+        &["n"],
+    );
     // Untyped: the same, with no declared slot entities.
     let untyped = program_with_untyped_member(&program);
-    assert_all_modes(
+    assert_all_modes_lenient(
         "untyped relation, members without the input",
         &untyped,
         &households([vec![], vec![]]),
@@ -869,9 +950,13 @@ fn derived_relation_predicate_declines_a_rule_of_neither_slot_entity() {
         )],
     };
     let outputs = ["snap_unit_size"];
-    let explain = sparse("explain", &program, &data, &outputs);
+    // `h1` is labelled `SnapUnit` (the query root) but sits in the
+    // `Household` slot of `member_of_household`, so the default strict
+    // binding refuses the request; lenient binding reaches the evaluators.
+    strict_binding_refuses("SnapUnit id in a Household slot", &program, &data, &outputs);
+    let explain = sparse_lenient("explain", &program, &data, &outputs);
     assert_eq!(explain, missing("g"), "explain reads `g` for the member");
-    assert_eq!(sparse("fast", &program, &data, &outputs), explain);
+    assert_eq!(sparse_lenient("fast", &program, &data, &outputs), explain);
     match dense(&program, &data, &outputs) {
         Err(DenseCompileError::Unsupported(message)) => assert!(
             message.contains(
