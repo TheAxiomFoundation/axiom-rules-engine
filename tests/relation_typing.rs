@@ -1955,3 +1955,116 @@ fn an_unused_declaration_does_not_establish_a_physical_kind_for_migration() {
         Err(other) => panic!("unexpected error: {other}"),
     }
 }
+
+fn always() -> serde_json::Value {
+    serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}})
+}
+
+/// Rewrite a compiled artifact's relations with `edit`, keeping its metadata.
+fn edit_relations(
+    artifact: &CompiledProgramArtifact,
+    mut edit: impl FnMut(&str, &mut serde_json::Map<String, serde_json::Value>),
+) -> String {
+    let mut value = serde_json::to_value(artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        edit(&name, relation.as_object_mut().unwrap());
+    }
+    serde_json::to_string(&value).unwrap()
+}
+
+/// An unused derived relation is never checked, so neither its declared
+/// kinds nor the filter it defines can type an executed relation, nor
+/// contradict a correct override.
+#[test]
+fn migration_ignores_unused_derived_relations_as_evidence() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "r", "current_slot": 1,
+                "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "d", "arity": 2, "derivation": {"source_relation": "r", "current_slot": 1,
+                "related_slot": 0, "slot_entities": ["Person", "Organization"],
+                "predicate": always()}}
+        ],
+        "derived": [{"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "s",
+                              "current_slot": 1, "related_slot": 0}}]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "r" || name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("the unused derivations must not type `s`: {other:?}"),
+    }
+    let overrides = BTreeMap::from([
+        (
+            "r".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+        (
+            "s".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+    ]);
+    migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("the unused Organization derivation does not contradict a correct override");
+}
+
+/// Explain runs a versioned rule's versions only, so a relation its base
+/// semantics reads is not execution evidence for migration.
+#[test]
+fn migration_ignores_a_versioned_rules_unexecuted_base_semantics() {
+    let count = |relation: &str| {
+        serde_json::json!({"kind": "count_related", "relation": relation,
+                           "current_slot": 1, "related_slot": 0})
+    };
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "seed", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "ghost",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [
+            {"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": count("s")},
+            {"name": "seed_reader", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": count("seed"),
+             "versions": [{"effective_from": "2026-01-01", "semantics": "scalar",
+                           "expr": {"kind": "literal", "value": {"kind": "integer", "value": 7}}}]}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" | "ghost" => {
+            relation.remove("slot_entities");
+        }
+        "seed" => {
+            relation.insert(
+                "slot_entities".to_string(),
+                serde_json::json!(["Person", "UnitF"]),
+            );
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("the dead base expression must not type `s`: {other:?}"),
+    }
+}

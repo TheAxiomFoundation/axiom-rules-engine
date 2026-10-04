@@ -115,6 +115,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
         program,
         filtered: filtered_entity_kinds(program),
         filtered_names: filtered_entity_names(program),
+        base_semantics: true,
         violations: BTreeSet::new(),
         used_relations: BTreeSet::new(),
     };
@@ -129,14 +130,17 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
     }
 }
 
-/// Every relation an executed node reads: aggregated or tested directly, or
-/// reached as a derived relation's source or through its predicate. These
-/// are the relations `check_program` types.
+/// Every relation a node explain executes reads: aggregated or tested
+/// directly, or reached as a derived relation's source or through its
+/// predicate. Like explain, it reads a versioned rule's versions only, so it
+/// is the evidence an artifact's execution gives; `check_program` also types
+/// the base semantics, which the dense compiler reads.
 pub fn executed_relations(program: &Program) -> BTreeSet<String> {
     let mut checker = Checker {
         program,
-        filtered: filtered_entity_kinds(program),
-        filtered_names: filtered_entity_names(program),
+        filtered: BTreeMap::new(),
+        filtered_names: BTreeSet::new(),
+        base_semantics: false,
         violations: BTreeSet::new(),
         used_relations: BTreeSet::new(),
     };
@@ -179,10 +183,14 @@ fn effective_slot_entities_inner(
 /// whose derived relations' current kinds are all unknown.
 fn filtered_entity_current_kinds(
     program: &Program,
+    among: Option<&BTreeSet<String>>,
 ) -> (BTreeMap<String, BTreeSet<String>>, BTreeSet<String>) {
     let mut known = BTreeMap::<String, BTreeSet<String>>::new();
     let mut seen = BTreeSet::new();
     for (name, schema) in &program.relations {
+        if among.is_some_and(|among| !among.contains(name)) {
+            continue;
+        }
         let Some(derivation) = &schema.derivation else {
             continue;
         };
@@ -210,7 +218,18 @@ fn filtered_entity_current_kinds(
 /// innermost kind; an entity whose derived relations disagree, or whose
 /// chain cycles, is left unmapped.
 pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
-    let (known, _) = filtered_entity_current_kinds(program);
+    resolve_filtered_kinds(filtered_entity_current_kinds(program, None).0)
+}
+
+/// [`filtered_entity_kinds`] from only the derived relations in `among`.
+pub fn filtered_entity_kinds_among(
+    program: &Program,
+    among: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    resolve_filtered_kinds(filtered_entity_current_kinds(program, Some(among)).0)
+}
+
+fn resolve_filtered_kinds(known: BTreeMap<String, BTreeSet<String>>) -> BTreeMap<String, String> {
     let direct = known
         .into_iter()
         .filter(|(_, kinds)| kinds.len() == 1)
@@ -242,7 +261,18 @@ pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
 /// and one whose only known current kind is itself (a filter of households
 /// to households) is a physical kind.
 pub fn filtered_entity_names(program: &Program) -> BTreeSet<String> {
-    let (known, _) = filtered_entity_current_kinds(program);
+    alias_names(filtered_entity_current_kinds(program, None).0)
+}
+
+/// [`filtered_entity_names`] from only the derived relations in `among`.
+pub fn filtered_entity_names_among(
+    program: &Program,
+    among: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    alias_names(filtered_entity_current_kinds(program, Some(among)).0)
+}
+
+fn alias_names(known: BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
     known
         .into_iter()
         .filter(|(entity, kinds)| kinds.iter().any(|kind| kind != entity))
@@ -253,7 +283,16 @@ pub fn filtered_entity_names(program: &Program) -> BTreeSet<String> {
 /// Filtered entities none of whose derived relations has a known current
 /// kind yet: a use naming one says nothing about the ids it reads.
 pub fn unresolved_filtered_entities(program: &Program) -> BTreeSet<String> {
-    filtered_entity_current_kinds(program).1
+    filtered_entity_current_kinds(program, None).1
+}
+
+/// Every entity some derived relation filters to.
+pub fn filtered_entities(program: &Program) -> BTreeSet<String> {
+    program
+        .relations
+        .values()
+        .filter_map(|schema| schema.derivation.as_ref()?.entity.clone())
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -272,6 +311,8 @@ struct Checker<'a> {
     filtered: BTreeMap<String, String>,
     /// Filtered entities that alias another kind; never a slot kind.
     filtered_names: BTreeSet<String>,
+    /// Whether a versioned rule's base semantics is walked too.
+    base_semantics: bool,
     violations: BTreeSet<RelationTypingViolation>,
     used_relations: BTreeSet<String>,
 }
@@ -294,9 +335,12 @@ impl<'a> Checker<'a> {
         for name in names {
             let derived = &self.program.derived[name];
             let citing = derived.id.as_deref().unwrap_or(&derived.name);
-            // Explain selects among the versions, but the dense compiler reads the
-            // base semantics, so both are checked.
-            let semantics = std::iter::once(&derived.semantics)
+            // Explain selects among the versions, but the dense compiler reads
+            // the base semantics, so the check walks both.
+            let base =
+                (self.base_semantics || derived.versions.is_empty()).then_some(&derived.semantics);
+            let semantics = base
+                .into_iter()
                 .chain(derived.versions.iter().map(|version| &version.semantics));
             for semantics in semantics {
                 let context = Context {

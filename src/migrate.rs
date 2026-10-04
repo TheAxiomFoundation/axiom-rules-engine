@@ -821,7 +821,7 @@ pub fn migrate_artifact_relation_typing(
     }
     let (executed, filtered) = loop {
         let model = artifact.program.to_program()?;
-        let filtered = crate::relation_typing::filtered_entity_kinds(&model);
+        let filtered = execution_filter_kinds(&model);
         let executed = canonical_usage(&model, &filtered);
         let mut stamped = false;
         for relation in &mut artifact.program.relations {
@@ -955,16 +955,45 @@ pub fn migrate_artifact_relation_typing(
 /// combined. A filtered entity whose source kind is not yet known, or that
 /// still names an alias after mapping, says nothing about the slot. A slot is known when every use that constrains it
 /// agrees.
+/// Filtered entity -> source kind, from derived relations whose declared
+/// kinds agree with their source's: a derived relation whose declaration
+/// contradicts its source defines nothing trustworthy. The derivation need
+/// not be executed: a `SnapUnit` rule's ids are household ids because
+/// `snap_unit` filters households, whether or not a rule aggregates it.
+fn execution_filter_kinds(
+    model: &crate::model::Program,
+) -> std::collections::BTreeMap<String, String> {
+    crate::relation_typing::filtered_entity_kinds_among(model, &consistent_derivations(model))
+}
+
+fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
+    model
+        .relations
+        .iter()
+        .filter_map(|(name, schema)| {
+            let derivation = schema.derivation.as_ref()?;
+            let source =
+                crate::relation_typing::effective_slot_entities(model, &derivation.source_relation);
+            let agrees = |declared: &Vec<String>| {
+                declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
+            };
+            (agrees(&derivation.slot_entities) && agrees(&schema.slot_entities))
+                .then(|| name.clone())
+        })
+        .collect()
+}
+
 fn canonical_usage(
     model: &crate::model::Program,
     filtered: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
-    // A kind an executed, typed relation declares is a physical kind: the
-    // typing check validates it and refuses a filtered entity there. It stays
-    // evidence even when an unresolved filter happens to share its name. An
-    // unused relation's declaration is never checked, so it establishes
-    // nothing.
+    // Evidence comes only from what execution reaches: relations an executed
+    // node reads, derived relations among them, and the uses those nodes and
+    // derivations make. An unused relation or derived relation is never
+    // checked, so its declarations and uses establish nothing.
     let executed = crate::relation_typing::executed_relations(model);
+    // A kind an executed relation declares is a physical kind: the typing
+    // check validates it and refuses a filtered entity there.
     let declared = model
         .relations
         .iter()
@@ -980,23 +1009,34 @@ fn canonical_usage(
         })
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut unknown = crate::relation_typing::filtered_entity_names(model);
-    unknown.extend(
-        crate::relation_typing::unresolved_filtered_entities(model)
-            .into_iter()
-            .filter(|entity| !declared.contains(entity)),
-    );
+    // A filter name says nothing about the ids a use reads unless an executed
+    // derivation maps it to a physical kind, or an executed relation declares
+    // it as one; a name that still aliases another kind says nothing either.
+    let aliases =
+        crate::relation_typing::filtered_entity_names_among(model, &consistent_derivations(model));
+    let filters = crate::relation_typing::filtered_entities(model);
+    let says_nothing =
+        |kind: &str| aliases.contains(kind) || (filters.contains(kind) && !declared.contains(kind));
     let mut slots =
         std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
     for usage in crate::model::relation_usage_records(model) {
+        if model.relations.contains_key(&usage.citing_rule)
+            && !executed.contains(&usage.citing_rule)
+        {
+            continue;
+        }
         let entry = slots.entry(usage.relation).or_default();
         if entry.len() < usage.slot_entities.len() {
             entry.resize_with(usage.slot_entities.len(), Default::default);
         }
         for (slot, kind) in usage.slot_entities.into_iter().enumerate() {
             if let Some(kind) = kind {
-                let kind = filtered.get(&kind).cloned().unwrap_or(kind);
-                if !unknown.contains(&kind) {
+                let kind = match filtered.get(&kind) {
+                    Some(mapped) => mapped.clone(),
+                    None if says_nothing(&kind) => continue,
+                    None => kind,
+                };
+                if !aliases.contains(&kind) {
                     entry[slot].insert(kind);
                 }
             }
