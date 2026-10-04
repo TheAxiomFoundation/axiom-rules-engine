@@ -187,11 +187,15 @@ fn counts_any(relation: &str) -> JudgmentExprSpec {
     }
 }
 
+/// `member` relates households to households (`run_e` relates the
+/// household to itself), so a relation predicate reading the household rule
+/// `e` reads it on an id of its entity. The derived relations inherit these
+/// kinds.
 fn base_relation() -> RelationSpec {
     RelationSpec {
         name: "member".to_string(),
         arity: 2,
-        slot_entities: Vec::new(),
+        slot_entities: vec!["Household".to_string(), "Household".to_string()],
         derivation: None,
     }
 }
@@ -480,12 +484,42 @@ fn cycle_detection_agrees_with_a_model_of_every_small_program() {
 /// loads, so a changed order would make previously valid artifacts
 /// unloadable. This artifact was compiled before the check existed (main at
 /// 5a29e03). `e` counts `R`, which is filtered from `S`, whose predicate reads
-/// `z`; the program is acyclic.
+/// `z`; the program is acyclic. It also predates mandatory relation typing,
+/// so it loads once `migrate artifact` has typed `member`, which keeps every
+/// other part of the artifact, its stored order included.
 #[test]
 fn an_artifact_compiled_before_this_check_still_loads_and_runs() {
     const ARTIFACT: &str = r#"{"artifact_format_version":2,"engine_version":"0.2.2","metadata":{"evaluation_order":["e","z"],"fast_path":{"blockers":[],"compatible":true,"strategy":"generic_bulk"},"input_catalog":[]},"program":{"derived":[{"dtype":"integer","entity":"Household","expr":{"current_slot":0,"kind":"count_related","related_slot":1,"relation":"R","where":null},"name":"e","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null},{"dtype":"integer","entity":"Household","expr":{"kind":"literal","value":{"kind":"integer","value":1}},"name":"z","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null}],"parameters":[],"relations":[{"arity":2,"name":"member"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"derived","name":"z"},"op":"gte","right":{"kind":"literal","value":{"kind":"integer","value":0}}},"related_slot":1,"source_relation":"member"},"name":"S"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"literal","value":{"kind":"integer","value":1}},"op":"eq","right":{"kind":"literal","value":{"kind":"integer","value":1}}},"related_slot":1,"source_relation":"S"},"name":"R"}],"units":[]}}"#;
-    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(ARTIFACT)
-        .expect("a previously compiled acyclic artifact still loads");
+    let refused = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(ARTIFACT)
+        .expect_err("the untyped artifact is refused");
+    assert!(
+        matches!(
+            &refused,
+            CompileError::LegacyArtifactRelationTyping { report, .. }
+                if report.untyped_relations().into_iter().collect::<Vec<_>>() == ["R", "S", "member"]
+        ),
+        "{refused:?}"
+    );
+    // Executable usage fixes only the slot `e` keys on, so the migration is
+    // given `member`'s kinds.
+    let households = vec!["Household".to_string(), "Household".to_string()];
+    let migration = axiom_rules_engine::migrate::migrate_artifact_relation_typing(
+        ARTIFACT,
+        "<memory>",
+        &std::collections::BTreeMap::from([("member".to_string(), households.clone())]),
+    )
+    .expect("the acyclic artifact migrates");
+    assert_eq!(
+        migration
+            .changes
+            .iter()
+            .map(|change| (change.relation.as_str(), &change.slot_entities))
+            .collect::<Vec<_>>(),
+        [("member", &households)]
+    );
+    let typed = serde_json::to_string(&migration.artifact).expect("the artifact serialises");
+    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(&typed)
+        .expect("a previously compiled acyclic artifact still loads once typed");
     assert_eq!(artifact.metadata.evaluation_order, ["e", "z"]);
     let recompiled =
         axiom_rules_engine::compile::CompiledProgramArtifact::compile(artifact.program.clone())
