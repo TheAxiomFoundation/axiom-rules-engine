@@ -43,7 +43,7 @@
 //!   diverged and the first few (unshrunk) divergences. Useful for measuring a
 //!   partial fix.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -53,7 +53,7 @@ use axiom_rules_engine::api::{
     ApiError, CompiledExecutionRequest, ExecutionMode, ExecutionQuery, ExecutionRequest,
     ExecutionResponse, OutputValue, RulePin, execute_compiled_request, execute_request,
 };
-use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact, FastPathMetadata};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseExecutionResult,
     DenseOutputValue, DenseRelationBatchSpec, DenseRelationKey,
@@ -4068,6 +4068,302 @@ fn random_programs_fast_matches_explain_on_relation_aggregation() {
 /// Dense must hold explain's value for every row and output of a dense-profile
 /// case, fail exactly when explain fails for some row (same error variant), and
 /// give columns that do not depend on the order outputs are requested in.
+// ===========================================================================
+// Compiled fast-path metadata
+// ===========================================================================
+
+/// Fallback reasons that mean bulk fast mode declined a construct (the
+/// prefixes `bulk::unsupported_reason` passes through), as opposed to a row
+/// failing and explain deciding the outcome.
+const CONSTRUCT_DECLINES: [&str; 3] = [
+    "bulk execution does not yet support",
+    "bulk fast mode does not yet support",
+    "fast mode does not yet support",
+];
+
+/// The blocker every engine before #201 listed for a relation sum over a
+/// related derived value.
+const RETIRED_SUM_BLOCKER: &str =
+    "fast mode does not yet support sum_related over related derived values";
+
+/// How many blockers the pre-#201 analysis listed for `expr`: one per
+/// `sum_related` over a related derived value, never looking inside a relation
+/// aggregation. Written independently of `src/compile.rs`, and exhaustive, so
+/// a new expression variant has to be classified here as well.
+fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
+    match expr {
+        ScalarExprSpec::SumRelated { value, .. } => {
+            usize::from(matches!(value, RelatedValueRefSpec::Derived { .. }))
+        }
+        ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::Input { .. }
+        | ScalarExprSpec::InputOrElse { .. }
+        | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::CountRelated { .. }
+        | ScalarExprSpec::PeriodStart
+        | ScalarExprSpec::PeriodEnd => 0,
+        ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),
+        ScalarExprSpec::Add { items }
+        | ScalarExprSpec::Max { items }
+        | ScalarExprSpec::Min { items } => items.iter().map(retired_sums_in_scalar).sum(),
+        ScalarExprSpec::Sub { left, right }
+        | ScalarExprSpec::Mul { left, right }
+        | ScalarExprSpec::Div { left, right } => {
+            retired_sums_in_scalar(left) + retired_sums_in_scalar(right)
+        }
+        ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
+            retired_sums_in_scalar(value)
+        }
+        ScalarExprSpec::DateAddDays { date, days: other }
+        | ScalarExprSpec::DateAddMonths {
+            date,
+            months: other,
+        }
+        | ScalarExprSpec::DateAddYears { date, years: other }
+        | ScalarExprSpec::DaysBetween {
+            from: date,
+            to: other,
+        } => retired_sums_in_scalar(date) + retired_sums_in_scalar(other),
+        ScalarExprSpec::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            retired_sums_in_judgment(condition)
+                + retired_sums_in_scalar(then_expr)
+                + retired_sums_in_scalar(else_expr)
+        }
+        ScalarExprSpec::NoMatch { subject, patterns } => {
+            retired_sums_in_scalar(subject)
+                + patterns.iter().map(retired_sums_in_scalar).sum::<usize>()
+        }
+        ScalarExprSpec::OverPeriods { value, n, .. } => {
+            retired_sums_in_scalar(value) + n.as_deref().map_or(0, retired_sums_in_scalar)
+        }
+    }
+}
+
+fn retired_sums_in_judgment(expr: &JudgmentExprSpec) -> usize {
+    match expr {
+        JudgmentExprSpec::Comparison { left, right, .. } => {
+            retired_sums_in_scalar(left) + retired_sums_in_scalar(right)
+        }
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => 0,
+        JudgmentExprSpec::And { items }
+        | JudgmentExprSpec::Or { items }
+        | JudgmentExprSpec::ExactlyOne { items } => {
+            items.iter().map(retired_sums_in_judgment).sum()
+        }
+        JudgmentExprSpec::Not { item } => retired_sums_in_judgment(item),
+    }
+}
+
+fn retired_sums_in_semantics(semantics: &DerivedSemanticsSpec) -> usize {
+    match semantics {
+        DerivedSemanticsSpec::Scalar { expr } => retired_sums_in_scalar(expr),
+        DerivedSemanticsSpec::Judgment { expr } => retired_sums_in_judgment(expr),
+    }
+}
+
+/// The `fast_path` an engine before #201 stamped for a program in which no
+/// other construct blocks fast mode: each rule's retired blockers, the rule's
+/// formula and then its versions, in rule order. Every entry of one rule is
+/// the same string, so the order within a rule cannot matter.
+fn pre_lazy_fast_path(program: &ProgramSpec) -> FastPathMetadata {
+    let blockers = program
+        .derived
+        .iter()
+        .flat_map(|derived| {
+            let count = retired_sums_in_semantics(&derived.semantics)
+                + derived
+                    .versions
+                    .iter()
+                    .map(|version| retired_sums_in_semantics(&version.semantics))
+                    .sum::<usize>();
+            std::iter::repeat_n(format!("{}: {RETIRED_SUM_BLOCKER}", derived.name), count)
+        })
+        .collect::<Vec<_>>();
+    FastPathMetadata {
+        strategy: "generic_bulk".to_string(),
+        compatible: blockers.is_empty(),
+        blockers,
+    }
+}
+
+#[derive(Default)]
+struct FastPathCounts {
+    compiled: Cell<u32>,
+    /// The program has a relation sum over a related derived value, which the
+    /// pre-#201 analysis blocked.
+    retired_shape: Cell<u32>,
+    /// ...and fast mode answered the request on its own path.
+    retired_shape_on_fast_path: Cell<u32>,
+}
+
+fn bump(counter: &Cell<u32>) {
+    counter.set(counter.get() + 1);
+}
+
+/// The artifact-metadata contract on a generated program:
+///
+/// 1. **No false blocker.** Nothing the generator emits makes bulk fast mode
+///    decline, so a fresh compile reports `compatible` with no blockers, and
+///    fast mode never falls back with a construct-decline reason.
+/// 2. **Round trip.** A fresh artifact loads with no stale diagnostic and
+///    re-serializes to the same bytes.
+/// 3. **Retired stamps load unchanged.** The same artifact stamped with what an
+///    engine before #201 wrote loads, keeps those bytes, and reports exactly
+///    one `stale_fast_path_metadata` diagnostic when the stamp differs.
+/// 4. **Nothing else loads.** Flipping `compatible`, dropping a blocker or
+///    adding one is rejected as a metadata mismatch.
+fn check_fast_path_metadata(
+    case: &CaseG,
+    profile: Profile,
+    counts: &FastPathCounts,
+) -> Result<(), String> {
+    let lowered = lower(case, profile);
+    let fail = |problem: String| render_case(profile, &lowered, &[("fast_path", problem)]);
+    let Ok(artifact) = CompiledProgramArtifact::compile(lowered.program.clone()) else {
+        // Programs the compiler refuses are other properties' concern.
+        return Ok(());
+    };
+    bump(&counts.compiled);
+
+    let current = &artifact.metadata.fast_path;
+    if current.strategy != "generic_bulk" || !current.compatible || !current.blockers.is_empty() {
+        return Err(fail(format!("a fresh compile reported {current:?}")));
+    }
+    let stale = |loaded: &CompiledProgramArtifact| {
+        loaded
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "stale_fast_path_metadata")
+            .count()
+    };
+
+    let source = serde_json::to_string(&artifact).expect("artifact serialises");
+    let loaded = CompiledProgramArtifact::from_json_str(&source)
+        .map_err(|error| fail(format!("a fresh artifact failed to load: {error}")))?;
+    if stale(&loaded) != 0 || serde_json::to_string(&loaded).expect("serialises") != source {
+        return Err(fail(
+            "a fresh artifact did not round-trip unchanged and without diagnostics".to_string(),
+        ));
+    }
+
+    let legacy = pre_lazy_fast_path(&artifact.program);
+    let retired = !legacy.blockers.is_empty();
+    let mut stamped = artifact.clone();
+    stamped.metadata.fast_path = legacy.clone();
+    let stamped_source = serde_json::to_string(&stamped).expect("artifact serialises");
+    let loaded = CompiledProgramArtifact::from_json_str(&stamped_source).map_err(|error| {
+        fail(format!(
+            "the pre-#201 stamp {legacy:?} failed to load: {error}"
+        ))
+    })?;
+    if serde_json::to_string(&loaded).expect("serialises") != stamped_source {
+        return Err(fail("loading changed a pre-#201 stamp".to_string()));
+    }
+    if stale(&loaded) != usize::from(retired) {
+        return Err(fail(format!(
+            "expected {} stale_fast_path_metadata diagnostics for {legacy:?}, got {:?}",
+            usize::from(retired),
+            loaded.diagnostics
+        )));
+    }
+
+    if retired {
+        bump(&counts.retired_shape);
+        let mut flipped = legacy.clone();
+        flipped.compatible = true;
+        let mut dropped = legacy.clone();
+        dropped.blockers.pop();
+        let mut extra = legacy.clone();
+        extra.blockers.push(legacy.blockers[0].clone());
+        for (name, corrupt) in [("flipped", flipped), ("dropped", dropped), ("extra", extra)] {
+            let mut corrupted = artifact.clone();
+            corrupted.metadata.fast_path = corrupt;
+            let json = serde_json::to_string(&corrupted).expect("artifact serialises");
+            match CompiledProgramArtifact::from_json_str(&json) {
+                Err(error) if error.to_string().contains("metadata does not match") => {}
+                other => {
+                    return Err(fail(format!(
+                        "a {name} fast_path no engine computed was not rejected as a mismatch: {:?}",
+                        other.map(|artifact| artifact.metadata.fast_path)
+                    )));
+                }
+            }
+        }
+    }
+
+    let fast = catch_unwind(AssertUnwindSafe(|| {
+        execute_request(request(
+            ExecutionMode::Fast,
+            &lowered.program,
+            &lowered.dataset,
+            &lowered.queries,
+        ))
+    }));
+    if let Ok(Ok(response)) = fast {
+        match &response.metadata.fallback_reason {
+            Some(reason)
+                if CONSTRUCT_DECLINES
+                    .iter()
+                    .any(|prefix| reason.starts_with(prefix)) =>
+            {
+                return Err(fail(format!(
+                    "metadata reported no blocker, but fast mode declined a construct: {reason}"
+                )));
+            }
+            Some(_) => {}
+            None if retired => bump(&counts.retired_shape_on_fast_path),
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Artifact `fast_path` metadata holds the contract in
+/// [`check_fast_path_metadata`] on the full generator and on programs built
+/// around relation aggregation, and enough cases exercise the retired shape,
+/// with fast mode answering it, for the property to bite.
+#[test]
+fn random_programs_fast_path_metadata_is_accurate_and_loads_across_engines() {
+    for (name, property, profile, min_retired_share) in [
+        ("fast_path: full generator", 21, FULL, 0.02),
+        ("fast_path: relation aggregation", 22, RELATIONS, 0.04),
+    ] {
+        let counts = FastPathCounts::default();
+        let stats = run_property(name, property, profile, |case, stats| {
+            stats.cases += 1;
+            check_fast_path_metadata(case, profile, &counts)
+        });
+        eprintln!(
+            "{name}: {} cases; {} compiled; {} with a relation sum over a related derived value, {} answered on the fast path",
+            stats.cases,
+            counts.compiled.get(),
+            counts.retired_shape.get(),
+            counts.retired_shape_on_fast_path.get()
+        );
+        if report_only() || stats.cases < 200 {
+            continue;
+        }
+        let compiled = f64::from(counts.compiled.get());
+        assert!(
+            compiled >= 0.9 * f64::from(stats.cases),
+            "{name}: too few generated programs compiled: {} of {}",
+            counts.compiled.get(),
+            stats.cases
+        );
+        assert!(
+            f64::from(counts.retired_shape_on_fast_path.get()) >= min_retired_share * compiled,
+            "{name}: too few cases had fast mode answer a relation sum over a related derived value: {} with the shape, {} answered on the fast path, {} compiled",
+            counts.retired_shape.get(),
+            counts.retired_shape_on_fast_path.get(),
+            counts.compiled.get()
+        );
+    }
+}
+
 fn check_dense(case: &CaseG, profile: Profile, stats: &mut Stats) -> Result<(), String> {
     let lowered = lower(case, profile);
     let decisive_before = stats.decisive_memberships;
