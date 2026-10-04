@@ -901,3 +901,367 @@ fn capabilities_advertise_mandatory_relation_typing() {
         "{value}"
     );
 }
+
+fn violation_codes(error: &impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+/// A rule a derived relation's predicate reads runs on the current id only
+/// when the derivation declares the current kind. Lowering now stamps the
+/// source's kinds onto a derivation over distinct kinds, so a Household rule
+/// in the predicate reads the household, not the member.
+#[test]
+fn derived_relation_predicate_reads_a_current_entity_rule_on_the_current_id() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: household_is_large
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(member_of_household) > 1
+  - name: large_household_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: '2026-01-01'
+        formula: household_is_large
+  - name: large_member_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(large_household_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("a typed source with distinct kinds compiles")
+        .program;
+    let derived = program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "large_household_members")
+        .and_then(|relation| relation.derivation.as_ref())
+        .unwrap();
+    assert_eq!(derived.slot_entities, vec!["Person", "Household"]);
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("member_of_household", &["p1", "h1"]),
+            tuple("member_of_household", &["p2", "h1"]),
+            tuple("member_of_household", &["p3", "h2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![
+                query("h1", &["large_member_count"]),
+                query("h2", &["large_member_count"]),
+            ],
+        )
+        .unwrap();
+        let outputs = outputs(&response);
+        assert_eq!(outputs[0]["large_member_count"], 2, "{mode:?}");
+        assert_eq!(outputs[1]["large_member_count"], 0, "{mode:?}");
+    }
+}
+
+/// A raw program whose derivation declares no kinds runs every predicate
+/// rule on the related id; a Household rule there would read a person.
+#[test]
+fn raw_derivation_without_kinds_cannot_read_a_current_entity_rule() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "large_household_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household", "current_slot": 1, "related_slot": 0,
+                "predicate": {"kind": "derived", "name": "household_is_large"}
+            }}
+        ],
+        "derived": [
+            {"name": "household_is_large", "entity": "Household", "dtype": "judgment",
+             "unit": null, "semantics": "judgment",
+             "expr": {"kind": "comparison",
+                      "left": {"kind": "count_related", "relation": "member_of_household",
+                               "current_slot": 1, "related_slot": 0},
+                      "op": "gt",
+                      "right": {"kind": "literal", "value": {"kind": "integer", "value": 1}}}},
+            {"name": "large_member_count", "entity": "Household", "dtype": "integer",
+             "unit": null, "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "large_household_members",
+                      "current_slot": 1, "related_slot": 0}}
+        ]
+    }))
+    .unwrap();
+    let error = run(
+        ExecutionMode::Explain,
+        program,
+        DatasetSpec::default(),
+        vec![query("h1", &["large_member_count"])],
+    )
+    .expect_err("the predicate rule would run on a person id");
+    let ApiError::RelationTyping(report) = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.code == RelationTypingCode::PredicateEntityMismatch),
+        "{report}"
+    );
+    assert!(error.to_string().contains("slot_entities"), "{error}");
+}
+
+#[test]
+fn same_kind_derived_relation_must_state_its_slots() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: parent_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: dependent_children
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: parent_of
+    versions:
+      - effective_from: '2026-01-01'
+        formula: child_is_dependent
+  - name: dependent_child_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(dependent_children)
+"#;
+    let error = lower_rulespec_str(source).expect_err("the default slots are a guess");
+    assert!(
+        matches!(error, RuleSpecError::AmbiguousDerivedRelationSlots { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("current_slot"), "{error}");
+}
+
+#[test]
+fn chained_derived_relations_must_keep_one_direction() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: household_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: eligible_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: households_of_eligible_member
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: eligible_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: my_eligible_households
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(households_of_eligible_member)
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("the inner derivation traverses Household-first");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report.violations.iter().any(|violation| violation.code
+            == RelationTypingCode::DerivedRelationSlotsDiverge
+            && violation.relation == "households_of_eligible_member"),
+        "{report}"
+    );
+}
+
+const SNAP_UNIT_OVER_HOUSEHOLD_FIRST: &str = r#"
+format: rulespec/v1
+rules:
+  - name: household_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(members)
+  - name: unit_household_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(household_members)
+"#;
+
+/// A SnapUnit is queried with household ids, so a SnapUnit rule may
+/// aggregate the household relation keyed on its Household slot.
+#[test]
+fn filtered_entity_rule_aggregates_its_source_relation_by_the_source_kind() {
+    let program = CompiledProgramArtifact::from_rulespec_str(SNAP_UNIT_OVER_HOUSEHOLD_FIRST)
+        .expect("a SnapUnit rule keys household_members on its Household slot")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("eligible", "Person", "p1", true),
+            bool_input("eligible", "Person", "p2", false),
+        ],
+        relations: vec![
+            tuple("household_members", &["h1", "p1"]),
+            tuple("household_members", &["h1", "p2"]),
+        ],
+    };
+    let model = program.to_program().unwrap();
+    let strict = dataset.to_dataset_for_queries_with_options(
+        &model,
+        &[("h1".to_string(), "SnapUnit".to_string())],
+        DatasetBindingOptions::strict(),
+    );
+    assert!(strict.is_ok(), "a SnapUnit query is Household evidence");
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["unit_size", "unit_household_size"])],
+        )
+        .unwrap();
+        let outputs = &outputs(&response)[0];
+        assert_eq!(outputs["unit_size"], 1, "{mode:?}");
+        assert_eq!(outputs["unit_household_size"], 2, "{mode:?}");
+    }
+}
+
+#[test]
+fn derived_relations_filtering_to_one_entity_must_agree_on_its_kind() {
+    let source = SNAP_UNIT_OVER_HOUSEHOLD_FIRST.replace(
+        "  - name: unit_size\n",
+        r#"  - name: other_snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      entity: SnapUnit
+      member_relation: other_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: other_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(other_members)
+  - name: unit_size
+"#,
+    );
+    let error = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect_err("SnapUnit ids cannot be both households and people");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.code == RelationTypingCode::FilteredEntityKindConflict),
+        "{report}"
+    );
+}
+
+#[test]
+fn derived_relation_schema_kinds_must_match_its_source() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "members_d", "arity": 2, "slot_entities": ["Household", "Person"],
+             "derivation": {
+                "source_relation": "member_of_household", "current_slot": 0, "related_slot": 1,
+                "predicate": {"kind": "comparison",
+                              "left": {"kind": "literal", "value": {"kind": "bool", "value": true}},
+                              "op": "eq",
+                              "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}
+            }}
+        ],
+        "derived": [
+            {"name": "hh_size_d", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "members_d",
+                      "current_slot": 0, "related_slot": 1}}
+        ]
+    }))
+    .unwrap();
+    let error = run(
+        ExecutionMode::Explain,
+        program,
+        DatasetSpec::default(),
+        vec![query("h1", &["hh_size_d"])],
+    )
+    .expect_err("the schema kinds contradict the source");
+    assert!(
+        violation_codes(&error).contains("derived_relation_source_slot_conflict"),
+        "{error}"
+    );
+}

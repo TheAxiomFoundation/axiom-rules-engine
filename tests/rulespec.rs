@@ -2405,8 +2405,9 @@ fn relation_orientation_mismatch_is_refused_at_compile_load_and_migration() {
     ];
 
     // Compile, in default and strict mode alike.
-    let mut program = serde_json::to_value(lower_rulespec_str(ORIENTATION_MISMATCH_RULESPEC).unwrap())
-        .expect("program serializes");
+    let mut program =
+        serde_json::to_value(lower_rulespec_str(ORIENTATION_MISMATCH_RULESPEC).unwrap())
+            .expect("program serializes");
     force_legacy_count_slots(&mut program);
     let program: ProgramSpec = serde_json::from_value(program).expect("program deserializes");
     for options in [CompileOptions::default(), strict] {
@@ -2491,7 +2492,10 @@ fn relation_orientation_mismatch_is_refused_at_compile_load_and_migration() {
     .expect("an executed-order override types the artifact");
     assert_eq!(migration.changes.len(), 1);
     assert_eq!(migration.changes[0].previous, vec!["TaxUnit", "Person"]);
-    assert_eq!(migration.changes[0].slot_entities, vec!["Person", "TaxUnit"]);
+    assert_eq!(
+        migration.changes[0].slot_entities,
+        vec!["Person", "TaxUnit"]
+    );
     CompiledProgramArtifact::from_json_str(
         &serde_json::to_string(&migration.artifact).expect("migrated artifact serializes"),
     )
@@ -4935,7 +4939,11 @@ fn declared_relation_order_drives_count_for_each_tax_unit() {
             },
         )
         .unwrap();
-        assert!(artifact.diagnostics.is_empty(), "{:?}", artifact.diagnostics);
+        assert!(
+            artifact.diagnostics.is_empty(),
+            "{:?}",
+            artifact.diagnostics
+        );
         let interval = IntervalSpec {
             start: "2026-01-01".parse().unwrap(),
             end: "2027-01-01".parse().unwrap(),

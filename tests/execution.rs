@@ -3290,7 +3290,11 @@ fn fast_mode_counts_and_sums_each_related_entity_once() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "household_member_role".to_string(),
             arity: 3,
-            slot_entities: vec!["Household".to_string(), "Person".to_string(), "Role".to_string()],
+            slot_entities: vec![
+                "Household".to_string(),
+                "Person".to_string(),
+                "Role".to_string(),
+            ],
             derivation: None,
         }],
         derived: vec![

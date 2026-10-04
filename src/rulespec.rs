@@ -2145,8 +2145,8 @@ impl RulesDocument {
             })
             .map(|rule| rule.canonical_relation_id())
             .collect::<HashSet<_>>();
-        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(
-            |error| match error {
+        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
+            match error {
                 crate::relation_direction::DirectionError::Aggregate {
                     relation,
                     citing,
@@ -2165,8 +2165,8 @@ impl RulesDocument {
                     relation,
                     slot_entities,
                 },
-            },
-        )?;
+            }
+        })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();

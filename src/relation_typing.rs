@@ -297,7 +297,9 @@ impl<'a> Checker<'a> {
                 RelationTypingCode::UnknownRelation,
                 relation,
                 citing,
-                format!("`{citing}` executes relation `{relation}`, which the program does not declare"),
+                format!(
+                    "`{citing}` executes relation `{relation}`, which the program does not declare"
+                ),
             );
             return None;
         };
@@ -716,16 +718,27 @@ impl<'a> Checker<'a> {
                 self.scalar(then_expr, context);
                 self.scalar(else_expr, context);
             }
+            // As in explain, a derived relation's membership binding does not
+            // reach a match fallback's pattern labels or an over-periods
+            // reduction.
             ScalarExpr::NoMatch { subject, patterns } => {
                 self.scalar(subject, context);
+                let unbound = Context {
+                    membership: None,
+                    ..context
+                };
                 for pattern in patterns {
-                    self.scalar(pattern, context);
+                    self.scalar(pattern, unbound);
                 }
             }
             ScalarExpr::OverPeriods { value, n, .. } => {
-                self.scalar(value, context);
+                let unbound = Context {
+                    membership: None,
+                    ..context
+                };
+                self.scalar(value, unbound);
                 if let Some(n) = n {
-                    self.scalar(n, context);
+                    self.scalar(n, unbound);
                 }
             }
             ScalarExpr::Literal(_)
