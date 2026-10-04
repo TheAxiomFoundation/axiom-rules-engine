@@ -948,7 +948,7 @@ pub fn migrate_artifact_relation_typing(
         let hints = untrusted_filter_hints(&artifact.program.to_program()?);
         if !hints.is_empty() {
             detail.push_str(
-                "\nthese filtered entities have no trusted kind, so the rules evaluated for them say nothing; type their source relations (or recompile) so they map to a kind:\n",
+                "\nthese filtered entities have no trusted kind, so the rules evaluated for them say nothing:\n",
             );
             detail.push_str(&hints.join("\n"));
         }
@@ -1051,9 +1051,27 @@ fn execution_evidence_contested(
 }
 
 /// For each filtered entity a rule is evaluated for but migration does not
-/// trust, the derived relations defining it and their sources.
+/// trust, what would settle it: typing the data relation at the bottom of a
+/// consistent defining chain (`--relation-entities` takes data relations
+/// only), or recompiling when a chain is inconsistent.
 fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
     let trusted = trusted_filter_kinds(model);
+    let consistent = consistent_derivations(model);
+    let data_source = |relation: &str| {
+        let mut name = relation.to_string();
+        let mut visited = std::collections::BTreeSet::new();
+        while let Some(derivation) = model
+            .relations
+            .get(&name)
+            .and_then(|schema| schema.derivation.as_ref())
+        {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            name = derivation.source_relation.clone();
+        }
+        Some(name)
+    };
     let evaluated = model
         .derived
         .values()
@@ -1070,10 +1088,16 @@ fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
         if trusted.contains_key(entity) || !evaluated.contains(entity) {
             continue;
         }
+        let remedy = match data_source(name) {
+            Some(source) if consistent.contains(name) => {
+                format!("type its data relation `{source}`")
+            }
+            _ => "its source chain is inconsistent; recompile from source".to_string(),
+        };
         definitions
             .entry(entity.clone())
             .or_default()
-            .push(format!("`{name}` over `{}`", derivation.source_relation));
+            .push(format!("`{name}` ({remedy})"));
     }
     definitions
         .into_iter()

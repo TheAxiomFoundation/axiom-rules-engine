@@ -2263,7 +2263,11 @@ fn migration_takes_no_evidence_from_an_unresolved_filter_name() {
             assert!(
                 detail.contains("  s ") && detail.contains("[Organization, ?]"),
                 "{detail}"
-            )
+            );
+            assert!(
+                detail.contains("UnitF: defined by `f` (type its data relation `g`)"),
+                "names the data relation to type: {detail}"
+            );
         }
         other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
     }
@@ -2325,8 +2329,10 @@ fn migration_refuses_a_slot_an_untrusted_filter_contests() {
         Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
             assert!(detail.contains("  s "), "{detail}");
             assert!(
-                detail.contains("UnitF: defined by `bridge` over `bad_seed`"),
-                "names the filter to type: {detail}"
+                detail.contains(
+                    "UnitF: defined by `bridge` (its source chain is inconsistent; recompile from source)"
+                ),
+                "says what settles the filter: {detail}"
             );
         }
         other => panic!("the contested slot must not be stamped: {other:?}"),
