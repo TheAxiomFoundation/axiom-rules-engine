@@ -829,12 +829,11 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(request.as_bytes())
-            .unwrap();
+        // A refusal can exit before reading stdin, so a closed pipe is not a failure here;
+        // the assertions below check the exit status and stderr.
+        if let Err(error) = child.stdin.take().unwrap().write_all(request.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
         child.wait_with_output().unwrap()
     };
 
