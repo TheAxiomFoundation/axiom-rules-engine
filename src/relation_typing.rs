@@ -416,10 +416,17 @@ impl<'a> Checker<'a> {
                         RelationTypingCode::CurrentSlotEntityMismatch,
                         relation,
                         citing,
-                        format!(
-                            "`{citing}` evaluates on `{entity}` ids and aggregates relation `{relation}` keyed on slot {current}, which declares `{current_kind}` (slot kinds {}), so the lookup can never match those ids. Declare the kinds in tuple order and recompile",
-                            format_kinds(kinds)
-                        ),
+                        if entity == SCALAR_ENTITY {
+                            format!(
+                                "`{citing}` has no entity (`{SCALAR_ENTITY}`), so the id it aggregates relation `{relation}` from has no kind to check against slot {current}, which declares `{current_kind}` (slot kinds {}). Give the rule the entity it is evaluated for",
+                                format_kinds(kinds)
+                            )
+                        } else {
+                            format!(
+                                "`{citing}` evaluates on `{entity}` ids and aggregates relation `{relation}` keyed on slot {current}, which declares `{current_kind}` (slot kinds {}), so the lookup can never match those ids. Declare the kinds in tuple order and recompile",
+                                format_kinds(kinds)
+                            )
+                        },
                     );
                 }
                 let related_kind = kinds[related].as_str();
