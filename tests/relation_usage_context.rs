@@ -651,6 +651,120 @@ rules:
     assert_eq!(reversed.diagnostics.len(), 2, "{:?}", reversed.diagnostics);
 }
 
+/// The #203 shape over a `head_of_household` declared household-first. Read
+/// as declared, the membership test keys the household the derivation binds
+/// on slot 0 and the person on slot 1, as the bare membership test does, and
+/// the module compiles and counts the household's head.
+///
+/// KNOWN FAILURE, reported rather than papered over: RuleSpec lowering
+/// (`src/relation_direction.rs`) re-keys a membership test from the declared
+/// kinds only when it is the predicate itself or sits under `and`, `or`,
+/// `exactly_one` or `not`. Inside a comparison operand, and so inside an `if`
+/// condition, it keeps formula lowering's default slots (1, 0), which read
+/// this declaration backwards, and the typing check, which keeps the binding
+/// there as explain does, refuses the well-typed module with
+/// `relation_membership_slot_entity_mismatch`.
+#[test]
+fn rulespec_membership_in_an_if_condition_follows_a_household_first_declaration() {
+    let module = |formula: &str| {
+        format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: head_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: household_heads
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: "{formula}"
+  - name: head_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(household_heads)
+"#
+        )
+    };
+    let interval = json!({"start": "2026-01-01", "end": "2026-01-31"});
+    let dataset = json!({
+        "inputs": [],
+        "relations": [
+            {"name": "member_of_household", "tuple": ["p1", "h1"], "interval": interval},
+            {"name": "member_of_household", "tuple": ["p2", "h1"], "interval": interval},
+            {"name": "head_of_household", "tuple": ["h1", "p1"], "interval": interval},
+        ],
+    });
+    for formula in [
+        "head_of_household",
+        "(if head_of_household: 1 else: 0) == 1",
+    ] {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&module(formula))
+            .unwrap_or_else(|error| panic!("`{formula}` compiles: {error}"));
+        let relation = artifact
+            .program
+            .relations
+            .iter()
+            .find(|relation| relation.name == "household_heads")
+            .expect("derived relation is emitted");
+        let predicate = serde_json::to_value(
+            &relation
+                .derivation
+                .as_ref()
+                .expect("household_heads is derived")
+                .predicate,
+        )
+        .expect("predicate serializes");
+        let membership = if predicate["kind"] == "relation_member" {
+            &predicate
+        } else {
+            &predicate["left"]["condition"]
+        };
+        assert_eq!(
+            (&membership["current_slot"], &membership["related_slot"]),
+            (&json!(0), &json!(1)),
+            "`{formula}`: {predicate}"
+        );
+        let request = json!({
+            "mode": "explain",
+            "program": artifact.program,
+            "dataset": dataset,
+            "queries": [{
+                "entity_id": "h1",
+                "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                "outputs": ["head_count"],
+            }],
+        });
+        let request: ExecutionRequest = serde_json::from_value(request).expect("request parses");
+        let response = execute_request(request).expect("explain answers");
+        assert!(
+            matches!(
+                &response.results[0].outputs["head_count"],
+                OutputValue::Scalar {
+                    value: ScalarValueSpec::Integer { value: 1 },
+                    ..
+                }
+            ),
+            "`{formula}`: {:?}",
+            response.results[0].outputs
+        );
+    }
+}
+
 /// A context-keeping step between a scalar and its enclosing scalar. Each
 /// preserves the value (1 or 0) and evaluates its operand, so the membership
 /// test is always reached and always decides the outcome.
