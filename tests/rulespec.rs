@@ -675,6 +675,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -783,6 +784,7 @@ rules:
     };
 
     let error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -849,6 +851,7 @@ rules:
     let output_id = "us:statutes/7/2017/a#snap_regular_month_allotment".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -930,6 +933,7 @@ rules:
     let output_id = "us:policies/irs/brackets#first_bracket_rate".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1002,6 +1006,7 @@ rules:
     let output_id = "us:statutes/7/2014/e/6/A#snap_net_income".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1095,6 +1100,7 @@ rules:
         "us:statutes/7/2012/j#snap_household_has_elderly_or_disabled_member".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1185,6 +1191,7 @@ rules:
     let output_id = "us:regulations/7-cfr/273/5#snap_student_eligible".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1304,6 +1311,7 @@ rules:
     let output_id = "us-co:policies/snap#snap_student_eligible".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1416,6 +1424,7 @@ rules:
     let output_id = "us:statutes/26/25A#american_opportunity_credit_before_phaseout".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -1562,6 +1571,7 @@ rules: []
         "us:statutes/26/63/c#standard_deduction_member_count".to_string();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -2712,7 +2722,7 @@ fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
 
     let broken = dataset_with_tuple(["related-0", "case"]);
     let broken_outcome = broken
-        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::lenient())
         .expect("broken order remains compatible under the warning ratchet");
     assert_eq!(
         broken_outcome.diagnostics.len(),
@@ -2728,7 +2738,7 @@ fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
 }
 
 #[test]
-fn relation_slot_entity_mismatch_warns_by_default_and_errors_in_strict_mode() {
+fn relation_slot_entity_mismatch_warns_in_lenient_mode_and_errors_by_default() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(
         r#"
 format: rulespec/v1
@@ -2788,12 +2798,12 @@ rules:
     };
 
     let outcome = dataset
-        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
-        .expect("default binding keeps mismatched records under the warning ratchet");
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::lenient())
+        .expect("lenient binding keeps mismatched records under the warning ratchet");
     assert_eq!(
         outcome.dataset.relations[0].tuple,
         vec!["household-1", "person-1"],
-        "default mode must diagnose without rewriting or dropping the tuple"
+        "lenient mode must diagnose without rewriting or dropping the tuple"
     );
     assert_eq!(outcome.diagnostics.len(), 2);
     assert_eq!(
@@ -2808,11 +2818,11 @@ rules:
     assert!(
         outcome.diagnostics[0]
             .to_string()
-            .contains("strict relation entity mode")
+            .contains("reorder the tuple")
     );
 
     let error = dataset
-        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
         .expect_err("strict binding rejects the same mismatched tuple");
     assert!(matches!(
         &error,
@@ -4148,6 +4158,7 @@ rules:
         end: "2026-01-31".parse().expect("valid date"),
     };
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program,
         dataset: DatasetSpec {
@@ -4674,6 +4685,7 @@ rules:
     }
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: artifact.program.clone(),
             dataset: DatasetSpec {
@@ -4715,6 +4727,7 @@ rules:
         let mut forged_inputs = inputs.clone();
         forged_inputs[0].name = invalid.to_string();
         let error = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program: artifact.program.clone(),
             dataset: DatasetSpec {
@@ -4787,6 +4800,7 @@ fn declared_relation_order_drives_count_for_each_tax_unit() {
         })
         .collect();
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program: artifact.program,
             dataset: DatasetSpec { inputs, relations },

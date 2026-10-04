@@ -1538,6 +1538,7 @@ fn explain(
     outputs: &[&str],
 ) -> Result<Vec<HashMap<String, OutputValue>>, String> {
     execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,

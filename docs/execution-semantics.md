@@ -66,9 +66,11 @@ output's formula is evaluated for that entity and period as follows.
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
   evaluation does not reach can fail it.
-- **A request fails if and only if any of its (query, output) evaluations
-  fails,** and the reported error is the first failure in query order, then
-  output order.
+- **Once a request passes validation and dataset binding, it fails if and
+  only if any of its (query, output) evaluations fails,** and the reported
+  error is the first failure in query order, then output order. Validation
+  (the program's dependency graph, assessment dates, input spells) and strict
+  relation binding can refuse a request before any evaluation runs.
 
 The consequence callers rely on: a guard such as
 

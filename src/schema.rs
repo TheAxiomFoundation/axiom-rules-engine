@@ -15,6 +15,9 @@
 //!   consumers. `compiled-artifact.v1` remains published unchanged so stored
 //!   v1 artifacts have a stable historical schema, but this engine does not
 //!   execute them.
+//! - `execution-request.v1`, `compiled-execution-request.v1`, and
+//!   `execution-response.v1` describe the served JSON boundary, including
+//!   strict-by-default relation binding and its response metadata echo.
 //! - With both `schema` and `unit-derivation` enabled, four explicitly
 //!   experimental stage-3 schemas cover the aggregation authoring plan,
 //!   compiled artifact, Knowledge-valued request, and Knowledge-valued result.
@@ -77,6 +80,18 @@ pub fn all_schemas() -> Vec<NamedSchema> {
         NamedSchema {
             file_name: "compiled-artifact.v2.schema.json",
             schema: compiled_artifact_schema(),
+        },
+        NamedSchema {
+            file_name: "execution-request.v1.schema.json",
+            schema: execution_request_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-execution-request.v1.schema.json",
+            schema: compiled_execution_request_schema(),
+        },
+        NamedSchema {
+            file_name: "execution-response.v1.schema.json",
+            schema: execution_response_schema(),
         },
     ];
     #[cfg(feature = "unit-derivation")]
@@ -166,6 +181,48 @@ pub fn compiled_artifact_schema() -> Value {
         "A compiled RuleSpec program: the ProgramSpec IR plus evaluation \
          order and fast-path metadata, stamped with an artifact format \
          version. Produced by `axiom-rules-engine compile`.",
+    );
+    schema
+}
+
+/// The self-contained execution request accepted by the CLI and Rust API.
+#[cfg(feature = "schema")]
+pub fn execution_request_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::api::ExecutionRequest))
+        .expect("execution request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "execution-request.v1",
+        "Axiom execution request",
+        "Execute a program and dataset. Relation binding defaults to strict; lenient retains mismatched tuples without reordering.",
+    );
+    schema
+}
+
+/// The JSON request shared by run-compiled, wasm and the Rust compiled API.
+#[cfg(feature = "schema")]
+pub fn compiled_execution_request_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::api::CompiledExecutionRequest))
+        .expect("compiled execution request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "compiled-execution-request.v1",
+        "Axiom compiled execution request",
+        "Execute an existing compiled artifact against a dataset. Relation binding defaults to strict; lenient retains mismatched tuples without reordering.",
+    );
+    schema
+}
+
+/// Execution results and the binding policy used to produce them.
+#[cfg(feature = "schema")]
+pub fn execution_response_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::api::ExecutionResponse))
+        .expect("execution response schema serializes");
+    stamp_meta(
+        &mut schema,
+        "execution-response.v1",
+        "Axiom execution response",
+        "Execution results. metadata.relation_binding echoes the selected relation binding policy.",
     );
     schema
 }
