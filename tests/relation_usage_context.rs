@@ -21,9 +21,13 @@
 //!   compilation warns exactly when that order differs from the declaration.
 //! * A membership test explain rejects: it implies no orientation, so no
 //!   compile warning, and binding falls back to the declared order.
-//! * Strict binding rejects exactly the datasets default binding warns about.
+//! * Strict binding (the default) rejects exactly the datasets lenient binding
+//!   warns about. The observations evaluate explain under lenient binding, so
+//!   a reversed tuple still reaches the evaluator.
 
-use axiom_rules_engine::api::{ExecutionMode, ExecutionRequest, OutputValue, execute_request};
+use axiom_rules_engine::api::{
+    ExecutionMode, ExecutionRequest, OutputValue, RelationBinding, execute_request,
+};
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::spec::{
     DatasetBindingOptions, DatasetSpec, ProgramSpec, RelationRecordSpec, ScalarValueSpec,
@@ -130,7 +134,7 @@ struct Observed {
     explain: Result<i64, String>,
     /// Compile-time `relation_orientation_mismatch` warnings.
     orientation_warnings: Vec<String>,
-    /// Default dataset binding diagnostics as (relation, slot, expected, actual).
+    /// Lenient dataset binding diagnostics as (relation, slot, expected, actual).
     binding: Vec<(String, usize, String, String)>,
 }
 
@@ -151,8 +155,8 @@ fn observe(request: &Value) -> Observed {
         .to_program()
         .expect("runtime program builds");
     let binding = dataset
-        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-        .expect("default binding only warns")
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::lenient())
+        .expect("lenient binding only warns")
         .diagnostics
         .into_iter()
         .map(|diagnostic| {
@@ -169,7 +173,7 @@ fn observe(request: &Value) -> Observed {
     assert_eq!(
         strict.is_ok(),
         binding.is_empty(),
-        "strict binding must reject exactly the datasets default binding warns about: {binding:?}"
+        "strict binding must reject exactly the datasets lenient binding warns about: {binding:?}"
     );
     Observed {
         explain: count(request, ExecutionMode::Explain),
@@ -178,10 +182,15 @@ fn observe(request: &Value) -> Observed {
     }
 }
 
+/// `n` for the first query, evaluated under lenient relation binding so that a
+/// reversed tuple reaches the evaluator and the test observes its orientation;
+/// strict binding (the default) is checked against the diagnostics in
+/// `observe`.
 fn count(request: &Value, mode: ExecutionMode) -> Result<i64, String> {
     let mut request: ExecutionRequest =
         serde_json::from_value(request.clone()).expect("request parses");
     request.mode = mode;
+    request.relation_binding = RelationBinding::Lenient;
     let response = execute_request(request).map_err(|error| error.to_string())?;
     let OutputValue::Scalar {
         value: ScalarValueSpec::Integer { value },
@@ -528,8 +537,8 @@ rules:
         .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::strict())
         .expect("the correctly oriented dataset binds strictly");
     let reversed = dataset_with_head(REVERSED_ORDER)
-        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-        .expect("default binding only warns");
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::lenient())
+        .expect("lenient binding only warns");
     assert_eq!(reversed.diagnostics.len(), 2, "{:?}", reversed.diagnostics);
 }
 
