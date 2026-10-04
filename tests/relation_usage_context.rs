@@ -601,9 +601,11 @@ rules:
         predicate["left"]["condition"]["kind"], "relation_member",
         "the formula must lower to the #203 shape: {predicate}"
     );
-    // Lowering keys the household the derivation binds on `head_of_household`'s
-    // household slot and the person on its person slot: the slots that read
-    // it as declared.
+    // Formula lowering gives a membership test the default slots (1, 0),
+    // which read `head_of_household` as declared here. Lowering does not
+    // re-key a test inside a comparison from the declared kinds; the
+    // household-first test below covers a declaration the default reads
+    // backwards.
     assert_eq!(
         (
             &predicate["left"]["condition"]["current_slot"],
@@ -930,7 +932,8 @@ fn binding_and_compile_agree_with_explain_on_generated_predicates() {
         panic!("{error}");
     }
     // The generator keeps reaching the membership test with both slots and
-    // stopping at each kind of site explain cannot see past.
+    // stopping at each kind of site explain cannot see past. Checked at the
+    // default case count and above, where every combination is common.
     let reached = reached.into_inner();
     for reach in [
         Reach::Membership,
@@ -944,7 +947,7 @@ fn binding_and_compile_agree_with_explain_on_generated_predicates() {
                 .copied()
                 .unwrap_or(0);
             assert!(
-                seen * 100 >= cases as usize,
+                cases < 256 || seen * 100 >= cases as usize,
                 "too few cases reach {reach:?} with slots {slots:?}: {reached:?}"
             );
         }
