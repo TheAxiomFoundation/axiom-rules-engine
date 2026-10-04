@@ -42,6 +42,7 @@ fn household_rule(name: &str, expr: ScalarExprSpec) -> DerivedSpec {
 fn request(mode: ExecutionMode, program: ProgramSpec, output: &str) -> ExecutionRequest {
     let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program,
         dataset: DatasetSpec {
