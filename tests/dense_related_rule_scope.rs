@@ -32,8 +32,11 @@
 //! another entity there is refused, as is a relation with no declared kinds.
 //! The cross-entity shapes above, which explain once evaluated for the
 //! related entity whatever it declares, are therefore refused in every mode
-//! before any of them evaluates, and the dense compiler's own decline is
-//! checked on the raw program.
+//! before any of them evaluates. Explain's evaluator and the dense compiler
+//! still accept a raw program without that check (`Engine::new`,
+//! `DenseCompiledProgram::from_program`), so on the raw program those shapes
+//! must still get the answer each test states from both, or, for a predicate
+//! rule of neither slot entity, a decline from dense.
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
@@ -44,9 +47,12 @@ use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
     DenseRelationBatchSpec,
 };
-use axiom_rules_engine::engine::EvalError;
+use axiom_rules_engine::engine::{Engine, EvalError};
+use axiom_rules_engine::model::{DerivedSemantics, ScalarValue};
 use axiom_rules_engine::relation_typing::{RelationTypingCode, RelationTypingReport};
-use axiom_rules_engine::spec::{JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec};
+use axiom_rules_engine::spec::{
+    DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec,
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
@@ -377,6 +383,78 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
     let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
     let artifact = CompiledProgramArtifact::compile(spec).expect("artifact compiles");
     let compiled = DenseCompiledProgram::from_artifact(&artifact, Some(data.root))?;
+    Ok(run_dense(&compiled, data, outputs))
+}
+
+/// The dense compiler given `program` as is, without the checks a request or
+/// an artifact passes.
+fn raw_dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, DenseCompileError> {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let compiled = DenseCompiledProgram::from_program(
+        &spec.to_program().expect("the program converts"),
+        Some(data.root),
+    )?;
+    Ok(run_dense(&compiled, data, outputs))
+}
+
+/// Explain's evaluator given `program` as is: every row's outputs in batch
+/// order, or the first error, as a request in explain mode reports them.
+fn raw_explain(program: &Value, data: &Data, outputs: &[&str]) -> Answer {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let model = spec.to_program().expect("the program converts");
+    let dataset: DatasetSpec = serde_json::from_value(data.dataset()).expect("dataset parses");
+    let dataset = dataset
+        .to_dataset_for_program(&model)
+        .expect("the dataset binds");
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    let mut engine = Engine::new(&model, &dataset);
+    let mut answers = Vec::new();
+    for row in &data.rows {
+        let mut cells = Vec::new();
+        for output in outputs {
+            let cell =
+                match model.derived[*output].semantics {
+                    DerivedSemantics::Judgment(_) => engine
+                        .evaluate_judgment(output, row.id, &period)
+                        .map(|outcome| format!("{:?}", JudgmentOutcomeSpec::from(outcome))),
+                    DerivedSemantics::Scalar(_) => engine
+                        .evaluate_scalar(output, row.id, &period)
+                        .map(|value| match value {
+                            ScalarValue::Integer(value) => number(Decimal::from(value)),
+                            ScalarValue::Decimal(value) => number(value),
+                            other => panic!("unexpected scalar {other:?}"),
+                        }),
+                };
+            match cell {
+                Ok(cell) => cells.push(cell),
+                Err(error) => return Answer::Failed(error_key(&error)),
+            }
+        }
+        answers.push(cells);
+    }
+    Answer::Rows(answers)
+}
+
+/// Given the raw program, explain's evaluator answers `expected` and the
+/// dense compiler answers the same.
+fn assert_raw_program_answers(
+    label: &str,
+    program: &Value,
+    data: &Data,
+    outputs: &[&str],
+    expected: Answer,
+) {
+    let explain = raw_explain(program, data, outputs);
+    assert_eq!(explain, expected, "{label}: raw explain");
+    let dense = raw_dense(program, data, outputs)
+        .unwrap_or_else(|error| panic!("{label}: dense declined the raw program: {error}"));
+    assert_eq!(dense, explain, "{label}: raw dense and explain differ");
+}
+
+/// Execute `compiled` over `data`'s rows: every row's outputs in batch order,
+/// or the first error.
+fn run_dense(compiled: &DenseCompiledProgram, data: &Data, outputs: &[&str]) -> Answer {
     let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
     let outputs = outputs
         .iter()
@@ -384,13 +462,13 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
         .collect::<Vec<_>>();
     let result = match compiled.execute(
         &period.to_model().expect("period converts"),
-        data.batch(&compiled),
+        data.batch(compiled),
         &outputs,
     ) {
         Ok(result) => result,
-        Err(error) => return Ok(Answer::Failed(error_key(&error))),
+        Err(error) => return Answer::Failed(error_key(&error)),
     };
-    Ok(Answer::Rows(
+    Answer::Rows(
         (0..result.row_count)
             .map(|row| {
                 outputs
@@ -410,7 +488,7 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
                     .collect()
             })
             .collect(),
-    ))
+    )
 }
 
 /// Explain answers `expected`, and fast and dense answer the same.
@@ -555,7 +633,8 @@ fn is_minor() -> Value {
 /// they had one, while dense evaluated the household's own value and counted
 /// 2. The rule would run on the ids in `member`'s `Person` slot, so the
 /// program is ill-typed and every mode refuses it, with or without the input;
-/// with `member` untyped, every mode refuses the untyped relation.
+/// with `member` untyped, every mode refuses the untyped relation. Given the
+/// raw program, explain's evaluator and dense still give explain's answers.
 #[test]
 fn a_household_rule_in_a_where_clause_over_members_is_refused_in_every_mode() {
     let hh_flag = judgment_rule("hh_flag", "Household", is_true("f"));
@@ -592,6 +671,29 @@ fn a_household_rule_in_a_where_clause_over_members_is_refused_in_every_mode() {
         &households([vec![], vec![]]),
         &["n"],
         &[(RelationTypingCode::UntypedRelation, "member", "n")],
+    );
+    // Given the raw program, explain's evaluator still evaluates the rule for
+    // each member, and dense agrees.
+    assert_raw_program_answers(
+        "members without the input",
+        &program,
+        &households([vec![], vec![]]),
+        &["n"],
+        missing("f"),
+    );
+    assert_raw_program_answers(
+        "members with the input",
+        &program,
+        &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
+        &["n"],
+        rows(&[&["1"], &["0"]]),
+    );
+    assert_raw_program_answers(
+        "untyped relation, members without the input",
+        &untyped,
+        &households([vec![], vec![]]),
+        &["n"],
+        missing("f"),
     );
 }
 
@@ -705,6 +807,7 @@ fn scalar_entity_rule_in_a_where_clause_reads_the_related_entity() {
 /// A `where` clause over a derived relation has no relation context either:
 /// the `Household` rule would run on each adult member's id, the related slot
 /// of `adult_member`, which declares `Person`, so every mode refuses it.
+/// Given the raw program, explain's evaluator and dense still agree.
 #[test]
 fn a_household_rule_in_a_where_clause_over_a_derived_relation_is_refused_in_every_mode() {
     let adult = judgment_rule(
@@ -753,6 +856,25 @@ fn a_household_rule_in_a_where_clause_over_a_derived_relation_is_refused_in_ever
         ]),
         &["n"],
         &ill_typed,
+    );
+    // Given the raw program, explain's evaluator still evaluates the rule for
+    // each adult member, and dense agrees.
+    assert_raw_program_answers(
+        "adult members without the input",
+        &program,
+        &households([vec![("age", int(30))], vec![("age", int(5))]]),
+        &["n"],
+        missing("f"),
+    );
+    assert_raw_program_answers(
+        "adult members with the input",
+        &program,
+        &households([
+            vec![("age", int(30)), ("f", flag(true))],
+            vec![("age", int(40)), ("f", flag(false))],
+        ]),
+        &["n"],
+        rows(&[&["1"], &["0"]]),
     );
 }
 
@@ -929,9 +1051,10 @@ fn person_rows_read_row_rules_for_each_row() {
 /// `SnapUnit`) is evaluated for the related entity by explain's fallback,
 /// which read `g` for the member. A `SnapUnit` is queried with household ids,
 /// so the rule would run on an id of another kind than its entity's: every
-/// mode refuses the program. Dense, given the raw program, still declines the
-/// rule rather than evaluate it for either record; it used to evaluate a
-/// root-entity rule on the root row.
+/// mode refuses the program. Given the raw program, explain's evaluator still
+/// reads `g` for the member, and dense still declines the rule rather than
+/// evaluate it for either record; it used to evaluate a root-entity rule on
+/// the root row.
 #[test]
 fn a_derived_relation_predicate_rule_of_neither_slot_entity_is_refused() {
     let program = program(
@@ -984,11 +1107,12 @@ fn a_derived_relation_predicate_rule_of_neither_slot_entity_is_refused() {
             "snap_unit",
         )],
     );
-    let spec: ProgramSpec = serde_json::from_value(program).expect("program JSON parses");
-    match DenseCompiledProgram::from_program(
-        &spec.to_program().expect("the program converts"),
-        Some(data.root),
-    ) {
+    assert_eq!(
+        raw_explain(&program, &data, &outputs),
+        missing("g"),
+        "given the raw program, explain's evaluator reads `g` for the member"
+    );
+    match raw_dense(&program, &data, &outputs) {
         Err(DenseCompileError::Unsupported(message)) => assert!(
             message.contains(
                 "`unit_flag` has entity `SnapUnit`, which is neither current nor related"
