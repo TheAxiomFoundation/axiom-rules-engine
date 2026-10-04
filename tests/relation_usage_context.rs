@@ -653,8 +653,9 @@ rules:
 
 /// The #203 shape over a `head_of_household` declared household-first. Read
 /// as declared, the membership test keys the household the derivation binds
-/// on slot 0 and the person on slot 1, as the bare membership test does, and
-/// the module compiles and counts the household's head.
+/// on slot 0 and the person on slot 1, as the bare membership test does: the
+/// module compiles cleanly, the household-first head tuple binds strictly and
+/// is the household's head, and the person-first one warns and is not.
 ///
 /// KNOWN FAILURE, reported rather than papered over: RuleSpec lowering
 /// (`src/relation_direction.rs`) re-keys a membership test from the declared
@@ -697,24 +698,56 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: len(household_heads)
+  - name: household_size
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    versions:
+      - effective_from: 2026-01-01
+        formula: hh_size
+  - name: person_age
+    kind: derived
+    entity: Person
+    dtype: Decimal
+    versions:
+      - effective_from: 2026-01-01
+        formula: p_age
 "#
         )
     };
     let interval = json!({"start": "2026-01-01", "end": "2026-01-31"});
-    let dataset = json!({
-        "inputs": [],
-        "relations": [
-            {"name": "member_of_household", "tuple": ["p1", "h1"], "interval": interval},
-            {"name": "member_of_household", "tuple": ["p2", "h1"], "interval": interval},
-            {"name": "head_of_household", "tuple": ["h1", "p1"], "interval": interval},
-        ],
-    });
+    // Input records give binding its kind evidence for each id.
+    let input = |name: &str, entity: &str, entity_id: &str| {
+        json!({
+            "name": name, "entity": entity, "entity_id": entity_id, "interval": interval,
+            "value": {"kind": "decimal", "value": "1"},
+        })
+    };
+    let dataset = |head: [&str; 2]| {
+        json!({
+            "inputs": [
+                input("hh_size", "Household", "h1"),
+                input("p_age", "Person", "p1"),
+                input("p_age", "Person", "p2"),
+            ],
+            "relations": [
+                {"name": "member_of_household", "tuple": ["p1", "h1"], "interval": interval},
+                {"name": "member_of_household", "tuple": ["p2", "h1"], "interval": interval},
+                {"name": "head_of_household", "tuple": head, "interval": interval},
+            ],
+        })
+    };
     for formula in [
         "head_of_household",
         "(if head_of_household: 1 else: 0) == 1",
     ] {
         let artifact = CompiledProgramArtifact::from_rulespec_str(&module(formula))
             .unwrap_or_else(|error| panic!("`{formula}` compiles: {error}"));
+        assert!(
+            artifact.diagnostics.is_empty(),
+            "`{formula}` compiles cleanly: {:?}",
+            artifact.diagnostics
+        );
         let relation = artifact
             .program
             .relations
@@ -739,29 +772,49 @@ rules:
             (&json!(0), &json!(1)),
             "`{formula}`: {predicate}"
         );
-        let request = json!({
-            "mode": "explain",
-            "program": artifact.program,
-            "dataset": dataset,
-            "queries": [{
-                "entity_id": "h1",
-                "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
-                "outputs": ["head_count"],
-            }],
-        });
-        let request: ExecutionRequest = serde_json::from_value(request).expect("request parses");
-        let response = execute_request(request).expect("explain answers");
-        assert!(
-            matches!(
-                &response.results[0].outputs["head_count"],
-                OutputValue::Scalar {
-                    value: ScalarValueSpec::Integer { value: 1 },
-                    ..
-                }
-            ),
-            "`{formula}`: {:?}",
-            response.results[0].outputs
-        );
+        let runtime = artifact
+            .program
+            .to_program()
+            .expect("runtime program builds");
+        // The household-first head tuple is the declared order: it binds
+        // strictly and holds the head; the person-first one warns and holds
+        // none.
+        for (head, warnings, heads) in [(["h1", "p1"], 0, 1), (["p1", "h1"], 2, 0)] {
+            let bound: DatasetSpec = serde_json::from_value(dataset(head)).expect("dataset parses");
+            let bound = bound
+                .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+                .expect("default binding only warns");
+            assert_eq!(
+                bound.diagnostics.len(),
+                warnings,
+                "`{formula}` {head:?}: {:?}",
+                bound.diagnostics
+            );
+            let request = json!({
+                "mode": "explain",
+                "program": artifact.program,
+                "dataset": dataset(head),
+                "queries": [{
+                    "entity_id": "h1",
+                    "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                    "outputs": ["head_count"],
+                }],
+            });
+            let request: ExecutionRequest =
+                serde_json::from_value(request).expect("request parses");
+            let response = execute_request(request).expect("explain answers");
+            assert!(
+                matches!(
+                    &response.results[0].outputs["head_count"],
+                    OutputValue::Scalar {
+                        value: ScalarValueSpec::Integer { value },
+                        ..
+                    } if *value == heads
+                ),
+                "`{formula}` {head:?}: {:?}",
+                response.results[0].outputs
+            );
+        }
     }
 }
 
