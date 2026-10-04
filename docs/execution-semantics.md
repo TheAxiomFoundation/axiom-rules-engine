@@ -108,6 +108,16 @@ never forces one. Fast never reports an evaluation error of its own: when a
 live row fails, fast hands the request to explain, which reports its first
 error, so a failing request's error is explain's by construction.
 
+A compiled artifact's `metadata.fast_path` is a static, advisory scan of the
+constructs fast declines or cannot answer (period bounds, date arithmetic,
+over-periods reductions), listed per rule. Execution never reads it, so it
+cannot change a result. It scans every branch, so a listed construct that only
+dead branches reach still runs on the fast path. It does not look inside
+relation aggregations, which fast evaluates row by row on the explain
+interpreter. Date values are not listed either (date literals, date inputs
+and date-valued parameters), although fast declines them when a live row
+reaches them.
+
 ## Dense contract
 
 A dense batch is a set of rows, each standing for one entity, with typed input
