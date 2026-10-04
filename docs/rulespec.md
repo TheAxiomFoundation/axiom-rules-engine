@@ -242,20 +242,30 @@ axiom-rules-engine migrate artifact --artifact old.json --output typed.json \
 ```
 
 Without `--output` the command reports what it would change and writes
-nothing. It stamps each untyped relation with the kinds its executable usage
-determines (the evaluating rule's entity on the slot an aggregate keys on, the
-entity of rules its predicate or value read on the other). It never moves an
-aggregate's slots, so datasets that bound correctly before still bind, and
-datasets in the other orientation now get `relation_slot_entity_mismatch` at
-binding (an error by default, a warning under lenient binding) instead of aggregating nothing
-silently. A slot usage leaves open (for example `len(relation)` with no related
-rule) needs `--relation-entities <relation>=<Kind>,<Kind>` in tuple order; the
-relation may be named by its full id or a unique short name. A filtered
-entity in usage is stamped as its source kind. An override that contradicts
-the executed slots is refused. A typed declaration that contradicts them
-(artifacts compiled between the declaration carry and declared-order
-resolution) is refused unless an override in executed order retypes it; to
-change an orientation, recompile. The rewritten
+nothing. It stamps each untyped relation with the kinds execution
+establishes, and only those:
+
+- the slot an aggregate keys on holds ids of the evaluating rule's entity;
+- the other slot holds ids of the entity of the rules its `where` clause and
+  summed value read, when they agree;
+- an aggregate over a derived relation is evidence about its data source only
+  when every link of the chain keeps the same slots;
+- a filtered entity counts as its source's kind only when every derivation
+  defining that name is consistent with its source chain and they agree.
+
+Declarations never vouch for a kind, and derived-relation predicates and
+membership tests give no evidence. A slot this leaves open (for example
+`len(relation)` with no related rule, or a rule whose entity is a filter over
+an untyped source) needs `--relation-entities <relation>=<Kind>,<Kind>` in
+tuple order; the relation may be named by its full id or a unique short name.
+The command never moves an aggregate's slots, so datasets that bound
+correctly before still bind, and datasets in the other orientation now get
+`relation_slot_entity_mismatch` at binding (an error by default, a warning
+under lenient binding) instead of aggregating nothing silently. An override
+that contradicts what execution establishes is refused. A typed declaration
+that contradicts it (artifacts compiled between the declaration carry and
+declared-order resolution) is refused unless an override in executed order
+retypes it; to change an orientation, recompile. The rewritten
 artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
 capabilities` lists `relation_entity_typing` for engines that enforce this.
 

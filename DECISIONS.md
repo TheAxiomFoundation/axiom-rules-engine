@@ -90,8 +90,8 @@ would type a relation that is still separate from that declaration, so
 tuples supplied under the declaration's id would leave it empty: a silent
 zero the error now exposes. Whether such a name should alias the imported
 relation is #226; until axiom-compose can emit `arguments`, composition roots
-that aggregate an undeclared `member_of_household` fail to compile. Making
-dataset binding strict by default is a separate call (#190).
+that aggregate an undeclared `member_of_household` fail to compile. #190
+separately made dataset binding strict by default.
 
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 

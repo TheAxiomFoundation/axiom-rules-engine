@@ -718,16 +718,15 @@ pub enum ArtifactRelationMigrationError {
 /// executes untyped relations.
 ///
 /// Each untyped data relation an executable node reads is stamped with the
-/// slot kinds its executable usage determines: the evaluating rule's entity
-/// (a filtered entity as its source kind) on the slot the node keys on, and
-/// the entity of the rules its predicate or value read on the other.
-/// `overrides` (relation name, or its unique short name, to kinds in tuple
-/// order) supply slots usage leaves open and retype relations whose
-/// declaration contradicts how the artifact executes. The migration never
-/// moves an aggregate's slots, so datasets that bound correctly before still
-/// bind; datasets in the other orientation now get a binding diagnostic (an
-/// error under strict binding) instead of aggregating nothing silently. The
-/// result must pass the same typing check the loader enforces.
+/// slot kinds execution establishes (see [`execution_evidence`]); nothing
+/// else, declarations included, vouches for a kind. `overrides` (relation
+/// name, or its unique short name, to kinds in tuple order) supply slots that
+/// leaves open and retype relations whose declaration contradicts how the
+/// artifact executes. The migration never moves an aggregate's slots, so
+/// datasets that bound correctly before still bind; datasets in the other
+/// orientation now get a binding diagnostic (an error under the default
+/// strict binding) instead of aggregating nothing silently. The result must
+/// pass the same typing check the loader enforces.
 pub fn migrate_artifact_relation_typing(
     source: &str,
     path: &str,
@@ -820,10 +819,9 @@ pub fn migrate_artifact_relation_typing(
             relation.slot_entities = kinds.clone();
         }
     }
-    let (executed, filtered) = loop {
+    let executed = loop {
         let model = artifact.program.to_program()?;
-        let filtered = execution_filter_kinds(&model);
-        let executed = canonical_usage(&model, &filtered);
+        let executed = execution_evidence(&model);
         let mut stamped = false;
         for relation in &mut artifact.program.relations {
             if !is_data(relation) || !relation.slot_entities.is_empty() || relation.arity == 0 {
@@ -838,17 +836,12 @@ pub fn migrate_artifact_relation_typing(
             }
         }
         if !stamped {
-            break (executed, filtered);
+            break executed;
         }
     };
-    let canonical = |kind: &str| {
-        filtered
-            .get(kind)
-            .cloned()
-            .unwrap_or_else(|| kind.to_string())
-    };
-    // An override is checked against what execution fixes without it: usage
-    // otherwise completes a relation's open slot from its own declared kinds.
+    // An override is checked against what execution establishes without it,
+    // since its own kinds can map a filtered entity that then reads as
+    // agreement.
     let unhinted = {
         let mut program = artifact.program.clone();
         for relation in &mut program.relations {
@@ -856,7 +849,7 @@ pub fn migrate_artifact_relation_typing(
                 relation.slot_entities.clear();
             }
         }
-        canonical_usage(&program.to_program()?, &filtered)
+        execution_evidence(&program.to_program()?)
     };
 
     // Only relations the typing check requires (those an executed node
@@ -879,7 +872,7 @@ pub fn migrate_artifact_relation_typing(
             if let Some(usage) = unhinted.get(&relation.name) {
                 for (slot, (given, executed)) in given.iter().zip(usage).enumerate() {
                     if let Some(executed) = executed
-                        && *executed != canonical(given)
+                        && executed != given
                     {
                         return Err(
                             ArtifactRelationMigrationError::OverrideContradictsExecution {
@@ -902,14 +895,13 @@ pub fn migrate_artifact_relation_typing(
             }
             continue;
         }
-        let Some(usage) = usage else {
-            continue;
-        };
+        let unknown = vec![None; relation.arity];
+        let usage = usage.unwrap_or(&unknown);
         if !previous.is_empty() {
             let contradicts = previous.iter().zip(usage).any(|(declared, executed)| {
                 executed
                     .as_ref()
-                    .is_some_and(|executed| *executed != canonical(declared))
+                    .is_some_and(|executed| executed != declared)
             });
             if contradicts {
                 return Err(
@@ -951,20 +943,125 @@ pub fn migrate_artifact_relation_typing(
     Ok(ArtifactRelationMigration { artifact, changes })
 }
 
-/// Executable usage per relation, each use's kinds mapped to the kinds of the
-/// ids it reads (a filtered entity as its source kind) before uses are
-/// combined. A filtered entity whose source kind is not yet known, or that
-/// still names an alias after mapping, says nothing about the slot. A slot is known when every use that constrains it
-/// agrees.
-/// Filtered entity -> source kind, from derived relations whose declared
-/// kinds agree with their source's: a derived relation whose declaration
-/// contradicts its source defines nothing trustworthy. The derivation need
-/// not be executed: a `SnapUnit` rule's ids are household ids because
-/// `snap_unit` filters households, whether or not a rule aggregates it.
-fn execution_filter_kinds(
+/// What execution establishes about each data relation's slot kinds.
+///
+/// Evidence comes only from aggregations explain executes (a versioned rule's
+/// versions, otherwise its base semantics):
+/// - the slot an aggregate keys on holds ids of the evaluating rule's entity;
+/// - the other slot holds ids of the entity of the rules its `where` clause
+///   (outside nested aggregations) and summed value read, when they agree;
+/// - a nested aggregation in a `where` clause runs on those related ids.
+///
+/// An aggregate over a derived relation reads its data source through the
+/// derivation's slots, so it is evidence about that source only when every
+/// link of the chain keeps those slots. A rule whose entity is a filtered
+/// entity (a derived relation's `entity`) reads ids of that entity's physical
+/// kind only when every derivation defining the name is consistent with its
+/// source chain and they agree on one physical kind; otherwise it says
+/// nothing. Declarations never vouch for a kind, and derived-relation
+/// predicates and membership tests give no evidence. A slot is known when
+/// every use that constrains it agrees.
+fn execution_evidence(
+    model: &crate::model::Program,
+) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+    let collector = EvidenceCollector {
+        model,
+        filters: crate::relation_typing::filtered_entities(model),
+        trusted: trusted_filter_kinds(model),
+    };
+    let mut slots =
+        std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
+    let mut names = model.derived.keys().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let rule = &model.derived[name];
+        let semantics = if rule.versions.is_empty() {
+            vec![&rule.semantics]
+        } else {
+            rule.versions
+                .iter()
+                .map(|version| &version.semantics)
+                .collect()
+        };
+        let entity = collector.physical(&rule.entity);
+        for semantics in semantics {
+            match semantics {
+                crate::model::DerivedSemantics::Scalar(expr) => {
+                    collector.scalar(expr, entity.as_deref(), &mut slots)
+                }
+                crate::model::DerivedSemantics::Judgment(expr) => {
+                    collector.judgment(expr, entity.as_deref(), &mut slots)
+                }
+            }
+        }
+    }
+    slots
+        .into_iter()
+        .map(|(relation, slots)| {
+            let kinds = slots
+                .into_iter()
+                .map(|kinds| {
+                    (kinds.len() == 1)
+                        .then(|| kinds.into_iter().next())
+                        .flatten()
+                })
+                .collect();
+            (relation, kinds)
+        })
+        .collect()
+}
+
+/// Filtered entity -> the physical kind of the ids it is queried with, for
+/// names every defining derivation agrees on through consistent source
+/// chains. A filter of a filter resolves to the innermost kind.
+fn trusted_filter_kinds(
     model: &crate::model::Program,
 ) -> std::collections::BTreeMap<String, String> {
-    crate::relation_typing::filtered_entity_kinds_among(model, &consistent_derivations(model))
+    let consistent = consistent_derivations(model);
+    let mut direct = std::collections::BTreeMap::<String, Option<String>>::new();
+    for (name, schema) in &model.relations {
+        let Some(derivation) = &schema.derivation else {
+            continue;
+        };
+        let Some(entity) = &derivation.entity else {
+            continue;
+        };
+        let kind = consistent
+            .contains(name)
+            .then(|| {
+                crate::relation_typing::effective_slot_entities(model, name)
+                    .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
+            })
+            .flatten();
+        direct
+            .entry(entity.clone())
+            .and_modify(|known| {
+                if *known != kind {
+                    *known = None;
+                }
+            })
+            .or_insert(kind);
+    }
+    direct
+        .keys()
+        .filter_map(|entity| {
+            let mut kind = entity.clone();
+            let mut visited = std::collections::BTreeSet::new();
+            loop {
+                let Some(entry) = direct.get(&kind) else {
+                    return Some((entity.clone(), kind));
+                };
+                let next = entry.clone()?;
+                if next == kind {
+                    return Some((entity.clone(), kind));
+                }
+                if !visited.insert(kind.clone()) {
+                    return None;
+                }
+                kind = next;
+            }
+        })
+        .collect()
 }
 
 /// Derived relations whose declared kinds agree with their source's, and
@@ -980,8 +1077,6 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         let Some(derivation) = schema.derivation.as_ref() else {
             return true;
         };
-        // A derived source traverses with its own slots; a link naming other
-        // slots maps its entity through the wrong one.
         if let Some(source) = model
             .relations
             .get(&derivation.source_relation)
@@ -1023,87 +1118,228 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         .collect()
 }
 
-fn canonical_usage(
-    model: &crate::model::Program,
-    filtered: &std::collections::BTreeMap<String, String>,
-) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
-    // Evidence comes only from what execution reaches: relations an executed
-    // node reads, derived relations among them, and the uses those nodes and
-    // derivations make. An unused relation or derived relation is never
-    // checked, so its declarations and uses establish nothing.
-    let executed = crate::relation_typing::executed_relations(model);
-    // A kind an executed relation declares is a physical kind: the typing
-    // check validates it and refuses a filtered entity there.
-    let declared = model
-        .relations
-        .iter()
-        .filter(|(name, _)| executed.contains(*name))
-        .map(|(_, schema)| schema)
-        .flat_map(|schema| {
-            schema.slot_entities.iter().chain(
-                schema
-                    .derivation
-                    .iter()
-                    .flat_map(|derivation| derivation.slot_entities.iter()),
-            )
-        })
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    // A filter name says nothing about the ids a use reads unless an executed
-    // derivation maps it to a physical kind, or an executed relation declares
-    // it as one; a name that still aliases another kind says nothing either.
-    // A declaration cannot vouch for a name an inconsistent derivation also
-    // defines: what that derivation's ids are is unknown.
-    let consistent = consistent_derivations(model);
-    let aliases = crate::relation_typing::filtered_entity_names_among(model, &consistent);
-    let filters = crate::relation_typing::filtered_entities(model);
-    let untrusted = model
-        .relations
-        .iter()
-        .filter(|(name, _)| !consistent.contains(*name))
-        .filter_map(|(_, schema)| schema.derivation.as_ref()?.entity.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let says_nothing = |kind: &str| {
-        aliases.contains(kind)
-            || (filters.contains(kind) && (!declared.contains(kind) || untrusted.contains(kind)))
-    };
-    let mut slots =
-        std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
-    for usage in crate::model::relation_usage_records(model) {
-        if model.relations.contains_key(&usage.citing_rule)
-            && !executed.contains(&usage.citing_rule)
-        {
-            continue;
+struct EvidenceCollector<'a> {
+    model: &'a crate::model::Program,
+    filters: std::collections::BTreeSet<String>,
+    trusted: std::collections::BTreeMap<String, String>,
+}
+
+type Evidence = std::collections::BTreeMap<String, Vec<std::collections::BTreeSet<String>>>;
+
+impl EvidenceCollector<'_> {
+    /// The physical kind of the ids a rule of `entity` evaluates, if known.
+    fn physical(&self, entity: &str) -> Option<String> {
+        if entity == crate::model::SCALAR_ENTITY {
+            return None;
         }
-        let entry = slots.entry(usage.relation).or_default();
-        if entry.len() < usage.slot_entities.len() {
-            entry.resize_with(usage.slot_entities.len(), Default::default);
+        if self.filters.contains(entity) {
+            return self.trusted.get(entity).cloned();
         }
-        for (slot, kind) in usage.slot_entities.into_iter().enumerate() {
-            if let Some(kind) = kind {
-                let kind = match filtered.get(&kind) {
-                    Some(mapped) => mapped.clone(),
-                    None if says_nothing(&kind) => continue,
-                    None => kind,
-                };
-                if !aliases.contains(&kind) {
-                    entry[slot].insert(kind);
-                }
+        Some(entity.to_string())
+    }
+
+    /// The data relation an aggregate over `relation` reads, and the slots
+    /// it reads it with, when that is unambiguous.
+    fn data_source(
+        &self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> Option<(String, usize, usize)> {
+        let mut name = relation.to_string();
+        let mut slots = (current_slot, related_slot);
+        let mut visited = std::collections::BTreeSet::new();
+        loop {
+            if !visited.insert(name.clone()) {
+                return None;
             }
+            let schema = self.model.relations.get(&name)?;
+            let Some(derivation) = &schema.derivation else {
+                return Some((name, slots.0, slots.1));
+            };
+            let derivation_slots = (derivation.current_slot, derivation.related_slot);
+            if name != relation && derivation_slots != slots {
+                return None;
+            }
+            slots = derivation_slots;
+            name = derivation.source_relation.clone();
         }
     }
-    slots
-        .into_iter()
-        .map(|(relation, slots)| {
-            let kinds = slots
-                .into_iter()
-                .map(|kinds| {
-                    (kinds.len() == 1)
-                        .then(|| kinds.into_iter().next())
-                        .flatten()
-                })
-                .collect();
-            (relation, kinds)
-        })
-        .collect()
+
+    /// The kind of the related ids: the agreed physical entity of every rule
+    /// the `where` clause (outside nested aggregations) and value read.
+    fn related_kind(
+        &self,
+        value: Option<&crate::model::RelatedValueRef>,
+        where_clause: Option<&crate::model::JudgmentExpr>,
+    ) -> Option<String> {
+        let mut rules = std::collections::BTreeSet::new();
+        if let Some(crate::model::RelatedValueRef::Derived(name)) = value {
+            rules.insert(name.clone());
+        }
+        if let Some(where_clause) = where_clause {
+            rules.extend(crate::relation_typing::judgment_rule_references(
+                where_clause,
+            ));
+        }
+        let mut kinds = std::collections::BTreeSet::new();
+        for name in rules {
+            let rule = self.model.derived.get(&name)?;
+            if rule.entity == crate::model::SCALAR_ENTITY {
+                continue;
+            }
+            kinds.insert(self.physical(&rule.entity)?);
+        }
+        (kinds.len() == 1)
+            .then(|| kinds.into_iter().next())
+            .flatten()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn aggregate(
+        &self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        value: Option<&crate::model::RelatedValueRef>,
+        where_clause: Option<&crate::model::JudgmentExpr>,
+        entity: Option<&str>,
+        slots: &mut Evidence,
+    ) {
+        let related = self.related_kind(value, where_clause);
+        if let Some((source, current, related_index)) =
+            self.data_source(relation, current_slot, related_slot)
+            && let Some(schema) = self.model.relations.get(&source)
+            && current < schema.arity
+            && related_index < schema.arity
+        {
+            let entry = slots.entry(source).or_default();
+            if entry.len() < schema.arity {
+                entry.resize_with(schema.arity, Default::default);
+            }
+            if let Some(entity) = entity {
+                entry[current].insert(entity.to_string());
+            }
+            if let Some(related) = &related {
+                entry[related_index].insert(related.clone());
+            }
+        }
+        if let Some(where_clause) = where_clause {
+            self.judgment(where_clause, related.as_deref(), slots);
+        }
+    }
+
+    fn scalar(&self, expr: &crate::model::ScalarExpr, entity: Option<&str>, slots: &mut Evidence) {
+        use crate::model::ScalarExpr;
+        match expr {
+            ScalarExpr::CountRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+            } => self.aggregate(
+                relation,
+                *current_slot,
+                *related_slot,
+                None,
+                where_clause.as_deref(),
+                entity,
+                slots,
+            ),
+            ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => self.aggregate(
+                relation,
+                *current_slot,
+                *related_slot,
+                Some(value),
+                where_clause.as_deref(),
+                entity,
+                slots,
+            ),
+            ScalarExpr::ParameterLookup { index, .. }
+            | ScalarExpr::Ceil(index)
+            | ScalarExpr::Floor(index) => self.scalar(index, entity, slots),
+            ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+                for item in items {
+                    self.scalar(item, entity, slots);
+                }
+            }
+            ScalarExpr::Sub(left, right)
+            | ScalarExpr::Mul(left, right)
+            | ScalarExpr::Div(left, right)
+            | ScalarExpr::DateAddDays {
+                date: left,
+                days: right,
+            }
+            | ScalarExpr::DateAddMonths {
+                date: left,
+                months: right,
+            }
+            | ScalarExpr::DateAddYears {
+                date: left,
+                years: right,
+            }
+            | ScalarExpr::DaysBetween {
+                from: left,
+                to: right,
+            } => {
+                self.scalar(left, entity, slots);
+                self.scalar(right, entity, slots);
+            }
+            ScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.judgment(condition, entity, slots);
+                self.scalar(then_expr, entity, slots);
+                self.scalar(else_expr, entity, slots);
+            }
+            ScalarExpr::NoMatch { subject, patterns } => {
+                self.scalar(subject, entity, slots);
+                for pattern in patterns {
+                    self.scalar(pattern, entity, slots);
+                }
+            }
+            ScalarExpr::OverPeriods { value, n, .. } => {
+                self.scalar(value, entity, slots);
+                if let Some(n) = n {
+                    self.scalar(n, entity, slots);
+                }
+            }
+            ScalarExpr::Literal(_)
+            | ScalarExpr::Input(_)
+            | ScalarExpr::InputOrElse { .. }
+            | ScalarExpr::Derived(_)
+            | ScalarExpr::PeriodStart
+            | ScalarExpr::PeriodEnd => {}
+        }
+    }
+
+    fn judgment(
+        &self,
+        expr: &crate::model::JudgmentExpr,
+        entity: Option<&str>,
+        slots: &mut Evidence,
+    ) {
+        use crate::model::JudgmentExpr;
+        match expr {
+            JudgmentExpr::Comparison { left, right, .. } => {
+                self.scalar(left, entity, slots);
+                self.scalar(right, entity, slots);
+            }
+            JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+                for item in items {
+                    self.judgment(item, entity, slots);
+                }
+            }
+            JudgmentExpr::Not(item) => self.judgment(item, entity, slots),
+            JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+        }
+    }
 }

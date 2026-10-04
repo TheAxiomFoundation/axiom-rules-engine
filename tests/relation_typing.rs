@@ -1842,10 +1842,12 @@ rules:
     }
 }
 
-/// A kind a typed relation declares stays evidence for migration even when
-/// an unused filter over an untyped source shares its name.
+/// A filter over an untyped source that shares a physical kind's name makes
+/// that name ambiguous: its ids could be anything. Migration never lets a
+/// declaration settle that, so it asks for the kind, and an override in
+/// executed order succeeds.
 #[test]
-fn migration_keeps_declared_physical_kinds_despite_an_unresolved_namesake_filter() {
+fn migration_asks_when_an_unresolved_filter_shares_a_physical_name() {
     let truth = serde_json::json!({"kind": "comparison",
         "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
         "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
@@ -1885,12 +1887,19 @@ fn migration_keeps_declared_physical_kinds_despite_an_unresolved_namesake_filter
             relation.as_object_mut().unwrap().remove("slot_entities");
         }
     }
-    let migration = migrate_artifact_relation_typing(
-        &serde_json::to_string(&value).unwrap(),
-        "legacy.json",
-        &BTreeMap::new(),
-    )
-    .expect("Household is declared by typed_members, so it is still evidence");
+    let legacy = serde_json::to_string(&value).unwrap();
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("extra_members"), "{detail}")
+        }
+        other => panic!("the ambiguous Household name must not be stamped: {other:?}"),
+    }
+    let overrides = BTreeMap::from([(
+        "extra_members".to_string(),
+        vec!["Person".to_string(), "Household".to_string()],
+    )]);
+    let migration = migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("an override in executed order types the relation");
     let extra = migration
         .changes
         .iter()
@@ -2210,5 +2219,91 @@ fn migration_never_trusts_a_name_an_inconsistent_filter_defines() {
             assert!(detail.contains("  s "), "{detail}")
         }
         other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
+    }
+}
+
+fn org_flag_rule() -> serde_json::Value {
+    serde_json::json!({"name": "org_flag", "entity": "Organization", "dtype": "judgment",
+        "unit": null, "semantics": "judgment",
+        "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"}, "op": "eq",
+                 "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}})
+}
+
+fn unit_count(name: &str, relation: &str) -> serde_json::Value {
+    serde_json::json!({"name": name, "entity": "UnitF", "dtype": "integer", "unit": null,
+        "semantics": "scalar",
+        "expr": {"kind": "count_related", "relation": relation,
+                 "current_slot": 1, "related_slot": 0,
+                 "where": {"kind": "derived", "name": "org_flag"}}})
+}
+
+/// A filter over an untyped source has no known physical kind, so its name
+/// says nothing, even where an executed relation declares it in a slot.
+#[test]
+fn migration_takes_no_evidence_from_an_unresolved_filter_name() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "g", "arity": 2},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "g",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "UnitF"]},
+            {"name": "t", "arity": 2, "slot_entities": ["Organization", "UnitF"]}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s"), unit_count("unit_t", "t")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(
+                detail.contains("  s ") && detail.contains("[Organization, ?]"),
+                "{detail}"
+            )
+        }
+        other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
+    }
+}
+
+/// A filter name is trusted only when every derivation defining it is
+/// consistent: one consistent definition does not mask an inconsistent one.
+#[test]
+fn migration_distrusts_a_filter_name_any_inconsistent_derivation_defines() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "f1", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "f2", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        // An older engine let `f2` change direction partway down its chain.
+        "f2" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("`f1` alone must not vouch for UnitF: {other:?}"),
     }
 }

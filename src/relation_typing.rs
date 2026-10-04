@@ -949,6 +949,14 @@ impl<'a> Checker<'a> {
     }
 }
 
+/// Derived rules a `where` clause reads on the related id: every reference
+/// outside a nested aggregation.
+pub(crate) fn judgment_rule_references(expr: &JudgmentExpr) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_judgment_derived(expr, &mut out);
+    out
+}
+
 /// Derived rules a related predicate evaluates on the related id: every
 /// reference outside a nested aggregation, whose own predicate and value
 /// run on that aggregation's related ids instead.
@@ -1039,4 +1047,364 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
 
 fn format_kinds(kinds: &[String]) -> String {
     format!("[{}]", kinds.join(", "))
+}
+
+#[cfg(test)]
+mod membership_context_tests {
+    //! Ported from the usage-inference tests of #205: the typing check, which
+    //! replaced that inference, must keep a derived relation's membership
+    //! context in exactly the positions explain evaluates on the same ids.
+    use super::{RelationTypingCode, check_program};
+    use crate::spec::ProgramSpec;
+    use serde_json::{Value, json};
+
+    fn int(value: i64) -> Value {
+        json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
+    }
+
+    fn member(current_slot: usize, related_slot: usize) -> Value {
+        json!({
+            "kind": "relation_member",
+            "relation": "head",
+            "current_slot": current_slot,
+            "related_slot": related_slot
+        })
+    }
+
+    /// 1 when `head` holds for the IDs in scope, else 0.
+    fn indicator(member: Value) -> Value {
+        json!({"kind": "if", "condition": member, "then_expr": int(1), "else_expr": int(0)})
+    }
+
+    fn equals_one(scalar: Value) -> Value {
+        json!({"kind": "comparison", "left": scalar, "op": "eq", "right": int(1)})
+    }
+
+    /// Every scalar position that engine.rs evaluates on the same ID as its
+    /// parent, holding `operand`. Static collection does not evaluate, so
+    /// types and values do not matter; every position must keep the context.
+    fn same_id_positions(operand: &Value) -> Vec<(&'static str, Value)> {
+        let date = json!({"kind": "period_start"});
+        vec![
+            (
+                "parameter index",
+                json!({"kind": "parameter_lookup", "parameter": "rate", "index": operand}),
+            ),
+            ("add", json!({"kind": "add", "items": [int(0), operand]})),
+            (
+                "sub left",
+                json!({"kind": "sub", "left": operand, "right": int(0)}),
+            ),
+            (
+                "sub right",
+                json!({"kind": "sub", "left": int(0), "right": operand}),
+            ),
+            (
+                "mul left",
+                json!({"kind": "mul", "left": operand, "right": int(1)}),
+            ),
+            (
+                "mul right",
+                json!({"kind": "mul", "left": int(1), "right": operand}),
+            ),
+            (
+                "div left",
+                json!({"kind": "div", "left": operand, "right": int(1)}),
+            ),
+            (
+                "div right",
+                json!({"kind": "div", "left": int(1), "right": operand}),
+            ),
+            ("max", json!({"kind": "max", "items": [int(0), operand]})),
+            ("min", json!({"kind": "min", "items": [operand, int(1)]})),
+            ("ceil", json!({"kind": "ceil", "value": operand})),
+            ("floor", json!({"kind": "floor", "value": operand})),
+            (
+                "date_add_days date",
+                json!({"kind": "date_add_days", "date": operand, "days": int(0)}),
+            ),
+            (
+                "date_add_days days",
+                json!({"kind": "date_add_days", "date": date, "days": operand}),
+            ),
+            (
+                "date_add_months date",
+                json!({"kind": "date_add_months", "date": operand, "months": int(0)}),
+            ),
+            (
+                "date_add_months months",
+                json!({"kind": "date_add_months", "date": date, "months": operand}),
+            ),
+            (
+                "date_add_years date",
+                json!({"kind": "date_add_years", "date": operand, "years": int(0)}),
+            ),
+            (
+                "date_add_years years",
+                json!({"kind": "date_add_years", "date": date, "years": operand}),
+            ),
+            (
+                "days_between from",
+                json!({"kind": "days_between", "from": operand, "to": date}),
+            ),
+            (
+                "days_between to",
+                json!({"kind": "days_between", "from": date, "to": operand}),
+            ),
+            (
+                "if condition",
+                json!({"kind": "if", "condition": equals_one(operand.clone()), "then_expr": int(1), "else_expr": int(0)}),
+            ),
+            (
+                "if then",
+                json!({"kind": "if", "condition": equals_one(int(1)), "then_expr": operand, "else_expr": int(0)}),
+            ),
+            (
+                "if else",
+                json!({"kind": "if", "condition": equals_one(int(1)), "then_expr": int(0), "else_expr": operand}),
+            ),
+            (
+                "not",
+                indicator(json!({"kind": "not", "item": equals_one(operand.clone())})),
+            ),
+            (
+                "and",
+                indicator(
+                    json!({"kind": "and", "items": [equals_one(int(1)), equals_one(operand.clone())]}),
+                ),
+            ),
+            (
+                "or",
+                indicator(
+                    json!({"kind": "or", "items": [equals_one(operand.clone()), equals_one(int(1))]}),
+                ),
+            ),
+            (
+                "comparison right",
+                indicator(
+                    json!({"kind": "comparison", "left": int(1), "op": "eq", "right": operand}),
+                ),
+            ),
+            (
+                "no_match subject",
+                json!({"kind": "no_match", "subject": operand, "patterns": [int(2)]}),
+            ),
+        ]
+    }
+
+    /// Citing rules of `relation_membership_slot_entity_mismatch` reports on
+    /// `head`, for a program whose derived relation `heads` keeps the members
+    /// of a household (current ID, slot 1) that satisfy `predicate`, which a
+    /// Household rule `n` counts, plus the given derived rules. `head` is
+    /// declared `[Person, Household]`, so slots (1, 0) agree with the
+    /// predicate's context and (0, 1) contradict it.
+    fn head_mismatches(predicate: Value, derived: Value) -> Vec<String> {
+        let mut derived = derived.as_array().cloned().unwrap_or_default();
+        derived.push(json!({
+            "name": "n", "entity": "Household", "dtype": "integer",
+            "semantics": "scalar",
+            "expr": {"kind": "count_related", "relation": "heads",
+                     "current_slot": 1, "related_slot": 0}
+        }));
+        let spec: ProgramSpec = serde_json::from_value(json!({
+            "relations": [
+                {"name": "member", "arity": 2, "slot_entities": ["Person", "Household"]},
+                {"name": "head", "arity": 2, "slot_entities": ["Person", "Household"]},
+                {
+                    "name": "heads",
+                    "arity": 2,
+                    "slot_entities": ["Person", "Household"],
+                    "derivation": {
+                        "source_relation": "member",
+                        "current_slot": 1,
+                        "related_slot": 0,
+                        "slot_entities": ["Person", "Household"],
+                        "predicate": predicate
+                    }
+                }
+            ],
+            "derived": derived
+        }))
+        .expect("program spec parses");
+        let program = spec.to_program().expect("program builds");
+        let mut citing = check_program(&program)
+            .err()
+            .map(|report| report.violations)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|violation| {
+                violation.relation == "head"
+                    && violation.code == RelationTypingCode::MembershipSlotEntityMismatch
+            })
+            .map(|violation| violation.citing)
+            .collect::<Vec<_>>();
+        citing.dedup();
+        citing
+    }
+
+    #[test]
+    fn membership_keeps_derived_relation_context_in_every_same_id_position() {
+        // Slots agreeing with the context pass; contradicting ones are caught,
+        // which shows the context reached the membership test.
+        let agreeing = indicator(member(1, 0));
+        let contradicting = indicator(member(0, 1));
+        assert!(head_mismatches(equals_one(agreeing.clone()), json!([])).is_empty());
+        assert_eq!(
+            head_mismatches(equals_one(contradicting.clone()), json!([])),
+            ["heads"]
+        );
+        for (operand, expected) in [(&agreeing, vec![]), (&contradicting, vec!["heads"])] {
+            for (inner_name, inner) in same_id_positions(operand) {
+                for (outer_name, outer) in same_id_positions(&inner) {
+                    assert_eq!(
+                        head_mismatches(equals_one(outer), json!([])),
+                        expected,
+                        "{outer_name} holding {inner_name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn membership_outside_a_derived_relation_predicate_is_not_checked_against_its_context() {
+        // Slots (0, 1) under a Household owner: taking the owner as the current
+        // kind would record `[Household, Person]`, the reverse of the
+        // declaration, so a leaked usage cannot pass for the declared one.
+        let operand = indicator(member(0, 1));
+        let always = equals_one(int(1));
+        for (name, scalar) in same_id_positions(&operand)
+            .into_iter()
+            .chain([("bare", operand.clone())])
+        {
+            let rule = json!([{
+                "name": "headed",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": scalar
+            }]);
+            assert_eq!(
+                head_mismatches(always.clone(), rule),
+                Vec::<String>::new(),
+                "rule, {name}"
+            );
+
+            let rule_where = json!([{
+                "name": "headed",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "count_related",
+                    "relation": "member",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": equals_one(scalar.clone())
+                }
+            }]);
+            assert_eq!(
+                head_mismatches(always.clone(), rule_where),
+                Vec::<String>::new(),
+                "rule where, {name}"
+            );
+
+            // A nested aggregation's `where` clause runs on the aggregation's
+            // related IDs with no relation context, even inside a predicate.
+            let predicate_where = equals_one(json!({
+                "kind": "sum_related",
+                "relation": "member",
+                "current_slot": 0,
+                "related_slot": 1,
+                "value": {"kind": "input", "name": "hh_size"},
+                "where": equals_one(scalar)
+            }));
+            assert_eq!(
+                head_mismatches(predicate_where, json!([])),
+                Vec::<String>::new(),
+                "predicate where, {name}"
+            );
+        }
+        let judgment_rule = json!([{
+            "name": "headed",
+            "entity": "Household",
+            "dtype": "judgment",
+            "semantics": "judgment",
+            "expr": member(0, 1)
+        }]);
+        assert_eq!(
+            head_mismatches(always, judgment_rule),
+            Vec::<String>::new(),
+            "judgment rule"
+        );
+    }
+
+    #[test]
+    fn membership_in_operands_no_predicate_evaluates_is_not_checked_against_its_context() {
+        // `no_match` patterns only label an error, and no evaluator runs a
+        // reduction inside a predicate. Slots (0, 1) under the predicate's
+        // context would record `[Household, Person]` if either leaked.
+        let operand = indicator(member(0, 1));
+        let pattern = json!({"kind": "no_match", "subject": int(0), "patterns": [operand]});
+        let unselected = json!({
+            "kind": "if", "condition": equals_one(int(1)), "then_expr": int(1), "else_expr": pattern
+        });
+        assert!(head_mismatches(equals_one(unselected), json!([])).is_empty());
+        for reduction in [
+            json!({"kind": "over_periods", "over": "sum", "value": operand}),
+            json!({"kind": "over_periods", "over": "sum_top_n", "value": int(1), "n": operand}),
+        ] {
+            assert!(head_mismatches(equals_one(reduction), json!([])).is_empty());
+        }
+        // A rule-level reduction still runs its aggregations in lifetime mode,
+        // so an untyped relation there is refused.
+        let spec: ProgramSpec = serde_json::from_value(json!({
+            "relations": [{"name": "member", "arity": 2}],
+            "derived": [{
+                "name": "members_over_time",
+                "entity": "Household",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {"kind": "over_periods", "over": "sum", "value": {
+                    "kind": "count_related", "relation": "member", "current_slot": 1, "related_slot": 0
+                }}
+            }]
+        }))
+        .expect("program spec parses");
+        let program = spec.to_program().expect("program builds");
+        let report = check_program(&program).expect_err("an untyped relation is refused");
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.relation == "member"
+                    && violation.code == RelationTypingCode::UntypedRelation),
+            "aggregations under a rule-level reduction are executable uses: {report}"
+        );
+    }
+
+    #[test]
+    fn membership_beside_a_nested_aggregation_keeps_the_outer_context() {
+        // The aggregation resets context for its own clause only; a sibling
+        // operand of the same comparison still runs in the derived relation.
+        let predicate = |nested: Value, sibling: Value| {
+            json!({
+                "kind": "comparison",
+                "left": {"kind": "add", "items": [
+                    {"kind": "count_related", "relation": "member",
+                     "current_slot": 0, "related_slot": 1, "where": nested},
+                    indicator(sibling)
+                ]},
+                "op": "gt",
+                "right": int(0)
+            })
+        };
+        // The nested clause has no context, so contradicting slots there pass.
+        assert!(head_mismatches(predicate(member(0, 1), member(1, 0)), json!([])).is_empty());
+        // The sibling keeps it, so contradicting slots there are caught.
+        assert_eq!(
+            head_mismatches(predicate(member(1, 0), member(0, 1)), json!([])),
+            ["heads"]
+        );
+    }
 }
