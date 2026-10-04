@@ -479,6 +479,24 @@ impl<'a> Checker<'a> {
         let Some(kinds) = self.typed_slots(relation, citing) else {
             return;
         };
+        if let Some(derivation) = self
+            .program
+            .relations
+            .get(relation)
+            .and_then(|schema| schema.derivation.as_ref())
+            && (current_slot, related_slot) != (derivation.current_slot, derivation.related_slot)
+        {
+            let (derived_current, derived_related) =
+                (derivation.current_slot, derivation.related_slot);
+            self.push(
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                relation,
+                citing,
+                format!(
+                    "`{citing}` tests membership in derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({derived_current}, {derived_related}); recompile so the test uses the derivation's slots"
+                ),
+            );
+        }
         if current_slot >= kinds.len() || related_slot >= kinds.len() {
             self.push(
                 RelationTypingCode::SlotOutOfRange,

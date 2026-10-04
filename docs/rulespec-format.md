@@ -273,8 +273,9 @@ rules:
 ```
 
 Relation entity typing is mandatory. Every relation an aggregate or
-membership test executes must declare `arguments`: one entity kind per tuple
-slot, in tuple order. Compiling a program that executes an untyped relation
+membership test executes must have one entity kind per tuple slot, in tuple
+order: a `data_relation` declares them with `arguments`, and a
+`derived_relation` inherits its source's. Compiling a program that executes an untyped relation
 fails with `untyped_relation`, because the engine cannot check dataset tuples
 against slots it knows nothing about, and a tuple stored in the other
 orientation would aggregate nothing.

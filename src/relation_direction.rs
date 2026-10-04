@@ -208,10 +208,17 @@ struct Resolver<'a> {
 
 type Result<T> = std::result::Result<T, DirectionError>;
 
+/// The current and related kinds a derived relation's predicate binds while
+/// it runs; `None` outside that scope. As in explain, the binding reaches
+/// through comparisons, conditions and branches, and arithmetic, but not into
+/// a nested aggregation's `where`, a match fallback's patterns, or an
+/// over-periods reduction.
+type Membership<'a> = Option<(Option<&'a str>, Option<&'a str>)>;
+
 impl Resolver<'_> {
     fn semantics(&mut self, expr: &mut DerivedSemanticsSpec, entity: &str) -> Result<()> {
         match expr {
-            DerivedSemanticsSpec::Scalar { expr } => self.scalar(expr, entity),
+            DerivedSemanticsSpec::Scalar { expr } => self.scalar(expr, entity, None),
             DerivedSemanticsSpec::Judgment { expr } => self.judgment(expr, entity, None),
         }
     }
@@ -270,7 +277,12 @@ impl Resolver<'_> {
         Ok(kinds.get(*related_slot).cloned().unwrap_or_default())
     }
 
-    fn scalar(&mut self, expr: &mut ScalarExprSpec, entity: &str) -> Result<()> {
+    fn scalar(
+        &mut self,
+        expr: &mut ScalarExprSpec,
+        entity: &str,
+        membership: Membership<'_>,
+    ) -> Result<()> {
         match expr {
             ScalarExprSpec::CountRelated {
                 relation,
@@ -296,46 +308,46 @@ impl Resolver<'_> {
                 then_expr,
                 else_expr,
             } => {
-                self.judgment(condition, entity, None)?;
-                self.scalar(then_expr, entity)?;
-                self.scalar(else_expr, entity)?;
+                self.judgment(condition, entity, membership)?;
+                self.scalar(then_expr, entity, membership)?;
+                self.scalar(else_expr, entity, membership)?;
             }
             ScalarExprSpec::NoMatch { subject, patterns } => {
-                self.scalar(subject, entity)?;
+                self.scalar(subject, entity, membership)?;
                 for pattern in patterns {
-                    self.scalar(pattern, entity)?;
+                    self.scalar(pattern, entity, None)?;
                 }
             }
             ScalarExprSpec::Add { items }
             | ScalarExprSpec::Min { items }
             | ScalarExprSpec::Max { items } => {
                 for item in items {
-                    self.scalar(item, entity)?;
+                    self.scalar(item, entity, membership)?;
                 }
             }
             ScalarExprSpec::Sub { left, right }
             | ScalarExprSpec::Mul { left, right }
             | ScalarExprSpec::Div { left, right } => {
-                self.scalar(left, entity)?;
-                self.scalar(right, entity)?;
+                self.scalar(left, entity, membership)?;
+                self.scalar(right, entity, membership)?;
             }
             ScalarExprSpec::DateAddDays { date, days }
             | ScalarExprSpec::DateAddMonths { date, months: days }
             | ScalarExprSpec::DateAddYears { date, years: days } => {
-                self.scalar(date, entity)?;
-                self.scalar(days, entity)?;
+                self.scalar(date, entity, membership)?;
+                self.scalar(days, entity, membership)?;
             }
             ScalarExprSpec::DaysBetween { from, to } => {
-                self.scalar(from, entity)?;
-                self.scalar(to, entity)?;
+                self.scalar(from, entity, membership)?;
+                self.scalar(to, entity, membership)?;
             }
             ScalarExprSpec::ParameterLookup { index, .. }
             | ScalarExprSpec::Ceil { value: index }
-            | ScalarExprSpec::Floor { value: index } => self.scalar(index, entity)?,
+            | ScalarExprSpec::Floor { value: index } => self.scalar(index, entity, membership)?,
             ScalarExprSpec::OverPeriods { value, n, .. } => {
-                self.scalar(value, entity)?;
+                self.scalar(value, entity, None)?;
                 if let Some(n) = n {
-                    self.scalar(n, entity)?;
+                    self.scalar(n, entity, None)?;
                 }
             }
             ScalarExprSpec::Literal { .. }
@@ -354,12 +366,12 @@ impl Resolver<'_> {
         &mut self,
         expr: &mut JudgmentExprSpec,
         entity: &str,
-        membership: Option<(Option<&str>, Option<&str>)>,
+        membership: Membership<'_>,
     ) -> Result<()> {
         match expr {
             JudgmentExprSpec::Comparison { left, right, .. } => {
-                self.scalar(left, entity)?;
-                self.scalar(right, entity)?;
+                self.scalar(left, entity, membership)?;
+                self.scalar(right, entity, membership)?;
             }
             JudgmentExprSpec::And { items }
             | JudgmentExprSpec::Or { items }
@@ -374,6 +386,13 @@ impl Resolver<'_> {
                 current_slot,
                 related_slot,
             } => {
+                // A derived relation's traversal reads its source with the
+                // derivation's own slots; a membership test can only use them.
+                if let Some(derived) = self.relations.derived.get(relation.as_str()) {
+                    *current_slot = derived.current_slot;
+                    *related_slot = derived.related_slot;
+                    return Ok(());
+                }
                 let Some((Some(current), Some(related))) = membership else {
                     return Ok(());
                 };

@@ -1265,3 +1265,237 @@ fn derived_relation_schema_kinds_must_match_its_source() {
         "{error}"
     );
 }
+
+/// Usage names a SnapUnit rule's entity, but SnapUnit ids are household ids:
+/// migration must stamp the household kind, or binding would refuse the
+/// correctly oriented tuples it was meant to keep.
+#[test]
+fn migration_stamps_a_filtered_entitys_source_kind() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: extra_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: member_is_extra
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: extra_flag
+  - name: unit_extra_count
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+"#;
+    let fresh = CompiledProgramArtifact::from_rulespec_str(source).expect("typed source compiles");
+    let mut value = serde_json::to_value(&fresh).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        if relation["name"] == "extra_members" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let legacy = serde_json::to_string(&value).unwrap();
+    let migration =
+        migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(
+        migration.changes[0].slot_entities,
+        vec!["Person", "Household"]
+    );
+    assert_eq!(
+        serde_json::to_value(&migration.artifact).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+    // The fully typed artifact needs no change and is not a contradiction.
+    let typed = serde_json::to_string(&fresh).unwrap();
+    let unchanged = migrate_artifact_relation_typing(&typed, "typed.json", &BTreeMap::new())
+        .expect("a typed artifact migrates cleanly");
+    assert!(unchanged.changes.is_empty());
+
+    let model = migration.artifact.program.to_program().unwrap();
+    let dataset = DatasetSpec {
+        inputs: vec![bool_input("extra_flag", "Person", "p1", true)],
+        relations: vec![tuple("extra_members", &["p1", "h1"])],
+    };
+    dataset
+        .to_dataset_for_queries_with_options(
+            &model,
+            &[("h1".to_string(), "SnapUnit".to_string())],
+            DatasetBindingOptions::strict(),
+        )
+        .expect("correctly oriented tuples bind under a SnapUnit query");
+}
+
+/// Explain keeps a derived relation's membership binding through `if`
+/// conditions and comparisons, so lowering must resolve a membership test
+/// there exactly as it does for a bare one.
+#[test]
+fn membership_inside_a_conditional_keeps_its_direction() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: granted
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: granted_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: '(if granted: 1 else: 0) > 0'
+  - name: granted_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(granted_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("the conditional membership test resolves from the declared kinds")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("members", &["p1", "h1"]),
+            tuple("members", &["p2", "h1"]),
+            tuple("granted", &["h1", "p1"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["granted_count"])],
+        )
+        .unwrap();
+        assert_eq!(outputs(&response)[0]["granted_count"], 1, "{mode:?}");
+    }
+}
+
+/// A membership test over a derived relation can only use that derivation's
+/// slots, which its traversal reads its source with.
+#[test]
+fn membership_in_a_derived_relation_uses_its_derivation_slots() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: grants
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: approved_grants
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: grants
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: approved
+  - name: approved_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: approved_grants
+  - name: approved_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(approved_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("the membership test takes the derived relation's slots")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("approved", "Person", "p1", true),
+            bool_input("approved", "Person", "p2", false),
+        ],
+        relations: vec![
+            tuple("members", &["p1", "h1"]),
+            tuple("members", &["p2", "h1"]),
+            tuple("grants", &["h1", "p1"]),
+            tuple("grants", &["h1", "p2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["approved_count"])],
+        )
+        .unwrap();
+        assert_eq!(outputs(&response)[0]["approved_count"], 1, "{mode:?}");
+    }
+}
+
+/// An artifact deserialized directly skips the loader's gate; the dense
+/// compiler checks typing itself.
+#[test]
+fn dense_compilation_refuses_an_untyped_artifact() {
+    use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
+    let artifact: CompiledProgramArtifact =
+        serde_json::from_str(&legacy_artifact_json("[Person, Household]")).unwrap();
+    let error = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
+        .expect_err("dense must not execute an untyped relation");
+    assert!(
+        matches!(error, DenseCompileError::RelationTyping(_)),
+        "{error}"
+    );
+}

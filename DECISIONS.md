@@ -16,8 +16,9 @@ relation use the derivation's slots, and an undeclared short-name relation
 takes the kinds of the same-named declarations only when they all agree.
 Binding uses queries as kind evidence alongside input records and rejects
 tuples whose length differs from the arity. The artifact format stays 2:
-typed and relation-free artifacts load byte-for-byte, an artifact executing
-an untyped relation is refused with a pointer to `migrate artifact`, and
+artifacts that pass the typing check (including relation-free ones) load as
+before, an artifact executing an untyped relation is refused with a pointer
+to `migrate artifact`, and
 `capabilities` lists `relation_entity_typing` so publishers can tell engines
 apart.
 

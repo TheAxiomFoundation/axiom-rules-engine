@@ -118,19 +118,29 @@ zero. Relation entity typing is therefore mandatory:
 
 - **Compile.** Every relation that a `count_related`, `sum_related`, or
   membership node executes, directly or as a derived relation's source, must
-  carry one entity kind per slot (`data_relation.arguments`, lowered to
-  `program.relations[].slot_entities`). The slot a node keys on must hold the
-  evaluating entity (a derived relation's filtered `entity` counts as its
-  source's current kind), and rules evaluated on the related ids must have the
-  related slot's kind. Violations are compile errors listing each relation and
-  citing rule: `untyped_relation`, `relation_current_slot_entity_mismatch`,
+  have one entity kind per slot: declared with `data_relation.arguments`
+  (lowered to `program.relations[].slot_entities`), or, for a derived
+  relation, inherited from its source. The slot a node keys on must hold the
+  evaluating entity (a filtered entity, a derived relation's `entity` such as
+  `SnapUnit`, counts as its source's current kind), rules evaluated on the
+  related ids must have the related slot's kind, and rules a derived
+  relation's predicate reads must run on an id of their own entity. A
+  derived relation's kinds must match its source's, a chain of derived
+  relations must keep one direction, and derived relations filtering to the
+  same entity must agree on its kind. Violations are compile errors listing
+  each relation and citing rule: `untyped_relation`, `unknown_relation`,
+  `relation_slot_entity_count`, `relation_slot_out_of_range`,
+  `relation_current_slot_entity_mismatch`,
   `relation_related_slot_entity_mismatch`,
   `relation_membership_slot_entity_mismatch`,
-  `derived_relation_source_slot_conflict`, `derived_relation_slots_diverge`,
-  `relation_slot_entity_count`, and `relation_slot_out_of_range`.
-- **Load and request.** The same check runs when a compiled artifact loads and
-  when a request carries a raw `ProgramSpec`, so no execution path runs an
-  untyped relation.
+  `relation_predicate_entity_mismatch`, `derived_relation_source_slot_conflict`,
+  `derived_relation_slots_diverge`, and `filtered_entity_kind_conflict`.
+- **Load and request.** The same check runs when a compiled artifact loads
+  (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
+  carries a raw `ProgramSpec`, and when the dense compiler builds from a
+  program or artifact. `Engine::new` evaluates a `Program` exactly as given;
+  Rust callers that build one themselves must call
+  `relation_typing::check_program` first.
 - **Bind.** Dataset tuples are checked against the declared kinds. An id's
   kind comes from input records that carry both `entity_id` and `entity`, and
   from queries: a query evaluates its output rules on its `entity_id`, so a
@@ -162,10 +172,11 @@ still an `untyped_relation` error.
 
 #### Migrating compiled artifacts
 
-Artifacts compiled before typing became mandatory keep format version 2, and
-those whose executed relations are typed (or that execute none) load
-unchanged. One that executes an untyped relation fails to load with a message
-naming the migration. Recompiling from typed source is the durable fix; for an
+Artifacts compiled before typing became mandatory keep format version 2.
+Those whose executed relations pass the typing check (or that execute none)
+load as before. One that executes an untyped relation, or reads a typed one
+against its declared kinds, fails to load with a message naming the
+migration. Recompiling from typed source is the durable fix; for an
 artifact whose source cannot be recompiled yet:
 
 ```bash
@@ -179,13 +190,16 @@ nothing. It stamps each untyped relation with the kinds its executable usage
 determines (the evaluating rule's entity on the slot an aggregate keys on, the
 entity of rules its predicate or value read on the other). It never moves an
 aggregate's slots, so datasets that bound correctly before still bind, and
-datasets in the other orientation now fail binding instead of aggregating
-nothing. A slot usage leaves open (for example `len(relation)` with no related
+datasets in the other orientation now get `relation_slot_entity_mismatch` at
+binding (an error under strict binding) instead of aggregating nothing
+silently. A slot usage leaves open (for example `len(relation)` with no related
 rule) needs `--relation-entities <relation>=<Kind>,<Kind>` in tuple order; the
-relation may be named by its full id or a unique short name. An override that
-contradicts the executed slots, or a typed declaration that contradicts them
+relation may be named by its full id or a unique short name. A filtered
+entity in usage is stamped as its source kind. An override that contradicts
+the executed slots is refused. A typed declaration that contradicts them
 (artifacts compiled between the declaration carry and declared-order
-resolution), is refused: recompile to change an orientation. The rewritten
+resolution) is refused unless an override in executed order retypes it; to
+change an orientation, recompile. The rewritten
 artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
 capabilities` lists `relation_entity_typing` for engines that enforce this.
 

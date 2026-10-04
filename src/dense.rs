@@ -344,6 +344,8 @@ pub struct DenseExecutionResult {
 pub enum DenseCompileError {
     #[error(transparent)]
     Eval(#[from] EvalError),
+    #[error("relation entity typing failed:\n{0}")]
+    RelationTyping(crate::relation_typing::RelationTypingReport),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
     #[error(
@@ -632,10 +634,16 @@ impl DenseCompiledProgram {
     /// To check a program first, compile it into an artifact
     /// (`CompiledProgramArtifact::compile`, or load one with `from_json_*`)
     /// and pass that to [`Self::from_artifact`], which does not check again.
+    ///
+    /// Relation entity typing is checked here, as at every other execution
+    /// entry point, because an artifact deserialized directly (rather than
+    /// through `from_json_*`) or a program built in Rust has not been checked.
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,
     ) -> Result<Self, DenseCompileError> {
+        crate::relation_typing::check_program(program)
+            .map_err(DenseCompileError::RelationTyping)?;
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
             None => {

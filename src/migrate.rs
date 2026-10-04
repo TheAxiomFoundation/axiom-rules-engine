@@ -718,14 +718,15 @@ pub enum ArtifactRelationMigrationError {
 ///
 /// Each untyped data relation an executable node reads is stamped with the
 /// slot kinds its executable usage determines: the evaluating rule's entity
-/// on the slot the node keys on, and the entity of the rules its predicate
-/// or value read on the other. `overrides` (relation name, or its unique
-/// short name, to kinds in tuple order) supply slots usage leaves open and
-/// retype relations whose declaration contradicts how the artifact executes.
-/// The migration never moves an aggregate's slots, so datasets that bound
-/// correctly before still bind; datasets in the other orientation now fail
-/// binding instead of aggregating nothing. The result must pass the same
-/// typing check the loader enforces.
+/// (a filtered entity as its source kind) on the slot the node keys on, and
+/// the entity of the rules its predicate or value read on the other.
+/// `overrides` (relation name, or its unique short name, to kinds in tuple
+/// order) supply slots usage leaves open and retype relations whose
+/// declaration contradicts how the artifact executes. The migration never
+/// moves an aggregate's slots, so datasets that bound correctly before still
+/// bind; datasets in the other orientation now get a binding diagnostic (an
+/// error under strict binding) instead of aggregating nothing silently. The
+/// result must pass the same typing check the loader enforces.
 pub fn migrate_artifact_relation_typing(
     source: &str,
     path: &str,
@@ -736,7 +737,26 @@ pub fn migrate_artifact_relation_typing(
             source, path,
         )?;
     let model = artifact.program.to_program()?;
-    let executed = crate::model::relation_usage_orientations(&model);
+    // Usage names the entity a rule evaluates; a filtered entity's ids are
+    // its source's current-slot ids, so stamp that kind instead.
+    let filtered = crate::relation_typing::filtered_entity_kinds(&model);
+    let executed = crate::model::relation_usage_orientations(&model)
+        .into_iter()
+        .map(|(relation, mut usage)| {
+            for kind in usage.slot_entities.iter_mut().flatten() {
+                if let Some(canonical) = filtered.get(kind.as_str()) {
+                    *kind = canonical.clone();
+                }
+            }
+            (relation, usage)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let canonical = |kind: &str| {
+        filtered
+            .get(kind)
+            .cloned()
+            .unwrap_or_else(|| kind.to_string())
+    };
 
     let mut resolved_overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
     for (name, kinds) in overrides {
@@ -810,7 +830,7 @@ pub fn migrate_artifact_relation_typing(
             if let Some(usage) = usage {
                 for (slot, (given, executed)) in kinds.iter().zip(usage).enumerate() {
                     if let Some(executed) = executed
-                        && executed != given
+                        && *executed != canonical(given)
                     {
                         return Err(
                             ArtifactRelationMigrationError::OverrideContradictsExecution {
@@ -838,11 +858,16 @@ pub fn migrate_artifact_relation_typing(
             continue;
         };
         if !relation.slot_entities.is_empty() {
-            let contradicts = relation
-                .slot_entities
-                .iter()
-                .zip(usage)
-                .any(|(declared, executed)| executed.as_ref().is_some_and(|e| e != declared));
+            let contradicts =
+                relation
+                    .slot_entities
+                    .iter()
+                    .zip(usage)
+                    .any(|(declared, executed)| {
+                        executed
+                            .as_ref()
+                            .is_some_and(|executed| *executed != canonical(declared))
+                    });
             if contradicts {
                 return Err(
                     ArtifactRelationMigrationError::DeclarationContradictsExecution {

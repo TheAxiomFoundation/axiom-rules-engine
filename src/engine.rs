@@ -596,6 +596,11 @@ struct MembersResume {
 }
 
 impl<'a> Engine<'a> {
+    /// Evaluate `program` over `data` as given. This low-level constructor
+    /// performs no relation entity typing or dataset binding checks: callers
+    /// that build a `Program` themselves must run
+    /// [`crate::relation_typing::check_program`] first, or go through
+    /// `execute_request`, which does.
     pub fn new(program: &'a Program, data: &'a DataSet) -> Self {
         Self::with_tracing(program, data, true)
     }

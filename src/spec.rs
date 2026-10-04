@@ -518,13 +518,16 @@ fn relation_slot_entity_diagnostics(
             continue;
         };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
-            let Some(expected_entity) = expected_entities.get(slot) else {
+            // A slot declared with a filtered entity holds that entity's
+            // source ids, the same canonical kind the evidence uses.
+            let Some(expected_entity) = expected_entities.get(slot).map(|entity| canonical(entity))
+            else {
                 continue;
             };
             let Some(Some(actual_entity)) = entity_by_id.get(entity_id) else {
                 continue;
             };
-            if actual_entity != expected_entity {
+            if *actual_entity != expected_entity {
                 diagnostics.push(DatasetBindingDiagnostic {
                     code: DatasetBindingDiagnosticCode::RelationSlotEntityMismatch,
                     relation: record.name.clone(),
