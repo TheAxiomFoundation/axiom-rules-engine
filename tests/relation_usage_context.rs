@@ -37,7 +37,7 @@
 //!   violations.
 
 use axiom_rules_engine::api::{
-    ApiError, ExecutionMode, ExecutionRequest, OutputValue, execute_request,
+    ApiError, ExecutionMode, ExecutionRequest, OutputValue, RelationBinding, execute_request,
 };
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::relation_typing::{RelationTypingCode, RelationTypingReport};
@@ -269,10 +269,15 @@ fn observe(request: &Value) -> Observed {
 }
 
 /// `n` for `h1` in `mode`, or the request's error.
+/// `n` for `h1` in `mode`, or the request's error. Binding is lenient so a
+/// reversed tuple reaches the evaluator and the test observes its
+/// orientation; strict binding (the default) is checked against the
+/// diagnostics in `observe`.
 fn run(request: &Value, mode: ExecutionMode) -> Result<i64, ApiError> {
     let mut request: ExecutionRequest =
         serde_json::from_value(request.clone()).expect("request parses");
     request.mode = mode;
+    request.relation_binding = RelationBinding::Lenient;
     let response = execute_request(request)?;
     let OutputValue::Scalar {
         value: ScalarValueSpec::Integer { value },
@@ -789,6 +794,7 @@ rules:
             );
             let request = json!({
                 "mode": "explain",
+                "relation_binding": "lenient",
                 "program": artifact.program,
                 "dataset": dataset(head),
                 "queries": [{

@@ -421,8 +421,13 @@ fn explicit_lenient_dataset_options_retain_both_mismatch_diagnostics() {
     assert_eq!(outcome.diagnostics[1].actual_entity, "Person");
 }
 
+/// An artifact compiled between the declaration carry and declared-order
+/// resolution executes a typed relation against its declared kinds. Typing is
+/// mandatory, so such a program is refused at compile and the artifact at
+/// load, before binding could follow either order; `migrate artifact` retypes
+/// it in executed order.
 #[test]
-fn legacy_artifact_binding_respects_its_executable_relation_direction() {
+fn legacy_artifact_executing_against_its_declaration_is_refused() {
     let mut program = artifact().program;
     for rule in &mut program.derived {
         for semantics in std::iter::once(&mut rule.semantics).chain(
@@ -444,18 +449,14 @@ fn legacy_artifact_binding_respects_its_executable_relation_direction() {
             }
         }
     }
-    let artifact = CompiledProgramArtifact::compile(program).expect("legacy artifact compiles");
-    assert_eq!(
-        artifact.program.relations[0].slot_entities,
-        ["Person", "TaxUnit"]
+    let error = CompiledProgramArtifact::compile(program)
+        .expect_err("a typed relation read against its declaration is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("relation_current_slot_entity_mismatch"),
+        "{error}"
     );
-    for mode in ["explain", "fast"] {
-        let request: CompiledExecutionRequest =
-            serde_json::from_value(request(mode, true, true)).unwrap();
-        let response = execute_compiled_request(artifact.clone(), request)
-            .expect("strict binding follows the slots that the artifact executes");
-        assert_credit(&serde_json::to_value(response).unwrap(), 1, 1500);
-    }
 }
 
 #[test]

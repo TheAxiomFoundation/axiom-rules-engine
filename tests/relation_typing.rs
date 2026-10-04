@@ -79,6 +79,7 @@ fn run(
         program,
         dataset,
         queries,
+        relation_binding: Default::default(),
     })
 }
 

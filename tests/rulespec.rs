@@ -2877,6 +2877,7 @@ fn nested_sum_related_is_checked_under_an_untyped_outer_relation() {
         end: "2026-12-31".parse().expect("valid date"),
     };
     let request_error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: nested_sum_program(&[], &["Person", "Payment"]),
         dataset: nested_sum_dataset(),
