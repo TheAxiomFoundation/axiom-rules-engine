@@ -346,6 +346,7 @@ fn fast_mode_answers_the_shape_the_retired_blocker_named() {
                 dataset: dataset.clone(),
                 queries: queries.clone(),
                 pins: Vec::new(),
+                relation_binding: Default::default(),
             },
         )
         .expect("fast request succeeds");
