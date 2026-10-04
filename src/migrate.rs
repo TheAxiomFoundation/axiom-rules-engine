@@ -966,20 +966,47 @@ fn execution_filter_kinds(
     crate::relation_typing::filtered_entity_kinds_among(model, &consistent_derivations(model))
 }
 
+/// Derived relations whose declared kinds agree with their source's, all the
+/// way down their source chain: a filter that declares nothing still inherits
+/// whatever an ancestor declares, so one contradicting ancestor poisons every
+/// derived relation above it. A cyclic chain is never consistent.
 fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
+    let locally_consistent = |name: &str| {
+        let Some(schema) = model.relations.get(name) else {
+            return false;
+        };
+        let Some(derivation) = schema.derivation.as_ref() else {
+            return true;
+        };
+        let source =
+            crate::relation_typing::effective_slot_entities(model, &derivation.source_relation);
+        let agrees = |declared: &Vec<String>| {
+            declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
+        };
+        agrees(&derivation.slot_entities) && agrees(&schema.slot_entities)
+    };
     model
         .relations
         .iter()
-        .filter_map(|(name, schema)| {
-            let derivation = schema.derivation.as_ref()?;
-            let source =
-                crate::relation_typing::effective_slot_entities(model, &derivation.source_relation);
-            let agrees = |declared: &Vec<String>| {
-                declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
-            };
-            (agrees(&derivation.slot_entities) && agrees(&schema.slot_entities))
-                .then(|| name.clone())
+        .filter(|(_, schema)| schema.derivation.is_some())
+        .filter(|(name, _)| {
+            let mut current = name.to_string();
+            let mut visited = std::collections::BTreeSet::new();
+            loop {
+                if !visited.insert(current.clone()) || !locally_consistent(&current) {
+                    return false;
+                }
+                match model
+                    .relations
+                    .get(&current)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    Some(derivation) => current = derivation.source_relation.clone(),
+                    None => return true,
+                }
+            }
         })
+        .map(|(name, _)| name.clone())
         .collect()
 }
 
