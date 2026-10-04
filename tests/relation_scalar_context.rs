@@ -40,15 +40,11 @@ fn assert_correlated_predicate(nested_operand: bool) {
             serde_json::from_value(fixture).expect("request parses");
         request.mode = mode.clone();
         let response = execute_request(request).expect("correlated scalar predicate executes");
-        if nested_operand && mode == ExecutionMode::Fast {
-            // Conditional scalar membership operands currently use the documented
-            // generic fallback. Its values must still match an Explain request.
-            assert_eq!(response.metadata.actual_mode, ExecutionMode::Explain);
-            assert!(response.metadata.fallback_reason.is_some());
-        } else {
-            assert_eq!(response.metadata.actual_mode, mode);
-            assert!(response.metadata.fallback_reason.is_none());
-        }
+        // Fast mode evaluates relation aggregations, including conditional
+        // scalar membership operands, row by row on the reference
+        // interpreter, so neither shape falls back.
+        assert_eq!(response.metadata.actual_mode, mode);
+        assert!(response.metadata.fallback_reason.is_none());
         assert_eq!(response.results.len(), 4);
         for (row, (expected_matches, expected_records, expected_outcome)) in
             response.results.iter().zip([

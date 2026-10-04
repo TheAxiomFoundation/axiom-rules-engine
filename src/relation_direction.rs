@@ -224,6 +224,12 @@ impl Resolver<'_> {
                 self.scalar(then_expr, entity)?;
                 self.scalar(else_expr, entity)?;
             }
+            ScalarExprSpec::NoMatch { subject, patterns } => {
+                self.scalar(subject, entity)?;
+                for pattern in patterns {
+                    self.scalar(pattern, entity)?;
+                }
+            }
             ScalarExprSpec::Add { items }
             | ScalarExprSpec::Min { items }
             | ScalarExprSpec::Max { items } => {

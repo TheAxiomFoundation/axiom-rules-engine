@@ -549,6 +549,12 @@ impl<'a> Checker<'a> {
                 self.scalar(then_expr, context);
                 self.scalar(else_expr, context);
             }
+            ScalarExpr::NoMatch { subject, patterns } => {
+                self.scalar(subject, context);
+                for pattern in patterns {
+                    self.scalar(pattern, context);
+                }
+            }
             ScalarExpr::OverPeriods { value, n, .. } => {
                 self.scalar(value, context);
                 if let Some(n) = n {
@@ -651,6 +657,12 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
             collect_judgment_derived(condition, out);
             collect_scalar_derived(then_expr, out);
             collect_scalar_derived(else_expr, out);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_derived(subject, out);
+            for pattern in patterns {
+                collect_scalar_derived(pattern, out);
+            }
         }
         ScalarExpr::OverPeriods { value, n, .. } => {
             collect_scalar_derived(value, out);

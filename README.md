@@ -21,7 +21,9 @@ RuleSpec YAML only as test fixtures under `tests/fixtures/rulespec/`.
 - durable repo-backed output IDs, e.g.
   `us:statutes/7/2017/a#snap_regular_month_allotment`
 - `explain` execution with traces
-- `fast` execution through the generic dense path when supported
+- `fast` execution: one columnar pass over a batch that returns exactly what
+  `explain` returns, falling back to `explain` for constructs it does not
+  implement — see [`docs/execution-semantics.md`](docs/execution-semantics.md)
 - opt-in currency output rounding per rule (`rounding: half_up|half_even|floor|ceil`),
   applied identically across the explain, fast, and dense paths — see
   [`docs/rulespec.md`](docs/rulespec.md#currency-rounding)
@@ -109,9 +111,12 @@ cargo run -- compile-composed \
 
 `compile-composed` requires exact `format: rulespec/v1` and
 `module.kind: composition`, keeps the composition's synthesized root rules
-originless, and permits only canonical atomic imports resolved through the
-explicit roots. Atomic files, declarative ProgramSpecs, relative dependencies,
-and composition files inside a RuleSpec checkout are rejected.
+originless, and permits only canonical imports resolved through the explicit
+roots. Imported compositions are recursively merged on this surface and keep
+their canonical rule origins and source citations; the ordinary atomic loader
+continues to reject them. Atomic entry files, declarative ProgramSpecs,
+relative dependencies, and composition entry files inside a RuleSpec checkout
+are rejected.
 
 Every compiled artifact publishes `metadata.input_catalog`. Each entry records
 the internal runtime `slot`, one deterministic `canonical_request_name`, and all

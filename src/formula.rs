@@ -1717,23 +1717,23 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             default,
         } => {
             // Lower every concrete arm as a comparison. A final `_ => ...`
-            // arm is the explicit fallback. In compatibility mode a match
-            // without `_` retains the historical last result as its fallback,
-            // but its final pattern is still represented and RuleSpec lowering
-            // emits a warning (or rejects it in strict mode).
+            // arm is the explicit fallback. A match without `_` ends its
+            // chain in NoMatch, so a subject no pattern covers is an
+            // evaluation error rather than the last arm's value; RuleSpec
+            // lowering still warns about it (or rejects it in strict mode).
             if cases.is_empty() && default.is_none() {
                 return Err(FormulaError::lower("empty match".to_string()));
             }
             let subj_scalar = lower_to_scalar(subject, ctx)?;
             let mut expr = match default {
                 Some(default) => lower_to_scalar(default, ctx)?,
-                None => lower_to_scalar(
-                    &cases
-                        .last()
-                        .expect("non-empty match has a compatibility fallback")
-                        .1,
-                    ctx,
-                )?,
+                None => ScalarExprSpec::NoMatch {
+                    subject: Box::new(subj_scalar.clone()),
+                    patterns: cases
+                        .iter()
+                        .map(|(pattern, _)| lower_to_scalar(pattern, ctx))
+                        .collect::<Result<_, _>>()?,
+                },
             };
             for (pat, res) in cases.iter().rev() {
                 expr = ScalarExprSpec::If {
