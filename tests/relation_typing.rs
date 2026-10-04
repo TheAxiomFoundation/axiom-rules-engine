@@ -1718,3 +1718,125 @@ fn migration_applies_overrides_before_mapping_filtered_entities() {
     let typed = serde_json::to_string(&migration.artifact).unwrap();
     CompiledProgramArtifact::from_json_str(&typed).expect("the migrated artifact loads");
 }
+
+/// A filter whose source kind is unknown (here an unused one over an untyped
+/// relation) does not make its entity an alias: `Household` slots elsewhere
+/// remain a physical kind, with or without an identity filter alongside.
+#[test]
+fn an_unresolved_filter_does_not_alias_a_physical_kind() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    for with_identity_filter in [false, true] {
+        let mut relations = vec![
+            serde_json::json!({"name": "household_members", "arity": 2,
+                               "slot_entities": ["Household", "Person"]}),
+            serde_json::json!({"name": "ghost", "arity": 2}),
+            serde_json::json!({"name": "ghost_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "Household", "predicate": truth.clone()}}),
+        ];
+        if with_identity_filter {
+            relations.push(
+                serde_json::json!({"name": "household_self", "arity": 2, "derivation": {
+                "source_relation": "household_members", "current_slot": 0, "related_slot": 1,
+                "entity": "Household", "predicate": truth.clone()}}),
+            );
+        }
+        let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+            "relations": relations,
+            "derived": [{"name": "hh_size", "entity": "Household", "dtype": "integer",
+                         "unit": null, "semantics": "scalar",
+                         "expr": {"kind": "count_related", "relation": "household_members",
+                                  "current_slot": 0, "related_slot": 1}}]
+        }))
+        .unwrap();
+        let dataset = DatasetSpec {
+            inputs: vec![],
+            relations: vec![
+                tuple("household_members", &["h1", "p1"]),
+                tuple("household_members", &["h1", "p2"]),
+            ],
+        };
+        for mode in BOTH_MODES {
+            let response = run(
+                mode.clone(),
+                program.clone(),
+                dataset.clone(),
+                vec![query("h1", &["hh_size"])],
+            )
+            .unwrap_or_else(|error| panic!("identity={with_identity_filter} {mode:?}: {error}"));
+            assert_eq!(outputs(&response)[0]["hh_size"], 2);
+        }
+    }
+}
+
+/// A slot declared with a filter of a filter is told the physical kind at
+/// the end of the chain, not the intermediate alias.
+#[test]
+fn a_nested_filtered_slot_kind_names_the_physical_kind() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: unit_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, SnapUnit]
+  - name: nested_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: unit_members
+      entity: NestedSnap
+      member_relation: nested_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: nested_size
+    kind: derived
+    entity: NestedSnap
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(nested_members)
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("SnapUnit is an alias, so unit_members is refused");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    let aliased = report
+        .violations
+        .iter()
+        .filter(|violation| violation.code == RelationTypingCode::FilteredEntitySlotKind)
+        .collect::<Vec<_>>();
+    assert!(!aliased.is_empty(), "{report}");
+    for violation in aliased {
+        assert!(
+            violation.message.contains("(`Household`)"),
+            "names the physical kind: {}",
+            violation.message
+        );
+    }
+}

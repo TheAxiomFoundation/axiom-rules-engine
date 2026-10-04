@@ -938,14 +938,15 @@ pub fn migrate_artifact_relation_typing(
 
 /// Executable usage per relation, each use's kinds mapped to the kinds of the
 /// ids it reads (a filtered entity as its source kind) before uses are
-/// combined. A filtered entity whose source kind is not yet known says
-/// nothing about the slot. A slot is known when every use that constrains it
+/// combined. A filtered entity whose source kind is not yet known, or that
+/// still names an alias after mapping, says nothing about the slot. A slot is known when every use that constrains it
 /// agrees.
 fn canonical_usage(
     model: &crate::model::Program,
     filtered: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
-    let aliases = crate::relation_typing::filtered_entity_names(model);
+    let mut unknown = crate::relation_typing::filtered_entity_names(model);
+    unknown.extend(crate::relation_typing::unresolved_filtered_entities(model));
     let mut slots =
         std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
     for usage in crate::model::relation_usage_records(model) {
@@ -956,7 +957,7 @@ fn canonical_usage(
         for (slot, kind) in usage.slot_entities.into_iter().enumerate() {
             if let Some(kind) = kind {
                 let kind = filtered.get(&kind).cloned().unwrap_or(kind);
-                if !aliases.contains(&kind) {
+                if !unknown.contains(&kind) {
                     entry[slot].insert(kind);
                 }
             }

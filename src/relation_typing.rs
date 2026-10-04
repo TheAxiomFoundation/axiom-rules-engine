@@ -180,12 +180,14 @@ fn effective_slot_entities_inner(
     (!schema.slot_entities.is_empty()).then(|| schema.slot_entities.clone())
 }
 
-/// Filtered entities (a derived relation's `entity`, e.g. `SnapUnit`) are
-/// queried with the source relation's current-slot ids. Map each to the kind
-/// those ids have, so dataset evidence about a `SnapUnit` id counts as
-/// evidence about a `Household` id.
-pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
-    let mut candidates = BTreeMap::<String, BTreeSet<String>>::new();
+/// The known current-slot kinds of every derived relation filtering to each
+/// entity (a derived relation's `entity`, e.g. `SnapUnit`), and the entities
+/// whose derived relations' current kinds are all unknown.
+fn filtered_entity_current_kinds(
+    program: &Program,
+) -> (BTreeMap<String, BTreeSet<String>>, BTreeSet<String>) {
+    let mut known = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut seen = BTreeSet::new();
     for (name, schema) in &program.relations {
         let Some(derivation) = &schema.derivation else {
             continue;
@@ -193,40 +195,71 @@ pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
         let Some(entity) = derivation.entity.as_ref() else {
             continue;
         };
+        seen.insert(entity.clone());
         if let Some(kind) = effective_slot_entities(program, name)
             .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
         {
-            candidates.entry(entity.clone()).or_default().insert(kind);
+            known.entry(entity.clone()).or_default().insert(kind);
         }
     }
-    candidates
+    let unresolved = seen
         .into_iter()
-        .filter_map(|(entity, kinds)| {
-            (kinds.len() == 1).then(|| (entity, kinds.into_iter().next().unwrap_or_default()))
+        .filter(|entity| !known.contains_key(entity))
+        .collect();
+    (known, unresolved)
+}
+
+/// Filtered entities (a derived relation's `entity`, e.g. `SnapUnit`) are
+/// queried with the source relation's current-slot ids. Map each to the kind
+/// those ids have, so dataset evidence about a `SnapUnit` id counts as
+/// evidence about a `Household` id. A filter of a filter resolves to the
+/// innermost kind; an entity whose derived relations disagree, or whose
+/// chain cycles, is left unmapped.
+pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
+    let (known, _) = filtered_entity_current_kinds(program);
+    let direct = known
+        .into_iter()
+        .filter(|(_, kinds)| kinds.len() == 1)
+        .filter_map(|(entity, kinds)| kinds.into_iter().next().map(|kind| (entity, kind)))
+        .collect::<BTreeMap<_, _>>();
+    direct
+        .keys()
+        .filter_map(|entity| {
+            let mut kind = entity.clone();
+            let mut visited = BTreeSet::new();
+            while let Some(next) = direct.get(&kind) {
+                if next == &kind {
+                    break;
+                }
+                if !visited.insert(kind.clone()) {
+                    return None;
+                }
+                kind = next.clone();
+            }
+            Some((entity.clone(), kind))
         })
         .collect()
 }
 
-/// Filtered entities that name something other than the ids they are queried
-/// with: every derived relation's `entity` whose source's current kind is
-/// another kind, or is not known. Such a name is an alias for ids of the
-/// source kind, so it cannot be a relation slot's kind.
+/// Filtered entities that alias ids of another kind: an entity some derived
+/// relation filters to over a source whose current kind is known and is not
+/// that entity. Such a name cannot be a relation slot's kind. An entity whose
+/// derived relations' current kinds are all unknown is not called an alias,
+/// and one whose only known current kind is itself (a filter of households
+/// to households) is a physical kind.
 pub fn filtered_entity_names(program: &Program) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for (name, schema) in &program.relations {
-        let Some(derivation) = &schema.derivation else {
-            continue;
-        };
-        let Some(entity) = derivation.entity.as_ref() else {
-            continue;
-        };
-        let current = effective_slot_entities(program, name)
-            .and_then(|kinds| kinds.get(derivation.current_slot).cloned());
-        if current.as_deref() != Some(entity.as_str()) {
-            names.insert(entity.clone());
-        }
-    }
-    names
+    let (known, _) = filtered_entity_current_kinds(program);
+    known
+        .into_iter()
+        .filter(|(entity, kinds)| kinds.iter().any(|kind| kind != entity))
+        .map(|(entity, _)| entity)
+        .collect()
+}
+
+/// Filtered entities none of whose derived relations has a known current
+/// kind yet: a use naming one says nothing about the ids it reads.
+pub fn unresolved_filtered_entities(program: &Program) -> BTreeSet<String> {
+    filtered_entity_current_kinds(program).1
 }
 
 #[derive(Clone, Copy)]
