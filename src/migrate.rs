@@ -858,6 +858,17 @@ pub fn migrate_artifact_relation_typing(
         canonical_usage(&program.to_program()?, &filtered)
     };
 
+    // Only relations the typing check requires (those an executed node
+    // reads) must be typed; one read only by an unused derived relation may
+    // stay untyped.
+    let required = match crate::relation_typing::check_program(&artifact.program.to_program()?) {
+        Ok(()) => std::collections::BTreeSet::new(),
+        Err(report) => report
+            .untyped_relations()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    };
     let mut changes = Vec::new();
     let mut uninferable = Vec::new();
     for relation in artifact.program.relations.iter().filter(|r| is_data(r)) {
@@ -911,6 +922,9 @@ pub fn migrate_artifact_relation_typing(
             continue;
         }
         if relation.slot_entities.is_empty() {
+            if !required.contains(&relation.name) {
+                continue;
+            }
             uninferable.push(format!(
                 "  {} (arity {}; executable usage determines {})",
                 relation.name,
@@ -945,8 +959,28 @@ fn canonical_usage(
     model: &crate::model::Program,
     filtered: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+    // A kind some relation declares is a physical kind (declaring a filtered
+    // entity is refused), so it stays evidence even when an unresolved
+    // filter happens to share its name.
+    let declared = model
+        .relations
+        .values()
+        .flat_map(|schema| {
+            schema.slot_entities.iter().chain(
+                schema
+                    .derivation
+                    .iter()
+                    .flat_map(|derivation| derivation.slot_entities.iter()),
+            )
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let mut unknown = crate::relation_typing::filtered_entity_names(model);
-    unknown.extend(crate::relation_typing::unresolved_filtered_entities(model));
+    unknown.extend(
+        crate::relation_typing::unresolved_filtered_entities(model)
+            .into_iter()
+            .filter(|entity| !declared.contains(entity)),
+    );
     let mut slots =
         std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
     for usage in crate::model::relation_usage_records(model) {

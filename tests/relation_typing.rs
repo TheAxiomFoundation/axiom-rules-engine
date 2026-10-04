@@ -1840,3 +1840,60 @@ rules:
         );
     }
 }
+
+/// A kind a typed relation declares stays evidence for migration even when
+/// an unused filter over an untyped source shares its name.
+#[test]
+fn migration_keeps_declared_physical_kinds_despite_an_unresolved_namesake_filter() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "typed_members", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "extra_members", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "Household", "predicate": truth}}
+        ],
+        "derived": [
+            {"name": "member_flag", "entity": "Person", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "typed_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "typed_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}},
+            {"name": "extra_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "extra_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        if name == "extra_members" || name == "ghost" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let migration = migrate_artifact_relation_typing(
+        &serde_json::to_string(&value).unwrap(),
+        "legacy.json",
+        &BTreeMap::new(),
+    )
+    .expect("Household is declared by typed_members, so it is still evidence");
+    let extra = migration
+        .changes
+        .iter()
+        .find(|change| change.relation == "extra_members")
+        .expect("extra_members is typed");
+    assert_eq!(extra.slot_entities, vec!["Person", "Household"]);
+}
