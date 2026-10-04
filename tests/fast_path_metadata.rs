@@ -126,7 +126,7 @@ fn an_artifact_compiled_before_the_change_still_loads_unchanged() {
         "(17 blockers, compatible: false)",
         "fast mode answers `sum_related` over related derived values",
         "this engine lists 12 blockers (compatible: false)",
-        "no longer blocks `household_income`, `counted_income`",
+        "no longer lists the retired blocker for `household_income`, `counted_income`",
         "kept unchanged",
         "Recompile with this engine",
     ] {
@@ -172,8 +172,10 @@ fn a_fresh_compile_drops_only_the_retired_blocker() {
     assert_eq!(kept.len(), 12);
     expected["metadata"]["fast_path"]["blockers"] = serde_json::json!(kept);
     expected["metadata"]["fast_path"]["compatible"] = serde_json::json!(kept.is_empty());
+    // The fixture records the engine version that wrote it; this engine stamps
+    // its own.
+    expected["engine_version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
     let actual = serde_json::to_value(&fresh).expect("fresh artifact serialises");
-    assert_eq!(actual["engine_version"], expected["engine_version"]);
     assert_eq!(actual, expected);
 
     // A fresh artifact loads with no stale diagnostic and round-trips exactly.
@@ -372,82 +374,39 @@ fn fast_mode_answers_the_shape_the_retired_blocker_named() {
 
 /// Unit aggregation digests the serialization of the source artifact it loads,
 /// so a loader that rewrote stale `fast_path` would break every aggregation
-/// artifact embedding one. The stored copy must survive the whole chain.
+/// artifact embedding one. The fixture is the unmodified stage-3 output of the
+/// engine at 6031295 for `nz_best_start_carer_sum.rulespec.yaml` (the NZ
+/// stage-3 source plus a carer-side sum over a related derived value) and
+/// `unit_derivation/nz_income_explorer_family.yaml`. Its advertised
+/// `source_artifact_digest` was computed over the source exactly as that engine
+/// wrote it.
 #[cfg(feature = "unit-derivation")]
 #[test]
-fn an_aggregation_artifact_over_a_pre_change_source_still_loads() {
-    use axiom_rules_engine::unit_derivation::{
-        CompiledAggregationArtifact, UnitDerivationDocumentRegistry,
-    };
+fn an_aggregation_artifact_the_previous_engine_compiled_still_loads() {
+    use axiom_rules_engine::unit_derivation::CompiledAggregationArtifact;
 
-    const TARGET: &str = "nz:statutes/income_tax/family_scheme/tax_credits";
-    struct Source;
-    impl axiom_rules_engine::source::ModuleSource for Source {
-        fn load(
-            &self,
-            target: &str,
-        ) -> Result<Option<String>, axiom_rules_engine::source::SourceError> {
-            Ok((target == TARGET).then(|| {
-                let mut source =
-                    include_str!("fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml")
-                        .to_string();
-                source.push_str(
-                    r#"
-  - name: carer_of_child
-    kind: data_relation
-    data_relation:
-      arity: 2
-      arguments: [Child, Carer]
-  - name: carer_best_start_total
-    kind: derived
-    entity: Carer
-    dtype: Money
-    period: Year
-    unit: NZD
-    versions:
-      - effective_from: '2026-04-01'
-        formula: sum(carer_of_child.best_start_tax_credit_before_abatement)
-"#,
-                );
-                source
-            }))
-        }
-    }
-
-    let fresh = CompiledProgramArtifact::from_rulespec_with_source(TARGET, &Source)
-        .expect("extended NZ source compiles");
-    assert!(
-        fresh
-            .metadata
-            .fast_path
-            .blockers
-            .iter()
-            .all(|blocker| !blocker.contains("carer_best_start_total")),
-        "fresh blockers: {:#?}",
-        fresh.metadata.fast_path.blockers
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/artifacts/nz_best_start_carer_sum.pre-lazy-fast-path.stage3.json"
+    ))
+    .expect("fixture is JSON");
+    let stored_source = value["source_artifact"].clone();
+    assert_eq!(
+        stored_fast_path(&stored_source).blockers,
+        [
+            format!("carer_best_start_total: {RETIRED_SUM_BLOCKER}"),
+            format!("carer_best_start_total: {RETIRED_SUM_BLOCKER}"),
+        ]
     );
-    let mut stamped = serde_json::to_value(&fresh).expect("artifact serialises");
-    let mut legacy = stored_fast_path(&stamped);
-    // The previous engine listed the sum once for the rule's formula and once
-    // for its single version.
-    legacy.blockers.extend([
-        format!("carer_best_start_total: {RETIRED_SUM_BLOCKER}"),
-        format!("carer_best_start_total: {RETIRED_SUM_BLOCKER}"),
-    ]);
-    legacy.compatible = false;
-    stamped["metadata"]["fast_path"] = serde_json::to_value(&legacy).expect("serialises");
-    let source_artifact = load(&stamped).expect("the previous engine's stamp loads");
-    assert_eq!(source_artifact.metadata.fast_path, legacy);
+    // Loading regenerates the phase-two artifact (relations only, no derived
+    // rules, so no blockers) and compares it in full, engine version included.
+    // Restamp that one field so the fixture survives a crate version bump. The
+    // digested source artifact stays exactly as the previous engine wrote it.
+    value["phase_two_artifact"]["engine_version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
 
-    let plan = include_str!("fixtures/unit_derivation/nz_income_explorer_family.yaml");
-    let mut registry = UnitDerivationDocumentRegistry::default();
-    let compiled = registry
-        .register_aggregation_source(plan, &source_artifact)
-        .expect("aggregation compiles over the pre-change source")
-        .to_json_pretty()
-        .expect("aggregation artifact serialises");
-    let reloaded = CompiledAggregationArtifact::from_json_str(&compiled)
-        .expect("its source digest still matches after loading");
-    assert_eq!(reloaded.source_artifact.metadata.fast_path, legacy);
-    assert_eq!(reloaded.to_json_pretty().expect("serialises"), compiled);
+    let loaded = CompiledAggregationArtifact::from_json_str(&value.to_string())
+        .expect("the previous engine's source digest must still match after loading");
+    assert_eq!(
+        serde_json::to_value(&loaded.source_artifact).expect("source serialises"),
+        stored_source
+    );
 }

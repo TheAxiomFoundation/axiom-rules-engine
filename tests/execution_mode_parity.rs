@@ -4066,9 +4066,6 @@ fn random_programs_fast_matches_explain_on_relation_aggregation() {
     assert_relation_regressions_exercised("relations", &stats);
 }
 
-/// Dense must hold explain's value for every row and output of a dense-profile
-/// case, fail exactly when explain fails for some row (same error variant), and
-/// give columns that do not depend on the order outputs are requested in.
 // ===========================================================================
 // Compiled fast-path metadata
 // ===========================================================================
@@ -4365,6 +4362,9 @@ fn random_programs_fast_path_metadata_is_accurate_and_loads_across_engines() {
     }
 }
 
+/// Dense must hold explain's value for every row and output of a dense-profile
+/// case, fail exactly when explain fails for some row (same error variant), and
+/// give columns that do not depend on the order outputs are requested in.
 fn check_dense(case: &CaseG, profile: Profile, stats: &mut Stats) -> Result<(), String> {
     let lowered = lower(case, profile);
     let decisive_before = stats.decisive_memberships;

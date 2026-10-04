@@ -13,8 +13,8 @@ Artifact loading still requires `evaluation_order` and `input_catalog` to equal
 what the embedded program yields. `fast_path` must equal this engine's
 analysis or the analysis under a retired rule set
 (`RETIRED_FAST_PATH_RULES` in `src/compile.rs`). The first retired set is the
-one every v2 engine before this change used: v0.1.2, v0.2.0 through v0.2.2,
-and main up to #209. A retired value is kept byte for byte and reported as a
+one every v2 engine before this change used: v0.1.1, v0.1.2, v0.2.0
+through v0.2.2, and main before this change. A retired value is kept byte for byte and reported as a
 `stale_fast_path_metadata` diagnostic. `ARTIFACT_FORMAT_VERSION` stays 2.
 
 **Why.**
@@ -39,14 +39,14 @@ and main up to #209. A retired value is kept byte for byte and reported as a
 - New to old: v0.2.0 through v0.2.2, and main before this change, reject a
   newly compiled artifact containing `sum_related` over a related derived
   value ("metadata does not match the compiled program"). Recompile for those
-  engines, or upgrade them. v0.1.2 and engines that predate the metadata check
-  (such as the `c8e8db1` pin in axiom-api) never compare it. An engine cannot
+  engines, or upgrade them. v0.1.1, v0.1.2 and engines that predate the
+  metadata check (such as the `c8e8db1` pin in axiom-api) never compare it. An engine cannot
   know a later engine's analysis, so each future retirement repeats this
   new-to-old refusal, as a new expression variant does (#186).
 - Retiring a blocker, or changing its message or the scan order, means adding
   an entry to `RETIRED_FAST_PATH_RULES` that reproduces the old output exactly.
   `tests/fast_path_metadata.rs` holds the unmodified output of the pre-change
-  engine as a fixture. `tests/execution_mode_parity.rs` checks generated
+  engine as fixtures: a compiled artifact and a stage-3 aggregation artifact. `tests/execution_mode_parity.rs` checks generated
   programs against an independent reconstruction of the retired analysis.
 
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed

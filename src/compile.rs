@@ -159,9 +159,9 @@ pub struct CompiledProgramArtifact {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramMetadata {
     pub evaluation_order: Vec<String>,
-    /// Advisory: the compiling engine's static list of derived rules whose
-    /// formulas contain a construct bulk fast mode declines or cannot answer.
-    /// Execution never reads it. Fast mode decides per request and reports
+    /// Advisory: the compiling engine's static scan for constructs bulk fast
+    /// mode declines or cannot answer, one blocker per occurrence. Execution
+    /// never reads it. Fast mode decides per request and reports
     /// any fallback in the response's `metadata.fallback_reason`. A later
     /// engine whose fast mode has since gained a listed construct still loads
     /// the artifact and keeps this value unchanged, with a
@@ -1250,7 +1250,8 @@ struct RetiredFastPathRules {
 /// the `fast_path` an earlier engine wrote, so changing a blocker message or
 /// the traversal order means adding an entry here, never editing one.
 const RETIRED_FAST_PATH_RULES: &[RetiredFastPathRules] = &[RetiredFastPathRules {
-    // v0.1.2 and v0.2.0 through v0.2.2, and main until this set was retired.
+    // v0.1.1, v0.1.2 and v0.2.0 through v0.2.2, and main before this set was
+    // retired.
     rules: FastPathRules {
         sum_related_over_derived: true,
     },
@@ -1328,7 +1329,7 @@ fn stale_fast_path_diagnostic(
         code: STALE_FAST_PATH_DIAGNOSTIC,
         path: path.to_string(),
         message: format!(
-            "metadata.fast_path was computed by {compiler} ({} blockers, compatible: {}). Since then {}, so this engine lists {} blockers (compatible: {}) and no longer blocks {rules}. The stored metadata is kept unchanged so the artifact's bytes and digests stay stable; execution never reads it. Recompile with this engine to refresh it",
+            "metadata.fast_path was computed by {compiler} ({} blockers, compatible: {}). Since then {}, so this engine lists {} blockers (compatible: {}) and no longer lists the retired blocker for {rules}. The stored metadata is kept unchanged so the artifact's bytes and digests stay stable; execution never reads it. Recompile with this engine to refresh it",
             stored.blockers.len(),
             stored.compatible,
             retired.superseded_because,

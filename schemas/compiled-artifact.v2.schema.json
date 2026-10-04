@@ -64,7 +64,7 @@
         },
         "fast_path": {
           "$ref": "#/$defs/FastPathMetadata",
-          "description": "Advisory: the compiling engine's static list of derived rules whose\nformulas contain a construct bulk fast mode declines or cannot answer.\nExecution never reads it. Fast mode decides per request and reports\nany fallback in the response's `metadata.fallback_reason`. A later\nengine whose fast mode has since gained a listed construct still loads\nthe artifact and keeps this value unchanged, with a\n`stale_fast_path_metadata` diagnostic."
+          "description": "Advisory: the compiling engine's static scan for constructs bulk fast\nmode declines or cannot answer, one blocker per occurrence. Execution\nnever reads it. Fast mode decides per request and reports\nany fallback in the response's `metadata.fallback_reason`. A later\nengine whose fast mode has since gained a listed construct still loads\nthe artifact and keeps this value unchanged, with a\n`stale_fast_path_metadata` diagnostic."
         },
         "input_catalog": {
           "default": [],
