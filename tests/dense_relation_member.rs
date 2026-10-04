@@ -13,11 +13,10 @@
 //! Every program here runs through the path the PyO3 extension uses:
 //! `CompiledProgramArtifact::compile`, then `DenseCompiledProgram::from_artifact`.
 //! A program mandatory relation typing refuses never reaches that path, so its
-//! refusal is checked in explain and the artifact compiler, and the dense
-//! compiler (`from_program`) is checked on the raw program against explain's
-//! evaluator (`Engine::new`), which also takes a raw program: dense declines
-//! the reversed source test explain answers, and agrees with explain on the
-//! alternating chain.
+//! refusal is checked in explain, the artifact compiler, and the dense
+//! compiler, which checks typing itself even on a raw program
+//! (`from_program`). Explain's evaluator (`Engine::new`) takes a raw program
+//! as given, so it is still checked on the refused shapes.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -897,8 +896,8 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
     // Read the other way round, the source's own test asks whether a
     // household id is in `member`'s person slot and a person id in its
     // household slot, so typing refuses the program before explain evaluates
-    // it or dense sees an artifact. Given the raw program, explain's evaluator
-    // still filters every member out and dense still declines the test.
+    // it or dense compiles it. Given the raw program, explain's evaluator
+    // still filters every member out.
     let reversed = with_filter(vec![base_relation("member")], reversed_member);
     let mismatch = (
         RelationTypingCode::MembershipSlotEntityMismatch,
@@ -912,12 +911,8 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
     );
     assert_eq!(raw_explain(&reversed, &["n"]), Ok(numbers(&[0, 0, 0])));
     match compile_dense_unchecked(&reversed) {
-        Err(DenseCompileError::Unsupported(message)) => assert!(
-            message.contains("`relation_member` of `member`")
-                && message.contains("derived relation `filtered`"),
-            "{message}"
-        ),
-        other => panic!("dense must decline the reversed test, got {other:?}"),
+        Err(DenseCompileError::RelationTyping(_)) => {}
+        other => panic!("dense must refuse the reversed test, got {other:?}"),
     }
 
     // Without resident tuples explain counts nobody; dense counted all three.
@@ -1018,8 +1013,8 @@ const LINK_ROOTS: &[(&str, &str)] = &[("h1", "5"), ("h2", "0"), ("h3", "7"), ("h
 
 /// Whether `link_answers` runs the program through the checked entry points
 /// (an explain request and the artifact path) or as given (explain's
-/// evaluator and `DenseCompiledProgram::from_program`, which skip the typing
-/// check).
+/// evaluator, which skips the typing check, and
+/// `DenseCompiledProgram::from_program`, which checks it itself).
 #[derive(Clone, Copy, PartialEq)]
 enum Entry {
     Checked,
@@ -1185,8 +1180,8 @@ fn link_answers(
 /// A chain whose links alternate direction is refused before any mode runs:
 /// explain reads a derived source with the source's own derivation slots, not
 /// the ones its child names, so the child's slots would be ignored. Given that
-/// raw program, explain's evaluator and dense still agree link by link, and
-/// dense still declines `link` read the other way from `d1`'s slots.
+/// raw program, explain's evaluator still answers, and the dense compiler
+/// refuses it for its typing.
 #[test]
 fn dense_membership_of_an_ancestor_checks_each_links_slots() {
     let test = |relation: &str, (current, related): (usize, usize)| json!({ "kind": "relation_member", "relation": relation, "current_slot": current, "related_slot": related });
@@ -1321,8 +1316,10 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
         let label = format!("alternating, raw: {label}");
         let (explained, dense) =
             link_answers(&alternating(predicate), "d3", aggregates, Entry::Raw);
-        let dense = dense.unwrap_or_else(|error| panic!("{label}: dense declined: {error}"));
-        assert_eq!(dense, explained, "{label}");
+        assert!(
+            matches!(dense, Err(DenseCompileError::RelationTyping(_))),
+            "{label}: dense must refuse the ill-typed raw chain"
+        );
         assert!(explained.is_ok(), "{label}: {explained:?}");
     }
     let (off_chain, dense) = link_answers(
@@ -1336,15 +1333,10 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
         off_chain, keep_all,
         "alternating, raw: the off-chain test filters in explain"
     );
-    match dense {
-        Err(DenseCompileError::Unsupported(message)) => {
-            assert!(
-                message.contains("`relation_member` of `link` (slots 0, 1)"),
-                "{message}"
-            )
-        }
-        other => panic!("alternating, raw: dense must decline the off-chain test, got {other:?}"),
-    }
+    assert!(
+        matches!(dense, Err(DenseCompileError::RelationTyping(_))),
+        "alternating, raw: dense must refuse the off-chain test"
+    );
 
     let mut alternating = alternating(and(vec![test("d2", (1, 0)), x_above("1")]));
     alternating["derived"] = json!([rule(
@@ -1353,13 +1345,25 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
         "integer",
         json!({ "kind": "count_related", "relation": "d3", "current_slot": 1, "related_slot": 0 }),
     )]);
+    // Each link's source and each membership test of an ancestor names slots
+    // other than the ones that ancestor's derivation traverses with.
     assert_eq!(
         typing_refusal(&alternating),
         [
             (
                 RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d1".to_string(),
+                "d2".to_string(),
+            ),
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
                 "d2".to_string(),
                 "d2".to_string(),
+            ),
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d2".to_string(),
+                "d3".to_string(),
             ),
             (
                 RelationTypingCode::DerivedRelationSlotsDiverge,
@@ -1379,8 +1383,7 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
 /// predicate reads `is_flagged`, whose `relation_member` names `flagged`, and
 /// only `n`, which counts `member`, is queried. Compiling and loading an
 /// artifact both refuse it the same way, so the dense path never compiles it.
-/// (`DenseCompiledProgram::from_program` takes a lowered program as given,
-/// as `Engine::new` does.)
+/// (`Engine::new` takes a lowered program as given.)
 #[test]
 fn dense_artifact_path_refuses_an_unused_relation_routed_cycle_as_explain_does() {
     let program = program(

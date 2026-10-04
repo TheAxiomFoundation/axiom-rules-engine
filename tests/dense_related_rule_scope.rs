@@ -32,11 +32,11 @@
 //! another entity there is refused, as is a relation with no declared kinds.
 //! The cross-entity shapes above, which explain once evaluated for the
 //! related entity whatever it declares, are therefore refused in every mode
-//! before any of them evaluates. Explain's evaluator and the dense compiler
-//! still accept a raw program without that check (`Engine::new`,
-//! `DenseCompiledProgram::from_program`), so on the raw program those shapes
-//! must still get the answer each test states from both, or, for a predicate
-//! rule of neither slot entity, a decline from dense.
+//! before any of them evaluates. Explain's evaluator still accepts a raw
+//! program without that check (`Engine::new`), so on the raw program those
+//! shapes must still get the answer each test states from it. The dense
+//! compiler checks typing itself (`DenseCompiledProgram::from_program`), so it
+//! refuses the raw program too.
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
@@ -439,8 +439,8 @@ fn raw_explain(program: &Value, data: &Data, outputs: &[&str]) -> Answer {
     Answer::Rows(answers)
 }
 
-/// Given the raw program, explain's evaluator answers `expected` and the
-/// dense compiler answers the same.
+/// Given the raw program, explain's evaluator answers `expected`, and the
+/// dense compiler refuses it for its relation typing.
 fn assert_raw_program_answers(
     label: &str,
     program: &Value,
@@ -450,9 +450,10 @@ fn assert_raw_program_answers(
 ) {
     let explain = raw_explain(program, data, outputs);
     assert_eq!(explain, expected, "{label}: raw explain");
-    let dense = raw_dense(program, data, outputs)
-        .unwrap_or_else(|error| panic!("{label}: dense declined the raw program: {error}"));
-    assert_eq!(dense, explain, "{label}: raw dense and explain differ");
+    match raw_dense(program, data, outputs) {
+        Err(DenseCompileError::RelationTyping(_)) => {}
+        other => panic!("{label}: dense must refuse the ill-typed raw program, got {other:?}"),
+    }
 }
 
 /// Execute `compiled` over `data`'s rows: every row's outputs in batch order,
@@ -1116,12 +1117,13 @@ fn a_derived_relation_predicate_rule_of_neither_slot_entity_is_refused() {
         "given the raw program, explain's evaluator reads `g` for the member"
     );
     match raw_dense(&program, &data, &outputs) {
-        Err(DenseCompileError::Unsupported(message)) => assert!(
-            message.contains(
-                "`unit_flag` has entity `SnapUnit`, which is neither current nor related"
-            ),
-            "unexpected decline: {message}"
+        Err(DenseCompileError::RelationTyping(report)) => assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.code == RelationTypingCode::PredicateEntityMismatch),
+            "unexpected refusal: {report}"
         ),
-        other => panic!("dense should decline, got {other:?}"),
+        other => panic!("dense should refuse the ill-typed raw program, got {other:?}"),
     }
 }

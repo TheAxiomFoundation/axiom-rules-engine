@@ -136,6 +136,12 @@ fn member_relation() -> Value {
     json!({ "name": "member", "arity": 2, "slot_entities": ["Household", "Person"] })
 }
 
+/// A household related to households: a rule can read itself on the related
+/// side only when both sides share its entity, or typing refuses it first.
+fn household_link_relation() -> Value {
+    json!({ "name": "member", "arity": 2, "slot_entities": ["Household", "Household"] })
+}
+
 fn derived_relation(name: &str, source: &str, predicate: Value) -> Value {
     json!({
         "name": name,
@@ -266,7 +272,7 @@ fn a_root_rule_read_directly_by_its_own_where_clause_is_refused() {
     // The `where` clause hands `busy` to the current-entity compiler, which
     // would inline its formula and only then refuse the nested `count`.
     let spec = program(
-        vec![member_relation()],
+        vec![household_link_relation()],
         vec![judgment(
             "busy",
             "Household",
@@ -279,7 +285,7 @@ fn a_root_rule_read_directly_by_its_own_where_clause_is_refused() {
 #[test]
 fn a_root_rule_summed_by_its_own_sum_value_is_refused() {
     let spec = program(
-        vec![member_relation()],
+        vec![household_link_relation()],
         vec![scalar("total", "Household", sum("member", "total"))],
     );
     assert_cycle_refused(&spec, &["total"]);
