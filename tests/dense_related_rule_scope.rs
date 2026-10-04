@@ -590,13 +590,15 @@ fn where_clause_reads_a_household_rule_for_each_member() {
         &["n"],
         rows(&[&["1"], &["0"]]),
     );
-    // The members are labelled `Person` while the `where` clause evaluates a
-    // `Household` rule for each of them, so the default strict binding
-    // refuses the request before evaluation.
+    // When the members' input records label them `Person` while the `where`
+    // clause evaluates a `Household` rule for each of them, the default strict
+    // binding refuses the request before evaluation. (Members with no input
+    // records have no known kind, so strict binding leaves them alone and the
+    // first case above fails in evaluation either way.)
     strict_binding_refuses(
-        "typed relation",
+        "typed relation, labelled members",
         &program,
-        &households([vec![], vec![]]),
+        &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
         &["n"],
     );
     // Untyped: the same, with no declared slot entities.
