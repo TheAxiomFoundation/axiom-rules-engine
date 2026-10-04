@@ -5115,8 +5115,9 @@ fn review_members_dataset() -> serde_json::Value {
     })
 }
 
+/// `member` declares the kinds of its `(household, person)` tuples.
 fn review_member_relations() -> serde_json::Value {
-    serde_json::json!([{ "name": "member", "arity": 2 }])
+    serde_json::json!([{ "name": "member", "arity": 2, "slot_entities": ["Household", "Person"] }])
 }
 
 const RELATION_PREDICATE_OUTSIDE_DERIVED_RELATION: &str =
@@ -5425,12 +5426,13 @@ fn relation_member_in_a_derived_relation_predicate_is_answered_natively_like_exp
         ],
     });
     let outputs = ["n", "n_decimal", "income", "any"];
+    // Without its own kinds, `adult_resident` inherits `member`'s.
     for slot_entities in [false, true] {
         let request = review_request(
             serde_json::json!({
                 "relations": [
-                    { "name": "member", "arity": 2 },
-                    { "name": "resident", "arity": 2 },
+                    { "name": "member", "arity": 2, "slot_entities": ["Household", "Person"] },
+                    { "name": "resident", "arity": 2, "slot_entities": ["Household", "Person"] },
                     adult_resident(slot_entities),
                 ],
                 "derived": derived,
@@ -5465,7 +5467,11 @@ fn count_related_in_a_decimal_rule_reports_explains_integer_value_in_fast_mode()
     let people = [("person-1", "100"), ("person-2", "0"), ("person-3", "50")];
     let request = review_request(
         serde_json::json!({
-            "relations": [{ "name": "member_of_household", "arity": 2 }],
+            "relations": [{
+                "name": "member_of_household",
+                "arity": 2,
+                "slot_entities": ["Person", "Household"],
+            }],
             "derived": [review_rule(
                 "earning_members",
                 "Household",
