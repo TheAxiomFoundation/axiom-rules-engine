@@ -204,6 +204,7 @@ fn dense_flat_tax_matches_explain_mode() {
     ];
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -402,6 +403,7 @@ fn dense_family_allowance_matches_explain_mode() {
     ];
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: family_allowance_dataset(&period, &households),
@@ -635,6 +637,7 @@ fn dense_sum_related_over_derived_matches_explain_mode() {
         "family_weekly_award_eligible_only".to_string(),
     ];
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -785,6 +788,7 @@ fn dense_filtered_entity_scope_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec { inputs, relations },
@@ -876,6 +880,7 @@ fn dense_filtered_entity_membership_can_depend_on_current_entity_predicates() {
         .expect("dense compilation succeeds");
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -986,6 +991,7 @@ fn dense_filtered_entities_can_compose_source_relations() {
         .expect("dense compilation succeeds");
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -1121,6 +1127,7 @@ fn dense_child_benefit_responsibility_matches_explain_mode() {
     ];
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: child_benefit_dataset(&case_file.cases),
@@ -1289,6 +1296,7 @@ fn dense_scottish_ctr_max_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -1465,6 +1473,7 @@ fn dense_child_benefit_rates_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -1642,6 +1651,7 @@ fn dense_auto_enrolment_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -1795,6 +1805,7 @@ fn dense_ated_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -1964,6 +1975,7 @@ fn dense_ct_marginal_relief_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -2159,6 +2171,7 @@ fn dense_state_pension_transitional_matches_explain_mode() {
     }
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -2306,6 +2319,7 @@ fn dense_universal_credit_matches_explain_mode() {
     ];
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: uc_dataset(&case_file.cases),
@@ -2848,6 +2862,7 @@ fn dense_date_add_days_matches_explain_mode() {
         "relevant_week_ends_on_end".to_string(),
     ];
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
@@ -3054,6 +3069,7 @@ fn dense_notional_capital_matches_explain_mode() {
         "capital_for_ctr".to_string(),
     ];
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,

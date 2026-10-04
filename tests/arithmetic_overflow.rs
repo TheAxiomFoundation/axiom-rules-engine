@@ -123,6 +123,7 @@ fn household_request(
     households: &[(&str, &[(&str, &str)])],
 ) -> ExecutionRequest {
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
             .expect("RuleSpec lowers"),
@@ -182,6 +183,7 @@ fn member_request(
         }
     }
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
             .expect("RuleSpec lowers"),

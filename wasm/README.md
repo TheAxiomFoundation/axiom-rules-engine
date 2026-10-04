@@ -18,7 +18,7 @@ wasm build and the CLI cannot drift apart:
 | Export | In | Out |
 | --- | --- | --- |
 | `compile(modules_json, root_target)` | `{canonical_target: yaml_text}` map + root target | `CompiledProgramArtifact` JSON (same format the CLI's `compile` writes) |
-| `execute(artifact_json, request_json)` | artifact JSON + `CompiledExecutionRequest` JSON (`mode`, `dataset`, `queries`) | `ExecutionResponse` JSON (same format the CLI's `execute` prints) |
+| `execute(artifact_json, request_json)` | artifact JSON + `CompiledExecutionRequest` JSON (`mode`, `relation_binding`, `dataset`, `queries`) | `ExecutionResponse` JSON (same format the CLI's `run-compiled` prints) |
 | `engine_version()` | — | core crate version string, for provenance display |
 | `artifact_format_version()` | — | exact artifact format this engine writes/accepts |
 
@@ -29,6 +29,28 @@ compiled in the browser matches one compiled by the CLI from the same modules.
 
 Errors (unresolved imports, cycles, bad payloads, evaluation failures) are
 thrown as JS `Error`s carrying the core's error messages.
+
+Relation tuple binding is strict by default. If input records identify an id's
+entity kind and it contradicts the expected tuple slot, `execute` throws an
+error naming the relation, slot, id, and expected and supplied kinds. Correct
+the tuple order and input labels to match the compiled program. A generic
+`"entity": "Entity"` label is not a wildcard.
+
+To retain lenient behavior while migrating a dataset, add
+`"relation_binding": "lenient"` beside `mode` in the request. Both `strict` and
+`lenient` are accepted; omission selects `strict`. Successful responses echo the
+policy in `metadata.relation_binding`, so browser callers can display a lenient
+execution notice. Leniency does not repair reversed tuples and can still
+produce a zero count. The CLI also emits a stderr notice for lenient
+binding.
+
+Binding cannot check an id with no input records or conflicting input kinds,
+and older untyped artifacts without `slot_entities` do not provide declarations
+for this validation. Loading an artifact preserves its executable orientation;
+recompiling typed RuleSpec adopts the declared argument order. This request
+policy does not change the artifact format version. See
+[dataset binding](../docs/rulespec.md#semantics) for migration details and the
+equivalent CLI and Rust API options.
 
 ## Building
 

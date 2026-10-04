@@ -233,6 +233,7 @@ fn assert_parity(
     let mut lifetime = BTreeMap::<String, Vec<Decimal>>::new();
     for period in &periods {
         let explain = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program: artifact.program.clone(),
             dataset: dataset(period, households),

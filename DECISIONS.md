@@ -4,6 +4,51 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
+
+**Decision.** A fresh compile no longer lists "fast mode does not yet support
+sum_related over related derived values": since #201, fast mode runs relation
+aggregations row by row on the explain interpreter and answers that shape.
+Artifact loading still requires `evaluation_order` and `input_catalog` to equal
+what the embedded program yields. `fast_path` must equal this engine's
+analysis or the analysis under a retired rule set
+(`RETIRED_FAST_PATH_RULES` in `src/compile.rs`). The first retired set is the
+one every v2 engine before this change used: v0.1.1, v0.1.2, v0.2.0
+through v0.2.2, and main before this change. A retired value is kept byte for byte and reported as a
+`stale_fast_path_metadata` diagnostic. `ARTIFACT_FORMAT_VERSION` stays 2.
+
+**Why.**
+
+- `fast_path` describes the compiling engine's fast mode as well as the
+  program. Exact equality therefore turned every improvement to fast mode into
+  a load failure for artifacts already published.
+- Rewriting the value on load was rejected. Unit aggregation digests the
+  serialization of the source artifact it loads (`source_artifact_digest`), so
+  a rewrite would invalidate every stage-3 aggregation artifact embedding a
+  stale one.
+- Ignoring `fast_path` was rejected too. Accepting only values some engine
+  actually computed for the embedded program keeps the consistency check's
+  meaning: a hand-edited or tampered `fast_path` is still refused.
+- A format bump would reject every published v2 artifact over a field
+  execution never reads. The 2026-06-09 policy reserves bumps for changes
+  that break the IR.
+
+**Consequences.**
+
+- Old to new: every published v2 artifact still loads.
+- New to old: v0.2.0 through v0.2.2, and main before this change, reject a
+  newly compiled artifact containing `sum_related` over a related derived
+  value ("metadata does not match the compiled program"). Recompile for those
+  engines, or upgrade them. v0.1.1, v0.1.2 and engines that predate the
+  metadata check (such as the `c8e8db1` pin in axiom-api) never compare it. An engine cannot
+  know a later engine's analysis, so each future retirement repeats this
+  new-to-old refusal, as a new expression variant does (#186).
+- Retiring a blocker, or changing its message or the scan order, means adding
+  an entry to `RETIRED_FAST_PATH_RULES` that reproduces the old output exactly.
+  `tests/fast_path_metadata.rs` holds the unmodified output of the pre-change
+  engine as fixtures: a compiled artifact and a stage-3 aggregation artifact. `tests/execution_mode_parity.rs` checks generated
+  programs against an independent reconstruction of the retired analysis.
+
 ## 2026-09-25 — Relation entity typing is mandatory
 
 **Decision.** Every relation that a `count_related`, `sum_related`, or

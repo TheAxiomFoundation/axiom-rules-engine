@@ -129,6 +129,18 @@ derived-metadata consistency check against the embedded program. This does not
 provide source-tamper evidence; that belongs to the signed-corpus-release and
 supervisor chain.
 
+`metadata.fast_path` is advisory: it lists the compiling engine's static view
+of which rules contain a construct bulk fast mode declines, and execution never
+reads it (fast mode decides per request and reports any fallback in
+`metadata.fallback_reason`). Because it describes an engine as well as a
+program, loading also accepts the value an earlier engine computed under a
+retired rule set, keeps it byte for byte, and reports a
+`stale_fast_path_metadata` diagnostic; recompiling refreshes it. Since fast
+mode began answering `sum_related` over related derived values, a fresh compile
+no longer lists that blocker. Engines v0.2.0 through v0.2.2 still require it, so
+they reject a newly compiled artifact containing that shape; recompile for them
+or upgrade them.
+
 Run a compiled artifact:
 
 ```bash

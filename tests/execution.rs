@@ -164,6 +164,7 @@ fn explain_and_fast_are_differentially_equivalent_on_generated_programs() {
             generated_overlap_case(expression, newer_value, older_value, newer_first);
 
         let explain = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program: program.clone(),
             dataset: dataset.clone(),
@@ -171,6 +172,7 @@ fn explain_and_fast_are_differentially_equivalent_on_generated_programs() {
         })
         .expect("generated Explain request succeeds");
         let fast = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Fast,
             program,
             dataset,
@@ -212,6 +214,7 @@ fn overlapping_covering_inputs_use_latest_start_in_every_mode_and_order() {
             generated_overlap_case(expression.clone(), 2_000, 4_000, newer_first);
         for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
             let response = execute_request(ExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 program: program.clone(),
                 dataset: dataset.clone(),
@@ -255,6 +258,7 @@ fn equal_start_conflicting_inputs_are_ambiguous_in_every_mode_and_order() {
 
         for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
             let error = execute_request(ExecutionRequest {
+                relation_binding: Default::default(),
                 mode,
                 program: program.clone(),
                 dataset: dataset.clone(),
@@ -292,6 +296,7 @@ fn newer_non_covering_input_does_not_displace_older_covering_input() {
 
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: dataset.clone(),
@@ -390,6 +395,7 @@ fn related_inputs_use_latest_covering_start_in_every_mode_and_order() {
         };
         for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
             let response = execute_request(ExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 program: program.clone(),
                 dataset: dataset.clone(),
@@ -497,6 +503,7 @@ rules:
         relations: vec![],
     };
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -579,6 +586,7 @@ rules:
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec::default(),
@@ -653,6 +661,7 @@ rules:
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -763,6 +772,7 @@ rules:
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec::default(),
@@ -877,6 +887,7 @@ fn trace_closure_includes_related_entity_instances() {
         ..ProgramSpec::default()
     };
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -1048,6 +1059,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
         .collect();
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1055,6 +1067,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1163,6 +1176,7 @@ fn derived_formula_versions_select_by_query_period() {
     };
 
     let response_2024 = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: DatasetSpec::default(),
@@ -1175,6 +1189,7 @@ fn derived_formula_versions_select_by_query_period() {
     })
     .expect("2024 versioned derived formula request succeeds");
     let response_2026 = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset: DatasetSpec::default(),
@@ -1388,6 +1403,7 @@ rules:
 
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode,
             program: program.clone(),
             dataset: DatasetSpec {
@@ -1458,6 +1474,7 @@ rules:
 fn filing_status_request(mode: ExecutionMode, filers: &[(&str, i64)]) -> CompiledExecutionRequest {
     let period = simple_period();
     CompiledExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         dataset: DatasetSpec {
             inputs: filers
@@ -1557,6 +1574,7 @@ fn integer_result(
 ) -> Result<i64, ApiError> {
     let date = chrono::NaiveDate::from_ymd_opt(year, month, day).expect("valid test date");
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: program.clone(),
         dataset: DatasetSpec::default(),
@@ -1688,6 +1706,7 @@ fn fast_mode_aggregates_related_derived_values_like_explain() {
     }];
 
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1695,6 +1714,7 @@ fn fast_mode_aggregates_related_derived_values_like_explain() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1719,6 +1739,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     let (program, dataset, queries) = date_arithmetic_case(&[false, false]);
 
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1726,6 +1747,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request falls back");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1752,6 +1774,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     // for this batch, so fast mode answers it.
     let (program, dataset, queries) = date_arithmetic_case(&[true, true]);
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1759,6 +1782,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1775,6 +1799,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     // One live row reaches the date arithmetic: fast declines and falls back.
     let (program, dataset, queries) = date_arithmetic_case(&[true, false]);
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1782,6 +1807,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     })
     .expect("fast request falls back");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -2000,6 +2026,7 @@ fn fast_outcome_request(mode: ExecutionMode, outputs: &[&str]) -> ExecutionReque
         end: period.end,
     };
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: fast_outcome_program(),
         dataset: DatasetSpec {
@@ -2172,6 +2199,7 @@ fn batch_request(
         end: period.end,
     };
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: ProgramSpec {
             derived: rules
@@ -2373,6 +2401,7 @@ rules:
         value: decimal_value(value),
     };
     let request = |mode, first_outputs: &[&str]| ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: program.clone(),
         dataset: DatasetSpec {
@@ -2506,6 +2535,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
     }];
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset,
@@ -2633,6 +2663,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset,
@@ -2778,6 +2809,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset,
@@ -2913,6 +2945,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset,
@@ -3084,6 +3117,7 @@ rules:
     };
 
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program,
         dataset,
@@ -3122,6 +3156,7 @@ fn pinned_versioned_rule_evaluates_to_the_pin_in_every_mode() {
         let response = execute_compiled_request(
             artifact,
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 dataset: simple_dataset(&period),
                 queries: simple_queries(&period),
@@ -3159,6 +3194,7 @@ fn pinned_rule_needs_none_of_its_original_inputs_in_any_mode() {
         let response = execute_compiled_request(
             artifact,
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 dataset: DatasetSpec {
                     inputs: Vec::new(),
@@ -3232,6 +3268,7 @@ fn explain_and_fast_values(
         .collect();
     [ExecutionMode::Explain, ExecutionMode::Fast].map(|mode| {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: dataset.clone(),
@@ -3535,6 +3572,7 @@ rules:
         let response = execute_compiled_request(
             artifact.clone(),
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 dataset: dataset.clone(),
                 queries: ["household-1", "household-2"]
@@ -3652,6 +3690,7 @@ fn fast_mode_skips_branches_and_operands_no_row_reaches() {
     let mut responses = Vec::new();
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: dataset.clone(),
@@ -3691,6 +3730,7 @@ fn pinning_an_unknown_rule_is_an_error_not_a_silent_no_op() {
     let error = execute_compiled_request(
         artifact,
         CompiledExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Fast,
             dataset: simple_dataset(&period),
             queries: simple_queries(&period),
@@ -3811,6 +3851,7 @@ fn dataset_binding_pins_do_not_allow_derived_dataset_inputs() {
         let error = execute_compiled_request(
             artifact,
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: request.mode,
                 dataset: request.dataset,
                 queries: request.queries,
@@ -3999,6 +4040,7 @@ fn execute_dataset_binding_request(
         execute_compiled_request(
             artifact,
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: request.mode,
                 dataset: request.dataset,
                 queries: request.queries,
@@ -4045,6 +4087,7 @@ fn compiled_program_artifact_round_trips_and_executes() {
     let response = execute_compiled_request(
         artifact,
         CompiledExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Fast,
             dataset: simple_dataset(&period),
             queries: simple_queries(&period),
@@ -4115,6 +4158,7 @@ fn cli_compile_and_run_compiled_round_trip() {
         query.outputs = vec!["us:policies/tests/simple#adjusted_amount".to_string()];
     }
     let request = CompiledExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         dataset,
         queries,
@@ -4189,6 +4233,7 @@ fn run_compiled_emits_relation_slot_entity_warning_to_stderr() {
         end: "2026-12-31".parse().expect("valid date"),
     };
     let request = CompiledExecutionRequest {
+        relation_binding: axiom_rules_engine::api::RelationBinding::Lenient,
         mode: ExecutionMode::Explain,
         dataset: DatasetSpec {
             inputs: vec![
@@ -4334,6 +4379,7 @@ fn assessment_date_round_trips_and_evaluates_identically() {
     let compiled_response = execute_compiled_request(
         artifact,
         CompiledExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Fast,
             dataset: simple_dataset(&period),
             queries: compiled_queries,
@@ -4433,6 +4479,7 @@ fn simple_queries(period: &PeriodSpec) -> Vec<ExecutionQuery> {
 fn simple_execution_request(mode: ExecutionMode, program: ProgramSpec) -> ExecutionRequest {
     let period = simple_period();
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program,
         dataset: simple_dataset(&period),
@@ -4560,6 +4607,7 @@ fn non_indexed_parameters_are_queryable_outputs_in_every_mode() {
     let period = simple_period();
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: DatasetSpec {
@@ -4618,6 +4666,7 @@ fn parameter_outputs_resolve_by_canonical_id_when_present() {
         .expect("base amount parameter");
     parameter.id = Some("us:statutes/example/1#base_amount".to_string());
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: program.clone(),
         dataset: DatasetSpec {
@@ -4645,6 +4694,7 @@ fn parameter_outputs_resolve_by_canonical_id_when_present() {
     // With an id present the bare name is no longer addressable, matching
     // derived-rule resolution.
     let error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -4680,6 +4730,7 @@ rules:
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     let error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -4707,6 +4758,7 @@ fn parameter_outputs_without_a_covering_version_error() {
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
     let error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -4736,6 +4788,7 @@ fn unknown_query_outputs_still_error_with_parameters_present() {
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(SIMPLE_RULESPEC).expect("RuleSpec lowers");
     let error = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {
@@ -4760,6 +4813,7 @@ fn mixed_parameter_and_derived_outputs_answer_in_one_query() {
     let period = simple_period();
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: DatasetSpec {
@@ -4834,6 +4888,7 @@ rules:
     // 2025 period selects the 255 version; the serialized row is the exact
     // shape the DE Kindergeld certificate premise validates.
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: program.clone(),
         dataset: DatasetSpec {
@@ -4866,6 +4921,7 @@ rules:
     // A 2026 period selects the later version: effective dating, not key
     // shape, drives the answer.
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: DatasetSpec {

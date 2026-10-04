@@ -282,7 +282,7 @@ fn queried_household_id_is_kind_evidence_for_reversed_tuples_without_inputs() {
         .to_dataset_for_queries_with_options(
             &program,
             &query_entities,
-            DatasetBindingOptions::default(),
+            DatasetBindingOptions::lenient(),
         )
         .unwrap();
     assert_eq!(outcome.diagnostics.len(), 2, "one per reversed tuple");

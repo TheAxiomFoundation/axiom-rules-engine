@@ -21,6 +21,7 @@ from .models import (
     Interval,
     Program,
     QueryResult,
+    RelationBinding,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "Interval",
     "Program",
     "QueryResult",
+    "RelationBinding",
     "AxiomRulesEngine",
     "load_program",
     "load_composed_program",

@@ -66,9 +66,11 @@ output's formula is evaluated for that entity and period as follows.
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
   evaluation does not reach can fail it.
-- **A request fails if and only if any of its (query, output) evaluations
-  fails,** and the reported error is the first failure in query order, then
-  output order.
+- **Once a request passes validation and dataset binding, it fails if and
+  only if any of its (query, output) evaluations fails,** and the reported
+  error is the first failure in query order, then output order. Validation
+  (the program's dependency graph, assessment dates, input spells) and strict
+  relation binding can refuse a request before any evaluation runs.
 
 The consequence callers rely on: a guard such as
 
@@ -105,6 +107,16 @@ fallback is never an error, and a construct that only a dead branch contains
 never forces one. Fast never reports an evaluation error of its own: when a
 live row fails, fast hands the request to explain, which reports its first
 error, so a failing request's error is explain's by construction.
+
+A compiled artifact's `metadata.fast_path` is a static, advisory scan of the
+constructs fast declines or cannot answer (period bounds, date arithmetic,
+over-periods reductions), listed per rule. Execution never reads it, so it
+cannot change a result. It scans every branch, so a listed construct that only
+dead branches reach still runs on the fast path. It does not look inside
+relation aggregations, which fast evaluates row by row on the explain
+interpreter. Date values are not listed either (date literals, date inputs
+and date-valued parameters), although fast declines them when a live row
+reaches them.
 
 ## Dense contract
 

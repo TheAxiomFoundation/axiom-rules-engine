@@ -149,9 +149,9 @@ zero. Relation entity typing is therefore mandatory:
   queried household is a `Household` even with no household-level inputs. A
   filtered entity's evidence (a `SnapUnit` query) counts as its source kind.
   Ids with no evidence, or evidence of more than one kind, are skipped. A
-  known mismatch emits `warning[relation_slot_entity_mismatch]`; Rust callers
-  can make it an error with `DatasetBindingOptions::strict()`. A tuple whose
-  length differs from the relation's arity is always an error.
+  known mismatch is an error by default and a warning under lenient binding
+  (see [Binding policy](#binding-policy)). A tuple whose length differs from the
+  relation's arity is always an error.
 
 Declared-kind labels must be UpperCamelCase entity kinds. A label that fails
 that shape, or names a kind no rule in the import-merged closure uses, is a
@@ -171,6 +171,60 @@ CompiledProgramArtifact::from_rulespec_str_with_options(
 
 A shape-failing declaration leaves the relation untyped, so executing it is
 still an `untyped_relation` error.
+
+#### Binding policy
+
+Dataset binding is strict by default: a known mismatch between a tuple slot's expected entity kind
+and the supplied entity id's kind is an error before execution. The error names
+the relation, slot, entity id, and expected and supplied kinds so callers can
+correct the tuple and input entity labels.
+
+Expected tuple positions are the relation's declared slot kinds (typing makes
+them agree with every executed use). Kind evidence is described under **Bind**
+above: input records and queries. Ids with no evidence, or ids used with more
+than one kind, remain unknown and are skipped. `Entity` is an ordinary supplied
+kind, not a wildcard for `Person`, `TaxUnit`, or another expected kind.
+
+Both `ExecutionRequest` and `CompiledExecutionRequest` accept a top-level
+`"relation_binding": "strict"` or `"relation_binding": "lenient"` field; omitting
+it selects `strict`. This applies to `api::execute_request`,
+`api::execute_compiled_request`, CLI execution, and wasm `execute`. Successful
+responses echo the selected policy in `metadata.relation_binding`.
+The [self-contained request](../schemas/execution-request.v1.schema.json),
+[compiled request](../schemas/compiled-execution-request.v1.schema.json), and
+[response](../schemas/execution-response.v1.schema.json) schemas describe this
+wire contract.
+
+New served responses always echo the binding policy. When reading a historical
+response without `metadata.relation_binding`, the policy remains unknown; the
+reader must not infer that strict validation occurred. Lower-level bulk execution
+that bypasses dataset binding likewise omits the policy.
+
+Callers migrating an existing dataset can explicitly select lenient binding:
+
+```sh
+axiom-rules-engine run --relation-binding lenient < request.json
+axiom-rules-engine run-compiled --artifact compiled.json --relation-binding lenient < request.json
+```
+
+The CLI flag overrides the request field. Requests supplied directly on stdin
+without a subcommand can select the same policy through the JSON field.
+The CLI emits a stderr notice for lenient binding and retains
+`warning[relation_slot_entity_mismatch]` diagnostics. It does not reorder tuples
+or correct their kinds: a reversed relation can still return a zero count or
+credit. Correcting the dataset lets callers return to the strict default.
+
+Rust callers using `DatasetSpec::to_dataset_for_program` also get strict
+binding. An explicit `DatasetBindingOptions::lenient()` passed to
+`to_dataset_for_program_with_options` opts out. Lower-level callers that
+construct a `DataSet` or `Engine` directly bypass wire-dataset validation. The
+Python extension's dense execution methods take arrays rather than a wire
+`DatasetSpec`, so this request policy does not apply to those methods.
+
+When upgrading or recompiling RuleSpec, ensure tuple order follows declared
+arguments and that input records carry the correct kinds. An old compiled
+artifact that executes relations without `program.relations[].slot_entities`
+no longer loads; see the next section.
 
 #### Migrating compiled artifacts
 
@@ -193,7 +247,7 @@ determines (the evaluating rule's entity on the slot an aggregate keys on, the
 entity of rules its predicate or value read on the other). It never moves an
 aggregate's slots, so datasets that bound correctly before still bind, and
 datasets in the other orientation now get `relation_slot_entity_mismatch` at
-binding (an error under strict binding) instead of aggregating nothing
+binding (an error by default, a warning under lenient binding) instead of aggregating nothing
 silently. A slot usage leaves open (for example `len(relation)` with no related
 rule) needs `--relation-entities <relation>=<Kind>,<Kind>` in tuple order; the
 relation may be named by its full id or a unique short name. A filtered

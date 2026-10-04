@@ -31,7 +31,8 @@
 //! * A membership test explain cannot reach implies no orientation: the
 //!   program compiles with either slots, and binding expects the declared
 //!   order.
-//! * Strict binding rejects exactly the datasets default binding warns about,
+//! * Strict binding (the default) rejects exactly the datasets lenient binding
+//!   warns about,
 //!   and a request is refused exactly when compilation is, for the same
 //!   violations.
 
@@ -200,7 +201,7 @@ struct Observed {
     /// The relation typing violations that refuse the program; empty when it
     /// compiles.
     typing: Vec<Violation>,
-    /// Default dataset binding diagnostics as (relation, slot, expected, actual).
+    /// Lenient dataset binding diagnostics as (relation, slot, expected, actual).
     binding: Vec<(String, usize, String, String)>,
 }
 
@@ -231,8 +232,8 @@ fn observe(request: &Value) -> Observed {
         Err(error) => panic!("compilation fails only for relation typing: {error}"),
     };
     let binding = dataset
-        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-        .expect("default binding only warns")
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::lenient())
+        .expect("lenient binding only warns")
         .diagnostics
         .into_iter()
         .map(|diagnostic| {
@@ -249,7 +250,7 @@ fn observe(request: &Value) -> Observed {
     assert_eq!(
         strict.is_ok(),
         binding.is_empty(),
-        "strict binding must reject exactly the datasets default binding warns about: {binding:?}"
+        "strict binding must reject exactly the datasets lenient binding warns about: {binding:?}"
     );
     let explain = run(request, ExecutionMode::Explain);
     let refused = match &explain {
@@ -646,8 +647,8 @@ rules:
         .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::strict())
         .expect("the correctly oriented dataset binds strictly");
     let reversed = dataset_with_head(REVERSED_ORDER)
-        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-        .expect("default binding only warns");
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::lenient())
+        .expect("lenient binding only warns");
     assert_eq!(reversed.diagnostics.len(), 2, "{:?}", reversed.diagnostics);
 }
 
@@ -778,8 +779,8 @@ rules:
         for (head, warnings, heads) in [(["h1", "p1"], 0, 1), (["p1", "h1"], 2, 0)] {
             let bound: DatasetSpec = serde_json::from_value(dataset(head)).expect("dataset parses");
             let bound = bound
-                .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-                .expect("default binding only warns");
+                .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::lenient())
+                .expect("lenient binding only warns");
             assert_eq!(
                 bound.diagnostics.len(),
                 warnings,
