@@ -38,6 +38,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
