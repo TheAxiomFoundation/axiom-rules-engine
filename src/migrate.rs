@@ -1051,11 +1051,21 @@ fn canonical_usage(
     // A filter name says nothing about the ids a use reads unless an executed
     // derivation maps it to a physical kind, or an executed relation declares
     // it as one; a name that still aliases another kind says nothing either.
-    let aliases =
-        crate::relation_typing::filtered_entity_names_among(model, &consistent_derivations(model));
+    // A declaration cannot vouch for a name an inconsistent derivation also
+    // defines: what that derivation's ids are is unknown.
+    let consistent = consistent_derivations(model);
+    let aliases = crate::relation_typing::filtered_entity_names_among(model, &consistent);
     let filters = crate::relation_typing::filtered_entities(model);
-    let says_nothing =
-        |kind: &str| aliases.contains(kind) || (filters.contains(kind) && !declared.contains(kind));
+    let untrusted = model
+        .relations
+        .iter()
+        .filter(|(name, _)| !consistent.contains(*name))
+        .filter_map(|(_, schema)| schema.derivation.as_ref()?.entity.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let says_nothing = |kind: &str| {
+        aliases.contains(kind)
+            || (filters.contains(kind) && (!declared.contains(kind) || untrusted.contains(kind)))
+    };
     let mut slots =
         std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
     for usage in crate::model::relation_usage_records(model) {

@@ -2150,3 +2150,64 @@ fn migration_ignores_filters_whose_chain_changes_direction() {
         other => panic!("UnitF must not map to Person through `outer`: {other:?}"),
     }
 }
+
+/// An older artifact can declare a filter name in an executed slot. A
+/// declaration cannot vouch for a name that an inconsistent derivation also
+/// defines: here the outer filter changes direction, so its `UnitF` ids are
+/// really households, whatever `t` declares.
+#[test]
+fn migration_never_trusts_a_name_an_inconsistent_filter_defines() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["UnitF", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "t", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [
+            {"name": "org_flag", "entity": "Organization", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "unit_s", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "s",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "org_flag"}}},
+            {"name": "unit_t", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "t",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "org_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        "t" => {
+            relation.insert(
+                "slot_entities".to_string(),
+                serde_json::json!(["Organization", "UnitF"]),
+            );
+        }
+        "outer" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
+    }
+}
