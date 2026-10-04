@@ -2338,3 +2338,35 @@ fn migration_refuses_a_slot_an_untrusted_filter_contests() {
         other => panic!("the contested slot must not be stamped: {other:?}"),
     }
 }
+
+/// The uninferable hint follows a filter's source chain down to the data
+/// relation `--relation-entities` accepts, not the derived relation the
+/// filter reads directly.
+#[test]
+fn migration_hint_names_the_data_relation_at_the_bottom_of_a_chain() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "g", "arity": 2},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "g",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "UnitF"]}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => assert!(
+            detail.contains("UnitF: defined by `outer` (type its data relation `g`)"),
+            "names `g`, not `inner`: {detail}"
+        ),
+        other => panic!("UnitF has no trusted kind: {other:?}"),
+    }
+}
