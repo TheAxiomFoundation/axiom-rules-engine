@@ -654,7 +654,7 @@ fn dependency_graph(spec: &Value) -> BTreeMap<String, BTreeSet<String>> {
 /// value names a household rule, which would run on a person id. Derived
 /// relation predicates are always well-typed: the derivation's kinds route a
 /// household rule to the current id and a person rule to the related one,
-/// and a formula parameter may run on any id.
+/// and the check accepts a formula parameter there.
 fn typing_violations(spec: &Value) -> BTreeSet<(&'static str, String, String)> {
     fn aggregates<'v>(value: &'v Value, into: &mut Vec<&'v Value>) {
         match value {
