@@ -929,7 +929,7 @@ pub fn migrate_artifact_relation_typing(
             slots.len() != relation.slot_entities.len() || slots.iter().any(Option::is_none)
         }) {
             uninferable.push(format!(
-                "  {} (arity {}; a filtered entity whose derivations are inconsistent also reads it; executable usage determines {})",
+                "  {} (arity {}; a filtered entity with no trusted kind also reads it; executable usage determines {})",
                 relation.name,
                 relation.arity,
                 format_executed(&contested[&relation.name])
@@ -948,7 +948,7 @@ pub fn migrate_artifact_relation_typing(
         let hints = untrusted_filter_hints(&artifact.program.to_program()?);
         if !hints.is_empty() {
             detail.push_str(
-                "\nthese filtered entities have no trusted kind, so the rules evaluated for them say nothing:\n",
+                "\nthese filtered entities have no trusted kind, so the rules evaluated for them cannot settle a slot:\n",
             );
             detail.push_str(&hints.join("\n"));
         }
