@@ -4,6 +4,7 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompileError, CompileOptions, CompiledProgramArtifact, compile_program_file_to_json,
 };
+use axiom_rules_engine::relation_typing::RelationTypingCode;
 use axiom_rules_engine::rulespec::{
     CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
     ValidationStatus, load_rulespec_file, load_rulespec_file_with_options, lower_rulespec_str,
@@ -1672,8 +1673,13 @@ rules:
     let _ = fs::remove_dir_all(root);
 }
 
+/// A short name the root aggregates without declaring it is the root's own
+/// formula-synthesized relation, separate from an imported declaration of the
+/// same name, and it declares no entity kinds. Relation typing is mandatory,
+/// so compiling refuses the untyped relation, and the error points at the
+/// same-named declaration the author probably meant.
 #[test]
-fn rulespec_keeps_unscoped_inferred_relation_when_import_uses_same_short_name() {
+fn rulespec_refuses_an_unscoped_relation_whose_import_uses_the_same_short_name() {
     let root = unique_test_root();
     let imported_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
     let program_file = root.join("rulespec-us/us/policies/test/unscoped-relation.yaml");
@@ -1713,23 +1719,53 @@ rules:
     )
     .expect("write program RuleSpec");
 
-    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
-    assert!(
-        artifact
-            .program
-            .relations
-            .iter()
-            .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
-    );
-    let unscoped = artifact
-        .program
+    let program = load_rulespec_file(&program_file, &canonical_roots_for(&program_file))
+        .expect("RuleSpec lowers");
+    let declared = program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
+        .expect("the imported declaration keeps its scoped name");
+    assert_eq!(declared.slot_entities, vec!["Person", "TaxUnit"]);
+    let unscoped = program
         .relations
         .iter()
         .find(|relation| relation.name == "member_of_tax_unit")
         .expect("the root's own short-name relation stays unscoped");
-    // The unscoped relation is formula-synthesized, so it declares no kinds of
-    // its own; it takes the kinds of the same-named imported declaration.
-    assert_eq!(unscoped.slot_entities, vec!["Person", "TaxUnit"]);
+    assert!(
+        unscoped.slot_entities.is_empty(),
+        "the unscoped relation does not take the declaration's kinds: {:?}",
+        unscoped.slot_entities
+    );
+
+    let error =
+        compile_rulespec_file(&program_file).expect_err("the root aggregates an untyped relation");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report
+            .violations
+            .iter()
+            .map(|violation| (
+                violation.code,
+                violation.relation.as_str(),
+                violation.citing.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [(
+            RelationTypingCode::UntypedRelation,
+            "member_of_tax_unit",
+            "us:policies/test/unscoped-relation#local_member_count",
+        )],
+        "{report}"
+    );
+    assert!(
+        report.violations[0]
+            .message
+            .contains("`us:statutes/26/63/c#relation.member_of_tax_unit`"),
+        "{report}"
+    );
 
     let _ = fs::remove_dir_all(root);
 }
