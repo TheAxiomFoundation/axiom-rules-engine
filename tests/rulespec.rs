@@ -74,6 +74,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_state_sme_flat_amount
     kind: parameter
     dtype: Money
@@ -1073,6 +1074,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Member, Household]
   - name: snap_household_has_elderly_or_disabled_member
     kind: derived
     entity: Household
@@ -1156,6 +1158,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_student_eligible
     kind: derived
     entity: Person
@@ -1190,7 +1193,7 @@ rules:
         dataset: DatasetSpec {
             inputs: vec![InputRecordSpec {
                 name: "us:regulations/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
-                entity: "Member".to_string(),
+                entity: "Person".to_string(),
                 entity_id: "member-1".to_string(),
                 interval: IntervalSpec {
                     start: period.start,
@@ -1256,6 +1259,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
 "#,
     )
     .expect("write relation RuleSpec");
@@ -1365,6 +1369,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, TaxUnit]
   - name: aotc_first_expense_threshold
     kind: parameter
     dtype: Money
@@ -1508,6 +1513,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, TaxUnit]
   - name: ctc_member_count
     kind: derived
     entity: TaxUnit
@@ -1528,6 +1534,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, TaxUnit]
   - name: standard_deduction_member_count
     kind: derived
     entity: TaxUnit
@@ -1683,6 +1690,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, TaxUnit]
 "#,
     )
     .expect("write imported RuleSpec");
@@ -1713,13 +1721,15 @@ rules:
             .iter()
             .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
     );
-    assert!(
-        artifact
-            .program
-            .relations
-            .iter()
-            .any(|relation| relation.name == "member_of_tax_unit")
-    );
+    let unscoped = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "member_of_tax_unit")
+        .expect("the root's own short-name relation stays unscoped");
+    // The unscoped relation is formula-synthesized, so it declares no kinds of
+    // its own; it takes the kinds of the same-named imported declaration.
+    assert_eq!(unscoped.slot_entities, vec!["Person", "TaxUnit"]);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -2352,77 +2362,159 @@ rules:
         formula: count_where(qualifying_child_of_tax_unit, eitc_qualifying_child)
 "#;
 
-#[test]
-fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_mode() {
-    // Existing artifacts with inconsistent slots still warn and fail strict loading.
-    let mut program = lower_rulespec_str(ORIENTATION_MISMATCH_RULESPEC).unwrap();
-    for rule in &mut program.derived {
-        for semantics in std::iter::once(&mut rule.semantics)
-            .chain(rule.versions.iter_mut().map(|v| &mut v.semantics))
-        {
-            if let DerivedSemanticsSpec::Scalar {
-                expr:
-                    ScalarExprSpec::CountRelated {
-                        current_slot,
-                        related_slot,
-                        ..
-                    },
-            } = semantics
-            {
-                *current_slot = 1;
-                *related_slot = 0;
+/// Force every `count_related` node of a program or artifact JSON back to the
+/// legacy slots (current 1, related 0), as artifacts compiled between the
+/// declaration carry and declared-order resolution executed them.
+fn force_legacy_count_slots(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("kind").and_then(serde_json::Value::as_str) == Some("count_related") {
+                map.insert("current_slot".to_string(), serde_json::json!(1));
+                map.insert("related_slot".to_string(), serde_json::json!(0));
             }
+            map.values_mut().for_each(force_legacy_count_slots);
         }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(force_legacy_count_slots),
+        _ => {}
     }
-    let artifact = CompiledProgramArtifact::compile(program).expect("legacy artifact compiles");
-    assert_eq!(
-        artifact.program.relations[0].slot_entities,
-        vec!["TaxUnit", "Person"],
-        "the artifact must retain source order verbatim"
-    );
-    let diagnostics = artifact
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
-        .collect::<Vec<_>>();
-    assert_eq!(diagnostics.len(), 1);
-    let diagnostic = diagnostics[0].to_string();
-    assert!(diagnostic.contains("qualifying_child_of_tax_unit"));
-    assert!(diagnostic.contains("[TaxUnit, Person]"));
-    assert!(diagnostic.contains("[Person, TaxUnit]"));
-    assert!(diagnostic.contains("eitc_child_count"));
-
-    let json = serde_json::to_string(&artifact).expect("artifact serializes");
-    let reloaded = CompiledProgramArtifact::from_json_str(&json)
-        .expect("artifact loading recomputes the orientation warning");
-    assert_eq!(
-        reloaded
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
-            .count(),
-        1
-    );
-    let reload_error = CompiledProgramArtifact::from_json_str_with_options(
-        &json,
-        CompileOptions {
-            strict_relation_entities: true,
-            ..CompileOptions::default()
-        },
-    )
-    .expect_err("strict artifact loading recomputes and rejects the mismatch");
-    assert!(
-        reload_error
-            .to_string()
-            .contains("relation_orientation_mismatch"),
-        "{reload_error}"
-    );
 }
 
+/// A program whose aggregate slots contradict its declared relation order:
+/// `eitc_child_count` keys `TaxUnit` ids on slot 1 of a `[TaxUnit, Person]`
+/// relation and evaluates the `Person` rule `eitc_qualifying_child` on slot 0.
+/// Before relation typing was mandatory this compiled and loaded with a
+/// `relation_orientation_mismatch` warning, an error only in strict mode. It is
+/// now refused in every mode: at compile, at artifact load (naming the
+/// migration), and by the migration itself unless the caller retypes the
+/// relation in the order the artifact executes.
 #[test]
-fn derived_relation_membership_contributes_usage_orientation() {
-    let artifact = CompiledProgramArtifact::from_rulespec_str(
-        r#"
+fn relation_orientation_mismatch_is_refused_at_compile_load_and_migration() {
+    use axiom_rules_engine::migrate::{
+        ArtifactRelationMigrationError, migrate_artifact_relation_typing,
+    };
+    use axiom_rules_engine::relation_typing::RelationTypingCode;
+    use std::collections::BTreeMap;
+
+    let strict = CompileOptions {
+        strict_relation_entities: true,
+        ..CompileOptions::default()
+    };
+    let expected_codes = vec![
+        RelationTypingCode::CurrentSlotEntityMismatch,
+        RelationTypingCode::RelatedSlotEntityMismatch,
+    ];
+
+    // Compile, in default and strict mode alike.
+    let mut program = serde_json::to_value(lower_rulespec_str(ORIENTATION_MISMATCH_RULESPEC).unwrap())
+        .expect("program serializes");
+    force_legacy_count_slots(&mut program);
+    let program: ProgramSpec = serde_json::from_value(program).expect("program deserializes");
+    for options in [CompileOptions::default(), strict] {
+        let error = CompiledProgramArtifact::compile_with_options(program.clone(), options)
+            .expect_err("slots contradicting the declaration do not compile");
+        let CompileError::RelationTyping { report, .. } = &error else {
+            panic!("expected a relation typing error, got {error}");
+        };
+        assert_eq!(
+            report
+                .violations
+                .iter()
+                .map(|violation| violation.code)
+                .collect::<Vec<_>>(),
+            expected_codes,
+            "{report}"
+        );
+        assert!(
+            report.violations.iter().all(|violation| {
+                violation.relation == "qualifying_child_of_tax_unit"
+                    && violation.citing == "eitc_child_count"
+            }),
+            "{report}"
+        );
+        let message = report.to_string();
+        assert!(message.contains("[TaxUnit, Person]"), "{message}");
+        assert!(message.contains("eitc_qualifying_child"), "{message}");
+    }
+
+    // Load: an artifact carrying those slots is refused in either mode, with
+    // a pointer to the migration.
+    let mut legacy = serde_json::to_value(
+        CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+            .expect("the declared order compiles"),
+    )
+    .expect("artifact serializes");
+    force_legacy_count_slots(&mut legacy);
+    let legacy = serde_json::to_string(&legacy).expect("artifact JSON serializes");
+    for options in [CompileOptions::default(), strict] {
+        let error = CompiledProgramArtifact::from_json_str_with_options(&legacy, options)
+            .expect_err("an artifact whose slots contradict its declaration must not load");
+        let CompileError::LegacyArtifactRelationTyping { report, .. } = &error else {
+            panic!("expected a legacy artifact typing error, got {error}");
+        };
+        assert_eq!(
+            report
+                .violations
+                .iter()
+                .map(|violation| violation.code)
+                .collect::<Vec<_>>(),
+            expected_codes,
+            "{report}"
+        );
+        assert!(error.to_string().contains("migrate artifact"), "{error}");
+    }
+
+    // Migrate: the declaration contradicts execution, so the migration never
+    // guesses; retyping the relation in executed order types the artifact as
+    // it runs, and the result loads.
+    let error = migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new())
+        .expect_err("the migration never reorders a contradicting declaration");
+    let ArtifactRelationMigrationError::DeclarationContradictsExecution {
+        relation,
+        declared,
+        executed,
+    } = &error
+    else {
+        panic!("expected a declaration contradiction, got {error}");
+    };
+    assert_eq!(relation, "qualifying_child_of_tax_unit");
+    assert_eq!(declared, &vec!["TaxUnit", "Person"]);
+    assert_eq!(executed, "[Person, TaxUnit]");
+
+    let migration = migrate_artifact_relation_typing(
+        &legacy,
+        "legacy.json",
+        &BTreeMap::from([(
+            "qualifying_child_of_tax_unit".to_string(),
+            vec!["Person".to_string(), "TaxUnit".to_string()],
+        )]),
+    )
+    .expect("an executed-order override types the artifact");
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(migration.changes[0].previous, vec!["TaxUnit", "Person"]);
+    assert_eq!(migration.changes[0].slot_entities, vec!["Person", "TaxUnit"]);
+    CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&migration.artifact).expect("migrated artifact serializes"),
+    )
+    .expect("the migrated artifact loads");
+}
+
+/// A derived relation filters its source's tuples, so its slot kinds are its
+/// source's. `snap_unit` declares `[Person, Household]` over a
+/// `member_of_household` declared `[Household, Person]` and tests membership
+/// in it. That contradiction used to surface only as a usage-orientation
+/// warning on the source; once a rule aggregates the derived relation it is a
+/// compile error. Declaring the source's kinds and slots compiles, and the
+/// membership test inside the predicate is keyed on the slots the source
+/// declares for the current (`Household`) and related (`Person`) ids, not the
+/// legacy (1, 0).
+#[test]
+fn derived_relation_membership_is_typed_against_its_source() {
+    use axiom_rules_engine::relation_typing::RelationTypingCode;
+    use axiom_rules_engine::spec::JudgmentExprSpec;
+
+    let source = |derived_relation: &str| {
+        format!(
+            r#"
 format: rulespec/v1
 rules:
   - name: member_of_household
@@ -2451,24 +2543,66 @@ rules:
       source_relation: member_of_household
       entity: SnapUnit
       member_relation: members
-      slot_entities: [Person, Household]
+{derived_relation}
     versions:
       - effective_from: 2026-01-01
         formula: member_of_household and eligible_member
-"#,
-    )
-    .expect("derived relation orientation mismatch is warning-ratcheted");
-    let diagnostics = artifact
-        .diagnostics
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(members)
+"#
+        )
+    };
+
+    let error = CompiledProgramArtifact::from_rulespec_str(&source(
+        "      slot_entities: [Person, Household]",
+    ))
+    .expect_err("derived relation kinds contradicting the source do not compile");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(report.violations.len(), 1, "{report}");
+    let conflict = &report.violations[0];
+    assert_eq!(
+        conflict.code,
+        RelationTypingCode::DerivedRelationSourceConflict,
+        "{report}"
+    );
+    assert_eq!(conflict.relation, "snap_unit");
+    assert!(conflict.message.contains("member_of_household"), "{report}");
+    assert!(conflict.message.contains("[Person, Household]"), "{report}");
+    assert!(conflict.message.contains("[Household, Person]"), "{report}");
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source(
+        "      slot_entities: [Household, Person]\n      current_slot: 0\n      related_slot: 1",
+    ))
+    .expect("derived relation kinds and slots that follow the source compile");
+    let derivation = artifact
+        .program
+        .relations
         .iter()
-        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
-        .collect::<Vec<_>>();
-    assert_eq!(diagnostics.len(), 1);
-    let warning = diagnostics[0].to_string();
-    assert!(warning.contains("member_of_household"), "{warning}");
-    assert!(warning.contains("[Household, Person]"), "{warning}");
-    assert!(warning.contains("[Person, Household]"), "{warning}");
-    assert!(warning.contains("snap_unit"), "{warning}");
+        .find(|relation| relation.name == "snap_unit")
+        .and_then(|relation| relation.derivation.as_ref())
+        .expect("snap_unit is a derived relation");
+    let JudgmentExprSpec::And { items } = &derivation.predicate else {
+        panic!("unexpected predicate {:?}", derivation.predicate);
+    };
+    let membership = items
+        .iter()
+        .find_map(|item| match item {
+            JudgmentExprSpec::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } if relation == "member_of_household" => Some((*current_slot, *related_slot)),
+            _ => None,
+        })
+        .expect("the predicate tests membership in its source");
+    assert_eq!(membership, (0, 1));
 }
 
 fn nested_sum_program(outer_slots: &[&str], inner_slots: &[&str]) -> ProgramSpec {
@@ -2607,11 +2741,10 @@ fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
         &["Payment", "Person"],
     ))
     .expect("nested aggregate program compiles");
+    // Compiling is the typing check: the Payment rule inside the nested sum
+    // must not type the outer Person slot. Nothing else is diagnosed.
     assert!(
-        artifact
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
+        artifact.diagnostics.is_empty(),
         "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
         artifact.diagnostics
     );
@@ -2630,37 +2763,87 @@ fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
     );
 }
 
+/// The nested sum is a program use even when the outer relation's kinds are
+/// unknown. With `member_of_tax_unit` untyped, `payment_of_person` declared
+/// `[Person, Payment]` puts the `Payment` rule `payment_amount` on a `Person`
+/// slot. Before relation typing was mandatory this compiled with one
+/// orientation warning for the nested relation; now compiling reports the
+/// untyped outer relation and still checks the nested one, and a request
+/// carrying the raw program is refused before its dataset is bound.
 #[test]
-fn nested_sum_related_retains_partial_orientation_under_untyped_outer_relation() {
-    let artifact =
-        CompiledProgramArtifact::compile(nested_sum_program(&[], &["Person", "Payment"]))
-            .expect("nested aggregate program compiles");
-    let orientation_diagnostics = artifact
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        orientation_diagnostics.len(),
-        1,
-        "the nested sum remains a program use even when its owner kind starts unknown"
-    );
-    let diagnostic = orientation_diagnostics[0].to_string();
-    assert!(diagnostic.contains("payment_of_person"), "{diagnostic}");
-    assert!(diagnostic.contains("[Person, Payment]"), "{diagnostic}");
-    assert!(diagnostic.contains("[Payment, Person]"), "{diagnostic}");
+fn nested_sum_related_is_checked_under_an_untyped_outer_relation() {
+    use axiom_rules_engine::relation_typing::RelationTypingCode;
 
-    let runtime = artifact
-        .program
-        .to_program()
-        .expect("runtime program builds");
-    let outcome = nested_sum_dataset()
-        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
-        .expect("working nested aggregate tuple orders bind");
+    let error = CompiledProgramArtifact::compile(nested_sum_program(&[], &["Person", "Payment"]))
+        .expect_err("an untyped outer relation does not compile");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report
+            .violations
+            .iter()
+            .map(|violation| (
+                violation.code,
+                violation.relation.as_str(),
+                violation.citing.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                RelationTypingCode::UntypedRelation,
+                "member_of_tax_unit",
+                "qualifying_person_count"
+            ),
+            (
+                RelationTypingCode::RelatedSlotEntityMismatch,
+                "payment_of_person",
+                "qualifying_person_count"
+            ),
+        ],
+        "{report}"
+    );
+    let nested = &report.violations[1].message;
+    assert!(nested.contains("payment_amount"), "{nested}");
+    assert!(nested.contains("[Person, Payment]"), "{nested}");
+
+    // With the nested relation declared in the order it executes, only the
+    // untyped outer relation is reported.
+    let error = CompiledProgramArtifact::compile(nested_sum_program(&[], &["Payment", "Person"]))
+        .expect_err("an untyped outer relation does not compile");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report.untyped_relations().into_iter().collect::<Vec<_>>(),
+        vec!["member_of_tax_unit"],
+        "{report}"
+    );
+    assert_eq!(report.violations.len(), 1, "{report}");
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let request_error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: nested_sum_program(&[], &["Person", "Payment"]),
+        dataset: nested_sum_dataset(),
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit".to_string(),
+            period,
+            outputs: vec!["qualifying_person_count".to_string()],
+        }],
+    })
+    .expect_err("a raw program with an untyped relation is refused");
     assert!(
-        outcome.diagnostics.is_empty(),
-        "partial usage must prevent declaration fallback from warning on the working inner tuple: {:?}",
-        outcome.diagnostics
+        matches!(
+            request_error,
+            axiom_rules_engine::api::ApiError::RelationTyping(_)
+        ),
+        "{request_error}"
     );
 }
 
@@ -3179,6 +3362,11 @@ fn rulespec_lowers_date_and_relation_judgment_formulas() {
 format: rulespec/v1
 module:
 rules:
+  - name: council_notice_of_tenancy
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [CouncilNotice, Tenancy]
   - name: minimum_notice_days
     kind: parameter
     dtype: Integer
@@ -3246,6 +3434,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -3304,6 +3493,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -4732,12 +4922,7 @@ fn declared_relation_order_drives_count_for_each_tax_unit() {
             },
         )
         .unwrap();
-        assert!(
-            !artifact
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "relation_orientation_mismatch")
-        );
+        assert!(artifact.diagnostics.is_empty(), "{:?}", artifact.diagnostics);
         let interval = IntervalSpec {
             start: "2026-01-01".parse().unwrap(),
             end: "2027-01-01".parse().unwrap(),

@@ -319,7 +319,7 @@ fn related_inputs_use_latest_covering_start_in_every_mode_and_order() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![DerivedSpec {
@@ -827,7 +827,7 @@ fn trace_closure_includes_related_entity_instances() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![
@@ -1473,7 +1473,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![
@@ -1621,7 +1621,7 @@ fn fast_outcome_program() -> ProgramSpec {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![
@@ -2118,7 +2118,7 @@ fn fast_mode_falls_back_for_filtered_relation_counts() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![DerivedSpec {
@@ -2212,6 +2212,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -2357,6 +2358,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -2496,6 +2498,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: household_accepts_snap_members
     kind: derived
     entity: Household
@@ -2636,6 +2639,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -2962,7 +2966,7 @@ fn fast_mode_counts_and_sums_each_related_entity_once() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "household_member_role".to_string(),
             arity: 3,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Household".to_string(), "Person".to_string(), "Role".to_string()],
             derivation: None,
         }],
         derived: vec![
@@ -3069,7 +3073,7 @@ fn fast_mode_gives_every_query_of_an_entity_its_relations() {
         relations: vec![axiom_rules_engine::spec::RelationSpec {
             name: "member_of_household".to_string(),
             arity: 2,
-            slot_entities: Vec::new(),
+            slot_entities: vec!["Person".to_string(), "Household".to_string()],
             derivation: None,
         }],
         derived: vec![household_decimal_rule(
@@ -3125,10 +3129,11 @@ fn fast_mode_gives_every_query_of_an_entity_its_relations() {
 }
 
 /// A derived relation lists the source relation's related entities in the
-/// derivation's own slots. RuleSpec lowers `len(snap_unit)` to
-/// `count_related(snap_unit, 1, 0)` while the derivation reads its source in
-/// slots 0 and 1, so fast mode must take related entities from the
-/// derivation, not re-project source tuples with the call's slots.
+/// derivation's own slots. Here the derivation reads its source in slots 0
+/// and 1, the reverse of the legacy (1, 0) default, and RuleSpec lowering
+/// gives `len(snap_unit)` those slots (`count_related(snap_unit, 0, 1)`);
+/// fast mode must count the related entities the derivation lists, as
+/// explain does.
 #[test]
 fn fast_mode_counts_a_derived_relation_as_explain_does() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(
@@ -3139,6 +3144,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Household, Person]
   - name: eligible_member
     kind: derived
     entity: Person

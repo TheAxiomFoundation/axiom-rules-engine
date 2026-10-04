@@ -222,6 +222,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Family]
   - name: shifted_date
     kind: derived
     entity: Person
