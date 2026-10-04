@@ -38,6 +38,9 @@ pub enum RelationTypingCode {
     FilteredEntityKindConflict,
     /// An executed node names a relation the program does not declare.
     UnknownRelation,
+    /// A relation slot declares a filtered entity (a derived relation's
+    /// `entity`) instead of the kind of the ids that entity is queried with.
+    FilteredEntitySlotKind,
 }
 
 impl RelationTypingCode {
@@ -54,6 +57,7 @@ impl RelationTypingCode {
             Self::PredicateEntityMismatch => "relation_predicate_entity_mismatch",
             Self::FilteredEntityKindConflict => "filtered_entity_kind_conflict",
             Self::UnknownRelation => "unknown_relation",
+            Self::FilteredEntitySlotKind => "relation_slot_kind_is_filtered_entity",
         }
     }
 }
@@ -110,6 +114,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
     let mut checker = Checker {
         program,
         filtered: filtered_entity_kinds(program),
+        filtered_names: filtered_entity_names(program),
         violations: BTreeSet::new(),
         used_relations: BTreeSet::new(),
     };
@@ -202,6 +207,28 @@ pub fn filtered_entity_kinds(program: &Program) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Filtered entities that name something other than the ids they are queried
+/// with: every derived relation's `entity` whose source's current kind is
+/// another kind, or is not known. Such a name is an alias for ids of the
+/// source kind, so it cannot be a relation slot's kind.
+pub fn filtered_entity_names(program: &Program) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for (name, schema) in &program.relations {
+        let Some(derivation) = &schema.derivation else {
+            continue;
+        };
+        let Some(entity) = derivation.entity.as_ref() else {
+            continue;
+        };
+        let current = effective_slot_entities(program, name)
+            .and_then(|kinds| kinds.get(derivation.current_slot).cloned());
+        if current.as_deref() != Some(entity.as_str()) {
+            names.insert(entity.clone());
+        }
+    }
+    names
+}
+
 #[derive(Clone, Copy)]
 struct Context<'a> {
     /// The kind of the id the expression is evaluated on, when known.
@@ -216,6 +243,8 @@ struct Checker<'a> {
     program: &'a Program,
     /// Filtered entity -> the kind of the source ids it is queried with.
     filtered: BTreeMap<String, String>,
+    /// Filtered entities that alias another kind; never a slot kind.
+    filtered_names: BTreeSet<String>,
     violations: BTreeSet<RelationTypingViolation>,
     used_relations: BTreeSet<String>,
 }
@@ -347,6 +376,31 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
+        let aliased = kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| self.filtered_names.contains(kind.as_str()))
+            .map(|(slot, kind)| (slot, kind.clone()))
+            .collect::<Vec<_>>();
+        if !aliased.is_empty() {
+            for (slot, kind) in aliased {
+                let source_kind = self
+                    .filtered
+                    .get(&kind)
+                    .map(|source| format!("`{source}`"))
+                    .unwrap_or_else(|| "its source's kind".to_string());
+                self.push(
+                    RelationTypingCode::FilteredEntitySlotKind,
+                    relation,
+                    citing,
+                    format!(
+                        "slot {slot} of relation `{relation}` declares the filtered entity `{kind}` (slot kinds {}); a filtered entity is queried with its source's ids, so declare the kind of those ids ({source_kind})",
+                        format_kinds(&kinds)
+                    ),
+                );
+            }
+            return None;
+        }
         Some(kinds)
     }
 
@@ -410,7 +464,7 @@ impl<'a> Checker<'a> {
                 related_entity = Some(kinds[related].clone());
                 if let Some(entity) = context.entity
                     && entity != current_kind
-                    && self.id_kind(entity) != self.id_kind(current_kind)
+                    && self.id_kind(entity) != current_kind
                 {
                     self.push(
                         RelationTypingCode::CurrentSlotEntityMismatch,
@@ -443,7 +497,7 @@ impl<'a> Checker<'a> {
                     };
                     if rule.entity == SCALAR_ENTITY
                         || rule.entity == related_kind
-                        || self.id_kind(&rule.entity) == self.id_kind(related_kind)
+                        || self.id_kind(&rule.entity) == related_kind
                     {
                         continue;
                     }
@@ -523,7 +577,6 @@ impl<'a> Checker<'a> {
         for (slot, expected_kind) in expected {
             if let Some(expected_kind) = expected_kind
                 && kinds[slot] != expected_kind
-                && self.id_kind(&kinds[slot]) != self.id_kind(expected_kind)
             {
                 self.push(
                     RelationTypingCode::MembershipSlotEntityMismatch,
@@ -656,7 +709,7 @@ impl<'a> Checker<'a> {
                 || routed_current.is_some_and(|kind| kind == entity)
                 || routed_related.is_some_and(|kind| kind == entity)
                 || entity == effective_related
-                || self.id_kind(entity) == self.id_kind(&effective_related)
+                || self.id_kind(entity) == effective_related
             {
                 continue;
             }

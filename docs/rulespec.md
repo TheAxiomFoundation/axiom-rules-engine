@@ -134,7 +134,9 @@ zero. Relation entity typing is therefore mandatory:
   `relation_related_slot_entity_mismatch`,
   `relation_membership_slot_entity_mismatch`,
   `relation_predicate_entity_mismatch`, `derived_relation_source_slot_conflict`,
-  `derived_relation_slots_diverge`, and `filtered_entity_kind_conflict`.
+  `derived_relation_slots_diverge`, `filtered_entity_kind_conflict`, and
+  `relation_slot_kind_is_filtered_entity` (a slot declares a filtered entity
+  such as `SnapUnit` rather than the kind of the ids it is queried with).
 - **Load and request.** The same check runs when a compiled artifact loads
   (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
   carries a raw `ProgramSpec`, and when the dense compiler builds from a

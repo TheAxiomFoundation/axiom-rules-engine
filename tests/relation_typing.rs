@@ -1557,48 +1557,106 @@ fn snap_unit_and_household(extra_kinds: &str) -> String {
     SNAP_UNIT_AND_HOUSEHOLD_READ_EXTRA.replace("EXTRA_KINDS", extra_kinds)
 }
 
-/// A slot declared with a filtered entity holds that entity's source ids, so
-/// `[Person, SnapUnit]` and `[Person, Household]` are the same physical
-/// relation for typing, direction, and binding alike.
+/// Household and SnapUnit rules read the same relation keyed on its
+/// Household slot: SnapUnit ids are household ids.
 #[test]
-fn a_filtered_entity_slot_kind_is_its_source_kind() {
-    for kinds in ["[Person, Household]", "[Person, SnapUnit]"] {
-        let program = CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household(kinds))
-            .unwrap_or_else(|error| panic!("{kinds}: {error}"))
+fn household_and_filtered_entity_rules_share_a_relation() {
+    let program =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap()
             .program;
-        let dataset = DatasetSpec {
-            inputs: vec![
-                bool_input("extra_flag", "Person", "p1", true),
-                bool_input("eligible", "Person", "p1", true),
-            ],
-            relations: vec![
-                tuple("member_of_household", &["p1", "h1"]),
-                tuple("extra_members", &["p1", "h1"]),
-            ],
-        };
-        let model = program.to_program().unwrap();
-        for entity in ["Household", "SnapUnit"] {
-            dataset
-                .to_dataset_for_queries_with_options(
-                    &model,
-                    &[("h1".to_string(), entity.to_string())],
-                    DatasetBindingOptions::strict(),
-                )
-                .unwrap_or_else(|error| panic!("{kinds} {entity}: {error}"));
-        }
-        for mode in BOTH_MODES {
-            let response = run(
-                mode.clone(),
-                program.clone(),
-                dataset.clone(),
-                vec![query("h1", &["unit_extra_count", "household_extra_count"])],
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("extra_flag", "Person", "p1", true),
+            bool_input("eligible", "Person", "p1", true),
+        ],
+        relations: vec![
+            tuple("member_of_household", &["p1", "h1"]),
+            tuple("extra_members", &["p1", "h1"]),
+        ],
+    };
+    let model = program.to_program().unwrap();
+    for entity in ["Household", "SnapUnit"] {
+        dataset
+            .to_dataset_for_queries_with_options(
+                &model,
+                &[("h1".to_string(), entity.to_string())],
+                DatasetBindingOptions::strict(),
             )
-            .unwrap();
-            let outputs = &outputs(&response)[0];
-            assert_eq!(outputs["unit_extra_count"], 1, "{kinds} {mode:?}");
-            assert_eq!(outputs["household_extra_count"], 1, "{kinds} {mode:?}");
-        }
+            .unwrap_or_else(|error| panic!("{entity}: {error}"));
     }
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["unit_extra_count", "household_extra_count"])],
+        )
+        .unwrap();
+        let outputs = &outputs(&response)[0];
+        assert_eq!(outputs["unit_extra_count"], 1, "{mode:?}");
+        assert_eq!(outputs["household_extra_count"], 1, "{mode:?}");
+    }
+}
+
+/// A filtered entity names ids of its source's kind, so it is never a slot
+/// kind: `[Person, SnapUnit]` is refused with the kind to declare instead,
+/// rather than accepted as an alias that every later comparison would have
+/// to resolve.
+#[test]
+fn a_slot_declared_with_a_filtered_entity_is_refused() {
+    let error =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, SnapUnit]"))
+            .expect_err("SnapUnit is an alias for household ids");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report.violations.iter().all(|violation| violation.code
+            == RelationTypingCode::FilteredEntitySlotKind
+            && violation.relation == "extra_members"),
+        "{report}"
+    );
+    assert!(error.to_string().contains("`Household`"), "{error}");
+}
+
+/// Migration never stamps an alias, and stops when nothing changes, even for
+/// an executed relation of arity zero.
+#[test]
+fn migration_terminates_on_an_executed_zero_arity_relation() {
+    // Compile a typed two-slot program, then rewrite the relation to arity
+    // zero: the compiler would refuse that program, but an old artifact can
+    // carry it, and its derived metadata does not depend on the arity.
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [{"name": "flag", "arity": 2, "slot_entities": ["Household", "Person"]}],
+        "derived": [{"name": "n", "entity": "Household", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "flag",
+                              "current_slot": 0, "related_slot": 1}}]
+    }))
+    .unwrap();
+    let mut value =
+        serde_json::to_value(CompiledProgramArtifact::compile(program).unwrap()).unwrap();
+    let relation = value["program"]["relations"][0].as_object_mut().unwrap();
+    relation.insert("arity".to_string(), serde_json::json!(0));
+    relation.remove("slot_entities");
+    let source = serde_json::to_string(&value).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(
+            migrate_artifact_relation_typing(&source, "zero.json", &BTreeMap::new())
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        );
+    });
+    let outcome = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("migration terminates");
+    let error = outcome.expect_err("a zero-arity aggregation cannot be typed");
+    assert!(
+        error.contains("cannot infer every slot kind") && error.contains("flag"),
+        "the migration reached its inference and reported the relation: {error}"
+    );
 }
 
 fn without_kinds(artifact: &CompiledProgramArtifact, relations: &[&str]) -> String {
