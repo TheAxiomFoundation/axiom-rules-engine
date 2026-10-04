@@ -119,28 +119,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
         used_relations: BTreeSet::new(),
     };
     checker.filtered_entity_conflicts();
-    let mut names = program.derived.keys().collect::<Vec<_>>();
-    names.sort();
-    for name in names {
-        let derived = &program.derived[name];
-        let citing = derived.id.as_deref().unwrap_or(&derived.name);
-        // Explain selects among the versions, but the dense compiler reads the
-        // base semantics, so both are checked.
-        let semantics = std::iter::once(&derived.semantics)
-            .chain(derived.versions.iter().map(|version| &version.semantics));
-        for semantics in semantics {
-            let context = Context {
-                entity: Some(derived.entity.as_str()),
-                membership: None,
-                citing,
-            };
-            match semantics {
-                crate::model::DerivedSemantics::Scalar(expr) => checker.scalar(expr, context),
-                crate::model::DerivedSemantics::Judgment(expr) => checker.judgment(expr, context),
-            }
-        }
-    }
-    checker.derived_relations();
+    checker.walk();
     if checker.violations.is_empty() {
         Ok(())
     } else {
@@ -148,6 +127,21 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
             violations: checker.violations.into_iter().collect(),
         })
     }
+}
+
+/// Every relation an executed node reads: aggregated or tested directly, or
+/// reached as a derived relation's source or through its predicate. These
+/// are the relations `check_program` types.
+pub fn executed_relations(program: &Program) -> BTreeSet<String> {
+    let mut checker = Checker {
+        program,
+        filtered: filtered_entity_kinds(program),
+        filtered_names: filtered_entity_names(program),
+        violations: BTreeSet::new(),
+        used_relations: BTreeSet::new(),
+    };
+    checker.walk();
+    checker.used_relations
 }
 
 /// The entity kind of each tuple slot of `relation`, or `None` when the
@@ -290,6 +284,33 @@ impl<'a> Checker<'a> {
             citing: citing.to_string(),
             message,
         });
+    }
+
+    /// Visit every executed node of every derived rule, then the derived
+    /// relations they reach.
+    fn walk(&mut self) {
+        let mut names = self.program.derived.keys().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let derived = &self.program.derived[name];
+            let citing = derived.id.as_deref().unwrap_or(&derived.name);
+            // Explain selects among the versions, but the dense compiler reads the
+            // base semantics, so both are checked.
+            let semantics = std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics));
+            for semantics in semantics {
+                let context = Context {
+                    entity: Some(derived.entity.as_str()),
+                    membership: None,
+                    citing,
+                };
+                match semantics {
+                    crate::model::DerivedSemantics::Scalar(expr) => self.scalar(expr, context),
+                    crate::model::DerivedSemantics::Judgment(expr) => self.judgment(expr, context),
+                }
+            }
+        }
+        self.derived_relations();
     }
 
     /// The kind a rule's entity has as an id: a filtered entity's ids are

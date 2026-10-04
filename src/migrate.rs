@@ -959,12 +959,17 @@ fn canonical_usage(
     model: &crate::model::Program,
     filtered: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
-    // A kind some relation declares is a physical kind (declaring a filtered
-    // entity is refused), so it stays evidence even when an unresolved
-    // filter happens to share its name.
+    // A kind an executed, typed relation declares is a physical kind: the
+    // typing check validates it and refuses a filtered entity there. It stays
+    // evidence even when an unresolved filter happens to share its name. An
+    // unused relation's declaration is never checked, so it establishes
+    // nothing.
+    let executed = crate::relation_typing::executed_relations(model);
     let declared = model
         .relations
-        .values()
+        .iter()
+        .filter(|(name, _)| executed.contains(*name))
+        .map(|(_, schema)| schema)
         .flat_map(|schema| {
             schema.slot_entities.iter().chain(
                 schema

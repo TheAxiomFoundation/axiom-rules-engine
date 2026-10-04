@@ -1897,3 +1897,61 @@ fn migration_keeps_declared_physical_kinds_despite_an_unresolved_namesake_filter
         .expect("extra_members is typed");
     assert_eq!(extra.slot_entities, vec!["Person", "Household"]);
 }
+
+/// An unused relation's declaration is never checked, so naming an
+/// unresolved filter there does not make that filter a physical kind for
+/// migration: the executed relation's slot stays unknown and migration asks
+/// rather than stamping the filter name.
+#[test]
+fn an_unused_declaration_does_not_establish_a_physical_kind_for_migration() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "unit_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "UnitF", "predicate": truth}},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "unused_declaration", "arity": 2, "slot_entities": ["Person", "UnitF"]},
+            {"name": "extra_members", "arity": 2, "slot_entities": ["Person", "Household"]}
+        ],
+        "derived": [
+            {"name": "member_flag", "entity": "Person", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "unit_extra", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "extra_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        if name == "extra_members" || name == "ghost" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let outcome = migrate_artifact_relation_typing(
+        &serde_json::to_string(&value).unwrap(),
+        "legacy.json",
+        &BTreeMap::new(),
+    );
+    match outcome {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("extra_members"), "{detail}")
+        }
+        Ok(migration) => panic!(
+            "UnitF must not be stamped as a physical kind: {:?}",
+            migration.changes
+        ),
+        Err(other) => panic!("unexpected error: {other}"),
+    }
+}
