@@ -863,6 +863,7 @@ pub fn migrate_artifact_relation_typing(
             .map(str::to_string)
             .collect(),
     };
+    let contested = execution_evidence_contested(&artifact.program.to_program()?, true);
     let mut changes = Vec::new();
     let mut uninferable = Vec::new();
     for relation in artifact.program.relations.iter().filter(|r| is_data(r)) {
@@ -924,6 +925,15 @@ pub fn migrate_artifact_relation_typing(
                 relation.arity,
                 format_executed(usage)
             ));
+        } else if contested.get(&relation.name).is_some_and(|slots| {
+            slots.len() != relation.slot_entities.len() || slots.iter().any(Option::is_none)
+        }) {
+            uninferable.push(format!(
+                "  {} (arity {}; a filtered entity whose derivations are inconsistent also reads it; executable usage determines {})",
+                relation.name,
+                relation.arity,
+                format_executed(&contested[&relation.name])
+            ));
         } else {
             changes.push(RelationTypingChange {
                 relation: relation.name.clone(),
@@ -934,9 +944,15 @@ pub fn migrate_artifact_relation_typing(
         }
     }
     if !uninferable.is_empty() {
-        return Err(ArtifactRelationMigrationError::Uninferable(
-            uninferable.join("\n"),
-        ));
+        let mut detail = uninferable.join("\n");
+        let hints = untrusted_filter_hints(&artifact.program.to_program()?);
+        if !hints.is_empty() {
+            detail.push_str(
+                "\nthese filtered entities have no trusted kind, so the rules evaluated for them say nothing; type their source relations (or recompile) so they map to a kind:\n",
+            );
+            detail.push_str(&hints.join("\n"));
+        }
+        return Err(ArtifactRelationMigrationError::Uninferable(detail));
     }
     crate::relation_typing::check_program(&artifact.program.to_program()?)
         .map_err(ArtifactRelationMigrationError::StillIllTyped)?;
@@ -945,8 +961,10 @@ pub fn migrate_artifact_relation_typing(
 
 /// What execution establishes about each data relation's slot kinds.
 ///
-/// Evidence comes only from aggregations explain executes (a versioned rule's
-/// versions, otherwise its base semantics):
+/// Evidence comes only from aggregations the runtimes evaluate (a versioned
+/// rule's versions, otherwise its base semantics, including aggregates in a
+/// `match` fallback's labels and over-periods reductions, which dense and
+/// lifetime execution read):
 /// - the slot an aggregate keys on holds ids of the evaluating rule's entity;
 /// - the other slot holds ids of the entity of the rules its `where` clause
 ///   (outside nested aggregations) and summed value read, when they agree;
@@ -964,10 +982,31 @@ pub fn migrate_artifact_relation_typing(
 fn execution_evidence(
     model: &crate::model::Program,
 ) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+    execution_evidence_contested(model, false)
+}
+
+/// [`execution_evidence`], where with `contest` a use by a filtered entity the
+/// typing check maps but migration does not trust leaves its slot unsettled
+/// instead of adding nothing. Run on the final model only: during stamping, a
+/// filter can become trusted once its source is typed.
+fn execution_evidence_contested(
+    model: &crate::model::Program,
+    contest: bool,
+) -> std::collections::BTreeMap<String, Vec<Option<String>>> {
+    let trusted = trusted_filter_kinds(model);
+    let contest = if contest {
+        crate::relation_typing::filtered_entity_kinds(model)
+            .into_keys()
+            .filter(|entity| !trusted.contains_key(entity))
+            .collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let collector = EvidenceCollector {
         model,
         filters: crate::relation_typing::filtered_entities(model),
-        trusted: trusted_filter_kinds(model),
+        trusted,
+        contest,
     };
     let mut slots =
         std::collections::BTreeMap::<String, Vec<std::collections::BTreeSet<String>>>::new();
@@ -1001,12 +1040,46 @@ fn execution_evidence(
             let kinds = slots
                 .into_iter()
                 .map(|kinds| {
-                    (kinds.len() == 1)
+                    (kinds.len() == 1 && !kinds.contains(CONTESTED))
                         .then(|| kinds.into_iter().next())
                         .flatten()
                 })
                 .collect();
             (relation, kinds)
+        })
+        .collect()
+}
+
+/// For each filtered entity a rule is evaluated for but migration does not
+/// trust, the derived relations defining it and their sources.
+fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
+    let trusted = trusted_filter_kinds(model);
+    let evaluated = model
+        .derived
+        .values()
+        .map(|rule| rule.entity.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut definitions = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for (name, schema) in &model.relations {
+        let Some(derivation) = &schema.derivation else {
+            continue;
+        };
+        let Some(entity) = &derivation.entity else {
+            continue;
+        };
+        if trusted.contains_key(entity) || !evaluated.contains(entity) {
+            continue;
+        }
+        definitions
+            .entry(entity.clone())
+            .or_default()
+            .push(format!("`{name}` over `{}`", derivation.source_relation));
+    }
+    definitions
+        .into_iter()
+        .map(|(entity, mut definitions)| {
+            definitions.sort();
+            format!("  {entity}: defined by {}", definitions.join(", "))
         })
         .collect()
 }
@@ -1118,10 +1191,16 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         .collect()
 }
 
+/// The kind recorded for a use by a filtered entity that the typing check
+/// maps (from the derivation's apparent kind) but migration does not trust:
+/// it contests the slot, so the slot is never settled from the other uses.
+const CONTESTED: &str = "\u{1}contested";
+
 struct EvidenceCollector<'a> {
     model: &'a crate::model::Program,
     filters: std::collections::BTreeSet<String>,
     trusted: std::collections::BTreeMap<String, String>,
+    contest: std::collections::BTreeSet<String>,
 }
 
 type Evidence = std::collections::BTreeMap<String, Vec<std::collections::BTreeSet<String>>>;
@@ -1133,6 +1212,9 @@ impl EvidenceCollector<'_> {
             return None;
         }
         if self.filters.contains(entity) {
+            if self.contest.contains(entity) {
+                return Some(CONTESTED.to_string());
+            }
             return self.trusted.get(entity).cloned();
         }
         Some(entity.to_string())
@@ -1189,6 +1271,9 @@ impl EvidenceCollector<'_> {
                 continue;
             }
             kinds.insert(self.physical(&rule.entity)?);
+        }
+        if kinds.contains(CONTESTED) {
+            return Some(CONTESTED.to_string());
         }
         (kinds.len() == 1)
             .then(|| kinds.into_iter().next())

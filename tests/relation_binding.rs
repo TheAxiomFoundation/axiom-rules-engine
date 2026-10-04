@@ -449,13 +449,38 @@ fn legacy_artifact_executing_against_its_declaration_is_refused() {
             }
         }
     }
-    let error = CompiledProgramArtifact::compile(program)
+    let error = CompiledProgramArtifact::compile(program.clone())
         .expect_err("a typed relation read against its declaration is refused");
     assert!(
         error
             .to_string()
             .contains("relation_current_slot_entity_mismatch"),
         "{error}"
+    );
+
+    // The same program as an earlier engine serialized it: refused at load.
+    let fresh = artifact();
+    let mut legacy = serde_json::to_value(&fresh).unwrap();
+    legacy["program"] = serde_json::to_value(&program).unwrap();
+    let legacy = serde_json::to_string(&legacy).unwrap();
+    let error =
+        CompiledProgramArtifact::from_json_str(&legacy).expect_err("the loader refuses it too");
+    assert!(error.to_string().contains("migrate artifact"), "{error}");
+
+    // Retyping in executed order makes it load and bind its executed order.
+    let relation = program.relations[0].name.clone();
+    let migration = axiom_rules_engine::migrate::migrate_artifact_relation_typing(
+        &legacy,
+        "legacy.json",
+        &std::collections::BTreeMap::from([(
+            relation,
+            vec!["TaxUnit".to_string(), "Person".to_string()],
+        )]),
+    )
+    .expect("an override in executed order retypes it");
+    assert_eq!(
+        migration.artifact.program.relations[0].slot_entities,
+        ["TaxUnit", "Person"]
     );
 }
 

@@ -2307,3 +2307,28 @@ fn migration_distrusts_a_filter_name_any_inconsistent_derivation_defines() {
         other => panic!("`f1` alone must not vouch for UnitF: {other:?}"),
     }
 }
+
+/// An earlier engine (6031295) compiled this module without typing it. The
+/// UnitF filter's chain changes direction, so its apparent kind is `Person`
+/// while it is queried with household ids. A Person rule and a UnitF rule
+/// both key `s` on slot 1, so that slot holds people for one and households
+/// for the other: no kind is right. A use by a filter migration does not
+/// trust must contest the slot, not drop out and let the Person use settle
+/// it (which used to stamp `s=[Organization, Person]` and then refuse the
+/// dataset's household tuples under strict binding).
+#[test]
+fn migration_refuses_a_slot_an_untrusted_filter_contests() {
+    let legacy = include_str!(
+        "fixtures/artifacts/relation_typing/inconsistent_filter_contests_slot.v0.2.2-6031295.json"
+    );
+    match migrate_artifact_relation_typing(legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}");
+            assert!(
+                detail.contains("UnitF: defined by `bridge` over `bad_seed`"),
+                "names the filter to type: {detail}"
+            );
+        }
+        other => panic!("the contested slot must not be stamped: {other:?}"),
+    }
+}
