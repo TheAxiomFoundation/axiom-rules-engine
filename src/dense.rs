@@ -314,8 +314,9 @@ pub struct DenseBatchSpec {
 struct DenseRelationBatch {
     offsets: Rc<[usize]>,
     related_count: usize,
-    /// The root row that owns each related row.
-    owners: Rc<[usize]>,
+    /// The root row that owns each related row. Sharing the Vec preserves its
+    /// allocation without copying the rows into an Rc slice.
+    owners: Rc<Vec<usize>>,
     /// This schema's `related_inputs`, index-aligned. `None` is a column the
     /// caller did not supply: a missing input on every related row, an error
     /// only for the rows that read it.
@@ -326,7 +327,10 @@ struct DenseRelationBatch {
 struct BoundRelationKey {
     offsets: Rc<[usize]>,
     related_count: usize,
-    owners: Rc<[usize]>,
+    owners: Rc<Vec<usize>>,
+    /// Supplied columns stay here until a schema first reads them.
+    unbound_inputs: HashMap<String, DenseColumn>,
+    /// Validated columns, shared by every schema that reads them.
     inputs: HashMap<String, Rc<DenseColumn>>,
 }
 
@@ -1049,8 +1053,8 @@ impl DenseCompiledProgram {
         // reached, and the schemas after it share those rows and columns.
         // Schemas are still walked in order, so the first error reported is
         // the one a per-schema binding reports: a key's offsets are checked
-        // for the first schema that reads it, and every schema checks its own
-        // columns' lengths.
+        // for the first schema that reads it, and supplied columns are
+        // length-checked in schema/input order before sharing them.
         let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for relation in &self.relations {
@@ -1069,25 +1073,32 @@ impl DenseCompiledProgram {
                     Self::bind_relation_key(relation, relation_batch, batch.row_count)?,
                 );
             }
-            let key = &bound_keys[&relation.key];
+            let key = bound_keys
+                .get_mut(&relation.key)
+                .expect("relation key was bound above");
             let related_count = key.related_count;
             let bound_inputs = relation
                 .related_inputs
                 .iter()
                 .map(|name| {
-                    let column = key.inputs.get(name).cloned();
-                    if let Some(column) = &column {
-                        if column.len() != related_count {
-                            return Err(EvalError::TypeMismatch(format!(
-                                "dense relation input `{}` for `{}` has length {} but related row count is {}",
-                                name,
-                                relation.key.name,
-                                column.len(),
-                                related_count
-                            )));
-                        }
+                    if let Some(column) = key.inputs.get(name) {
+                        return Ok(Some(Rc::clone(column)));
                     }
-                    Ok(column)
+                    let Some((name, column)) = key.unbound_inputs.remove_entry(name) else {
+                        return Ok(None);
+                    };
+                    if column.len() != related_count {
+                        return Err(EvalError::TypeMismatch(format!(
+                            "dense relation input `{}` for `{}` has length {} but related row count is {}",
+                            name,
+                            relation.key.name,
+                            column.len(),
+                            related_count
+                        )));
+                    }
+                    let column = Rc::new(column);
+                    key.inputs.insert(name, Rc::clone(&column));
+                    Ok(Some(column))
                 })
                 .collect::<Result<Vec<Option<Rc<DenseColumn>>>, EvalError>>()?;
 
@@ -1156,12 +1167,9 @@ impl DenseCompiledProgram {
         Ok(BoundRelationKey {
             offsets: offsets.into(),
             related_count,
-            owners: owners.into(),
-            inputs: relation_batch
-                .inputs
-                .into_iter()
-                .map(|(name, column)| (name, Rc::new(column)))
-                .collect(),
+            owners: Rc::new(owners),
+            unbound_inputs: relation_batch.inputs,
+            inputs: HashMap::new(),
         })
     }
 }

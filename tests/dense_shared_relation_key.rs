@@ -12,6 +12,8 @@
 //! * **Memory.** Binding a batch allocates the same whatever the chain's
 //!   length: peak allocation during an execution that binds n links is
 //!   within a small constant of one link's.
+//!   Sharing owners keeps one owners buffer live, and supplied columns no
+//!   schema reads add no binding allocations.
 //! * **Semantics.** For random households and random chains, each link
 //!   reading its own input, dense answers exactly what explain answers.
 //! * **Errors.** A malformed batch fails with the error a per-schema binding
@@ -348,6 +350,159 @@ fn binding_a_chain_allocates_the_same_as_binding_one_link() {
         many_links <= one_link + 16 * 1024,
         "binding 64 links peaked at {many_links} bytes, one link at {one_link}"
     );
+}
+
+/// One schema over `member`, optionally reading a Boolean column. Requesting
+/// only `one` exercises binding without allocating relation evaluation masks.
+fn single_relation_program(read_flag: bool) -> DenseCompiledProgram {
+    let mut count = json!({
+        "kind": "count_related", "relation": "member", "current_slot": 0, "related_slot": 1,
+    });
+    if read_flag {
+        count["where"] = compare(
+            input("flag"),
+            "eq",
+            json!({ "kind": "literal", "value": { "kind": "bool", "value": true } }),
+        );
+    }
+    let compiled = compile_dense(&json!({
+        "relations": [relation("member", None, None)],
+        "derived": [rule("member_count", count), rule("one", integer(1))],
+    }));
+    assert_eq!(compiled.relations().len(), 1);
+    assert_eq!(
+        compiled.relations()[0].related_inputs,
+        if read_flag {
+            vec!["flag".to_string()]
+        } else {
+            Vec::new()
+        }
+    );
+    compiled
+}
+
+fn single_relation_binding_peak(
+    compiled: &DenseCompiledProgram,
+    row_count: usize,
+    related_count: usize,
+    unread_columns: usize,
+    read_flag: bool,
+) -> usize {
+    let mut inputs: HashMap<_, _> = (0..unread_columns)
+        .map(|index| (format!("unused_{index}"), DenseColumn::Integer(Vec::new())))
+        .collect();
+    if read_flag {
+        inputs.insert(
+            "flag".to_string(),
+            DenseColumn::Bool(vec![true; related_count]),
+        );
+    }
+    let batch = DenseRelationBatchSpec {
+        offsets: (0..=row_count)
+            .map(|row| related_count * row / row_count)
+            .collect(),
+        inputs,
+    };
+    let (result, peak) = peak_allocation(|| execute(compiled, row_count, batch, &["one"]));
+    assert_eq!(result, Ok(vec![vec![1]; row_count]));
+    peak
+}
+
+// Enough for binding metadata and the small `one` result, but far less than
+// a second owners buffer or wrappers for hundreds of unread columns.
+const BINDING_OVERHEAD: usize = 4 * 1024;
+
+/// Converting owners to shared storage must retain the existing allocation,
+/// rather than holding the Vec and a copied Rc slice at the same time.
+#[test]
+fn binding_a_single_relation_keeps_one_owners_buffer_live() {
+    let _serial = serial();
+    let related_count = 100_000;
+    let owners_bytes = related_count * std::mem::size_of::<usize>();
+    for read_flag in [false, true] {
+        let compiled = single_relation_program(read_flag);
+        let peak = single_relation_binding_peak(&compiled, 1, related_count, 0, read_flag);
+        assert!(
+            peak <= owners_bytes + BINDING_OVERHEAD,
+            "binding {related_count} rows with read_flag={read_flag} peaked at {peak} bytes; one owners buffer is {owners_bytes} bytes"
+        );
+    }
+}
+
+/// For valid random batch sizes and partitions, owners sharing adds only
+/// constant metadata to the one-usize-per-related-row buffer.
+#[test]
+fn valid_related_counts_allocate_one_owners_buffer() {
+    let _serial = serial();
+    let without_flag = single_relation_program(false);
+    let with_flag = single_relation_program(true);
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(
+            &(4096_usize..=65_536, 1_usize..=8, any::<bool>()),
+            |(related_count, row_count, read_flag)| {
+                let compiled = if read_flag { &with_flag } else { &without_flag };
+                let peak = single_relation_binding_peak(compiled, row_count, related_count, 0, read_flag);
+                let owners_bytes = related_count * std::mem::size_of::<usize>();
+                prop_assert!(
+                    peak <= owners_bytes + BINDING_OVERHEAD,
+                    "binding {} related rows in {} root rows with read_flag={} peaked at {} bytes; one owners buffer is {} bytes",
+                    related_count, row_count, read_flag, peak, owners_bytes
+                );
+                Ok(())
+            },
+        )
+        .expect("valid batches retain one owners buffer");
+}
+
+/// Supplied columns no schema reads must not be wrapped or copied into a
+/// bound-key map, even when the caller supplies many of them.
+#[test]
+fn binding_does_not_allocate_for_twenty_thousand_unread_columns() {
+    let _serial = serial();
+    for read_flag in [false, true] {
+        let compiled = single_relation_program(read_flag);
+        let peak = single_relation_binding_peak(&compiled, 1, 0, 20_000, read_flag);
+        assert!(
+            peak <= BINDING_OVERHEAD,
+            "binding 20,000 unread columns with read_flag={read_flag} peaked at {peak} bytes"
+        );
+    }
+}
+
+/// Binding allocations remain bounded as the number of unread inputs grows,
+/// including schemas that also read a supplied Boolean column.
+#[test]
+fn unread_columns_add_no_binding_allocations() {
+    let _serial = serial();
+    let without_flag = single_relation_program(false);
+    let with_flag = single_relation_program(true);
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(
+            &(256_usize..=4096, any::<bool>()),
+            |(unread_columns, read_flag)| {
+                let compiled = if read_flag { &with_flag } else { &without_flag };
+                let peak = single_relation_binding_peak(compiled, 1, 0, unread_columns, read_flag);
+                prop_assert!(
+                    peak <= BINDING_OVERHEAD,
+                    "binding {} unread columns with read_flag={} peaked at {} bytes",
+                    unread_columns,
+                    read_flag,
+                    peak
+                );
+                Ok(())
+            },
+        )
+        .expect("unread inputs add no binding allocations");
 }
 
 // ---------------------------------------------------------------------------
