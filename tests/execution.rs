@@ -1067,6 +1067,7 @@ fn fast_mode_coerces_integer_and_decimal_if_branches() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1473,6 +1474,7 @@ rules:
 fn filing_status_request(mode: ExecutionMode, filers: &[(&str, i64)]) -> CompiledExecutionRequest {
     let period = simple_period();
     CompiledExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         dataset: DatasetSpec {
             inputs: filers
@@ -1737,6 +1739,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     let (program, dataset, queries) = date_arithmetic_case(&[false, false]);
 
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1744,6 +1747,7 @@ fn fast_mode_falls_back_to_explain_when_bulk_support_is_missing() {
     })
     .expect("fast request falls back");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1770,6 +1774,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     // for this batch, so fast mode answers it.
     let (program, dataset, queries) = date_arithmetic_case(&[true, true]);
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1777,6 +1782,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     })
     .expect("fast request succeeds");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -1793,6 +1799,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     // One live row reaches the date arithmetic: fast declines and falls back.
     let (program, dataset, queries) = date_arithmetic_case(&[true, false]);
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: program.clone(),
         dataset: dataset.clone(),
@@ -1800,6 +1807,7 @@ fn a_construct_only_a_dead_branch_contains_never_forces_a_fallback() {
     })
     .expect("fast request falls back");
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset,
@@ -3256,6 +3264,7 @@ fn explain_and_fast_values(
         .collect();
     [ExecutionMode::Explain, ExecutionMode::Fast].map(|mode| {
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: program.clone(),
             dataset: dataset.clone(),
@@ -3553,6 +3562,7 @@ rules:
         let response = execute_compiled_request(
             artifact.clone(),
             CompiledExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 dataset: dataset.clone(),
                 queries: ["household-1", "household-2"]

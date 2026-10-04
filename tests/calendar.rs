@@ -398,6 +398,7 @@ rules:
     };
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let error = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: artifact.program.clone(),
             dataset: DatasetSpec {
