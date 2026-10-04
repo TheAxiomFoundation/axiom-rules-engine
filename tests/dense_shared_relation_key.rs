@@ -31,6 +31,7 @@ use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue, DenseRelationBatchSpec,
     DenseRelationKey,
 };
+use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::spec::{PeriodSpec, ProgramSpec, ScalarValueSpec};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -420,6 +421,80 @@ fn two_links() -> DenseCompiledProgram {
 
 fn one_household() -> Households {
     vec![vec![[1, 30, 5], [0, 40, 7]]]
+}
+
+/// A supplied column read by the first schema must be checked before owners
+/// are allocated from the caller's related count, even at capacity overflow.
+#[test]
+fn malformed_related_count_returns_type_mismatch_before_allocating_owners() {
+    let _serial = serial();
+    let compiled = two_links();
+    let name = &compiled.relations()[0].related_inputs[0];
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    for execute in [
+        DenseCompiledProgram::execute,
+        DenseCompiledProgram::execute_f64,
+    ] {
+        let result = execute(
+            &compiled,
+            &period,
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    member_key(),
+                    DenseRelationBatchSpec {
+                        offsets: vec![0, usize::MAX],
+                        inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
+                    },
+                )]),
+            },
+            &["one".to_string()],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(EvalError::TypeMismatch(ref message)) if message == &format!(
+                    "dense relation input `{name}` for `member` has length 1 but related row count is {}",
+                    usize::MAX
+                )
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+}
+
+/// Rejecting a malformed first-schema column allocates a bounded amount,
+/// independent of the invalid count. Keep generated counts small enough that
+/// this test safely detects the regression without exhausting the host.
+#[test]
+fn malformed_related_counts_allocate_bounded_memory() {
+    let _serial = serial();
+    let compiled = two_links();
+    let name = &compiled.relations()[0].related_inputs[0];
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(&(4096_usize..=65_536), |related_count| {
+            let batch = DenseRelationBatchSpec {
+                offsets: vec![0, related_count],
+                inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
+            };
+            let (result, peak) = peak_allocation(|| execute(&compiled, 1, batch, &["one"]));
+            prop_assert_eq!(
+                result,
+                Err(format!(
+                    "type mismatch: dense relation input `{name}` for `member` has length 1 but related row count is {related_count}"
+                ))
+            );
+            prop_assert!(peak < 16 * 1024, "rejecting count {} peaked at {} bytes", related_count, peak);
+            Ok(())
+        })
+        .expect("malformed counts are rejected without allocating their owners");
 }
 
 #[test]

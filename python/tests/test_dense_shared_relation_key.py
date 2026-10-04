@@ -150,6 +150,38 @@ def test_a_column_no_schema_supplies_is_still_missing(program) -> None:
     np.testing.assert_array_equal(result["outputs"]["adult_snap_unit_size"], [0])
 
 
+@pytest.mark.parametrize("execute_name", ["execute", "execute_f64"])
+@pytest.mark.parametrize(
+    "related_count", [65536, int(np.iinfo(np.uint32).max), int(np.iinfo(np.int64).max)]
+)
+def test_malformed_related_count_returns_column_length_error(
+    program, execute_name, related_count
+) -> None:
+    # Offsets declare one household, but its one supplied member cannot fill
+    # the declared related row count. Reject the column before allocating
+    # owners for that count, including the largest offset Python accepts.
+    (key,) = {schema.key for schema in program.relations}
+    relations = {
+        key: DenseRelationBatch(
+            offsets=np.array([0, related_count], dtype=np.int64),
+            inputs={
+                "has_ssn": np.array([True]),
+                "age": np.array([30], dtype=np.int64),
+            },
+        )
+    }
+    first_schema = program.relations[0]
+    first_input = first_schema.related_inputs[0]
+    expected = (
+        f"type mismatch: dense relation input `{first_input}` for "
+        f"`{first_schema.name}` has length 1 but related row count is "
+        f"{related_count}"
+    )
+    with pytest.raises(RuntimeError) as error:
+        getattr(program, execute_name)(**PERIOD, inputs={}, relations=relations)
+    assert str(error.value) == expected
+
+
 def test_counts_match_the_rules_on_random_households(program) -> None:
     # Property: for every batch, a household's adult SNAP unit is its members
     # with an SSN who are at least 18. Seeded, so a failure reproduces.

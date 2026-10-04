@@ -1066,7 +1066,7 @@ impl DenseCompiledProgram {
                 })?;
                 bound_keys.insert(
                     &relation.key,
-                    Self::bind_relation_key(&relation.key, relation_batch, batch.row_count)?,
+                    Self::bind_relation_key(relation, relation_batch, batch.row_count)?,
                 );
             }
             let key = &bound_keys[&relation.key];
@@ -1106,13 +1106,15 @@ impl DenseCompiledProgram {
         })
     }
 
-    /// Validate one relation key's offsets against `row_count` and take its
-    /// columns. Errors name `key`, which every schema keyed alike shares.
+    /// Validate the first schema's offsets and supplied columns before
+    /// allocating owners from the caller's related count. Later schemas
+    /// still check their own columns in schema order when binding their views.
     fn bind_relation_key(
-        key: &DenseRelationKey,
+        schema: &DenseRelationSchema,
         relation_batch: DenseRelationBatchSpec,
         row_count: usize,
     ) -> Result<BoundRelationKey, EvalError> {
+        let key = &schema.key;
         let offsets = relation_batch.offsets;
         if offsets.len() != row_count + 1 {
             return Err(EvalError::TypeMismatch(format!(
@@ -1135,6 +1137,18 @@ impl DenseCompiledProgram {
         }
 
         let related_count = *offsets.last().unwrap_or(&0);
+        for name in &schema.related_inputs {
+            if let Some(column) = relation_batch.inputs.get(name) {
+                if column.len() != related_count {
+                    return Err(EvalError::TypeMismatch(format!(
+                        "dense relation input `{name}` for `{}` has length {} but related row count is {}",
+                        key.name,
+                        column.len(),
+                        related_count
+                    )));
+                }
+            }
+        }
         let mut owners = Vec::with_capacity(related_count);
         for (row, pair) in offsets.windows(2).enumerate() {
             owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
