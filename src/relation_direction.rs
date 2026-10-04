@@ -9,21 +9,38 @@
 //!   silently aggregate the wrong side;
 //! - an aggregate over a derived relation uses the derivation's own slots,
 //!   which are what every runtime traverses;
+//! - a filtered entity (a derived relation's `entity`, e.g. `SnapUnit`) is
+//!   queried with its source's current-slot ids, so it keys on that kind;
 //! - a membership test inside a derived-relation predicate keys the current
 //!   and related ids on the slots of their kinds.
+//!
+//! A derived relation that leaves its slots to the legacy default over a
+//! source whose two slots share a kind has no readable direction, and
+//! lowering fails. Over a source with distinct kinds, the derivation is
+//! stamped with the source's kinds, so the runtimes route each rule its
+//! predicate reads to the id of that rule's entity.
 //!
 //! Relations with no declared kinds keep the legacy slots here; the
 //! mandatory typing check (`relation_typing`) rejects executing them.
 use crate::spec::{DerivedSemanticsSpec, JudgmentExprSpec, ProgramSpec, ScalarExprSpec};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-/// A same-kind relation read from an entity occupying more than one slot.
+/// A direction lowering cannot read from declared kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AmbiguousRelationDirection {
-    pub relation: String,
-    pub citing: String,
-    pub entity: String,
-    pub slot_entities: Vec<String>,
+pub(crate) enum DirectionError {
+    /// A same-kind relation read from an entity occupying more than one slot.
+    Aggregate {
+        relation: String,
+        citing: String,
+        entity: String,
+        slot_entities: Vec<String>,
+    },
+    /// A derived relation that omits its slots over a source whose defaulted
+    /// slots share a kind.
+    DerivedSlots {
+        relation: String,
+        slot_entities: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -36,10 +53,32 @@ struct DerivedSlots {
 struct Relations {
     typed: HashMap<String, Vec<String>>,
     derived: HashMap<String, DerivedSlots>,
+    /// Filtered entity -> the kind of the source ids it is queried with, when
+    /// every derived relation filtering to that entity agrees.
+    filtered: HashMap<String, String>,
 }
 
-pub(crate) fn resolve(program: &mut ProgramSpec) -> Result<()> {
+/// `defaulted_slots` names the derived relations whose `current_slot` or
+/// `related_slot` the source left to the legacy default.
+pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<String>) -> Result<()> {
     let relations = relations(program);
+    let mut names = defaulted_slots.iter().collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let Some(slots) = relations.derived.get(name) else {
+            continue;
+        };
+        if let Some(kinds) = &slots.kinds
+            && let (Some(current), Some(related)) =
+                (kinds.get(slots.current_slot), kinds.get(slots.related_slot))
+            && current == related
+        {
+            return Err(DirectionError::DerivedSlots {
+                relation: name.clone(),
+                slot_entities: kinds.clone(),
+            });
+        }
+    }
     for rule in &mut program.derived {
         let citing = rule.id.clone().unwrap_or_else(|| rule.name.clone());
         let mut resolver = Resolver {
@@ -67,6 +106,21 @@ pub(crate) fn resolve(program: &mut ProgramSpec) -> Result<()> {
         };
         let current = kind(slots.current_slot);
         let related = kind(slots.related_slot);
+        // Runtimes route each rule a predicate reads by the derivation's own
+        // kinds; with none, every rule runs on the related id. Stamp the
+        // source's kinds so a rule of the current entity reads the current
+        // id. A same-kind source stays unstamped: stamping would move every
+        // rule of that kind onto the current id.
+        if derivation.slot_entities.is_empty()
+            && let Some(kinds) = &slots.kinds
+            && current.is_some()
+            && current != related
+        {
+            derivation.slot_entities = kinds.clone();
+            if relation.slot_entities.is_empty() {
+                relation.slot_entities = kinds.clone();
+            }
+        }
         let citing = relation.name.clone();
         let mut resolver = Resolver {
             relations: &relations,
@@ -110,9 +164,16 @@ fn relations(program: &ProgramSpec) -> Relations {
     };
     let mut typed = HashMap::new();
     let mut derived = HashMap::new();
+    let mut filtered = BTreeMap::<String, BTreeSet<String>>::new();
     for relation in &program.relations {
         match &relation.derivation {
             Some(derivation) => {
+                if let Some(entity) = &derivation.entity
+                    && let Some(kind) = kinds_of(&relation.name)
+                        .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
+                {
+                    filtered.entry(entity.clone()).or_default().insert(kind);
+                }
                 derived.insert(
                     relation.name.clone(),
                     DerivedSlots {
@@ -128,7 +189,16 @@ fn relations(program: &ProgramSpec) -> Relations {
             None => {}
         }
     }
-    Relations { typed, derived }
+    let filtered = filtered
+        .into_iter()
+        .filter(|(_, kinds)| kinds.len() == 1)
+        .filter_map(|(entity, kinds)| kinds.into_iter().next().map(|kind| (entity, kind)))
+        .collect();
+    Relations {
+        typed,
+        derived,
+        filtered,
+    }
 }
 
 struct Resolver<'a> {
@@ -136,7 +206,7 @@ struct Resolver<'a> {
     citing: &'a str,
 }
 
-type Result<T> = std::result::Result<T, AmbiguousRelationDirection>;
+type Result<T> = std::result::Result<T, DirectionError>;
 
 impl Resolver<'_> {
     fn semantics(&mut self, expr: &mut DerivedSemanticsSpec, entity: &str) -> Result<()> {
@@ -168,6 +238,12 @@ impl Resolver<'_> {
         let Some(kinds) = self.relations.typed.get(relation) else {
             return Ok(String::new());
         };
+        // A filtered entity's ids are its source's current-slot ids.
+        let entity = self
+            .relations
+            .filtered
+            .get(entity)
+            .map_or(entity, String::as_str);
         let matches = kinds
             .iter()
             .enumerate()
@@ -180,7 +256,7 @@ impl Resolver<'_> {
                 *related_slot = 1 - index;
             }
             [_, _] => {
-                return Err(AmbiguousRelationDirection {
+                return Err(DirectionError::Aggregate {
                     relation: relation.to_string(),
                     citing: self.citing.to_string(),
                     entity: entity.to_string(),
@@ -306,7 +382,7 @@ impl Resolver<'_> {
                 };
                 if current == related {
                     if kinds.iter().all(|kind| kind == current) {
-                        return Err(AmbiguousRelationDirection {
+                        return Err(DirectionError::Aggregate {
                             relation: relation.clone(),
                             citing: self.citing.to_string(),
                             entity: current.to_string(),

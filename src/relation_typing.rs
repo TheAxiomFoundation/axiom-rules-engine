@@ -30,6 +30,14 @@ pub enum RelationTypingCode {
     /// An aggregation over a derived relation addresses slots other than the
     /// ones the derivation traverses, so execution modes disagree.
     DerivedRelationSlotsDiverge,
+    /// A rule a derived relation's predicate reads runs on an id of another
+    /// kind than its entity.
+    PredicateEntityMismatch,
+    /// Derived relations filtering to the same entity disagree on the kind
+    /// of the ids that entity is queried with.
+    FilteredEntityKindConflict,
+    /// An executed node names a relation the program does not declare.
+    UnknownRelation,
 }
 
 impl RelationTypingCode {
@@ -43,6 +51,9 @@ impl RelationTypingCode {
             Self::MembershipSlotEntityMismatch => "relation_membership_slot_entity_mismatch",
             Self::DerivedRelationSourceConflict => "derived_relation_source_slot_conflict",
             Self::DerivedRelationSlotsDiverge => "derived_relation_slots_diverge",
+            Self::PredicateEntityMismatch => "relation_predicate_entity_mismatch",
+            Self::FilteredEntityKindConflict => "filtered_entity_kind_conflict",
+            Self::UnknownRelation => "unknown_relation",
         }
     }
 }
@@ -98,25 +109,20 @@ impl std::error::Error for RelationTypingReport {}
 pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
     let mut checker = Checker {
         program,
+        filtered: filtered_entity_kinds(program),
         violations: BTreeSet::new(),
         used_relations: BTreeSet::new(),
     };
+    checker.filtered_entity_conflicts();
     let mut names = program.derived.keys().collect::<Vec<_>>();
     names.sort();
     for name in names {
         let derived = &program.derived[name];
         let citing = derived.id.as_deref().unwrap_or(&derived.name);
-        // Runtime version selection ignores the base semantics whenever
-        // explicit versions exist; typing does likewise.
-        let semantics = if derived.versions.is_empty() {
-            vec![&derived.semantics]
-        } else {
-            derived
-                .versions
-                .iter()
-                .map(|version| &version.semantics)
-                .collect()
-        };
+        // Explain selects among the versions, but the dense compiler reads the
+        // base semantics, so both are checked.
+        let semantics = std::iter::once(&derived.semantics)
+            .chain(derived.versions.iter().map(|version| &version.semantics));
         for semantics in semantics {
             let context = Context {
                 entity: Some(derived.entity.as_str()),
@@ -208,6 +214,8 @@ struct Context<'a> {
 
 struct Checker<'a> {
     program: &'a Program,
+    /// Filtered entity -> the kind of the source ids it is queried with.
+    filtered: BTreeMap<String, String>,
     violations: BTreeSet<RelationTypingViolation>,
     used_relations: BTreeSet<String>,
 }
@@ -222,18 +230,104 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// The kind a rule's entity has as an id: a filtered entity's ids are
+    /// its source's current-slot ids.
+    fn id_kind<'b>(&'b self, entity: &'b str) -> &'b str {
+        self.filtered.get(entity).map_or(entity, String::as_str)
+    }
+
+    /// Report filtered entities whose derived relations disagree on the kind
+    /// of the ids the entity is queried with.
+    fn filtered_entity_conflicts(&mut self) {
+        let mut kinds = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
+        for (name, schema) in &self.program.relations {
+            let Some(derivation) = &schema.derivation else {
+                continue;
+            };
+            let Some(entity) = &derivation.entity else {
+                continue;
+            };
+            if let Some(kind) = effective_slot_entities(self.program, name)
+                .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
+            {
+                kinds
+                    .entry(entity.clone())
+                    .or_default()
+                    .entry(kind)
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+        for (entity, by_kind) in kinds {
+            if by_kind.len() < 2 {
+                continue;
+            }
+            let detail = by_kind
+                .iter()
+                .map(|(kind, relations)| {
+                    let mut relations = relations.clone();
+                    relations.sort();
+                    format!("`{kind}` by {}", relations.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let first = by_kind
+                .values()
+                .flatten()
+                .min()
+                .cloned()
+                .unwrap_or_default();
+            self.push(
+                RelationTypingCode::FilteredEntityKindConflict,
+                &first,
+                &entity,
+                format!(
+                    "filtered entity `{entity}` is queried with ids of more than one kind ({detail}); every derived relation filtering to `{entity}` must key on the same source kind"
+                ),
+            );
+        }
+    }
+
     /// The declared kinds of an executed relation, reporting a violation when
-    /// the relation is untyped or its kind list does not match its arity.
+    /// the relation is unknown or untyped, or its kind list does not match
+    /// its arity.
     fn typed_slots(&mut self, relation: &str, citing: &str) -> Option<Vec<String>> {
-        let schema = self.program.relations.get(relation)?;
+        let Some(schema) = self.program.relations.get(relation) else {
+            self.push(
+                RelationTypingCode::UnknownRelation,
+                relation,
+                citing,
+                format!("`{citing}` executes relation `{relation}`, which the program does not declare"),
+            );
+            return None;
+        };
         let arity = schema.arity;
         let Some(kinds) = effective_slot_entities(self.program, relation) else {
+            // A short name aggregated by a module that does not declare it is
+            // its own relation, distinct from same-named declarations.
+            let suffix = format!("#relation.{relation}");
+            let mut namesakes = self
+                .program
+                .relations
+                .keys()
+                .filter(|name| !relation.contains('#') && name.ends_with(&suffix))
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>();
+            namesakes.sort();
+            let namesakes = if namesakes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " It is not declared in the module that aggregates it, so it is a separate relation from the same-named {}; declare it there with `arguments`, or aggregate the declared relation through a module that declares it.",
+                    namesakes.join(", ")
+                )
+            };
             self.push(
                 RelationTypingCode::UntypedRelation,
                 relation,
                 citing,
                 format!(
-                    "relation `{relation}` (arity {arity}) is executed by `{citing}` but declares no entity kind for its tuple slots. Relation entity typing is mandatory: without slot kinds a dataset tuple stored in the other orientation aggregates nothing and yields a silent zero. Declare `data_relation.arguments` (one entity kind per slot, in tuple order) and recompile, or type an existing artifact with `axiom-rules-engine migrate artifact`"
+                    "relation `{relation}` (arity {arity}) is executed by `{citing}` but declares no entity kind for its tuple slots. Relation entity typing is mandatory: without slot kinds a dataset tuple stored in the other orientation aggregates nothing and yields a silent zero. Declare `data_relation.arguments` (one entity kind per slot, in tuple order) and recompile, or type an existing artifact with `axiom-rules-engine migrate artifact`.{namesakes}"
                 ),
             );
             return None;
@@ -312,11 +406,9 @@ impl<'a> Checker<'a> {
             } else {
                 let current_kind = kinds[current].as_str();
                 related_entity = Some(kinds[related].clone());
-                let filtered_entity =
-                    derivation.and_then(|derivation| derivation.entity.as_deref());
                 if let Some(entity) = context.entity
                     && entity != current_kind
-                    && filtered_entity != Some(entity)
+                    && self.id_kind(entity) != current_kind
                 {
                     self.push(
                         RelationTypingCode::CurrentSlotEntityMismatch,
@@ -340,7 +432,10 @@ impl<'a> Checker<'a> {
                     let Some(rule) = self.program.derived.get(&name) else {
                         continue;
                     };
-                    if rule.entity == SCALAR_ENTITY || rule.entity == related_kind {
+                    if rule.entity == SCALAR_ENTITY
+                        || rule.entity == related_kind
+                        || self.id_kind(&rule.entity) == related_kind
+                    {
                         continue;
                     }
                     self.push(
@@ -433,33 +528,59 @@ impl<'a> Checker<'a> {
             }
             for name in pending {
                 checked.insert(name.clone());
-                let Some(derivation) = self
-                    .program
-                    .relations
-                    .get(&name)
-                    .and_then(|schema| schema.derivation.clone())
-                else {
+                let Some(schema) = self.program.relations.get(&name) else {
                     continue;
                 };
+                let Some(derivation) = schema.derivation.clone() else {
+                    continue;
+                };
+                let schema_kinds = schema.slot_entities.clone();
                 self.used_relations
                     .insert(derivation.source_relation.clone());
                 let source_kinds = self.typed_slots(&derivation.source_relation, &name);
-                if let Some(source_kinds) = source_kinds.as_ref()
-                    && !derivation.slot_entities.is_empty()
-                    && &derivation.slot_entities != source_kinds
+                if let Some(source_kinds) = source_kinds.as_ref() {
+                    for declared in [&derivation.slot_entities, &schema_kinds] {
+                        if declared.is_empty() || declared == source_kinds {
+                            continue;
+                        }
+                        self.push(
+                            RelationTypingCode::DerivedRelationSourceConflict,
+                            &name,
+                            &name,
+                            format!(
+                                "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
+                                format_kinds(declared),
+                                derivation.source_relation,
+                                format_kinds(source_kinds)
+                            ),
+                        );
+                    }
+                }
+                // A derived source traverses its own source with its own
+                // slots, whatever slots reach it.
+                if let Some(source) = self
+                    .program
+                    .relations
+                    .get(&derivation.source_relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                    && (source.current_slot, source.related_slot)
+                        != (derivation.current_slot, derivation.related_slot)
                 {
                     self.push(
-                        RelationTypingCode::DerivedRelationSourceConflict,
+                        RelationTypingCode::DerivedRelationSlotsDiverge,
                         &name,
                         &name,
                         format!(
-                            "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
-                            format_kinds(&derivation.slot_entities),
+                            "derived relation `{name}` reads its derived source `{}` with slots ({}, {}), but that source traverses its own source with slots ({}, {}); a chain of derived relations must keep one direction",
                             derivation.source_relation,
-                            format_kinds(source_kinds)
+                            derivation.current_slot,
+                            derivation.related_slot,
+                            source.current_slot,
+                            source.related_slot
                         ),
                     );
                 }
+                self.predicate_rules(&name, &derivation);
                 let kinds = effective_slot_entities(self.program, &name);
                 let slot = |slot: usize| {
                     kinds
@@ -478,6 +599,52 @@ impl<'a> Checker<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// A derived relation's predicate runs each rule it reads on the current
+    /// id when the rule's entity is the derivation's declared current kind,
+    /// and on the related id otherwise. Report rules that would run on an id
+    /// of another kind.
+    fn predicate_rules(&mut self, name: &str, derivation: &crate::model::RelationDerivation) {
+        let effective = effective_slot_entities(self.program, name);
+        let Some(effective_related) = effective
+            .as_ref()
+            .and_then(|kinds| kinds.get(derivation.related_slot))
+            .cloned()
+        else {
+            return;
+        };
+        let routed_current = derivation.slot_entities.get(derivation.current_slot);
+        let routed_related = derivation.slot_entities.get(derivation.related_slot);
+        let mut referenced = BTreeSet::new();
+        collect_judgment_derived(&derivation.predicate, &mut referenced);
+        for rule_name in referenced {
+            let Some(rule) = self.program.derived.get(&rule_name) else {
+                continue;
+            };
+            let entity = rule.entity.as_str();
+            if entity == SCALAR_ENTITY
+                || routed_current.is_some_and(|kind| kind == entity)
+                || routed_related.is_some_and(|kind| kind == entity)
+                || entity == effective_related
+                || self.id_kind(entity) == effective_related
+            {
+                continue;
+            }
+            let hint = if derivation.slot_entities.is_empty() {
+                " Declare the derived relation's `slot_entities` so the predicate can read the current id"
+            } else {
+                ""
+            };
+            self.push(
+                RelationTypingCode::PredicateEntityMismatch,
+                name,
+                name,
+                format!(
+                    "the predicate of derived relation `{name}` reads `{rule_name}` (entity `{entity}`), which runs on the related id of kind `{effective_related}`.{hint}"
+                ),
+            );
         }
     }
 
