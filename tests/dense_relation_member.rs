@@ -421,7 +421,8 @@ fn typing_refusal(program: &Value) -> Vec<(RelationTypingCode, String, String)> 
 }
 
 /// Explain's evaluator (`Engine::new`) on `program` as given, without the
-/// checks a request passes: every household's outputs, or the first error.
+/// checks a request passes (typing, input spells, the dependency graph):
+/// every household's outputs, or the first error.
 fn raw_explain(program: &Value, outputs: &[&str]) -> Answer {
     let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
     let model = spec.to_program().expect("the program converts");
@@ -1025,7 +1026,7 @@ enum Entry {
     Raw,
 }
 
-/// `count` of `x` over `relation` read with `slots[0]`, and `sum` with
+/// `count` over `relation` read with `slots[0]`, and `sum` of `x` read with
 /// `slots[1]`, for each root household, in explain (one query per root) and
 /// in dense (a one-row batch per root), or dense's compile error.
 fn link_answers(
@@ -1185,7 +1186,7 @@ fn link_answers(
 /// explain reads a derived source with the source's own derivation slots, not
 /// the ones its child names, so the child's slots would be ignored. Given that
 /// raw program, explain's evaluator and dense still agree link by link, and
-/// dense still declines `link` read against `d1`'s slots.
+/// dense still declines `link` read the other way from `d1`'s slots.
 #[test]
 fn dense_membership_of_an_ancestor_checks_each_links_slots() {
     let test = |relation: &str, (current, related): (usize, usize)| json!({ "kind": "relation_member", "relation": relation, "current_slot": current, "related_slot": related });

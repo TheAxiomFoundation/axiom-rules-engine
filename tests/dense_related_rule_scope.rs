@@ -398,7 +398,10 @@ fn raw_dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, D
 }
 
 /// Explain's evaluator given `program` as is: every row's outputs in batch
-/// order, or the first error, as a request in explain mode reports them.
+/// order, or the first error, as a request in explain mode reports them. It
+/// skips a request's other checks too (input spells, the dependency graph)
+/// and picks scalar or judgment from each output's base semantics, so it
+/// suits unversioned fixtures.
 fn raw_explain(program: &Value, data: &Data, outputs: &[&str]) -> Answer {
     let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
     let model = spec.to_program().expect("the program converts");
