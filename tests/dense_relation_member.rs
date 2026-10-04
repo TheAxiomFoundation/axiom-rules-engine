@@ -14,7 +14,10 @@
 //! `CompiledProgramArtifact::compile`, then `DenseCompiledProgram::from_artifact`.
 //! A program mandatory relation typing refuses never reaches that path, so its
 //! refusal is checked in explain and the artifact compiler, and the dense
-//! compiler's own decline on the raw program (`from_program`).
+//! compiler (`from_program`) is checked on the raw program against explain's
+//! evaluator (`Engine::new`), which also takes a raw program: dense declines
+//! the reversed source test explain answers, and agrees with explain on the
+//! alternating chain.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -25,8 +28,11 @@ use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
     DenseRelationBatchSpec,
 };
+use axiom_rules_engine::engine::Engine;
 use axiom_rules_engine::relation_typing::{RelationTypingCode, RelationTypingReport};
-use axiom_rules_engine::spec::{JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec};
+use axiom_rules_engine::spec::{
+    DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec,
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
@@ -412,6 +418,35 @@ fn typing_refusal(program: &Value) -> Vec<(RelationTypingCode, String, String)> 
         other => panic!("the artifact compiler must refuse the program, got {other:?}"),
     }
     explained
+}
+
+/// Explain's evaluator (`Engine::new`) on `program` as given, without the
+/// checks a request passes: every household's outputs, or the first error.
+fn raw_explain(program: &Value, outputs: &[&str]) -> Answer {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let model = spec.to_program().expect("the program converts");
+    let dataset: DatasetSpec =
+        serde_json::from_value(dataset(HOUSEHOLDS, program)).expect("dataset parses");
+    let dataset = dataset
+        .to_dataset_for_program(&model)
+        .expect("the dataset binds");
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    let mut engine = Engine::new(&model, &dataset);
+    HOUSEHOLDS
+        .iter()
+        .map(|household| {
+            outputs
+                .iter()
+                .map(|output| {
+                    engine
+                        .evaluate_scalar(output, household.id, &period)
+                        .map(|value| Cell::Number(value.as_decimal().expect("a numeric output")))
+                        .map_err(|error| error.to_string())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// The dense compiler's own verdict on `program` as given, without the checks
@@ -861,8 +896,8 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
     // Read the other way round, the source's own test asks whether a
     // household id is in `member`'s person slot and a person id in its
     // household slot, so typing refuses the program before explain evaluates
-    // it (explain answered 0 for every household) or dense sees an artifact.
-    // Given the raw program, dense still declines the test.
+    // it or dense sees an artifact. Given the raw program, explain's evaluator
+    // still filters every member out and dense still declines the test.
     let reversed = with_filter(vec![base_relation("member")], reversed_member);
     let mismatch = (
         RelationTypingCode::MembershipSlotEntityMismatch,
@@ -874,6 +909,7 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
         [mismatch.clone(), mismatch],
         "one mismatch per slot"
     );
+    assert_eq!(raw_explain(&reversed, &["n"]), Ok(numbers(&[0, 0, 0])));
     match compile_dense_unchecked(&reversed) {
         Err(DenseCompileError::Unsupported(message)) => assert!(
             message.contains("`relation_member` of `member`")
@@ -979,13 +1015,24 @@ const LINKS: &[(&str, &str)] = &[
 ];
 const LINK_ROOTS: &[(&str, &str)] = &[("h1", "5"), ("h2", "0"), ("h3", "7"), ("h4", "2")];
 
-/// `count` and `sum` of `x` over `relation`, read with `slots`, for each root
-/// household, in explain (one query per root) and in dense (a one-row batch
-/// per root), or dense's compile error.
+/// Whether `link_answers` runs the program through the checked entry points
+/// (an explain request and the artifact path) or as given (explain's
+/// evaluator and `DenseCompiledProgram::from_program`, which skip the typing
+/// check).
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    Checked,
+    Raw,
+}
+
+/// `count` of `x` over `relation` read with `slots[0]`, and `sum` with
+/// `slots[1]`, for each root household, in explain (one query per root) and
+/// in dense (a one-row batch per root), or dense's compile error.
 fn link_answers(
     program: &Value,
     relation: &str,
-    slots: (usize, usize),
+    slots: [(usize, usize); 2],
+    entry: Entry,
 ) -> (Answer, Result<Answer, DenseCompileError>) {
     let x = |id: &str| {
         LINK_ROOTS
@@ -1005,26 +1052,29 @@ fn link_answers(
     };
     let mut program = program.clone();
     program["derived"] = json!([
-        rule("n", "Household", "integer", over("count_related", slots)),
-        rule("s", "Household", "decimal", over("sum_related", slots)),
+        rule("n", "Household", "integer", over("count_related", slots[0])),
+        rule("s", "Household", "decimal", over("sum_related", slots[1])),
     ]);
+    let dataset = json!({
+        "inputs": LINK_ROOTS.iter().map(|(id, x)| json!({
+            "name": "x", "entity": "Household", "entity_id": id, "interval": interval(),
+            "value": { "kind": "decimal", "value": x },
+        })).collect::<Vec<_>>(),
+        "relations": LINKS.iter().map(|(from, to)| json!({
+            "name": "link", "tuple": [from, to], "interval": interval(),
+        })).collect::<Vec<_>>(),
+    });
     let request: ExecutionRequest = serde_json::from_value(json!({
         "mode": "explain",
         "program": program,
-        "dataset": {
-            "inputs": LINK_ROOTS.iter().map(|(id, x)| json!({
-                "name": "x", "entity": "Household", "entity_id": id, "interval": interval(),
-                "value": { "kind": "decimal", "value": x },
-            })).collect::<Vec<_>>(),
-            "relations": LINKS.iter().map(|(from, to)| json!({
-                "name": "link", "tuple": [from, to], "interval": interval(),
-            })).collect::<Vec<_>>(),
-        },
+        "dataset": dataset,
         "queries": LINK_ROOTS.iter().map(|(id, _)| json!({
             "entity_id": id, "period": period(), "outputs": ["n", "s"],
         })).collect::<Vec<_>>(),
     }))
     .expect("request parses");
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program parses");
+    let model = spec.to_program().expect("the program converts");
     let cells = |n: Decimal, s: Decimal| vec![Cell::Number(n), Cell::Number(s)];
     let number = |value: &OutputValue| match value {
         OutputValue::Scalar {
@@ -1037,16 +1087,41 @@ fn link_answers(
         } => Decimal::from_str(value).expect("decimal"),
         other => panic!("unexpected output {other:?}"),
     };
-    let explained = execute_request(request)
-        .map(|response| {
-            response
-                .results
+    let explained = match entry {
+        Entry::Checked => execute_request(request)
+            .map(|response| {
+                response
+                    .results
+                    .iter()
+                    .map(|result| cells(number(&result.outputs["n"]), number(&result.outputs["s"])))
+                    .collect()
+            })
+            .map_err(|error| error.to_string()),
+        Entry::Raw => {
+            let dataset: DatasetSpec = serde_json::from_value(dataset).expect("dataset parses");
+            let dataset = dataset
+                .to_dataset_for_program(&model)
+                .expect("the dataset binds");
+            let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+            let period = period.to_model().expect("period converts");
+            let mut engine = Engine::new(&model, &dataset);
+            let mut value = |output: &str, root: &str| {
+                engine
+                    .evaluate_scalar(output, root, &period)
+                    .map_err(|error| error.to_string())
+                    .map(|value| value.as_decimal().expect("a numeric output"))
+            };
+            LINK_ROOTS
                 .iter()
-                .map(|result| cells(number(&result.outputs["n"]), number(&result.outputs["s"])))
+                .map(|(root, _)| Ok(cells(value("n", root)?, value("s", root)?)))
                 .collect()
-        })
-        .map_err(|error| error.to_string());
-    let dense = compile_dense(&program).map(|compiled| {
+        }
+    };
+    let compiled = match entry {
+        Entry::Checked => compile_dense(&program),
+        Entry::Raw => DenseCompiledProgram::from_program(&model, Some("Household")),
+    };
+    let dense = compiled.map(|compiled| {
         let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
         let outputs = ["n".to_string(), "s".to_string()];
         LINK_ROOTS
@@ -1108,7 +1183,9 @@ fn link_answers(
 ///
 /// A chain whose links alternate direction is refused before any mode runs:
 /// explain reads a derived source with the source's own derivation slots, not
-/// the ones its child names, so the child's slots would be ignored.
+/// the ones its child names, so the child's slots would be ignored. Given that
+/// raw program, explain's evaluator and dense still agree link by link, and
+/// dense still declines `link` read against `d1`'s slots.
 #[test]
 fn dense_membership_of_an_ancestor_checks_each_links_slots() {
     let test = |relation: &str, (current, related): (usize, usize)| json!({ "kind": "relation_member", "relation": relation, "current_slot": current, "related_slot": related });
@@ -1175,14 +1252,21 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
             ),
         ] {
             let label = format!("{direction:?}: {label}");
-            let (explained, dense) = link_answers(&chain(predicate), "d3", direction);
+            let (explained, dense) =
+                link_answers(&chain(predicate), "d3", [direction; 2], Entry::Checked);
             let dense = dense.unwrap_or_else(|error| panic!("{label}: dense declined: {error}"));
             assert_eq!(dense, explained, "{label}");
             assert!(explained.is_ok(), "{label}: {explained:?}");
         }
 
-        let (off_chain, dense) = link_answers(&chain(test("link", reverse)), "d3", direction);
-        let (keep_all, _) = link_answers(&chain(constant(true)), "d3", direction);
+        let (off_chain, dense) = link_answers(
+            &chain(test("link", reverse)),
+            "d3",
+            [direction; 2],
+            Entry::Checked,
+        );
+        let (keep_all, _) =
+            link_answers(&chain(constant(true)), "d3", [direction; 2], Entry::Checked);
         assert!(off_chain.is_ok(), "{direction:?}: {off_chain:?}");
         assert_ne!(
             off_chain, keep_all,
@@ -1202,10 +1286,66 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
         }
     }
 
-    let mut alternating = chain(
-        [(1, 0), (0, 1), (1, 0)],
-        and(vec![test("d2", (1, 0)), x_above("1")]),
+    // `d1` reads `link` (1, 0), `d2` reads `d1` (0, 1) and `d3` reads `d2`
+    // (1, 0); `n` counts and `s` sums `d3` each way round.
+    let alternating = |d3: Value| chain([(1, 0), (0, 1), (1, 0)], d3);
+    let aggregates = [(0, 1), (1, 0)];
+    for (label, predicate) in [
+        ("its source", and(vec![test("d2", (1, 0)), x_above("1")])),
+        (
+            "its source's source",
+            and(vec![test("d1", (0, 1)), x_above("1")]),
+        ),
+        (
+            "the base relation",
+            or(vec![not(test("link", (1, 0))), x_above("6")]),
+        ),
+        (
+            "every ancestor, in an `if` condition",
+            compare(
+                if_then_else(
+                    and(vec![
+                        test("d2", (1, 0)),
+                        test("d1", (0, 1)),
+                        test("link", (1, 0)),
+                    ]),
+                    json!({ "kind": "input", "name": "x" }),
+                    decimal("0"),
+                ),
+                "gt",
+                decimal("1"),
+            ),
+        ),
+    ] {
+        let label = format!("alternating, raw: {label}");
+        let (explained, dense) =
+            link_answers(&alternating(predicate), "d3", aggregates, Entry::Raw);
+        let dense = dense.unwrap_or_else(|error| panic!("{label}: dense declined: {error}"));
+        assert_eq!(dense, explained, "{label}");
+        assert!(explained.is_ok(), "{label}: {explained:?}");
+    }
+    let (off_chain, dense) = link_answers(
+        &alternating(test("link", (0, 1))),
+        "d3",
+        aggregates,
+        Entry::Raw,
     );
+    let (keep_all, _) = link_answers(&alternating(constant(true)), "d3", aggregates, Entry::Raw);
+    assert_ne!(
+        off_chain, keep_all,
+        "alternating, raw: the off-chain test filters in explain"
+    );
+    match dense {
+        Err(DenseCompileError::Unsupported(message)) => {
+            assert!(
+                message.contains("`relation_member` of `link` (slots 0, 1)"),
+                "{message}"
+            )
+        }
+        other => panic!("alternating, raw: dense must decline the off-chain test, got {other:?}"),
+    }
+
+    let mut alternating = alternating(and(vec![test("d2", (1, 0)), x_above("1")]));
     alternating["derived"] = json!([rule(
         "n",
         "Household",
