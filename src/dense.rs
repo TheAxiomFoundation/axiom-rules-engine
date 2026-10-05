@@ -1075,7 +1075,8 @@ impl DenseCompiledProgram {
         // validated, and its owners built, once, when the first schema keyed
         // to it is reached; the schemas after it share them. Each supplied
         // column is length-checked when a schema first reads it, then shared,
-        // and a later schema reading it gets the shared column unchecked.
+        // and a later schema reading it gets the shared column unchecked (the
+        // first schema's columns are also pre-checked in `bind_relation_key`).
         // Schemas are still walked in order, so the first error reported is
         // the one a per-schema binding reports: a key's offsets, related count
         // and shared columns never change once bound, so every check a later

@@ -474,8 +474,8 @@ fn build_batch(
     // input column is supplied, the row count above came from the first
     // schema's offsets, so that key's offsets are extracted twice. Schemas are
     // walked in order, and a later schema skips only reads that already
-    // succeeded, so a malformed batch fails with the error the first schema
-    // reading it raises.
+    // succeeded, so a malformed batch fails with the first error that reading
+    // each schema's batch afresh, in schema order, would raise.
     let relation_batches = relations.unwrap_or_else(|| PyDict::new(inputs.py()));
     let mut bound_relations: HashMap<
         DenseRelationKey,
