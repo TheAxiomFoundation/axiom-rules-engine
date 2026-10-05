@@ -49,6 +49,50 @@ through v0.2.2, and main before this change. A retired value is kept byte for by
   engine as fixtures: a compiled artifact and a stage-3 aggregation artifact. `tests/execution_mode_parity.rs` checks generated
   programs against an independent reconstruction of the retired analysis.
 
+## 2026-09-25 — Relation entity typing is mandatory
+
+**Decision.** Every relation that a `count_related`, `sum_related`, or
+membership node executes must have one entity kind per slot (declared, or
+inherited by a derived relation from its source), and the slot a node keys
+on must hold the entity evaluating it. The check (`relation_typing`) runs at
+compile, at artifact load, on raw-program requests, and in the dense
+compiler; there is no opt-out (`Engine::new` evaluates a `Program` as given
+and documents that its callers check). RuleSpec lowering refuses a direction
+it would have to guess (every slot holds the rule's entity), aggregates and
+membership tests over a derived relation use the derivation's slots, and an
+undeclared short-name relation stays untyped, so executing it is an error
+that names its same-named declarations.
+Binding uses queries as kind evidence alongside input records and rejects
+tuples whose length differs from the arity. The artifact format stays 2:
+artifacts that pass the typing check (including relation-free ones) load as
+before, an artifact executing an untyped relation is refused with a pointer
+to `migrate artifact`, and
+`capabilities` lists `relation_entity_typing` so publishers can tell engines
+apart.
+
+**Why.** Entity ids are untyped strings and aggregation looks tuples up by
+`(relation, current_slot, id)`. With an untyped relation, a tuple stored in
+the other orientation matched nothing: rulespec-us `us/statutes/7/2012/j`'s
+`member_of_household` returned `not_holds` for a household with an elderly
+member, in explain and fast, exit 0, no warning (reproduced 2026-09-24 at
+6e709eb). The orientation checks were warnings behind an opt-in strict mode
+the CLI never set, and every backend shares the lookup, so differential
+testing between modes could not see it. Four commits in two weeks (78e9442,
+3edeab4, bbf9d3b, 6e709eb) fixed bugs in this area.
+
+**Alternatives.** Bumping the artifact format to 3 would force recompiling
+artifacts that are already safe and move engine, rulespec-us, the Python
+package, and axiom-api in lockstep; the capability string carries the same
+signal without that. A legacy load flag would reintroduce the silent zero the
+change exists to remove. Giving an undeclared short name the kinds of its
+same-named imported declarations (as an earlier head of this change did)
+would type a relation that is still separate from that declaration, so
+tuples supplied under the declaration's id would leave it empty: a silent
+zero the error now exposes. Whether such a name should alias the imported
+relation is #226; until axiom-compose can emit `arguments`, composition roots
+that aggregate an undeclared `member_of_household` fail to compile. #190
+separately made dataset binding strict by default.
+
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 
 **Decision.** Parameter and derived versions carry an optional inclusive

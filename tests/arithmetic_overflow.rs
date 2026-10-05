@@ -62,6 +62,11 @@ rules:
 const MEMBER_INCOME_TOTAL: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: result
     kind: derived
     entity: Household
@@ -605,6 +610,11 @@ fn filtered_aggregation_checks_the_filter_before_the_value_in_every_mode() {
     const RULESPEC: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: earning_member
     kind: derived
     entity: Person
@@ -671,6 +681,11 @@ fn member_predicate_count(predicate: &str) -> String {
         r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: counted_member
     kind: derived
     entity: Person
@@ -732,6 +747,11 @@ fn filtered_related_aggregation_overflow_is_an_error_in_every_mode() {
     const RULESPEC: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: earning_member
     kind: derived
     entity: Person

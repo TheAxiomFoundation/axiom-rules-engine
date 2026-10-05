@@ -58,6 +58,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -100,6 +101,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: household_accepts_snap_members
     kind: derived
     entity: Household
@@ -141,6 +143,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: snap_member_eligible
     kind: derived
     entity: Person
@@ -515,6 +518,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Family]
   - name: eldest_weekly_rate
     kind: parameter
     dtype: Money

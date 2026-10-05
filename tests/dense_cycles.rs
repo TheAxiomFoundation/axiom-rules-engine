@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
+use axiom_rules_engine::relation_typing::RelationTypingCode;
 use axiom_rules_engine::spec::ProgramSpec;
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -133,6 +134,12 @@ fn sum(relation: &str, value: &str) -> Value {
 
 fn member_relation() -> Value {
     json!({ "name": "member", "arity": 2, "slot_entities": ["Household", "Person"] })
+}
+
+/// A household related to households: a rule can read itself on the related
+/// side only when both sides share its entity, or typing refuses it first.
+fn household_link_relation() -> Value {
+    json!({ "name": "member", "arity": 2, "slot_entities": ["Household", "Household"] })
 }
 
 fn derived_relation(name: &str, source: &str, predicate: Value) -> Value {
@@ -265,7 +272,7 @@ fn a_root_rule_read_directly_by_its_own_where_clause_is_refused() {
     // The `where` clause hands `busy` to the current-entity compiler, which
     // would inline its formula and only then refuse the nested `count`.
     let spec = program(
-        vec![member_relation()],
+        vec![household_link_relation()],
         vec![judgment(
             "busy",
             "Household",
@@ -278,7 +285,7 @@ fn a_root_rule_read_directly_by_its_own_where_clause_is_refused() {
 #[test]
 fn a_root_rule_summed_by_its_own_sum_value_is_refused() {
     let spec = program(
-        vec![member_relation()],
+        vec![household_link_relation()],
         vec![scalar("total", "Household", sum("member", "total"))],
     );
     assert_cycle_refused(&spec, &["total"]);
@@ -380,6 +387,8 @@ fn shared_and_repeated_dependencies_still_compile() {
 // values, related and current-entity rules, derived relation predicates, and
 // derived relation sources. References are drawn at random, so many programs
 // are cyclic. A graph built here, independently of the engine, decides which.
+// Some references cross entities, so some programs are ill-typed; a model of
+// the relation typing judgment built here decides which.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -641,6 +650,74 @@ fn dependency_graph(spec: &Value) -> BTreeMap<String, BTreeSet<String>> {
     graph
 }
 
+/// The relation typing violations the artifact compiler must report for a
+/// generated spec, as `(code, relation, citing rule)`. Every relation here
+/// declares `[Household, Person]` and is read at slots (0, 1), so an
+/// aggregate keys on a household id and runs its `where` rules and `sum`
+/// value on person ids. A generated program breaks that in two ways only: a
+/// formula parameter (a `Scalar` rule) aggregates, though `Scalar` is not
+/// the `Household` kind the aggregate keys on, or a `where` clause or `sum`
+/// value names a household rule, which would run on a person id. Derived
+/// relation predicates are always well-typed: the derivation's kinds route a
+/// household rule to the current id and a person rule to the related one,
+/// and the check accepts a formula parameter there.
+fn typing_violations(spec: &Value) -> BTreeSet<(&'static str, String, String)> {
+    fn aggregates<'v>(value: &'v Value, into: &mut Vec<&'v Value>) {
+        match value {
+            Value::Object(object) => {
+                if matches!(
+                    object.get("kind").and_then(Value::as_str),
+                    Some("count_related" | "sum_related")
+                ) {
+                    into.push(value);
+                }
+                object.values().for_each(|inner| aggregates(inner, into));
+            }
+            Value::Array(items) => items.iter().for_each(|inner| aggregates(inner, into)),
+            _ => {}
+        }
+    }
+    let rules = spec["derived"].as_array().unwrap();
+    let entity_of = |name: &str| {
+        rules
+            .iter()
+            .find(|rule| rule["name"] == name)
+            .map(|rule| rule["entity"].as_str().unwrap())
+    };
+    let mut violations = BTreeSet::new();
+    for rule in rules {
+        let citing = rule["name"].as_str().unwrap().to_string();
+        let mut found = Vec::new();
+        aggregates(&rule["expr"], &mut found);
+        for aggregate in found {
+            let relation = aggregate["relation"].as_str().unwrap().to_string();
+            if rule["entity"] == "Scalar" {
+                violations.insert((
+                    RelationTypingCode::CurrentSlotEntityMismatch.as_str(),
+                    relation.clone(),
+                    citing.clone(),
+                ));
+            }
+            // A `where` clause is one rule reference (or a literal), and a
+            // `sum` value names one rule.
+            let related_rules = [&aggregate["where"], &aggregate["value"]]
+                .into_iter()
+                .filter(|reference| reference["kind"] == "derived")
+                .map(|reference| reference["name"].as_str().unwrap());
+            for name in related_rules {
+                if entity_of(name) == Some("Household") {
+                    violations.insert((
+                        RelationTypingCode::RelatedSlotEntityMismatch.as_str(),
+                        relation.clone(),
+                        citing.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    violations
+}
+
 fn reachable(graph: &BTreeMap<String, BTreeSet<String>>, from: &[String]) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
     let mut stack = from.to_vec();
@@ -669,6 +746,8 @@ struct Tally {
     cycles: BTreeMap<&'static str, usize>,
     other_errors: usize,
     compiled: usize,
+    artifacts_compiled: usize,
+    artifacts_ill_typed: BTreeMap<&'static str, usize>,
 }
 
 /// For every generated program, `from_program` returns rather than
@@ -678,7 +757,10 @@ struct Tally {
 ///   acyclic program never meets the new refusal;
 /// * it refuses every program with a cycle its root rules reach;
 /// * the artifact compiler, an independent cycle check, agrees with the graph
-///   built here on whether the program is cyclic at all.
+///   built here on whether the program is cyclic at all;
+/// * the artifact compiler refuses an acyclic program for relation typing
+///   exactly when the typing model here says it is ill-typed, reporting the
+///   violations the model predicts, and compiles every other acyclic program.
 #[test]
 fn from_program_refuses_exactly_the_cycles_it_reaches() {
     let config = Config {
@@ -741,6 +823,9 @@ fn from_program_refuses_exactly_the_cycles_it_reaches() {
             );
         }
 
+        // The artifact compiler checks the graph before typing, so a cyclic
+        // program is refused as cyclic whatever its typing.
+        let expected_violations = typing_violations(&json);
         let artifact = CompiledProgramArtifact::compile(spec.clone());
         match &artifact {
             Err(
@@ -750,10 +835,38 @@ fn from_program_refuses_exactly_the_cycles_it_reaches() {
                 !cyclic.is_empty(),
                 "the artifact compiler found a cycle the graph lacks: {artifact:?}"
             ),
-            Ok(_) => prop_assert!(
-                cyclic.is_empty(),
-                "the artifact compiler missed the cycle through {cyclic:?}"
-            ),
+            Err(CompileError::RelationTyping { report, .. }) => {
+                prop_assert!(
+                    cyclic.is_empty(),
+                    "the artifact compiler missed the cycle through {cyclic:?}: {report}"
+                );
+                let reported = report
+                    .violations
+                    .iter()
+                    .map(|violation| {
+                        (
+                            violation.code.as_str(),
+                            violation.relation.clone(),
+                            violation.citing.clone(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                prop_assert_eq!(&reported, &expected_violations, "{}", report);
+                for (code, _, _) in reported {
+                    *tally.artifacts_ill_typed.entry(code).or_default() += 1;
+                }
+            }
+            Ok(_) => {
+                prop_assert!(
+                    cyclic.is_empty(),
+                    "the artifact compiler missed the cycle through {cyclic:?}"
+                );
+                prop_assert!(
+                    expected_violations.is_empty(),
+                    "the artifact compiler accepted an ill-typed program: {expected_violations:?}"
+                );
+                tally.artifacts_compiled += 1;
+            }
             Err(error) => {
                 return Err(TestCaseError::fail(format!(
                     "unexpected artifact compile error: {error}"
@@ -788,4 +901,27 @@ fn from_program_refuses_exactly_the_cycles_it_reaches() {
         tally.compiled
     );
     assert!(tally.other_errors > 0);
+    // And it keeps reaching both kinds of ill-typed aggregate, and acyclic,
+    // well-typed programs the artifact compiler accepts.
+    for code in [
+        RelationTypingCode::CurrentSlotEntityMismatch,
+        RelationTypingCode::RelatedSlotEntityMismatch,
+    ] {
+        assert!(
+            tally
+                .artifacts_ill_typed
+                .get(code.as_str())
+                .copied()
+                .unwrap_or(0)
+                >= 5,
+            "too few programs refused for {}: {:?}",
+            code.as_str(),
+            tally.artifacts_ill_typed
+        );
+    }
+    assert!(
+        tally.artifacts_compiled >= 50,
+        "too few artifacts compiled: {}",
+        tally.artifacts_compiled
+    );
 }

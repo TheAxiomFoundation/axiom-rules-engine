@@ -14,6 +14,14 @@ module:
     F is the standard fraction (3/200 = 0.015). Main CT rate of 25% is
     applied to N outside this RuleSpec module; marginal relief reduces gross CT.
 rules:
+  # Associated companies are companies too, but a [Company, Company]
+  # relation read from a Company rule has no inferable direction and is
+  # refused; the relation-only kind `AssociatedCompany` names slot 0.
+  - name: associate_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [AssociatedCompany, Company]
   - name: ct_lower_limit
     kind: parameter
     dtype: Money

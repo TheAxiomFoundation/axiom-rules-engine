@@ -254,6 +254,22 @@ pub enum RuleSpecError {
         new: Vec<String>,
     },
     #[error(
+        "`{citing}` aggregates relation `{relation}` from entity `{entity}`, but every slot of the relation ({slot_entities:?}) holds `{entity}`, so the aggregation direction is ambiguous. Wrap the relation in a `derived_relation` whose explicit `current_slot` and `related_slot` say which side the rule aggregates from"
+    )]
+    AmbiguousRelationDirection {
+        relation: String,
+        citing: String,
+        entity: String,
+        slot_entities: Vec<String>,
+    },
+    #[error(
+        "derived relation `{relation}` omits `current_slot` or `related_slot`, and the slots its source would default to both hold the same kind ({slot_entities:?}), so its direction cannot be read from the kinds. State `current_slot` and `related_slot` explicitly"
+    )]
+    AmbiguousDerivedRelationSlots {
+        relation: String,
+        slot_entities: Vec<String>,
+    },
+    #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
     )]
     ConflictingUnitDeclarations {
@@ -2118,7 +2134,39 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
-        crate::relation_direction::resolve(&mut program);
+        let defaulted_slots = self
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.kind, Some(RuleKind::DerivedRelation)))
+            .filter(|rule| {
+                rule.derived_relation.as_ref().is_some_and(|derived| {
+                    derived.current_slot.is_none() || derived.related_slot.is_none()
+                })
+            })
+            .map(|rule| rule.canonical_relation_id())
+            .collect::<HashSet<_>>();
+        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
+            match error {
+                crate::relation_direction::DirectionError::Aggregate {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousRelationDirection {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                },
+                crate::relation_direction::DirectionError::DerivedSlots {
+                    relation,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                    relation,
+                    slot_entities,
+                },
+            }
+        })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();

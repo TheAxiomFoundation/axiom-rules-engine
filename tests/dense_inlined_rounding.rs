@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 const MODES: [&str; 4] = ["half_up", "half_even", "floor", "ceil"];
-const HEADER: &str = "format: rulespec/v1\nunits:\n  - name: USD\n    kind: currency\n    minor_units: 0\nrules:\n  - name: member_of_household\n    kind: data_relation\n    data_relation:\n      arity: 2\n";
+const HEADER: &str = "format: rulespec/v1\nunits:\n  - name: USD\n    kind: currency\n    minor_units: 0\nrules:\n  - name: member_of_household\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Household]\n";
 
 #[derive(Clone, Debug)]
 struct Household {

@@ -44,11 +44,13 @@ execution notice. Leniency does not repair reversed tuples and can still
 produce a zero count. The CLI also emits a stderr notice for lenient
 binding.
 
-Binding cannot check an id with no input records or conflicting input kinds,
-and older untyped artifacts without `slot_entities` do not provide declarations
-for this validation. Loading an artifact preserves its executable orientation;
-recompiling typed RuleSpec adopts the declared argument order. This request
-policy does not change the artifact format version. See
+Binding learns an id's kind from input records and from the queries (a query
+evaluates its output rules on its id); an id with neither, or with conflicting
+kinds, is not checked. Relation entity typing is mandatory: an artifact that
+executes a relation without `slot_entities`, or reads a typed relation against
+its declared kinds, is refused at load. Recompile from typed RuleSpec, or type
+it with `axiom-rules-engine migrate artifact`. This request policy does not
+change the artifact format version. See
 [dataset binding](../docs/rulespec.md#semantics) for migration details and the
 equivalent CLI and Rust API options.
 

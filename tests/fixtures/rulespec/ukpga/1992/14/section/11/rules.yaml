@@ -15,6 +15,11 @@ module:
     caller via the per-person boolean `is_disregarded`. Empty-home override
     (ss.11A/11B/11C/12/12A/12B) is pre-applied via `empty_home_override_applies`.
 rules:
+  - name: resident_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Dwelling]
   - name: ctax_appropriate_percentage
     kind: parameter
     dtype: Rate

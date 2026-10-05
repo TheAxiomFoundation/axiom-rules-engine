@@ -24,19 +24,34 @@
 //! extension uses (`CompiledProgramArtifact::compile`, then
 //! `DenseCompiledProgram::from_artifact`), and all three must agree with the
 //! answer each test states.
+//!
+//! Relation entity typing is now mandatory (`src/relation_typing.rs`): a
+//! `where` clause or summed value over a relation runs its rules on ids of
+//! the related slot's declared kind, and a derived relation's predicate runs
+//! each rule on the current or related id its entity selects, so a rule of
+//! another entity there is refused, as is a relation with no declared kinds.
+//! The cross-entity shapes above, which explain once evaluated for the
+//! related entity whatever it declares, are therefore refused in every mode
+//! before any of them evaluates. Explain's evaluator still accepts a raw
+//! program without that check (`Engine::new`), so on the raw program those
+//! shapes must still get the answer each test states from it. The dense
+//! compiler checks typing itself (`DenseCompiledProgram::from_program`), so it
+//! refuses the raw program too.
 
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{ApiError, ExecutionRequest, OutputValue, execute_request};
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
     DenseRelationBatchSpec,
 };
-use axiom_rules_engine::engine::EvalError;
+use axiom_rules_engine::engine::{Engine, EvalError};
+use axiom_rules_engine::model::{DerivedSemantics, ScalarValue};
+use axiom_rules_engine::relation_typing::{RelationTypingCode, RelationTypingReport};
 use axiom_rules_engine::spec::{
-    JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec, SpecError,
+    DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec,
 };
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -322,29 +337,8 @@ fn number(value: Decimal) -> String {
     value.normalize().to_string()
 }
 
-fn sparse(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer {
-    sparse_bound(mode, program, data, outputs, "strict")
-}
-
-/// Explain or fast under `"lenient"` relation binding. Two tests here pin
-/// how the modes evaluate a program whose relation usage contradicts the
-/// dataset's entity labels (a `Household` rule read for each `Person` member,
-/// a `SnapUnit` id in a `Household` slot). The default strict binding refuses
-/// those requests before evaluation (see `strict_binding_refuses`), so they
-/// opt out to reach the evaluators.
-fn sparse_lenient(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer {
-    sparse_bound(mode, program, data, outputs, "lenient")
-}
-
-fn request_json(
-    mode: &str,
-    program: &Value,
-    data: &Data,
-    outputs: &[&str],
-    binding: &str,
-) -> Value {
-    json!({
-        "relation_binding": binding,
+fn request(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> ExecutionRequest {
+    serde_json::from_value(json!({
         "mode": mode,
         "program": program,
         "dataset": data.dataset(),
@@ -353,38 +347,12 @@ fn request_json(
             .iter()
             .map(|row| json!({ "entity_id": row.id, "period": period(), "outputs": outputs }))
             .collect::<Vec<_>>(),
-    })
+    }))
+    .expect("request JSON parses")
 }
 
-/// Strict binding (the default) refuses the request with a dataset binding
-/// error naming the relation, in explain and fast alike.
-fn strict_binding_refuses(label: &str, program: &Value, data: &Data, outputs: &[&str]) {
-    for mode in ["explain", "fast"] {
-        let request: ExecutionRequest =
-            serde_json::from_value(request_json(mode, program, data, outputs, "strict"))
-                .expect("request JSON parses");
-        match execute_request(request) {
-            Err(ApiError::Spec(SpecError::StrictDatasetBindingDiagnostics(report))) => assert!(
-                report.to_string().contains(data.relation),
-                "{label}: {mode}: binding error should name `{}`: {report}",
-                data.relation
-            ),
-            other => panic!("{label}: {mode}: expected a strict binding refusal, got {other:?}"),
-        }
-    }
-}
-
-fn sparse_bound(
-    mode: &str,
-    program: &Value,
-    data: &Data,
-    outputs: &[&str],
-    binding: &str,
-) -> Answer {
-    let request: ExecutionRequest =
-        serde_json::from_value(request_json(mode, program, data, outputs, binding))
-            .expect("request JSON parses");
-    match execute_request(request) {
+fn sparse(mode: &str, program: &Value, data: &Data, outputs: &[&str]) -> Answer {
+    match execute_request(request(mode, program, data, outputs)) {
         Ok(response) => Answer::Rows(
             response
                 .results
@@ -415,6 +383,82 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
     let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
     let artifact = CompiledProgramArtifact::compile(spec).expect("artifact compiles");
     let compiled = DenseCompiledProgram::from_artifact(&artifact, Some(data.root))?;
+    Ok(run_dense(&compiled, data, outputs))
+}
+
+/// The dense compiler given `program` as is, without the checks a request or
+/// an artifact passes.
+fn raw_dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, DenseCompileError> {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let compiled = DenseCompiledProgram::from_program(
+        &spec.to_program().expect("the program converts"),
+        Some(data.root),
+    )?;
+    Ok(run_dense(&compiled, data, outputs))
+}
+
+/// Explain's evaluator given `program` as is: every row's outputs in batch
+/// order, or the first error, as a request in explain mode reports them. It
+/// skips a request's other checks too (input spells, the dependency graph)
+/// and picks scalar or judgment from each output's base semantics, so it
+/// suits unversioned fixtures.
+fn raw_explain(program: &Value, data: &Data, outputs: &[&str]) -> Answer {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let model = spec.to_program().expect("the program converts");
+    let dataset: DatasetSpec = serde_json::from_value(data.dataset()).expect("dataset parses");
+    let dataset = dataset
+        .to_dataset_for_program(&model)
+        .expect("the dataset binds");
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    let mut engine = Engine::new(&model, &dataset);
+    let mut answers = Vec::new();
+    for row in &data.rows {
+        let mut cells = Vec::new();
+        for output in outputs {
+            let cell =
+                match model.derived[*output].semantics {
+                    DerivedSemantics::Judgment(_) => engine
+                        .evaluate_judgment(output, row.id, &period)
+                        .map(|outcome| format!("{:?}", JudgmentOutcomeSpec::from(outcome))),
+                    DerivedSemantics::Scalar(_) => engine
+                        .evaluate_scalar(output, row.id, &period)
+                        .map(|value| match value {
+                            ScalarValue::Integer(value) => number(Decimal::from(value)),
+                            ScalarValue::Decimal(value) => number(value),
+                            other => panic!("unexpected scalar {other:?}"),
+                        }),
+                };
+            match cell {
+                Ok(cell) => cells.push(cell),
+                Err(error) => return Answer::Failed(error_key(&error)),
+            }
+        }
+        answers.push(cells);
+    }
+    Answer::Rows(answers)
+}
+
+/// Given the raw program, explain's evaluator answers `expected`, and the
+/// dense compiler refuses it for its relation typing.
+fn assert_raw_program_answers(
+    label: &str,
+    program: &Value,
+    data: &Data,
+    outputs: &[&str],
+    expected: Answer,
+) {
+    let explain = raw_explain(program, data, outputs);
+    assert_eq!(explain, expected, "{label}: raw explain");
+    match raw_dense(program, data, outputs) {
+        Err(DenseCompileError::RelationTyping(_)) => {}
+        other => panic!("{label}: dense must refuse the ill-typed raw program, got {other:?}"),
+    }
+}
+
+/// Execute `compiled` over `data`'s rows: every row's outputs in batch order,
+/// or the first error.
+fn run_dense(compiled: &DenseCompiledProgram, data: &Data, outputs: &[&str]) -> Answer {
     let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
     let outputs = outputs
         .iter()
@@ -422,13 +466,13 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
         .collect::<Vec<_>>();
     let result = match compiled.execute(
         &period.to_model().expect("period converts"),
-        data.batch(&compiled),
+        data.batch(compiled),
         &outputs,
     ) {
         Ok(result) => result,
-        Err(error) => return Ok(Answer::Failed(error_key(&error))),
+        Err(error) => return Answer::Failed(error_key(&error)),
     };
-    Ok(Answer::Rows(
+    Answer::Rows(
         (0..result.row_count)
             .map(|row| {
                 outputs
@@ -448,7 +492,7 @@ fn dense(program: &Value, data: &Data, outputs: &[&str]) -> Result<Answer, Dense
                     .collect()
             })
             .collect(),
-    ))
+    )
 }
 
 /// Explain answers `expected`, and fast and dense answer the same.
@@ -465,24 +509,53 @@ fn assert_all_modes(label: &str, program: &Value, data: &Data, outputs: &[&str],
     assert_eq!(dense, explain, "{label}: dense and explain differ");
 }
 
-/// `assert_all_modes` with explain and fast under lenient relation binding.
-fn assert_all_modes_lenient(
+type Violation = (RelationTypingCode, String, String);
+
+fn violations(report: &RelationTypingReport) -> Vec<Violation> {
+    report
+        .violations
+        .iter()
+        .map(|violation| {
+            (
+                violation.code,
+                violation.relation.clone(),
+                violation.citing.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Explain and fast refuse `program` before evaluating it, and so does the
+/// artifact compiler the dense path starts from, each reporting exactly the
+/// relation typing violations `expected` lists as `(code, relation, citing)`.
+fn assert_refused_for_typing(
     label: &str,
     program: &Value,
     data: &Data,
     outputs: &[&str],
-    expected: Answer,
+    expected: &[(RelationTypingCode, &str, &str)],
 ) {
-    let explain = sparse_lenient("explain", program, data, outputs);
-    assert_eq!(explain, expected, "{label}: explain");
-    assert_eq!(
-        sparse_lenient("fast", program, data, outputs),
-        explain,
-        "{label}: fast and explain differ"
-    );
-    let dense = dense(program, data, outputs)
-        .unwrap_or_else(|error| panic!("{label}: dense declined the program: {error}"));
-    assert_eq!(dense, explain, "{label}: dense and explain differ");
+    let expected = expected
+        .iter()
+        .map(|(code, relation, citing)| (*code, relation.to_string(), citing.to_string()))
+        .collect::<Vec<_>>();
+    for mode in ["explain", "fast"] {
+        match execute_request(request(mode, program, data, outputs)) {
+            Err(ApiError::RelationTyping(report)) => {
+                assert_eq!(violations(&report), expected, "{label}: {mode}: {report}");
+            }
+            Err(other) => panic!("{label}: {mode} refused for another reason: {other}"),
+            Ok(response) => panic!("{label}: {mode} answered {:?}", response.results),
+        }
+    }
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    match CompiledProgramArtifact::compile(spec) {
+        Err(CompileError::RelationTyping { report, .. }) => {
+            assert_eq!(violations(&report), expected, "{label}: artifact: {report}");
+        }
+        Err(other) => panic!("{label}: the artifact compiler refused for another reason: {other}"),
+        Ok(_) => panic!("{label}: the artifact compiler accepted the program"),
+    }
 }
 
 fn rows(values: &[&[&str]]) -> Answer {
@@ -559,12 +632,16 @@ fn is_minor() -> Value {
 // ---------------------------------------------------------------------------
 
 /// The shape the issue reports: a `where` clause over household members reads
-/// a `Household` rule. Explain evaluates it for each member, so it fails on the
-/// first member without the input, reads the members' own values when they
-/// have one, and is never reached for a household without members. Dense
-/// evaluated the household's own value and counted 2.
+/// a `Household` rule. Explain evaluated it for each member, so it failed on
+/// the first member without the input and read the members' own values when
+/// they had one, while dense evaluated the household's own value and counted
+/// 2. The rule would run on the ids in `member`'s `Person` slot, so the
+/// program is ill-typed and every mode refuses it, with or without the input;
+/// with `member` untyped, every mode refuses the untyped relation. Given the
+/// raw program, explain's evaluator still gives its answers and the dense
+/// compiler refuses it for its typing.
 #[test]
-fn where_clause_reads_a_household_rule_for_each_member() {
+fn a_household_rule_in_a_where_clause_over_members_is_refused_in_every_mode() {
     let hh_flag = judgment_rule("hh_flag", "Household", is_true("f"));
     let n = rule(
         "n",
@@ -576,34 +653,47 @@ fn where_clause_reads_a_household_rule_for_each_member() {
         vec![relation("member", &["Household", "Person"])],
         vec![hh_flag, n],
     );
-    assert_all_modes_lenient(
+    let ill_typed = [(RelationTypingCode::RelatedSlotEntityMismatch, "member", "n")];
+    assert_refused_for_typing(
+        "members without the input",
+        &program,
+        &households([vec![], vec![]]),
+        &["n"],
+        &ill_typed,
+    );
+    assert_refused_for_typing(
+        "members with the input",
+        &program,
+        &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
+        &["n"],
+        &ill_typed,
+    );
+    // Untyped: no declared slot entities.
+    let untyped = program_with_untyped_member(&program);
+    assert_refused_for_typing(
+        "untyped relation, members without the input",
+        &untyped,
+        &households([vec![], vec![]]),
+        &["n"],
+        &[(RelationTypingCode::UntypedRelation, "member", "n")],
+    );
+    // Given the raw program, explain's evaluator still evaluates the rule for
+    // each member, and dense agrees.
+    assert_raw_program_answers(
         "members without the input",
         &program,
         &households([vec![], vec![]]),
         &["n"],
         missing("f"),
     );
-    assert_all_modes_lenient(
+    assert_raw_program_answers(
         "members with the input",
         &program,
         &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
         &["n"],
         rows(&[&["1"], &["0"]]),
     );
-    // When the members' input records label them `Person` while the `where`
-    // clause evaluates a `Household` rule for each of them, the default strict
-    // binding refuses the request before evaluation. (Members with no input
-    // records have no known kind, so strict binding leaves them alone and the
-    // first case above fails in evaluation either way.)
-    strict_binding_refuses(
-        "typed relation, labelled members",
-        &program,
-        &households([vec![("f", flag(false))], vec![("f", flag(true))]]),
-        &["n"],
-    );
-    // Untyped: the same, with no declared slot entities.
-    let untyped = program_with_untyped_member(&program);
-    assert_all_modes_lenient(
+    assert_raw_program_answers(
         "untyped relation, members without the input",
         &untyped,
         &households([vec![], vec![]]),
@@ -720,9 +810,12 @@ fn scalar_entity_rule_in_a_where_clause_reads_the_related_entity() {
 // ---------------------------------------------------------------------------
 
 /// A `where` clause over a derived relation has no relation context either:
-/// the `Household` rule is evaluated for each adult member.
+/// the `Household` rule would run on each adult member's id, the related slot
+/// of `adult_member`, which declares `Person`, so every mode refuses it.
+/// Given the raw program, explain's evaluator still answers and the dense
+/// compiler refuses it for its typing.
 #[test]
-fn where_clause_over_a_derived_relation_reads_rules_for_the_related_entity() {
+fn a_household_rule_in_a_where_clause_over_a_derived_relation_is_refused_in_every_mode() {
     let adult = judgment_rule(
         "is_adult",
         "Person",
@@ -748,14 +841,38 @@ fn where_clause_over_a_derived_relation_reads_rules_for_the_related_entity() {
         ],
         vec![adult, hh_flag, n],
     );
-    assert_all_modes(
+    let ill_typed = [(
+        RelationTypingCode::RelatedSlotEntityMismatch,
+        "adult_member",
+        "n",
+    )];
+    assert_refused_for_typing(
+        "adult members without the input",
+        &program,
+        &households([vec![("age", int(30))], vec![("age", int(5))]]),
+        &["n"],
+        &ill_typed,
+    );
+    assert_refused_for_typing(
+        "adult members with the input",
+        &program,
+        &households([
+            vec![("age", int(30)), ("f", flag(true))],
+            vec![("age", int(40)), ("f", flag(false))],
+        ]),
+        &["n"],
+        &ill_typed,
+    );
+    // Given the raw program, explain's evaluator still evaluates the rule for
+    // each adult member, and dense agrees.
+    assert_raw_program_answers(
         "adult members without the input",
         &program,
         &households([vec![("age", int(30))], vec![("age", int(5))]]),
         &["n"],
         missing("f"),
     );
-    assert_all_modes(
+    assert_raw_program_answers(
         "adult members with the input",
         &program,
         &households([
@@ -816,17 +933,21 @@ fn derived_relation_predicate_reads_rules_as_explain_scopes_them() {
     );
 }
 
-/// The shape of `rulespec-us`'s Medicaid MAGI household pipeline: an untyped
-/// data relation of candidate rows for each applicant (current slot 1), an
-/// untyped derived relation over it, and `Person` rules for the applicant that
-/// count and sum over it with `Person` rules for each row. Dense evaluated the
-/// row rules for the applicant (the root), so it counted every row or none,
-/// and summed the applicant's income once per row.
+/// The shape of `rulespec-us`'s Medicaid MAGI household pipeline: a data
+/// relation of candidate rows for each applicant (current slot 1), a derived
+/// relation over it, and `Person` rules for the applicant that count and sum
+/// over it with `Person` rules for each row. Dense evaluated the row rules for
+/// the applicant (the root), so it counted every row or none, and summed the
+/// applicant's income once per row. Both relations were untyped there; typing
+/// is now mandatory, so the data relation declares `[Person, Person]` and the
+/// derived relation inherits it. The derivation declares no kinds of its own,
+/// so its predicate still reads each `Person` rule for the row. Untyped, every
+/// mode refuses the program.
 #[test]
-fn untyped_person_rows_read_row_rules_for_each_row() {
+fn person_rows_read_row_rules_for_each_row() {
     let program = program(
         vec![
-            json!({ "name": "candidate_row", "arity": 2 }),
+            relation("candidate_row", &["Person", "Person"]),
             json!({
                 "name": "member_of_applicant",
                 "arity": 2,
@@ -904,15 +1025,43 @@ fn untyped_person_rows_read_row_rules_for_each_row() {
         &["counted_rows", "household_income"],
         rows(&[&["2", "150"], &["0", "0"]]),
     );
+    let mut untyped = program.clone();
+    untyped["relations"][0] = json!({ "name": "candidate_row", "arity": 2 });
+    assert_refused_for_typing(
+        "MAGI-style candidate rows, untyped",
+        &untyped,
+        &data,
+        &["counted_rows", "household_income"],
+        &[
+            (
+                RelationTypingCode::UntypedRelation,
+                "candidate_row",
+                "member_of_applicant",
+            ),
+            (
+                RelationTypingCode::UntypedRelation,
+                "member_of_applicant",
+                "counted_rows",
+            ),
+            (
+                RelationTypingCode::UntypedRelation,
+                "member_of_applicant",
+                "household_income",
+            ),
+        ],
+    );
 }
 
 /// In a derived relation's predicate, a rule of an entity that is neither the
 /// relation's current nor its related slot entity (here the derivation's own
-/// `SnapUnit`) is evaluated for the related entity by explain's fallback.
-/// Dense declines it rather than evaluate it for either record; it used to
-/// evaluate a root-entity rule on the root row.
+/// `SnapUnit`) is evaluated for the related entity by explain's fallback,
+/// which read `g` for the member. A `SnapUnit` is queried with household ids,
+/// so the rule would run on an id of another kind than its entity's: every
+/// mode refuses the program. Given the raw program, explain's evaluator still
+/// reads `g` for the member, and the dense compiler refuses it for its
+/// typing (it once evaluated a root-entity rule on the root row).
 #[test]
-fn derived_relation_predicate_declines_a_rule_of_neither_slot_entity() {
+fn a_derived_relation_predicate_rule_of_neither_slot_entity_is_refused() {
     let program = program(
         vec![
             relation("member_of_household", &["Person", "Household"]),
@@ -952,20 +1101,30 @@ fn derived_relation_predicate_declines_a_rule_of_neither_slot_entity() {
         )],
     };
     let outputs = ["snap_unit_size"];
-    // `h1` is labelled `SnapUnit` (the query root) but sits in the
-    // `Household` slot of `member_of_household`, so the default strict
-    // binding refuses the request; lenient binding reaches the evaluators.
-    strict_binding_refuses("SnapUnit id in a Household slot", &program, &data, &outputs);
-    let explain = sparse_lenient("explain", &program, &data, &outputs);
-    assert_eq!(explain, missing("g"), "explain reads `g` for the member");
-    assert_eq!(sparse_lenient("fast", &program, &data, &outputs), explain);
-    match dense(&program, &data, &outputs) {
-        Err(DenseCompileError::Unsupported(message)) => assert!(
-            message.contains(
-                "`unit_flag` has entity `SnapUnit`, which is neither current nor related"
-            ),
-            "unexpected decline: {message}"
+    assert_refused_for_typing(
+        "a SnapUnit rule in the SnapUnit derivation's predicate",
+        &program,
+        &data,
+        &outputs,
+        &[(
+            RelationTypingCode::PredicateEntityMismatch,
+            "snap_unit",
+            "snap_unit",
+        )],
+    );
+    assert_eq!(
+        raw_explain(&program, &data, &outputs),
+        missing("g"),
+        "given the raw program, explain's evaluator reads `g` for the member"
+    );
+    match raw_dense(&program, &data, &outputs) {
+        Err(DenseCompileError::RelationTyping(report)) => assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation.code == RelationTypingCode::PredicateEntityMismatch),
+            "unexpected refusal: {report}"
         ),
-        other => panic!("dense should decline, got {other:?}"),
+        other => panic!("dense should refuse the ill-typed raw program, got {other:?}"),
     }
 }

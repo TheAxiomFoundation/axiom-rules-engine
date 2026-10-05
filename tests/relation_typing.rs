@@ -1,0 +1,2371 @@
+//! Mandatory relation entity typing.
+//!
+//! Entity ids are untyped strings and aggregation looks tuples up by
+//! `(relation, current_slot, id)`, so a tuple stored in the other orientation
+//! used to aggregate nothing: a household with two members had size 0, in
+//! explain and fast alike, with exit 0 and no warning. These tests pin the
+//! guarantees that replace that silent zero: executed relations must declare
+//! slot kinds (compile, artifact load, and raw requests), directions are never
+//! guessed, dataset tuples are checked against the declared kinds using input
+//! records and queries as kind evidence, and pre-typing artifacts migrate.
+
+use std::collections::BTreeMap;
+use std::process::Command;
+
+use axiom_rules_engine::api::{
+    ApiError, ExecutionMode, ExecutionQuery, ExecutionRequest, ExecutionResponse, execute_request,
+};
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
+use axiom_rules_engine::migrate::{
+    ArtifactRelationMigrationError, migrate_artifact_relation_typing,
+};
+use axiom_rules_engine::relation_typing::RelationTypingCode;
+use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
+use axiom_rules_engine::spec::{
+    DatasetBindingOptions, DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec,
+    ProgramSpec, RelationRecordSpec, ScalarValueSpec, SpecError,
+};
+
+fn interval() -> IntervalSpec {
+    IntervalSpec {
+        start: "2026-01-01".parse().unwrap(),
+        end: "2026-01-31".parse().unwrap(),
+    }
+}
+
+fn period() -> PeriodSpec {
+    PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().unwrap(),
+        end: "2026-01-31".parse().unwrap(),
+    }
+}
+
+fn tuple(relation: &str, ids: &[&str]) -> RelationRecordSpec {
+    RelationRecordSpec {
+        name: relation.to_string(),
+        tuple: ids.iter().map(|id| id.to_string()).collect(),
+        interval: interval(),
+    }
+}
+
+fn bool_input(name: &str, entity: &str, id: &str, value: bool) -> InputRecordSpec {
+    InputRecordSpec {
+        name: name.to_string(),
+        entity: entity.to_string(),
+        entity_id: id.to_string(),
+        interval: interval(),
+        value: ScalarValueSpec::Bool { value },
+    }
+}
+
+fn query(entity_id: &str, outputs: &[&str]) -> ExecutionQuery {
+    ExecutionQuery {
+        entity_id: entity_id.to_string(),
+        period: period(),
+        outputs: outputs.iter().map(|output| output.to_string()).collect(),
+        assessment_date: None,
+    }
+}
+
+fn run(
+    mode: ExecutionMode,
+    program: ProgramSpec,
+    dataset: DatasetSpec,
+    queries: Vec<ExecutionQuery>,
+) -> Result<ExecutionResponse, ApiError> {
+    execute_request(ExecutionRequest {
+        mode,
+        program,
+        dataset,
+        queries,
+        relation_binding: Default::default(),
+    })
+}
+
+/// The response's output values as JSON, so assertions do not depend on
+/// output enum layout: integers as numbers, judgments as their outcome.
+fn outputs(response: &ExecutionResponse) -> Vec<BTreeMap<String, serde_json::Value>> {
+    let value = serde_json::to_value(response).unwrap();
+    value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            result["outputs"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, output)| {
+                    let value = if output["kind"] == "judgment" {
+                        output["outcome"].clone()
+                    } else {
+                        output["value"]["value"].clone()
+                    };
+                    (name.clone(), value)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+const BOTH_MODES: [ExecutionMode; 2] = [ExecutionMode::Explain, ExecutionMode::Fast];
+
+/// The shape of rulespec-us `us/statutes/7/2012/j.yaml`: the relation is
+/// declared by arity alone and aggregated from a Household rule.
+const UNTYPED_SNAP_MEMBERSHIP: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: household_has_elderly_or_disabled_member
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2008-10-01'
+        formula: count_where(member_of_household, member_is_elderly_or_disabled) > 0
+  - name: household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2008-10-01'
+        formula: len(member_of_household)
+"#;
+
+fn typed_snap_membership(arguments: &str) -> String {
+    UNTYPED_SNAP_MEMBERSHIP.replace(
+        "      arity: 2\n",
+        &format!("      arity: 2\n      arguments: {arguments}\n"),
+    )
+}
+
+fn snap_program(arguments: &str) -> ProgramSpec {
+    CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(arguments))
+        .expect("typed membership compiles")
+        .program
+}
+
+#[test]
+fn raw_program_with_untyped_relation_is_refused_instead_of_counting_zero() {
+    // The executed 2026-09-24 probe: two members stored household-first
+    // against an untyped relation gave household size 0 in both modes.
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [{"name": "member_of", "arity": 2}],
+        "derived": [{
+            "name": "hh_size", "entity": "Household", "dtype": "integer", "unit": null,
+            "semantics": "scalar",
+            "expr": {"kind": "count_related", "relation": "member_of",
+                     "current_slot": 1, "related_slot": 0}
+        }]
+    }))
+    .unwrap();
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("member_of", &["h1", "p1"]),
+            tuple("member_of", &["h1", "p2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let error = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["hh_size"])],
+        )
+        .expect_err("an untyped relation must not execute");
+        let ApiError::RelationTyping(report) = &error else {
+            panic!("expected a relation typing error, got {error}");
+        };
+        assert_eq!(report.violations.len(), 1, "{report}");
+        assert_eq!(
+            report.violations[0].code,
+            RelationTypingCode::UntypedRelation
+        );
+        assert_eq!(report.violations[0].relation, "member_of");
+        assert_eq!(report.violations[0].citing, "hh_size");
+        assert!(error.to_string().contains("silent zero"), "{error}");
+    }
+}
+
+#[test]
+fn untyped_rulespec_relation_used_in_aggregation_fails_to_compile() {
+    let error = CompiledProgramArtifact::from_rulespec_str(UNTYPED_SNAP_MEMBERSHIP)
+        .expect_err("untyped relation typing is mandatory at compile time");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report.untyped_relations().into_iter().collect::<Vec<_>>(),
+        vec!["member_of_household"]
+    );
+    // Both aggregating rules are cited, in name order.
+    let citing = report
+        .violations
+        .iter()
+        .map(|violation| violation.citing.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        citing,
+        vec!["household_has_elderly_or_disabled_member", "household_size"]
+    );
+    assert!(
+        error.to_string().contains("data_relation.arguments"),
+        "the error says how to fix it: {error}"
+    );
+}
+
+#[test]
+fn both_declared_orders_count_members_when_tuples_follow_the_declaration() {
+    for (arguments, member_first) in [
+        ("[Person, Household]", true),
+        ("[Household, Person]", false),
+    ] {
+        let program = snap_program(arguments);
+        let relations = ["p1", "p2"]
+            .iter()
+            .map(|person| {
+                if member_first {
+                    tuple("member_of_household", &[person, "h1"])
+                } else {
+                    tuple("member_of_household", &["h1", person])
+                }
+            })
+            .collect();
+        let dataset = DatasetSpec {
+            inputs: vec![
+                bool_input("member_is_elderly_or_disabled", "Person", "p1", true),
+                bool_input("member_is_elderly_or_disabled", "Person", "p2", false),
+            ],
+            relations,
+        };
+        for mode in BOTH_MODES {
+            let response = run(
+                mode.clone(),
+                program.clone(),
+                dataset.clone(),
+                vec![query(
+                    "h1",
+                    &["household_size", "household_has_elderly_or_disabled_member"],
+                )],
+            )
+            .unwrap();
+            let outputs = &outputs(&response)[0];
+            assert_eq!(outputs["household_size"], 2, "{arguments} {mode:?}");
+            assert_eq!(
+                outputs["household_has_elderly_or_disabled_member"], "holds",
+                "{arguments} {mode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn queried_household_id_is_kind_evidence_for_reversed_tuples_without_inputs() {
+    // No input record labels any id; only the query says `h1` is a Household.
+    let program = snap_program("[Person, Household]").to_program().unwrap();
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("member_of_household", &["h1", "p1"]),
+            tuple("member_of_household", &["h1", "p2"]),
+        ],
+    };
+    let query_entities = vec![("h1".to_string(), "Household".to_string())];
+
+    let outcome = dataset
+        .to_dataset_for_queries_with_options(
+            &program,
+            &query_entities,
+            DatasetBindingOptions::lenient(),
+        )
+        .unwrap();
+    assert_eq!(outcome.diagnostics.len(), 2, "one per reversed tuple");
+    for diagnostic in &outcome.diagnostics {
+        assert_eq!(diagnostic.slot, 0);
+        assert_eq!(diagnostic.entity_id, "h1");
+        assert_eq!(diagnostic.expected_entity, "Person");
+        assert_eq!(diagnostic.actual_entity, "Household");
+    }
+
+    let error = dataset
+        .to_dataset_for_queries_with_options(
+            &program,
+            &query_entities,
+            DatasetBindingOptions::strict(),
+        )
+        .expect_err("strict binding refuses the reversed tuples");
+    assert!(
+        error
+            .to_string()
+            .contains("from the dataset input records or the queries"),
+        "{error}"
+    );
+
+    // The same dataset without the query carries no kind evidence at all.
+    let blind = dataset
+        .to_dataset_for_queries_with_options(&program, &[], DatasetBindingOptions::strict())
+        .unwrap();
+    assert!(blind.diagnostics.is_empty());
+}
+
+/// For every household of up to three members and every choice of which
+/// tuples are stored reversed, strict binding either refuses the dataset or
+/// the count is the true member count, and explain agrees with fast. With
+/// person inputs present or absent, the queried household id alone is
+/// enough evidence to refuse any reversed tuple.
+#[test]
+fn no_orientation_of_member_tuples_yields_a_silent_wrong_count() {
+    let program = snap_program("[Person, Household]");
+    let model = program.to_program().unwrap();
+    let mut cases = 0;
+    for members in 0..=3usize {
+        for reversed_mask in 0..(1u32 << members) {
+            for label_people in [false, true] {
+                let people = (0..members).map(|i| format!("p{i}")).collect::<Vec<_>>();
+                let mut relations = people
+                    .iter()
+                    .enumerate()
+                    .map(|(i, person)| {
+                        if reversed_mask & (1 << i) != 0 {
+                            tuple("member_of_household", &["h1", person])
+                        } else {
+                            tuple("member_of_household", &[person, "h1"])
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // A second household, always well-formed, shares nothing.
+                relations.push(tuple("member_of_household", &["q0", "h2"]));
+                let inputs = if label_people {
+                    people
+                        .iter()
+                        .map(|person| {
+                            bool_input("member_is_elderly_or_disabled", "Person", person, false)
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+                let dataset = DatasetSpec { inputs, relations };
+                let queries = vec![query("h1", &["household_size"])];
+                let strict = dataset.to_dataset_for_queries_with_options(
+                    &model,
+                    &[("h1".to_string(), "Household".to_string())],
+                    DatasetBindingOptions::strict(),
+                );
+                if reversed_mask != 0 {
+                    assert!(
+                        strict.is_err(),
+                        "members={members} mask={reversed_mask:b} labels={label_people}"
+                    );
+                    continue;
+                }
+                strict.unwrap();
+                let explain = run(
+                    ExecutionMode::Explain,
+                    program.clone(),
+                    dataset.clone(),
+                    queries.clone(),
+                )
+                .unwrap();
+                let fast = run(ExecutionMode::Fast, program.clone(), dataset, queries).unwrap();
+                assert_eq!(outputs(&explain)[0]["household_size"], members as i64);
+                assert_eq!(outputs(&explain), outputs(&fast));
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(
+        cases, 8,
+        "every all-forward case executed (4 sizes x 2 label modes)"
+    );
+}
+
+#[test]
+fn same_kind_relation_direction_is_ambiguous_and_refused() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: parent_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: child_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(parent_of)
+"#;
+    let error = lower_rulespec_str(source).expect_err("the direction is a guess");
+    assert!(
+        matches!(error, RuleSpecError::AmbiguousRelationDirection { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("derived_relation"), "{error}");
+}
+
+#[test]
+fn same_kind_relation_aggregates_through_a_derived_relation_with_explicit_slots() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: parent_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: dependent_children
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: parent_of
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: child_is_dependent
+  - name: dependent_child_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(dependent_children)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("explicit derivation slots resolve a same-kind direction")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("child_is_dependent", "Person", "c1", true),
+            bool_input("child_is_dependent", "Person", "c2", false),
+        ],
+        relations: vec![
+            tuple("parent_of", &["parent", "c1"]),
+            tuple("parent_of", &["parent", "c2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![
+                query("parent", &["dependent_child_count"]),
+                query("c1", &["dependent_child_count"]),
+            ],
+        )
+        .unwrap();
+        let outputs = outputs(&response);
+        assert_eq!(outputs[0]["dependent_child_count"], 1, "{mode:?}");
+        assert_eq!(outputs[1]["dependent_child_count"], 0, "{mode:?}");
+    }
+}
+
+#[test]
+fn aggregation_from_an_entity_no_slot_holds_is_refused() {
+    let source = typed_snap_membership("[Person, TaxUnit]");
+    let error = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect_err("a Household rule cannot key a [Person, TaxUnit] relation");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report
+            .violations
+            .iter()
+            .all(|violation| violation.code == RelationTypingCode::CurrentSlotEntityMismatch),
+        "{report}"
+    );
+}
+
+#[test]
+fn related_rule_of_another_entity_is_refused() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: filer_is_head
+    kind: derived
+    entity: TaxUnit
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: head_flag
+  - name: household_has_head_filer
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(member_of_household, filer_is_head) > 0
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("a TaxUnit rule cannot run on the Person slot");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report.violations[0].code,
+        RelationTypingCode::RelatedSlotEntityMismatch,
+        "{report}"
+    );
+}
+
+#[test]
+fn undeclared_relation_used_in_aggregation_is_untyped() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(undeclared_members)
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("a relation synthesized from a formula has no kinds");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert_eq!(
+        report.untyped_relations().into_iter().collect::<Vec<_>>(),
+        vec!["undeclared_members"]
+    );
+}
+
+#[test]
+fn tuple_length_must_match_relation_arity() {
+    let program = snap_program("[Person, Household]");
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![tuple("member_of_household", &["p1"])],
+    };
+    for mode in BOTH_MODES {
+        let error = run(
+            mode,
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["household_size"])],
+        )
+        .expect_err("a one-id tuple for a two-slot relation used to vanish");
+        assert!(
+            matches!(
+                error,
+                ApiError::Spec(SpecError::RelationTupleArity {
+                    arity: 2,
+                    found: 1,
+                    ..
+                })
+            ),
+            "{error}"
+        );
+    }
+}
+
+/// D1 from the 2026-09-24 mapping: an aggregate over a derived relation used
+/// the legacy slots while the derivation traversed its source with others,
+/// and fast read the source tuple at the aggregate's related slot.
+#[test]
+fn derived_relation_aggregates_use_the_derivation_slots_in_every_mode() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: household_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Household, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: unit_income
+    kind: derived
+    entity: SnapUnit
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: sum(members.income)
+  - name: unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .unwrap()
+        .program;
+    let income = |id: &str, amount: &str| InputRecordSpec {
+        name: "income".to_string(),
+        entity: "Person".to_string(),
+        entity_id: id.to_string(),
+        interval: interval(),
+        value: ScalarValueSpec::Decimal {
+            value: amount.to_string(),
+        },
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("eligible", "Person", "p1", true),
+            bool_input("eligible", "Person", "p2", false),
+            income("p1", "100"),
+            income("p2", "50"),
+        ],
+        relations: vec![
+            tuple("household_members", &["h1", "p1"]),
+            tuple("household_members", &["h1", "p2"]),
+        ],
+    };
+    let mut results = Vec::new();
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["unit_income", "unit_size"])],
+        )
+        .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
+        results.push(outputs(&response));
+    }
+    assert_eq!(results[0][0]["unit_size"], 1);
+    assert_eq!(results[0][0]["unit_income"], "100");
+    assert_eq!(results[0], results[1], "explain and fast agree");
+}
+
+/// A pre-typing artifact: the typed SNAP program with its relation's
+/// `slot_entities` removed, as engines before relation typing wrote them.
+fn legacy_artifact_json(arguments: &str) -> String {
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(arguments)).unwrap();
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        relation.as_object_mut().unwrap().remove("slot_entities");
+    }
+    serde_json::to_string(&value).unwrap()
+}
+
+#[test]
+fn loading_a_pre_typing_artifact_names_the_migration() {
+    let error =
+        CompiledProgramArtifact::from_json_str(&legacy_artifact_json("[Person, Household]"))
+            .expect_err("an artifact executing an untyped relation must not load");
+    assert!(
+        matches!(error, CompileError::LegacyArtifactRelationTyping { .. }),
+        "{error}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("migrate artifact"), "{message}");
+    assert!(message.contains("member_of_household"), "{message}");
+}
+
+#[test]
+fn migration_types_an_artifact_as_it_executes() {
+    // `household_size` (len) leaves the related slot open; the elderly rule's
+    // predicate is an input, so it does too. Usage fixes only the Household
+    // slot the aggregates key on.
+    let legacy = legacy_artifact_json("[Person, Household]");
+    let error = migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new())
+        .expect_err("the member slot cannot be inferred");
+    let ArtifactRelationMigrationError::Uninferable(detail) = &error else {
+        panic!("expected an uninferable report, got {error}");
+    };
+    assert!(detail.contains("member_of_household"), "{detail}");
+    assert!(detail.contains("[?, Household]"), "{detail}");
+
+    // An override that contradicts the executed Household slot is refused:
+    // migration never reorders an artifact.
+    let flipped = BTreeMap::from([(
+        "member_of_household".to_string(),
+        vec!["Household".to_string(), "Person".to_string()],
+    )]);
+    let error = migrate_artifact_relation_typing(&legacy, "legacy.json", &flipped)
+        .expect_err("the override contradicts execution");
+    assert!(
+        matches!(
+            error,
+            ArtifactRelationMigrationError::OverrideContradictsExecution { slot: 1, .. }
+        ),
+        "{error}"
+    );
+
+    let overrides = BTreeMap::from([(
+        "member_of_household".to_string(),
+        vec!["Person".to_string(), "Household".to_string()],
+    )]);
+    let migration = migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(migration.changes[0].source, "override");
+    let typed = serde_json::to_string(&migration.artifact).unwrap();
+    let reloaded = CompiledProgramArtifact::from_json_str(&typed).expect("migrated artifact loads");
+    assert_eq!(
+        reloaded.program.relations[0].slot_entities,
+        vec!["Person", "Household"]
+    );
+    // Migration types the artifact; it does not change what it computes.
+    let original =
+        CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership("[Person, Household]"))
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+}
+
+#[test]
+fn migration_infers_both_slots_when_a_related_rule_names_the_member_kind() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: member_is_elderly
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: elderly_flag
+  - name: household_has_elderly_member
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(member_of_household, member_is_elderly) > 0
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(source).unwrap();
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    value["program"]["relations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("slot_entities");
+    let legacy = serde_json::to_string(&value).unwrap();
+    let migration =
+        migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(migration.changes[0].source, "inferred");
+    assert_eq!(
+        migration.changes[0].slot_entities,
+        vec!["Person", "Household"]
+    );
+}
+
+fn engine() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+}
+
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "axiom-relation-typing-{name}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn cli_refuses_a_legacy_artifact_and_migrates_it() {
+    let dir = scratch_dir("cli");
+    let legacy_path = dir.join("legacy.json");
+    let typed_path = dir.join("typed.json");
+    std::fs::write(&legacy_path, legacy_artifact_json("[Person, Household]")).unwrap();
+    let request = serde_json::json!({
+        "mode": "explain",
+        "dataset": {"relations": [
+            {"name": "member_of_household", "tuple": ["p1", "h1"],
+             "interval": {"start": "2026-01-01", "end": "2026-01-31"}}
+        ]},
+        "queries": [{"entity_id": "h1",
+                     "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                     "outputs": ["household_size"]}]
+    })
+    .to_string();
+    let run_compiled = |artifact: &std::path::Path| {
+        use std::io::Write;
+        let mut child = engine()
+            .args(["run-compiled", "--artifact"])
+            .arg(artifact)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A refusal can exit before reading stdin, so a closed pipe is not a failure here;
+        // the assertions below check the exit status and stderr.
+        if let Err(error) = child.stdin.take().unwrap().write_all(request.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
+        child.wait_with_output().unwrap()
+    };
+
+    let refused = run_compiled(&legacy_path);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("migrate artifact"), "{stderr}");
+
+    let dry_run = engine()
+        .args(["migrate", "artifact", "--artifact"])
+        .arg(&legacy_path)
+        .args([
+            "--relation-entities",
+            "member_of_household=Person,Household",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    assert!(String::from_utf8_lossy(&dry_run.stdout).contains("dry run"));
+    assert!(!typed_path.exists(), "a dry run writes nothing");
+
+    let migrated = engine()
+        .args(["migrate", "artifact", "--artifact"])
+        .arg(&legacy_path)
+        .args([
+            "--relation-entities",
+            "member_of_household=Person,Household",
+        ])
+        .arg("--output")
+        .arg(&typed_path)
+        .output()
+        .unwrap();
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    let ran = run_compiled(&typed_path);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(
+        response["results"][0]["outputs"]["household_size"]["value"]["value"],
+        1
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn capabilities_advertise_mandatory_relation_typing() {
+    let output = engine().arg("capabilities").output().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        value["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("relation_entity_typing")),
+        "{value}"
+    );
+}
+
+fn violation_codes(error: &impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+/// A rule a derived relation's predicate reads runs on the current id only
+/// when the derivation declares the current kind. Lowering now stamps the
+/// source's kinds onto a derivation over distinct kinds, so a Household rule
+/// in the predicate reads the household, not the member.
+#[test]
+fn derived_relation_predicate_reads_a_current_entity_rule_on_the_current_id() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: household_is_large
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(member_of_household) > 1
+  - name: large_household_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: '2026-01-01'
+        formula: household_is_large
+  - name: large_member_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(large_household_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("a typed source with distinct kinds compiles")
+        .program;
+    let derived = program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "large_household_members")
+        .and_then(|relation| relation.derivation.as_ref())
+        .unwrap();
+    assert_eq!(derived.slot_entities, vec!["Person", "Household"]);
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("member_of_household", &["p1", "h1"]),
+            tuple("member_of_household", &["p2", "h1"]),
+            tuple("member_of_household", &["p3", "h2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![
+                query("h1", &["large_member_count"]),
+                query("h2", &["large_member_count"]),
+            ],
+        )
+        .unwrap();
+        let outputs = outputs(&response);
+        assert_eq!(outputs[0]["large_member_count"], 2, "{mode:?}");
+        assert_eq!(outputs[1]["large_member_count"], 0, "{mode:?}");
+    }
+}
+
+/// A raw program whose derivation declares no kinds runs every predicate
+/// rule on the related id; a Household rule there would read a person.
+#[test]
+fn raw_derivation_without_kinds_cannot_read_a_current_entity_rule() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "large_household_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household", "current_slot": 1, "related_slot": 0,
+                "predicate": {"kind": "derived", "name": "household_is_large"}
+            }}
+        ],
+        "derived": [
+            {"name": "household_is_large", "entity": "Household", "dtype": "judgment",
+             "unit": null, "semantics": "judgment",
+             "expr": {"kind": "comparison",
+                      "left": {"kind": "count_related", "relation": "member_of_household",
+                               "current_slot": 1, "related_slot": 0},
+                      "op": "gt",
+                      "right": {"kind": "literal", "value": {"kind": "integer", "value": 1}}}},
+            {"name": "large_member_count", "entity": "Household", "dtype": "integer",
+             "unit": null, "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "large_household_members",
+                      "current_slot": 1, "related_slot": 0}}
+        ]
+    }))
+    .unwrap();
+    let error = run(
+        ExecutionMode::Explain,
+        program,
+        DatasetSpec::default(),
+        vec![query("h1", &["large_member_count"])],
+    )
+    .expect_err("the predicate rule would run on a person id");
+    let ApiError::RelationTyping(report) = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.code == RelationTypingCode::PredicateEntityMismatch),
+        "{report}"
+    );
+    assert!(error.to_string().contains("slot_entities"), "{error}");
+}
+
+#[test]
+fn same_kind_derived_relation_must_state_its_slots() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: parent_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: dependent_children
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: parent_of
+    versions:
+      - effective_from: '2026-01-01'
+        formula: child_is_dependent
+  - name: dependent_child_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(dependent_children)
+"#;
+    let error = lower_rulespec_str(source).expect_err("the default slots are a guess");
+    assert!(
+        matches!(error, RuleSpecError::AmbiguousDerivedRelationSlots { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("current_slot"), "{error}");
+}
+
+#[test]
+fn chained_derived_relations_must_keep_one_direction() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: household_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: eligible_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: households_of_eligible_member
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: eligible_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: my_eligible_households
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(households_of_eligible_member)
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("the inner derivation traverses Household-first");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report.violations.iter().any(|violation| violation.code
+            == RelationTypingCode::DerivedRelationSlotsDiverge
+            && violation.relation == "households_of_eligible_member"),
+        "{report}"
+    );
+}
+
+const SNAP_UNIT_OVER_HOUSEHOLD_FIRST: &str = r#"
+format: rulespec/v1
+rules:
+  - name: household_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(members)
+  - name: unit_household_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(household_members)
+"#;
+
+/// A SnapUnit is queried with household ids, so a SnapUnit rule may
+/// aggregate the household relation keyed on its Household slot.
+#[test]
+fn filtered_entity_rule_aggregates_its_source_relation_by_the_source_kind() {
+    let program = CompiledProgramArtifact::from_rulespec_str(SNAP_UNIT_OVER_HOUSEHOLD_FIRST)
+        .expect("a SnapUnit rule keys household_members on its Household slot")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("eligible", "Person", "p1", true),
+            bool_input("eligible", "Person", "p2", false),
+        ],
+        relations: vec![
+            tuple("household_members", &["h1", "p1"]),
+            tuple("household_members", &["h1", "p2"]),
+        ],
+    };
+    let model = program.to_program().unwrap();
+    let strict = dataset.to_dataset_for_queries_with_options(
+        &model,
+        &[("h1".to_string(), "SnapUnit".to_string())],
+        DatasetBindingOptions::strict(),
+    );
+    assert!(strict.is_ok(), "a SnapUnit query is Household evidence");
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["unit_size", "unit_household_size"])],
+        )
+        .unwrap();
+        let outputs = &outputs(&response)[0];
+        assert_eq!(outputs["unit_size"], 1, "{mode:?}");
+        assert_eq!(outputs["unit_household_size"], 2, "{mode:?}");
+    }
+}
+
+#[test]
+fn derived_relations_filtering_to_one_entity_must_agree_on_its_kind() {
+    let source = SNAP_UNIT_OVER_HOUSEHOLD_FIRST.replace(
+        "  - name: unit_size\n",
+        r#"  - name: other_snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: household_members
+      entity: SnapUnit
+      member_relation: other_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: other_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(other_members)
+  - name: unit_size
+"#,
+    );
+    let error = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect_err("SnapUnit ids cannot be both households and people");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.code == RelationTypingCode::FilteredEntityKindConflict),
+        "{report}"
+    );
+}
+
+#[test]
+fn derived_relation_schema_kinds_must_match_its_source() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "members_d", "arity": 2, "slot_entities": ["Household", "Person"],
+             "derivation": {
+                "source_relation": "member_of_household", "current_slot": 0, "related_slot": 1,
+                "predicate": {"kind": "comparison",
+                              "left": {"kind": "literal", "value": {"kind": "bool", "value": true}},
+                              "op": "eq",
+                              "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}
+            }}
+        ],
+        "derived": [
+            {"name": "hh_size_d", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "members_d",
+                      "current_slot": 0, "related_slot": 1}}
+        ]
+    }))
+    .unwrap();
+    let error = run(
+        ExecutionMode::Explain,
+        program,
+        DatasetSpec::default(),
+        vec![query("h1", &["hh_size_d"])],
+    )
+    .expect_err("the schema kinds contradict the source");
+    assert!(
+        violation_codes(&error).contains("derived_relation_source_slot_conflict"),
+        "{error}"
+    );
+}
+
+/// Usage names a SnapUnit rule's entity, but SnapUnit ids are household ids:
+/// migration must stamp the household kind, or binding would refuse the
+/// correctly oriented tuples it was meant to keep.
+#[test]
+fn migration_stamps_a_filtered_entitys_source_kind() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: extra_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: member_is_extra
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: extra_flag
+  - name: unit_extra_count
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+"#;
+    let fresh = CompiledProgramArtifact::from_rulespec_str(source).expect("typed source compiles");
+    let mut value = serde_json::to_value(&fresh).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        if relation["name"] == "extra_members" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let legacy = serde_json::to_string(&value).unwrap();
+    let migration =
+        migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(
+        migration.changes[0].slot_entities,
+        vec!["Person", "Household"]
+    );
+    assert_eq!(
+        serde_json::to_value(&migration.artifact).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+    // The fully typed artifact needs no change and is not a contradiction.
+    let typed = serde_json::to_string(&fresh).unwrap();
+    let unchanged = migrate_artifact_relation_typing(&typed, "typed.json", &BTreeMap::new())
+        .expect("a typed artifact migrates cleanly");
+    assert!(unchanged.changes.is_empty());
+
+    let model = migration.artifact.program.to_program().unwrap();
+    let dataset = DatasetSpec {
+        inputs: vec![bool_input("extra_flag", "Person", "p1", true)],
+        relations: vec![tuple("extra_members", &["p1", "h1"])],
+    };
+    dataset
+        .to_dataset_for_queries_with_options(
+            &model,
+            &[("h1".to_string(), "SnapUnit".to_string())],
+            DatasetBindingOptions::strict(),
+        )
+        .expect("correctly oriented tuples bind under a SnapUnit query");
+}
+
+/// Explain keeps a derived relation's membership binding through `if`
+/// conditions and comparisons, so lowering must resolve a membership test
+/// there exactly as it does for a bare one.
+#[test]
+fn membership_inside_a_conditional_keeps_its_direction() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: granted
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: granted_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: '(if granted: 1 else: 0) > 0'
+  - name: granted_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(granted_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("the conditional membership test resolves from the declared kinds")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![],
+        relations: vec![
+            tuple("members", &["p1", "h1"]),
+            tuple("members", &["p2", "h1"]),
+            tuple("granted", &["h1", "p1"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["granted_count"])],
+        )
+        .unwrap();
+        assert_eq!(outputs(&response)[0]["granted_count"], 1, "{mode:?}");
+    }
+}
+
+/// A membership test over a derived relation can only use that derivation's
+/// slots, which its traversal reads its source with.
+#[test]
+fn membership_in_a_derived_relation_uses_its_derivation_slots() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: grants
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: approved_grants
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: grants
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: approved
+  - name: approved_members
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: approved_grants
+  - name: approved_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(approved_members)
+"#;
+    let program = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect("the membership test takes the derived relation's slots")
+        .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("approved", "Person", "p1", true),
+            bool_input("approved", "Person", "p2", false),
+        ],
+        relations: vec![
+            tuple("members", &["p1", "h1"]),
+            tuple("members", &["p2", "h1"]),
+            tuple("grants", &["h1", "p1"]),
+            tuple("grants", &["h1", "p2"]),
+        ],
+    };
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["approved_count"])],
+        )
+        .unwrap();
+        assert_eq!(outputs(&response)[0]["approved_count"], 1, "{mode:?}");
+    }
+}
+
+/// An artifact deserialized directly skips the loader's gate; the dense
+/// compiler checks typing itself.
+#[test]
+fn dense_compilation_refuses_an_untyped_artifact() {
+    use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
+    let artifact: CompiledProgramArtifact =
+        serde_json::from_str(&legacy_artifact_json("[Person, Household]")).unwrap();
+    let error = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
+        .expect_err("dense must not execute an untyped relation");
+    assert!(
+        matches!(error, DenseCompileError::RelationTyping(_)),
+        "{error}"
+    );
+}
+
+/// Household and SnapUnit rules both read `extra_members`; SnapUnit ids are
+/// household ids.
+const SNAP_UNIT_AND_HOUSEHOLD_READ_EXTRA: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: extra_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: EXTRA_KINDS
+  - name: member_is_extra
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: extra_flag
+  - name: unit_extra_count
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+  - name: household_extra_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(extra_members, member_is_extra)
+"#;
+
+fn snap_unit_and_household(extra_kinds: &str) -> String {
+    SNAP_UNIT_AND_HOUSEHOLD_READ_EXTRA.replace("EXTRA_KINDS", extra_kinds)
+}
+
+/// Household and SnapUnit rules read the same relation keyed on its
+/// Household slot: SnapUnit ids are household ids.
+#[test]
+fn household_and_filtered_entity_rules_share_a_relation() {
+    let program =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap()
+            .program;
+    let dataset = DatasetSpec {
+        inputs: vec![
+            bool_input("extra_flag", "Person", "p1", true),
+            bool_input("eligible", "Person", "p1", true),
+        ],
+        relations: vec![
+            tuple("member_of_household", &["p1", "h1"]),
+            tuple("extra_members", &["p1", "h1"]),
+        ],
+    };
+    let model = program.to_program().unwrap();
+    for entity in ["Household", "SnapUnit"] {
+        dataset
+            .to_dataset_for_queries_with_options(
+                &model,
+                &[("h1".to_string(), entity.to_string())],
+                DatasetBindingOptions::strict(),
+            )
+            .unwrap_or_else(|error| panic!("{entity}: {error}"));
+    }
+    for mode in BOTH_MODES {
+        let response = run(
+            mode.clone(),
+            program.clone(),
+            dataset.clone(),
+            vec![query("h1", &["unit_extra_count", "household_extra_count"])],
+        )
+        .unwrap();
+        let outputs = &outputs(&response)[0];
+        assert_eq!(outputs["unit_extra_count"], 1, "{mode:?}");
+        assert_eq!(outputs["household_extra_count"], 1, "{mode:?}");
+    }
+}
+
+/// A filtered entity names ids of its source's kind, so it is never a slot
+/// kind: `[Person, SnapUnit]` is refused with the kind to declare instead,
+/// rather than accepted as an alias that every later comparison would have
+/// to resolve.
+#[test]
+fn a_slot_declared_with_a_filtered_entity_is_refused() {
+    let error =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, SnapUnit]"))
+            .expect_err("SnapUnit is an alias for household ids");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    assert!(
+        report.violations.iter().all(|violation| violation.code
+            == RelationTypingCode::FilteredEntitySlotKind
+            && violation.relation == "extra_members"),
+        "{report}"
+    );
+    assert!(error.to_string().contains("`Household`"), "{error}");
+}
+
+/// Migration never stamps an alias, and stops when nothing changes, even for
+/// an executed relation of arity zero.
+#[test]
+fn migration_terminates_on_an_executed_zero_arity_relation() {
+    // Compile a typed two-slot program, then rewrite the relation to arity
+    // zero: the compiler would refuse that program, but an old artifact can
+    // carry it, and its derived metadata does not depend on the arity.
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [{"name": "flag", "arity": 2, "slot_entities": ["Household", "Person"]}],
+        "derived": [{"name": "n", "entity": "Household", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "flag",
+                              "current_slot": 0, "related_slot": 1}}]
+    }))
+    .unwrap();
+    let mut value =
+        serde_json::to_value(CompiledProgramArtifact::compile(program).unwrap()).unwrap();
+    let relation = value["program"]["relations"][0].as_object_mut().unwrap();
+    relation.insert("arity".to_string(), serde_json::json!(0));
+    relation.remove("slot_entities");
+    let source = serde_json::to_string(&value).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(
+            migrate_artifact_relation_typing(&source, "zero.json", &BTreeMap::new())
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        );
+    });
+    let outcome = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("migration terminates");
+    let error = outcome.expect_err("a zero-arity aggregation cannot be typed");
+    assert!(
+        error.contains("cannot infer every slot kind") && error.contains("flag"),
+        "the migration reached its inference and reported the relation: {error}"
+    );
+}
+
+fn without_kinds(artifact: &CompiledProgramArtifact, relations: &[&str]) -> String {
+    let mut value = serde_json::to_value(artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        if relations.contains(&relation["name"].as_str().unwrap()) {
+            let relation = relation.as_object_mut().unwrap();
+            relation.remove("slot_entities");
+            if let Some(derivation) = relation.get_mut("derivation") {
+                derivation.as_object_mut().unwrap().remove("slot_entities");
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap()
+}
+
+/// Uses that name a filtered entity and its source kind agree once each use
+/// is mapped to the ids it reads, so migration infers the relation.
+#[test]
+fn migration_combines_household_and_filtered_entity_uses() {
+    let fresh =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap();
+    let legacy = without_kinds(&fresh, &["extra_members"]);
+    let migration =
+        migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()).unwrap();
+    assert_eq!(migration.changes.len(), 1);
+    assert_eq!(migration.changes[0].source, "inferred");
+    assert_eq!(
+        serde_json::to_value(&migration.artifact).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+}
+
+/// With every kind stripped, the filtered entity maps to nothing until the
+/// override types its source; the overrides must be read in that light.
+#[test]
+fn migration_applies_overrides_before_mapping_filtered_entities() {
+    let fresh =
+        CompiledProgramArtifact::from_rulespec_str(&snap_unit_and_household("[Person, Household]"))
+            .unwrap();
+    let legacy = without_kinds(
+        &fresh,
+        &["member_of_household", "extra_members", "snap_unit"],
+    );
+    let overrides = BTreeMap::from([
+        (
+            "member_of_household".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+        (
+            "extra_members".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+    ]);
+    let migration = migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("the overrides agree with execution once SnapUnit maps to Household");
+    assert_eq!(migration.changes.len(), 2);
+    let typed = serde_json::to_string(&migration.artifact).unwrap();
+    CompiledProgramArtifact::from_json_str(&typed).expect("the migrated artifact loads");
+}
+
+/// A filter whose source kind is unknown (here an unused one over an untyped
+/// relation) does not make its entity an alias: `Household` slots elsewhere
+/// remain a physical kind, with or without an identity filter alongside.
+#[test]
+fn an_unresolved_filter_does_not_alias_a_physical_kind() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    for with_identity_filter in [false, true] {
+        let mut relations = vec![
+            serde_json::json!({"name": "household_members", "arity": 2,
+                               "slot_entities": ["Household", "Person"]}),
+            serde_json::json!({"name": "ghost", "arity": 2}),
+            serde_json::json!({"name": "ghost_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "Household", "predicate": truth.clone()}}),
+        ];
+        if with_identity_filter {
+            relations.push(
+                serde_json::json!({"name": "household_self", "arity": 2, "derivation": {
+                "source_relation": "household_members", "current_slot": 0, "related_slot": 1,
+                "entity": "Household", "predicate": truth.clone()}}),
+            );
+        }
+        let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+            "relations": relations,
+            "derived": [{"name": "hh_size", "entity": "Household", "dtype": "integer",
+                         "unit": null, "semantics": "scalar",
+                         "expr": {"kind": "count_related", "relation": "household_members",
+                                  "current_slot": 0, "related_slot": 1}}]
+        }))
+        .unwrap();
+        let dataset = DatasetSpec {
+            inputs: vec![],
+            relations: vec![
+                tuple("household_members", &["h1", "p1"]),
+                tuple("household_members", &["h1", "p2"]),
+            ],
+        };
+        for mode in BOTH_MODES {
+            let response = run(
+                mode.clone(),
+                program.clone(),
+                dataset.clone(),
+                vec![query("h1", &["hh_size"])],
+            )
+            .unwrap_or_else(|error| panic!("identity={with_identity_filter} {mode:?}: {error}"));
+            assert_eq!(outputs(&response)[0]["hh_size"], 2);
+        }
+    }
+}
+
+/// A slot declared with a filter of a filter is told the physical kind at
+/// the end of the chain, not the intermediate alias.
+#[test]
+fn a_nested_filtered_slot_kind_names_the_physical_kind() {
+    let source = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: unit_members
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, SnapUnit]
+  - name: nested_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: unit_members
+      entity: NestedSnap
+      member_relation: nested_members
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: eligible
+  - name: nested_size
+    kind: derived
+    entity: NestedSnap
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(nested_members)
+"#;
+    let error = CompiledProgramArtifact::from_rulespec_str(source)
+        .expect_err("SnapUnit is an alias, so unit_members is refused");
+    let CompileError::RelationTyping { report, .. } = &error else {
+        panic!("expected a relation typing error, got {error}");
+    };
+    let aliased = report
+        .violations
+        .iter()
+        .filter(|violation| violation.code == RelationTypingCode::FilteredEntitySlotKind)
+        .collect::<Vec<_>>();
+    assert!(!aliased.is_empty(), "{report}");
+    for violation in aliased {
+        assert!(
+            violation.message.contains("(`Household`)"),
+            "names the physical kind: {}",
+            violation.message
+        );
+    }
+}
+
+/// A filter over an untyped source that shares a physical kind's name makes
+/// that name ambiguous: its ids could be anything. Migration never lets a
+/// declaration settle that, so it asks for the kind, and an override in
+/// executed order succeeds.
+#[test]
+fn migration_asks_when_an_unresolved_filter_shares_a_physical_name() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "typed_members", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "extra_members", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "Household", "predicate": truth}}
+        ],
+        "derived": [
+            {"name": "member_flag", "entity": "Person", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "typed_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "typed_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}},
+            {"name": "extra_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "extra_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        if name == "extra_members" || name == "ghost" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let legacy = serde_json::to_string(&value).unwrap();
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("extra_members"), "{detail}")
+        }
+        other => panic!("the ambiguous Household name must not be stamped: {other:?}"),
+    }
+    let overrides = BTreeMap::from([(
+        "extra_members".to_string(),
+        vec!["Person".to_string(), "Household".to_string()],
+    )]);
+    let migration = migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("an override in executed order types the relation");
+    let extra = migration
+        .changes
+        .iter()
+        .find(|change| change.relation == "extra_members")
+        .expect("extra_members is typed");
+    assert_eq!(extra.slot_entities, vec!["Person", "Household"]);
+}
+
+/// An unused relation's declaration is never checked, so naming an
+/// unresolved filter there does not make that filter a physical kind for
+/// migration: the executed relation's slot stays unknown and migration asks
+/// rather than stamping the filter name.
+#[test]
+fn an_unused_declaration_does_not_establish_a_physical_kind_for_migration() {
+    let truth = serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}});
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "unit_filter", "arity": 2, "derivation": {
+                "source_relation": "ghost", "current_slot": 1, "related_slot": 0,
+                "entity": "UnitF", "predicate": truth}},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "unused_declaration", "arity": 2, "slot_entities": ["Person", "UnitF"]},
+            {"name": "extra_members", "arity": 2, "slot_entities": ["Person", "Household"]}
+        ],
+        "derived": [
+            {"name": "member_flag", "entity": "Person", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "unit_extra", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "extra_members",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "member_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
+    let mut value = serde_json::to_value(&artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        if name == "extra_members" || name == "ghost" {
+            relation.as_object_mut().unwrap().remove("slot_entities");
+        }
+    }
+    let outcome = migrate_artifact_relation_typing(
+        &serde_json::to_string(&value).unwrap(),
+        "legacy.json",
+        &BTreeMap::new(),
+    );
+    match outcome {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("extra_members"), "{detail}")
+        }
+        Ok(migration) => panic!(
+            "UnitF must not be stamped as a physical kind: {:?}",
+            migration.changes
+        ),
+        Err(other) => panic!("unexpected error: {other}"),
+    }
+}
+
+fn always() -> serde_json::Value {
+    serde_json::json!({"kind": "comparison",
+        "left": {"kind": "literal", "value": {"kind": "bool", "value": true}}, "op": "eq",
+        "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}})
+}
+
+/// Rewrite a compiled artifact's relations with `edit`, keeping its metadata.
+fn edit_relations(
+    artifact: &CompiledProgramArtifact,
+    mut edit: impl FnMut(&str, &mut serde_json::Map<String, serde_json::Value>),
+) -> String {
+    let mut value = serde_json::to_value(artifact).unwrap();
+    for relation in value["program"]["relations"].as_array_mut().unwrap() {
+        let name = relation["name"].as_str().unwrap().to_string();
+        edit(&name, relation.as_object_mut().unwrap());
+    }
+    serde_json::to_string(&value).unwrap()
+}
+
+/// An unused derived relation is never checked, so neither its declared
+/// kinds nor the filter it defines can type an executed relation, nor
+/// contradict a correct override.
+#[test]
+fn migration_ignores_unused_derived_relations_as_evidence() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "r", "current_slot": 1,
+                "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "d", "arity": 2, "derivation": {"source_relation": "r", "current_slot": 1,
+                "related_slot": 0, "slot_entities": ["Person", "Organization"],
+                "predicate": always()}}
+        ],
+        "derived": [{"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "s",
+                              "current_slot": 1, "related_slot": 0}}]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "r" || name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("the unused derivations must not type `s`: {other:?}"),
+    }
+    let overrides = BTreeMap::from([
+        (
+            "r".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+        (
+            "s".to_string(),
+            vec!["Person".to_string(), "Household".to_string()],
+        ),
+    ]);
+    migrate_artifact_relation_typing(&legacy, "legacy.json", &overrides)
+        .expect("the unused Organization derivation does not contradict a correct override");
+}
+
+/// Explain runs a versioned rule's versions only, so a relation its base
+/// semantics reads is not execution evidence for migration.
+#[test]
+fn migration_ignores_a_versioned_rules_unexecuted_base_semantics() {
+    let count = |relation: &str| {
+        serde_json::json!({"kind": "count_related", "relation": relation,
+                           "current_slot": 1, "related_slot": 0})
+    };
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "seed", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "ghost", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "ghost",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [
+            {"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": count("s")},
+            {"name": "seed_reader", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": count("seed"),
+             "versions": [{"effective_from": "2026-01-01", "semantics": "scalar",
+                           "expr": {"kind": "literal", "value": {"kind": "integer", "value": 7}}}]}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" | "ghost" => {
+            relation.remove("slot_entities");
+        }
+        "seed" => {
+            relation.insert(
+                "slot_entities".to_string(),
+                serde_json::json!(["Person", "UnitF"]),
+            );
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("the dead base expression must not type `s`: {other:?}"),
+    }
+}
+
+/// A filter that declares nothing inherits its ancestor's kinds, so an
+/// ancestor contradicting its own source poisons the filter too.
+#[test]
+fn migration_ignores_filters_above_a_contradicting_ancestor() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [{"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "s",
+                              "current_slot": 1, "related_slot": 0}}]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    // An earlier engine could carry a derivation declaring kinds that
+    // contradict its source; strip the data relations' kinds as a
+    // pre-typing artifact would.
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        "inner" => {
+            relation["derivation"].as_object_mut().unwrap().insert(
+                "slot_entities".to_string(),
+                serde_json::json!(["Person", "Organization"]),
+            );
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("UnitF must not map to Organization through `inner`: {other:?}"),
+    }
+}
+
+/// A chain link that names other slots than its derived source traverses
+/// with maps its entity through the wrong slot, so migration ignores it.
+#[test]
+fn migration_ignores_filters_whose_chain_changes_direction() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [{"name": "unit_size", "entity": "UnitF", "dtype": "integer", "unit": null,
+                     "semantics": "scalar",
+                     "expr": {"kind": "count_related", "relation": "s",
+                              "current_slot": 1, "related_slot": 0}}]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        "outer" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("UnitF must not map to Person through `outer`: {other:?}"),
+    }
+}
+
+/// An older artifact can declare a filter name in an executed slot. A
+/// declaration cannot vouch for a name that an inconsistent derivation also
+/// defines: here the outer filter changes direction, so its `UnitF` ids are
+/// really households, whatever `t` declares.
+#[test]
+fn migration_never_trusts_a_name_an_inconsistent_filter_defines() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["UnitF", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "t", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [
+            {"name": "org_flag", "entity": "Organization", "dtype": "judgment", "unit": null,
+             "semantics": "judgment",
+             "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"},
+                      "op": "eq",
+                      "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "unit_s", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "s",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "org_flag"}}},
+            {"name": "unit_t", "entity": "UnitF", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "count_related", "relation": "t",
+                      "current_slot": 1, "related_slot": 0,
+                      "where": {"kind": "derived", "name": "org_flag"}}}
+        ]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        "t" => {
+            relation.insert(
+                "slot_entities".to_string(),
+                serde_json::json!(["Organization", "UnitF"]),
+            );
+        }
+        "outer" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
+    }
+}
+
+fn org_flag_rule() -> serde_json::Value {
+    serde_json::json!({"name": "org_flag", "entity": "Organization", "dtype": "judgment",
+        "unit": null, "semantics": "judgment",
+        "expr": {"kind": "comparison", "left": {"kind": "input", "name": "flag"}, "op": "eq",
+                 "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}})
+}
+
+fn unit_count(name: &str, relation: &str) -> serde_json::Value {
+    serde_json::json!({"name": name, "entity": "UnitF", "dtype": "integer", "unit": null,
+        "semantics": "scalar",
+        "expr": {"kind": "count_related", "relation": relation,
+                 "current_slot": 1, "related_slot": 0,
+                 "where": {"kind": "derived", "name": "org_flag"}}})
+}
+
+/// A filter over an untyped source has no known physical kind, so its name
+/// says nothing, even where an executed relation declares it in a slot.
+#[test]
+fn migration_takes_no_evidence_from_an_unresolved_filter_name() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "g", "arity": 2},
+            {"name": "f", "arity": 2, "derivation": {"source_relation": "g",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "UnitF"]},
+            {"name": "t", "arity": 2, "slot_entities": ["Organization", "UnitF"]}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s"), unit_count("unit_t", "t")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(
+                detail.contains("  s ") && detail.contains("[Organization, ?]"),
+                "{detail}"
+            );
+            assert!(
+                detail.contains("UnitF: defined by `f` (type its data relation `g`)"),
+                "names the data relation to type: {detail}"
+            );
+        }
+        other => panic!("UnitF must not be stamped onto `s`: {other:?}"),
+    }
+}
+
+/// A filter name is trusted only when every derivation defining it is
+/// consistent: one consistent definition does not mask an inconsistent one.
+#[test]
+fn migration_distrusts_a_filter_name_any_inconsistent_derivation_defines() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "r", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "Household"]},
+            {"name": "f1", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "r",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "f2", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| match name {
+        "s" => {
+            relation.remove("slot_entities");
+        }
+        // An older engine let `f2` change direction partway down its chain.
+        "f2" => {
+            let derivation = relation["derivation"].as_object_mut().unwrap();
+            derivation.insert("current_slot".to_string(), serde_json::json!(0));
+            derivation.insert("related_slot".to_string(), serde_json::json!(1));
+        }
+        _ => {}
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}")
+        }
+        other => panic!("`f1` alone must not vouch for UnitF: {other:?}"),
+    }
+}
+
+/// An earlier engine (6031295) compiled this module without typing it. The
+/// UnitF filter's chain changes direction, so its apparent kind is `Person`
+/// while it is queried with household ids. A Person rule and a UnitF rule
+/// both key `s` on slot 1, so that slot holds people for one and households
+/// for the other: no kind is right. A use by a filter migration does not
+/// trust must contest the slot, not drop out and let the Person use settle
+/// it (which used to stamp `s=[Organization, Person]` and then refuse the
+/// dataset's household tuples under strict binding).
+#[test]
+fn migration_refuses_a_slot_an_untrusted_filter_contests() {
+    let legacy = include_str!(
+        "fixtures/artifacts/relation_typing/inconsistent_filter_contests_slot.v0.2.2-6031295.json"
+    );
+    match migrate_artifact_relation_typing(legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => {
+            assert!(detail.contains("  s "), "{detail}");
+            assert!(
+                detail.contains(
+                    "UnitF: defined by `bridge` (its source chain is inconsistent; recompile from source)"
+                ),
+                "says what settles the filter: {detail}"
+            );
+        }
+        other => panic!("the contested slot must not be stamped: {other:?}"),
+    }
+}
+
+/// The uninferable hint follows a filter's source chain down to the data
+/// relation `--relation-entities` accepts, not the derived relation the
+/// filter reads directly.
+#[test]
+fn migration_hint_names_the_data_relation_at_the_bottom_of_a_chain() {
+    let program: ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "g", "arity": 2},
+            {"name": "inner", "arity": 2, "derivation": {"source_relation": "g",
+                "current_slot": 1, "related_slot": 0, "predicate": always()}},
+            {"name": "outer", "arity": 2, "derivation": {"source_relation": "inner",
+                "current_slot": 1, "related_slot": 0, "entity": "UnitF", "predicate": always()}},
+            {"name": "s", "arity": 2, "slot_entities": ["Organization", "UnitF"]}
+        ],
+        "derived": [org_flag_rule(), unit_count("unit_s", "s")]
+    }))
+    .unwrap();
+    let artifact = CompiledProgramArtifact::compile(program).expect("the fresh program compiles");
+    let legacy = edit_relations(&artifact, |name, relation| {
+        if name == "s" {
+            relation.remove("slot_entities");
+        }
+    });
+    match migrate_artifact_relation_typing(&legacy, "legacy.json", &BTreeMap::new()) {
+        Err(ArtifactRelationMigrationError::Uninferable(detail)) => assert!(
+            detail.contains("UnitF: defined by `outer` (type its data relation `g`)"),
+            "names `g`, not `inner`: {detail}"
+        ),
+        other => panic!("UnitF has no trusted kind: {other:?}"),
+    }
+}

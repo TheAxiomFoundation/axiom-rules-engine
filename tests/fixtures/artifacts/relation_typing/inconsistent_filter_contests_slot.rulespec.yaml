@@ -1,0 +1,57 @@
+format: rulespec/v1
+rules:
+  - name: r
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: s
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: bad_seed
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: r
+      current_slot: 1
+      related_slot: 0
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'true'
+  - name: bridge
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: bad_seed
+      current_slot: 0
+      related_slot: 1
+      entity: UnitF
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'true'
+  - name: o_ok
+    kind: derived
+    entity: Organization
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'eligible == true'
+  - name: person_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'count_where(s, o_ok)'
+  - name: unit_count
+    kind: derived
+    entity: UnitF
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'count_where(s, o_ok)'

@@ -56,16 +56,16 @@ Supported rule kinds in the current Rust loader:
   every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
 - `data_relation`: executable runtime predicate declarations with
-  `data_relation.arity`. An optional `data_relation.arguments` list declares
-  one proposed entity kind per tuple slot, in source position order. The list
-  length must equal the arity; that mismatch is always a compile error.
-  Usable entity-kind labels are ASCII UpperCamelCase/alphanumeric. A
-  shape-failing declaration warns in compatibility mode and is treated as
-  undeclared (`slot_entities` remains empty). A well-shaped kind absent from
+  `data_relation.arity` and a `data_relation.arguments` list declaring one
+  entity kind per tuple slot, in tuple order. The list length must equal the
+  arity; that mismatch is always a compile error. The list is required for any
+  relation a rule executes (see [Relation entity typing](#relation-entity-typing));
+  a relation no rule executes may omit it. Usable entity-kind labels are ASCII
+  UpperCamelCase/alphanumeric. A shape-failing declaration warns and is treated
+  as undeclared (`slot_entities` remains empty). A well-shaped kind absent from
   the import-merged program closure also warns, but remains carried verbatim
-  because published modules legitimately declare relation-only kinds.
-  Omitting the list leaves a legacy relation untyped. Dataset relation records
-  use durable ids such as
+  because published modules legitimately declare relation-only kinds. Dataset
+  relation records use durable ids such as
   `us:statutes/7/2012/j#relation.member_of_household`.
 - `derived_relation`: executable runtime predicates computed by filtering a
   source relation with a judgment formula. This supports filtered membership
@@ -109,22 +109,55 @@ rules:
       arguments: [Person, Household]
 ```
 
-Compiled artifacts carry declared argument kinds as
-`program.relations[].slot_entities`. The compiler separately derives the
-orientation that executable `count_related`, `sum_related`, and membership
-nodes use. A membership node is executable only inside a derived relation's
-predicate, where it reads the two IDs the relation binds. As at run time, that
-binding carries through comparisons, `if` conditions and branches, and
-arithmetic, but not into a nested aggregation's `where` clause, a `match`
-fallback's pattern labels, or an over-periods reduction. The reference
-evaluator rejects a membership node outside that scope, so it implies no
-orientation. If the
-derived orientation disagrees with the declaration, compilation emits
-`warning[relation_orientation_mismatch]` naming both orders and a citing rule.
-The serialized declaration remains verbatim for source fidelity.
+### Relation entity typing
 
-Rust callers can promote relation argument shape/closure/orientation warnings
-to errors at compile time with:
+Entity ids are opaque strings, and an aggregate reads a relation by looking
+up `(relation, current slot, id)`. Without declared slot kinds, a tuple stored
+in the other orientation matches nothing and the aggregate silently returns
+zero. Relation entity typing is therefore mandatory:
+
+- **Compile.** Every relation that a `count_related`, `sum_related`, or
+  membership node executes, directly or as a derived relation's source, must
+  have one entity kind per slot: declared with `data_relation.arguments`
+  (lowered to `program.relations[].slot_entities`), or, for a derived
+  relation, inherited from its source. The slot a node keys on must hold the
+  evaluating entity (a filtered entity, a derived relation's `entity` such as
+  `SnapUnit`, counts as its source's current kind), rules evaluated on the
+  related ids must have the related slot's kind, and rules a derived
+  relation's predicate reads must run on an id of their own entity. A
+  derived relation's kinds must match its source's, a chain of derived
+  relations must keep one direction, and derived relations filtering to the
+  same entity must agree on its kind. Violations are compile errors listing
+  each relation and citing rule: `untyped_relation`, `unknown_relation`,
+  `relation_slot_entity_count`, `relation_slot_out_of_range`,
+  `relation_current_slot_entity_mismatch`,
+  `relation_related_slot_entity_mismatch`,
+  `relation_membership_slot_entity_mismatch`,
+  `relation_predicate_entity_mismatch`, `derived_relation_source_slot_conflict`,
+  `derived_relation_slots_diverge`, `filtered_entity_kind_conflict`, and
+  `relation_slot_kind_is_filtered_entity` (a slot declares a filtered entity
+  such as `SnapUnit` rather than the kind of the ids it is queried with).
+- **Load and request.** The same check runs when a compiled artifact loads
+  (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
+  carries a raw `ProgramSpec`, and when the dense compiler builds from a
+  program or artifact. `Engine::new` evaluates a `Program` exactly as given;
+  Rust callers that build one themselves must call
+  `relation_typing::check_program` first.
+- **Bind.** Dataset tuples are checked against the declared kinds. An id's
+  kind comes from input records that carry both `entity_id` and `entity`, and
+  from queries: a query evaluates its output rules on its `entity_id`, so a
+  queried household is a `Household` even with no household-level inputs. A
+  filtered entity's evidence (a `SnapUnit` query) counts as its source kind.
+  Ids with no evidence, or evidence of more than one kind, are skipped. A
+  known mismatch is an error by default and a warning under lenient binding
+  (see [Binding policy](#binding-policy)). A tuple whose length differs from the
+  relation's arity is always an error.
+
+Declared-kind labels must be UpperCamelCase entity kinds. A label that fails
+that shape, or names a kind no rule in the import-merged closure uses, is a
+warning (`invalid_relation_argument_entity_shape`,
+`unknown_relation_argument_entity`) that `strict_relation_entities` promotes to
+an error:
 
 ```rust
 CompiledProgramArtifact::from_rulespec_str_with_options(
@@ -136,20 +169,21 @@ CompiledProgramArtifact::from_rulespec_str_with_options(
 )
 ```
 
-This compile option is independent of binding strictness. Dataset binding is
-strict by default: a known mismatch between a tuple slot's expected entity kind
+A shape-failing declaration leaves the relation untyped, so executing it is
+still an `untyped_relation` error.
+
+#### Binding policy
+
+Dataset binding is strict by default: a known mismatch between a tuple slot's expected entity kind
 and the supplied entity id's kind is an error before execution. The error names
 the relation, slot, entity id, and expected and supplied kinds so callers can
 correct the tuple and input entity labels.
 
-The engine derives an opaque entity id's kind from dataset input records that
-carry both `entity_id` and `entity`. For a relation used by the program, expected
-tuple positions come from executable usage; unresolved or conflicting positions
-are skipped. Only an unused relation falls back to its declared position order.
-This preserves the orientation encoded in existing compiled artifacts. Ids
-absent from input records, or ids used with more than one kind, remain unknown
-and are skipped. `Entity` is an ordinary supplied kind, not a wildcard for
-`Person`, `TaxUnit`, or another expected kind.
+Expected tuple positions are the relation's declared slot kinds (typing makes
+them agree with every executed use). Kind evidence is described under **Bind**
+above: input records and queries. Ids with no evidence, or ids used with more
+than one kind, remain unknown and are skipped. `Entity` is an ordinary supplied
+kind, not a wildcard for `Person`, `TaxUnit`, or another expected kind.
 
 Both `ExecutionRequest` and `CompiledExecutionRequest` accept a top-level
 `"relation_binding": "strict"` or `"relation_binding": "lenient"` field; omitting
@@ -188,11 +222,52 @@ Python extension's dense execution methods take arrays rather than a wire
 `DatasetSpec`, so this request policy does not apply to those methods.
 
 When upgrading or recompiling RuleSpec, ensure tuple order follows declared
-arguments and that input records carry the correct kinds. Old compiled
-artifacts without `program.relations[].slot_entities` cannot validate tuple
-entity kinds; strict binding does not infer missing declarations or rewrite
-their executable slots. Recompile from typed RuleSpec to carry the declarations.
-This binding policy does not change the artifact format version.
+arguments and that input records carry the correct kinds. An old compiled
+artifact that executes relations without `program.relations[].slot_entities`
+no longer loads; see the next section.
+
+#### Migrating compiled artifacts
+
+Artifacts compiled before typing became mandatory keep format version 2.
+Those whose executed relations pass the typing check (or that execute none)
+load as before. One that executes an untyped relation, or reads a typed one
+against its declared kinds, fails to load with a message naming the
+migration. Recompiling from typed source is the durable fix; for an
+artifact whose source cannot be recompiled yet:
+
+```bash
+axiom-rules-engine migrate artifact --artifact old.json
+axiom-rules-engine migrate artifact --artifact old.json --output typed.json \
+  --relation-entities 'us:statutes/7/2012/j#relation.member_of_household=Person,Household'
+```
+
+Without `--output` the command reports what it would change and writes
+nothing. It stamps each untyped relation with the kinds execution
+establishes, and only those:
+
+- the slot an aggregate keys on holds ids of the evaluating rule's entity;
+- the other slot holds ids of the entity of the rules its `where` clause and
+  summed value read, when they agree;
+- an aggregate over a derived relation is evidence about its data source only
+  when every link of the chain keeps the same slots;
+- a filtered entity counts as its source's kind only when every derivation
+  defining that name is consistent with its source chain and they agree.
+
+Declarations never vouch for a kind, and derived-relation predicates and
+membership tests give no evidence. A slot this leaves open (for example
+`len(relation)` with no related rule, or a rule whose entity is a filter over
+an untyped source) needs `--relation-entities <relation>=<Kind>,<Kind>` in
+tuple order; the relation may be named by its full id or a unique short name.
+The command never moves an aggregate's slots, so datasets that bound
+correctly before still bind, and datasets in the other orientation now get
+`relation_slot_entity_mismatch` at binding (an error by default, a warning
+under lenient binding) instead of aggregating nothing silently. An override
+that contradicts what execution establishes is refused. A typed declaration
+that contradicts it (artifacts compiled between the declaration carry and
+declared-order resolution) is refused unless an override in executed order
+retypes it; to change an orientation, recompile. The rewritten
+artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
+capabilities` lists `relation_entity_typing` for engines that enforce this.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides
@@ -208,6 +283,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
 
   - name: snap_member_eligible
     kind: derived

@@ -23,6 +23,11 @@ module:
     `is_in_retaliation_window: Boolean` pre-computed by the caller (the
     served-on date falls 0–180 days before the s.21 notice was served).
 rules:
+  - name: council_notice_of_tenancy
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [CouncilNotice, Tenancy]
   - name: deposit_protection_window_days
     kind: parameter
     dtype: Integer
