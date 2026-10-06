@@ -3,6 +3,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -379,12 +380,16 @@ pub(crate) struct CacheKey {
 enum Deferred {
     Scalar(CacheKey),
     Judgment(CacheKey),
+    /// A derived relation's members, resolved as a task of their own
+    /// ([`Engine::derived_members`]).
+    Members(DerivedMembersKey),
 }
 
 impl Deferred {
     fn rule(&self) -> &str {
         match self {
             Self::Scalar(key) | Self::Judgment(key) => &key.derived,
+            Self::Members(key) => &key.relation,
         }
     }
 }
@@ -422,13 +427,13 @@ impl From<ArithmeticError> for Interrupt {
 
 type Eval<T> = Result<T, Interrupt>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TraceSkipReason {
     ShortCircuit,
     BranchNotSelected,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SkippedTraceDependency {
     Derived {
         key: CacheKey,
@@ -455,6 +460,63 @@ pub(crate) struct NodeExecutionTrace {
     pub(crate) not_evaluated_dependencies: Vec<SkippedTraceDependency>,
     pub(crate) parameter_reads: Vec<ParameterTraceRead>,
 }
+
+/// What a [`NodeExecutionTrace`] already holds, so a record is deduplicated
+/// in constant time rather than by scanning a list that grows with every
+/// link of a relation chain. The lists keep first-occurrence order.
+#[derive(Debug, Default)]
+struct NodeTraceIndex {
+    dependencies: HashSet<CacheKey>,
+    not_evaluated_dependencies: HashSet<SkippedTraceDependency>,
+    /// Positions in `parameter_reads` by parameter and key. A read's value
+    /// is compared by equality only, so reads sharing a parameter and key
+    /// are compared in full.
+    parameter_reads: HashMap<(String, i64), Vec<usize>>,
+}
+
+/// The members a derived relation adds for one current entity and period:
+/// its source relation's related ids that satisfy its predicate. They do not
+/// depend on the slots a caller reads the relation at, so every use of the
+/// relation for that entity and period shares them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DerivedMembersKey {
+    relation: String,
+    entity_id: String,
+    period: Period,
+}
+
+/// A trace record that evaluating relation predicates makes on the rule
+/// whose evaluation asked for the relation.
+#[derive(Clone, Debug)]
+enum TraceEffect {
+    Evaluated(CacheKey),
+    Skipped(SkippedTraceDependency),
+    ParameterRead(ParameterTraceRead),
+    /// Every record resolving these derived members made, in its place.
+    Members(DerivedMembersKey),
+}
+
+#[derive(Debug)]
+struct DerivedMembers {
+    /// Sorted and deduplicated.
+    result: Result<Rc<[String]>, EvalError>,
+    /// The records resolving these members made, in order, for replay on
+    /// each rule evaluation that asks for them.
+    effects: Vec<TraceEffect>,
+    /// Rule evaluations the effects are already recorded on.
+    recorded_on: HashSet<CacheKey>,
+}
+
+/// A derived relation's predicate part-way through its candidates, stopped
+/// because a candidate needed a relation that must be resolved first.
+#[derive(Debug)]
+struct PendingMembers {
+    candidates: Rc<[String]>,
+    next: usize,
+    kept: Vec<String>,
+    effects: Vec<TraceEffect>,
+}
+
 
 #[derive(Clone, Debug)]
 pub(crate) enum EvaluatedTraceValue {
@@ -503,6 +565,7 @@ pub struct Engine<'a> {
     pre_rounding_cache: HashMap<CacheKey, ScalarValue>,
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
+    trace_index: HashMap<CacheKey, NodeTraceIndex>,
     active_evaluations: Vec<CacheKey>,
     /// Whether to record the per-node trace. The bulk evaluator borrows this
     /// interpreter for per-entity relation work and never reads a trace.
@@ -512,6 +575,13 @@ pub struct Engine<'a> {
     /// The level at which a reference to a rule not yet evaluated is deferred
     /// to the driver (see [`crate::depth`]).
     suspend_depth: usize,
+    derived_members: HashMap<DerivedMembersKey, DerivedMembers>,
+    pending_members: HashMap<DerivedMembersKey, PendingMembers>,
+    /// Effects of the relation predicates under evaluation, innermost last,
+    /// each with the number of active evaluations when it began: only records
+    /// made at that depth belong to the relation rather than to a rule its
+    /// predicate evaluates.
+    member_captures: Vec<(usize, Vec<TraceEffect>)>,
 }
 
 impl<'a> Engine<'a> {
@@ -561,10 +631,14 @@ impl<'a> Engine<'a> {
             pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
             execution_trace: HashMap::new(),
+            trace_index: HashMap::new(),
             active_evaluations: Vec::new(),
             tracing,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
+            derived_members: HashMap::new(),
+            pending_members: HashMap::new(),
+            member_captures: Vec::new(),
         }
     }
 
@@ -610,6 +684,10 @@ impl<'a> Engine<'a> {
                         Deferred::Judgment(key) => self
                             .judgment_rule(&key.derived, &key.entity_id, &key.period)
                             .map(|_| ()),
+                        Deferred::Members(key) if self.derived_members.contains_key(key) => {
+                            Ok(())
+                        }
+                        Deferred::Members(key) => self.fold_members(key),
                     };
                     match evaluated {
                         Ok(()) => {
@@ -625,6 +703,9 @@ impl<'a> Engine<'a> {
                 Interrupt::Error(error) => return Err(error),
                 // A rule deferred while a task waiting on it is still open
                 // reaches itself.
+                Interrupt::Defer(Deferred::Members(key)) if waiting.contains(&Deferred::Members(key.clone())) => {
+                    return Err(cyclic_relation_error(&key.relation));
+                }
                 Interrupt::Defer(deferred) if waiting.contains(&deferred) => {
                     return Err(EvalError::DependencyCycle(deferred.rule().to_string()));
                 }
@@ -849,42 +930,105 @@ impl<'a> Engine<'a> {
     }
 
     fn record_evaluated_dependency(&mut self, key: CacheKey) {
-        if !self.tracing {
-            return;
-        }
-        let Some(parent) = self.active_evaluations.last().cloned() else {
-            return;
-        };
-        let trace = self.execution_trace.entry(parent).or_default();
-        if !trace.dependencies.contains(&key) {
-            trace.dependencies.push(key);
-        }
+        self.record_effect(TraceEffect::Evaluated(key));
     }
 
     fn record_skipped_dependency(&mut self, dependency: SkippedTraceDependency) {
-        if !self.tracing {
-            return;
-        }
-        let Some(parent) = self.active_evaluations.last().cloned() else {
-            return;
-        };
-        let trace = self.execution_trace.entry(parent).or_default();
-        if !trace.not_evaluated_dependencies.contains(&dependency) {
-            trace.not_evaluated_dependencies.push(dependency);
-        }
+        self.record_effect(TraceEffect::Skipped(dependency));
     }
 
     fn record_parameter_read(&mut self, read: ParameterTraceRead) {
+        self.record_effect(TraceEffect::ParameterRead(read));
+    }
+
+    /// Record `effect` on the rule under evaluation, or, while a relation
+    /// predicate is being evaluated for that rule, on the relation's
+    /// resolution, which replays it on every rule that asks for the relation.
+    fn record_effect(&mut self, effect: TraceEffect) {
         if !self.tracing {
+            return;
+        }
+        let depth = self.active_evaluations.len();
+        if let Some((capture_depth, effects)) = self.member_captures.last_mut()
+            && *capture_depth == depth
+        {
+            effects.push(effect);
             return;
         }
         let Some(parent) = self.active_evaluations.last().cloned() else {
             return;
         };
-        let trace = self.execution_trace.entry(parent).or_default();
-        if !trace.parameter_reads.contains(&read) {
-            trace.parameter_reads.push(read);
+        match effect {
+            TraceEffect::Members(key) => self.replay_members(&parent, key),
+            effect => self.record_on(&parent, effect),
         }
+    }
+
+    fn record_on(&mut self, parent: &CacheKey, effect: TraceEffect) {
+        let trace = self.execution_trace.entry(parent.clone()).or_default();
+        let index = self.trace_index.entry(parent.clone()).or_default();
+        match effect {
+            TraceEffect::Evaluated(key) => {
+                if index.dependencies.insert(key.clone()) {
+                    trace.dependencies.push(key);
+                }
+            }
+            TraceEffect::Skipped(dependency) => {
+                if index.not_evaluated_dependencies.insert(dependency.clone()) {
+                    trace.not_evaluated_dependencies.push(dependency);
+                }
+            }
+            TraceEffect::ParameterRead(read) => {
+                let positions = index
+                    .parameter_reads
+                    .entry((read.parameter.clone(), read.index))
+                    .or_default();
+                if !positions
+                    .iter()
+                    .any(|&position| trace.parameter_reads[position] == read)
+                {
+                    positions.push(trace.parameter_reads.len());
+                    trace.parameter_reads.push(read);
+                }
+            }
+            TraceEffect::Members(key) => self.replay_members(parent, key),
+        }
+    }
+
+    /// Record on `parent` everything resolving `key` recorded, in order,
+    /// expanding the members it read in place. Members already replayed on
+    /// `parent` are skipped whole: their records are there already. The walk
+    /// keeps its own stack, since a relation chain nests members per link.
+    fn replay_members(&mut self, parent: &CacheKey, key: DerivedMembersKey) {
+        if !self.mark_replayed(&key, parent) {
+            return;
+        }
+        let mut stack = vec![(key, 0_usize)];
+        while let Some((key, next)) = stack.last_mut() {
+            let effect = self
+                .derived_members
+                .get(key)
+                .and_then(|members| members.effects.get(*next))
+                .cloned();
+            *next = next.saturating_add(1);
+            match effect {
+                None => {
+                    stack.pop();
+                }
+                Some(TraceEffect::Members(child)) => {
+                    if self.mark_replayed(&child, parent) {
+                        stack.push((child, 0));
+                    }
+                }
+                Some(effect) => self.record_on(parent, effect),
+            }
+        }
+    }
+
+    fn mark_replayed(&mut self, key: &DerivedMembersKey, parent: &CacheKey) -> bool {
+        self.derived_members
+            .get_mut(key)
+            .is_some_and(|members| members.recorded_on.insert(parent.clone()))
     }
 
     fn record_skipped_scalar_dependencies(
@@ -1594,64 +1738,16 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Eval<Vec<String>> {
-        let schema = self
-            .program
-            .relations
-            .get(relation)
-            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
-        if current_slot >= schema.arity || related_slot >= schema.arity {
-            return Err(EvalError::TypeMismatch(format!(
-                "relation `{relation}` has arity {}, but slots {current_slot} and {related_slot} were requested",
-                schema.arity
-            ))
-            .into());
+        let schema = self.relation_schema(relation, current_slot, related_slot)?;
+        let mut related_ids =
+            self.direct_related_ids(relation, current_slot, related_slot, entity_id, period);
+        if schema.derivation.is_some() {
+            related_ids.extend(
+                self.derived_members(relation, entity_id, period)?
+                    .iter()
+                    .cloned(),
+            );
         }
-
-        let mut related_ids = self
-            .relation_index
-            .get(&(relation.to_string(), current_slot, entity_id.to_string()))
-            .into_iter()
-            .flat_map(|records| records.iter().copied())
-            .filter(|record| record.interval.contains_period(period))
-            .filter_map(|record| record.tuple.get(related_slot).cloned())
-            .collect::<Vec<String>>();
-
-        if let Some(derivation) = schema.derivation.clone() {
-            let mut derived_ids = Vec::new();
-            for related_id in self.related_entity_ids(
-                &derivation.source_relation,
-                derivation.current_slot,
-                derivation.related_slot,
-                entity_id,
-                period,
-            )? {
-                let context = RelationEvalContext {
-                    current_id: entity_id,
-                    related_id: &related_id,
-                    current_entity: derivation
-                        .slot_entities
-                        .get(derivation.current_slot)
-                        .map(String::as_str),
-                    related_entity: derivation
-                        .slot_entities
-                        .get(derivation.related_slot)
-                        .map(String::as_str),
-                };
-                if self
-                    .eval_judgment_expr_inner(
-                        &derivation.predicate,
-                        &related_id,
-                        period,
-                        Some(context),
-                    )?
-                    .is_holds()
-                {
-                    derived_ids.push(related_id);
-                }
-            }
-            related_ids.extend(derived_ids);
-        }
-
         related_ids.sort();
         related_ids.dedup();
         Ok(related_ids)
@@ -1666,10 +1762,323 @@ impl<'a> Engine<'a> {
         related_id: &str,
         period: &Period,
     ) -> Eval<bool> {
-        Ok(self
-            .related_entity_ids(relation, current_slot, related_slot, current_id, period)?
-            .iter()
-            .any(|candidate| candidate == related_id))
+        let schema = self.relation_schema(relation, current_slot, related_slot)?;
+        let direct = self
+            .relation_index
+            .get(&(relation.to_string(), current_slot, current_id.to_string()))
+            .is_some_and(|records| {
+                records.iter().any(|record| {
+                    record.interval.contains_period(period)
+                        && record
+                            .tuple
+                            .get(related_slot)
+                            .is_some_and(|candidate| candidate == related_id)
+                })
+            });
+        if schema.derivation.is_none() {
+            return Ok(direct);
+        }
+        // Resolve the derived members even when a tuple already answers, so
+        // the trace records the predicates as it always has.
+        let derived =
+            self.nested(|engine| engine.derived_members(relation, current_id, period))?;
+        Ok(direct
+            || derived
+                .binary_search_by(|candidate| candidate.as_str().cmp(related_id))
+                .is_ok())
+    }
+
+    /// `relation`'s schema, when it exists and has both slots.
+    fn relation_schema(
+        &self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> Result<&'a crate::model::RelationSchema, EvalError> {
+        let program: &'a Program = self.program;
+        let schema = program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        if current_slot >= schema.arity || related_slot >= schema.arity {
+            return Err(EvalError::TypeMismatch(format!(
+                "relation `{relation}` has arity {}, but slots {current_slot} and {related_slot} were requested",
+                schema.arity
+            )));
+        }
+        Ok(schema)
+    }
+
+    /// The ids `relation`'s own tuples relate to `entity_id` in `period`.
+    fn direct_related_ids(
+        &self,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+        entity_id: &str,
+        period: &Period,
+    ) -> Vec<String> {
+        self.relation_index
+            .get(&(relation.to_string(), current_slot, entity_id.to_string()))
+            .into_iter()
+            .flat_map(|records| records.iter().copied())
+            .filter(|record| record.interval.contains_period(period))
+            .filter_map(|record| record.tuple.get(related_slot).cloned())
+            .collect()
+    }
+
+    /// The members the derived relation `relation` adds for `entity_id` in
+    /// `period`. They are resolved once; every later use reads them and
+    /// replays the trace records resolving them made. Past the deferral
+    /// threshold, unresolved members are deferred to the driver like a rule
+    /// (see [`crate::depth`]), so predicate chains cannot deepen the stack.
+    fn derived_members(
+        &mut self,
+        relation: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Eval<Rc<[String]>> {
+        let key = members_key(relation, entity_id, period);
+        if !self.derived_members.contains_key(&key) {
+            if self.depth >= self.suspend_depth {
+                return Err(Interrupt::Defer(Deferred::Members(key)));
+            }
+            self.fold_members(&key)?;
+        }
+        self.record_effect(TraceEffect::Members(key.clone()));
+        self.derived_members
+            .get(&key)
+            .expect("a completed fold memoizes the members it was asked for")
+            .result
+            .clone()
+            .map_err(Interrupt::Error)
+    }
+
+    /// Resolve the members of `key`'s relation, and before them those of each
+    /// unresolved derived relation down its chain of source relations,
+    /// deepest first, memoizing each, errors included. The chain is walked by
+    /// a loop, not by recursion. When a predicate defers something to the
+    /// driver, the predicate's progress is kept in `pending_members` and the
+    /// deferral propagates; the next fold resumes there.
+    fn fold_members(&mut self, key: &DerivedMembersKey) -> Result<(), Interrupt> {
+        let program: &'a Program = self.program;
+        let (entity_id, period) = (key.entity_id.as_str(), &key.period);
+        // Down the chain, check each source relation before evaluating any
+        // predicate, as resolution always has: it exists and has the slots
+        // the derivation reads.
+        let mut chain = Vec::new();
+        let mut on_chain = HashSet::new();
+        let mut relation = program
+            .relations
+            .get(&key.relation)
+            .expect("members are resolved only for a known derived relation");
+        let failure = loop {
+            let derivation = relation
+                .derivation
+                .as_ref()
+                .expect("members are resolved only for a derived relation");
+            chain.push(relation);
+            on_chain.insert(relation.name.as_str());
+            let source = match self.relation_schema(
+                &derivation.source_relation,
+                derivation.current_slot,
+                derivation.related_slot,
+            ) {
+                Ok(source) => source,
+                Err(error) => break Some(error),
+            };
+            if source.derivation.is_none()
+                || self
+                    .derived_members
+                    .contains_key(&members_key(&source.name, entity_id, period))
+            {
+                break None;
+            }
+            if on_chain.contains(source.name.as_str()) {
+                break Some(cyclic_relation_error(&source.name));
+            }
+            relation = source;
+        };
+        if let Some(error) = failure {
+            // Resolution fails at every level above the failed check, before
+            // any predicate runs.
+            for relation in chain {
+                let level = members_key(&relation.name, entity_id, period);
+                self.pending_members.remove(&level);
+                self.derived_members.insert(
+                    level,
+                    DerivedMembers {
+                        result: Err(error.clone()),
+                        effects: Vec::new(),
+                        recorded_on: HashSet::new(),
+                    },
+                );
+            }
+            return Ok(());
+        }
+
+        for relation in chain.into_iter().rev() {
+            let level = members_key(&relation.name, entity_id, period);
+            let derivation = relation
+                .derivation
+                .as_ref()
+                .expect("the chain holds derived relations");
+            let pending = match self.pending_members.remove(&level) {
+                Some(pending) => pending,
+                None => match self.member_candidates(derivation, entity_id, period) {
+                    Ok(pending) => pending,
+                    Err((error, effects)) => {
+                        self.derived_members.insert(
+                            level,
+                            DerivedMembers {
+                                result: Err(error),
+                                effects,
+                                recorded_on: HashSet::new(),
+                            },
+                        );
+                        continue;
+                    }
+                },
+            };
+            self.filter_members(&level, derivation, pending)?;
+        }
+        Ok(())
+    }
+
+    /// The candidates a derived relation's predicate tests: its source
+    /// relation's related ids, read at the derivation's slots, whose own
+    /// members are already resolved.
+    fn member_candidates(
+        &mut self,
+        derivation: &'a crate::model::RelationDerivation,
+        entity_id: &str,
+        period: &Period,
+    ) -> Result<PendingMembers, (EvalError, Vec<TraceEffect>)> {
+        let program: &'a Program = self.program;
+        let source = &derivation.source_relation;
+        let mut candidates = self.direct_related_ids(
+            source,
+            derivation.current_slot,
+            derivation.related_slot,
+            entity_id,
+            period,
+        );
+        let mut effects = Vec::new();
+        if program
+            .relations
+            .get(source)
+            .is_some_and(|source| source.derivation.is_some())
+        {
+            let source_key = members_key(source, entity_id, period);
+            let result = self
+                .derived_members
+                .get(&source_key)
+                .expect("a source's members resolve before the relation's")
+                .result
+                .clone();
+            effects.push(TraceEffect::Members(source_key));
+            match result {
+                Ok(ids) => candidates.extend(ids.iter().cloned()),
+                Err(error) => return Err((error, effects)),
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        Ok(PendingMembers {
+            candidates: candidates.into(),
+            next: 0,
+            kept: Vec::new(),
+            effects,
+        })
+    }
+
+    /// Test the remaining candidates against the derivation's predicate and
+    /// memoize the members that hold, or the predicate's error. A deferral
+    /// is never memoized: it propagates, with the progress in
+    /// `pending_members`.
+    fn filter_members(
+        &mut self,
+        level: &DerivedMembersKey,
+        derivation: &'a crate::model::RelationDerivation,
+        pending: PendingMembers,
+    ) -> Result<(), Interrupt> {
+        let PendingMembers {
+            candidates,
+            next,
+            mut kept,
+            effects,
+        } = pending;
+        self.member_captures
+            .push((self.active_evaluations.len(), effects));
+        let current_entity = derivation
+            .slot_entities
+            .get(derivation.current_slot)
+            .map(String::as_str);
+        let related_entity = derivation
+            .slot_entities
+            .get(derivation.related_slot)
+            .map(String::as_str);
+        let mut failure = None;
+        for (index, candidate) in candidates.iter().enumerate().skip(next) {
+            let recorded = self
+                .member_captures
+                .last()
+                .map_or(0, |(_, effects)| effects.len());
+            let context = RelationEvalContext {
+                current_id: &level.entity_id,
+                related_id: candidate,
+                current_entity,
+                related_entity,
+            };
+            match self.eval_judgment_expr_inner(
+                &derivation.predicate,
+                candidate,
+                &level.period,
+                Some(context),
+            ) {
+                Ok(outcome) => {
+                    if outcome.is_holds() {
+                        kept.push(candidate.clone());
+                    }
+                }
+                Err(Interrupt::Defer(deferred)) => {
+                    // This candidate is tested again from the start once the
+                    // driver has evaluated what it deferred.
+                    let (_, mut effects) = self
+                        .member_captures
+                        .pop()
+                        .expect("the capture pushed above");
+                    effects.truncate(recorded);
+                    self.pending_members.insert(
+                        level.clone(),
+                        PendingMembers {
+                            candidates: Rc::clone(&candidates),
+                            next: index,
+                            kept,
+                            effects,
+                        },
+                    );
+                    return Err(Interrupt::Defer(deferred));
+                }
+                Err(Interrupt::Error(error)) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let (_, effects) = self
+            .member_captures
+            .pop()
+            .expect("the capture pushed above");
+        self.derived_members.insert(
+            level.clone(),
+            DerivedMembers {
+                result: failure.map_or_else(|| Ok(kept.into()), Err),
+                effects,
+                recorded_on: HashSet::new(),
+            },
+        );
+        Ok(())
     }
 
     fn compare_scalar_values(
@@ -1680,6 +2089,22 @@ impl<'a> Engine<'a> {
     ) -> Result<bool, EvalError> {
         compare_scalar_values(left, op, right)
     }
+}
+
+fn members_key(relation: &str, entity_id: &str, period: &Period) -> DerivedMembersKey {
+    DerivedMembersKey {
+        relation: relation.to_string(),
+        entity_id: entity_id.to_string(),
+        period: period.clone(),
+    }
+}
+
+/// The error for a derived relation whose members depend on themselves,
+/// which program validation refuses before execution.
+fn cyclic_relation_error(relation: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "derived relation `{relation}` depends on its own members"
+    ))
 }
 
 /// Compare two scalars under the reference semantics: booleans and text
@@ -1881,5 +2306,263 @@ pub fn expect_dtype(derived: &Derived, expected: DType) -> Result<(), EvalError>
             "derived `{}` has dtype {:?}, expected {:?}",
             derived.name, derived.dtype, expected
         )))
+    }
+}
+
+#[cfg(test)]
+mod relation_resolution_tests {
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+    use serde_json::{Value, json};
+
+    use super::Engine;
+    use crate::model::{DType, Period};
+    use crate::spec::{DatasetSpec, ProgramSpec};
+
+    const HOUSEHOLDS: [&str; 2] = ["h1", "h2"];
+    const PEOPLE: [&str; 3] = ["p1", "p2", "p3"];
+    const RELATIONS: usize = 6;
+
+    fn literal(value: i64) -> Value {
+        json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
+    }
+
+    fn person_rule(index: usize) -> Value {
+        json!({"kind": "derived", "name": format!("p{index}")})
+    }
+
+    /// A predicate for derived relation `index`: it may read only relations
+    /// after it and person rules, so programs stay acyclic.
+    fn predicate(index: usize) -> BoxedStrategy<Value> {
+        let later = (index + 1..RELATIONS)
+            .map(|later| format!("r{later}"))
+            .collect::<Vec<_>>();
+        let mut leaves = vec![
+            Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
+                .boxed(),
+            (0_usize..2)
+                .prop_map(|rule| {
+                    json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
+                })
+                .boxed(),
+            // A parameter read and a division that can fail.
+            (0_i64..3)
+                .prop_map(|key| {
+                    json!({"kind": "comparison",
+                        "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
+                        "op": "gt", "right": literal(0)})
+                })
+                .boxed(),
+        ];
+        if !later.is_empty() {
+            let members = later.clone();
+            leaves.push(
+                (prop::sample::select(members), 0_usize..2)
+                    .prop_map(|(relation, orientation)| {
+                        json!({"kind": "relation_member", "relation": relation,
+                            "current_slot": orientation, "related_slot": 1 - orientation})
+                    })
+                    .boxed(),
+            );
+            leaves.push(
+                prop::sample::select(later)
+                    .prop_map(|relation| {
+                        json!({"kind": "comparison",
+                            "left": {"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1},
+                            "op": "gte", "right": literal(1)})
+                    })
+                    .boxed(),
+            );
+        }
+        prop::strategy::Union::new(leaves)
+            .prop_recursive(2, 6, 3, |inner| {
+                prop_oneof![
+                    vec(inner.clone(), 1..3)
+                        .prop_map(|items| json!({"kind": "and", "items": items})),
+                    vec(inner.clone(), 1..3)
+                        .prop_map(|items| json!({"kind": "or", "items": items})),
+                    inner.prop_map(|item| json!({"kind": "not", "item": item})),
+                ]
+            })
+            .boxed()
+    }
+
+    fn relation(index: usize) -> BoxedStrategy<Value> {
+        let sources = std::iter::once("base".to_string())
+            .chain((index + 1..RELATIONS).map(|later| format!("r{later}")))
+            .collect::<Vec<_>>();
+        (
+            prop::sample::select(sources),
+            prop::sample::select(vec![(0_usize, 1_usize), (1, 0)]),
+            prop::bool::ANY,
+            predicate(index),
+        )
+            .prop_map(
+                move |(source, (current_slot, related_slot), typed, predicate)| {
+                    let mut derivation = json!({
+                        "source_relation": source, "current_slot": current_slot,
+                        "related_slot": related_slot, "predicate": predicate,
+                    });
+                    if typed {
+                        derivation["slot_entities"] = json!(["Household", "Person"]);
+                    }
+                    json!({"name": format!("r{index}"), "arity": 2, "derivation": derivation})
+                },
+            )
+            .boxed()
+    }
+
+    fn household_rule(index: usize) -> BoxedStrategy<Value> {
+        let relation = (0..RELATIONS).prop_map(|relation| format!("r{relation}"));
+        let where_clause = prop::option::of((0_usize..2).prop_map(|rule| {
+            json!({"kind": "comparison", "left": person_rule(rule), "op": "lt", "right": literal(30)})
+        }));
+        prop_oneof![
+            (relation.clone(), where_clause.clone()).prop_map(|(relation, where_clause)| {
+                let mut expr = json!({"kind": "count_related", "relation": relation,
+                    "current_slot": 0, "related_slot": 1});
+                if let Some(where_clause) = where_clause {
+                    expr["where"] = where_clause;
+                }
+                expr
+            }),
+            (relation, 0_usize..2, where_clause).prop_map(|(relation, rule, where_clause)| {
+                let mut expr = json!({"kind": "sum_related", "relation": relation,
+                    "current_slot": 0, "related_slot": 1,
+                    "value": {"kind": "derived", "name": format!("p{rule}")}});
+                if let Some(where_clause) = where_clause {
+                    expr["where"] = where_clause;
+                }
+                expr
+            }),
+        ]
+        .prop_map(move |expr| {
+            json!({"name": format!("h{index}"), "entity": "Household", "dtype": "decimal",
+                "unit": null, "semantics": "scalar", "expr": expr})
+        })
+        .boxed()
+    }
+
+    /// A program of person rules over one input, a data relation `base`,
+    /// derived relations reading later ones through sources and predicates,
+    /// and household aggregations over them; with tuples and incomes, some
+    /// missing so predicates fail.
+    fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
+        let relations = (0..RELATIONS).map(relation).collect::<Vec<_>>();
+        let rules = (0..3).map(household_rule).collect::<Vec<_>>();
+        let tuples = vec(
+            (
+                prop::sample::select([HOUSEHOLDS.as_slice(), PEOPLE.as_slice()].concat()),
+                prop::sample::select(PEOPLE.to_vec()),
+            ),
+            0..8,
+        );
+        let incomes = vec(prop::option::of(0_i64..40), PEOPLE.len());
+        (relations, rules, tuples, incomes).prop_map(|(relations, rules, tuples, incomes)| {
+            let mut derived = vec![
+                json!({"name": "p0", "entity": "Person", "dtype": "decimal", "unit": null,
+                    "semantics": "scalar", "expr": {"kind": "input", "name": "income"}}),
+                json!({"name": "p1", "entity": "Person", "dtype": "decimal", "unit": null,
+                    "semantics": "scalar", "expr": {"kind": "add", "items": [person_rule(0), literal(5)]}}),
+            ];
+            derived.extend(rules);
+            let relations = std::iter::once(json!({"name": "base", "arity": 2}))
+                .chain(relations)
+                .collect::<Vec<_>>();
+            let program = json!({
+                "relations": relations,
+                "parameters": [{"name": "rate", "unit": null, "versions": [
+                    {"effective_from": "2026-01-01", "values": {"0": {"kind": "integer", "value": 2}, "1": {"kind": "integer", "value": 0}}}
+                ]}],
+                "derived": derived,
+            });
+            let interval = json!({"start": "2026-01-01", "end": "2026-12-31"});
+            let inputs = PEOPLE
+                .iter()
+                .zip(incomes)
+                .filter_map(|(person, income)| {
+                    income.map(|income| {
+                        json!({"name": "income", "entity": "Person", "entity_id": person,
+                            "interval": interval, "value": {"kind": "integer", "value": income}})
+                    })
+                })
+                .collect::<Vec<_>>();
+            let tuples = tuples
+                .into_iter()
+                .map(|(left, right)| {
+                    json!({"name": "base", "tuple": [left, right], "interval": interval})
+                })
+                .collect::<Vec<_>>();
+            let dataset = json!({"inputs": inputs, "relations": tuples});
+            (
+                serde_json::from_value(program).expect("a valid program"),
+                serde_json::from_value(dataset).expect("a valid dataset"),
+            )
+        })
+    }
+
+    /// Every household output's value or error, and each household's trace,
+    /// as an engine deferring at `threshold` levels gives them.
+    fn evaluate(program: &ProgramSpec, dataset: &DatasetSpec, threshold: usize) -> Vec<String> {
+        let program = program.to_program().expect("the program lowers");
+        let dataset = dataset
+            .to_dataset_for_program(&program)
+            .expect("the dataset binds");
+        let period = Period::month(2026, 1);
+        let mut engine =
+            crate::depth::with_suspend_depth(threshold, || Engine::new(&program, &dataset));
+        let mut outcomes = Vec::new();
+        for household in HOUSEHOLDS {
+            for rule in ["h0", "h1", "h2"] {
+                let outcome = match program.derived[rule].dtype {
+                    DType::Judgment => {
+                        format!("{:?}", engine.evaluate_judgment(rule, household, &period))
+                    }
+                    _ => format!("{:?}", engine.evaluate_scalar(rule, household, &period)),
+                };
+                outcomes.push(format!("{household} {rule} {outcome}"));
+            }
+            let mut trace = engine
+                .evaluated_trace_instances(&period, household)
+                .iter()
+                .map(|instance| format!("{instance:?}"))
+                .collect::<Vec<_>>();
+            trace.sort();
+            outcomes.extend(trace);
+        }
+        outcomes
+    }
+
+    #[test]
+    fn deferred_resolution_matches_recursive_resolution() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 1500,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[23; 32]),
+        );
+        let nested = std::cell::Cell::new(0_usize);
+        runner
+            .run(&case(), |(program, dataset)| {
+                // `usize::MAX` never defers; 1 defers every rule and every
+                // relation's members at each reference it can.
+                let native = evaluate(&program, &dataset, usize::MAX);
+                let suspended = evaluate(&program, &dataset, 1);
+                if native != suspended {
+                    return Err(TestCaseError::fail(format!(
+                        "native {native:#?}\nsuspended {suspended:#?}\nprogram {}",
+                        serde_json::to_string(&program).expect("serializes")
+                    )));
+                }
+                if native.iter().any(|line| line.contains("Ok(")) {
+                    nested.set(nested.get() + 1);
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(nested.get() > 500, "only {} cases evaluated", nested.get());
     }
 }
