@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -360,11 +360,25 @@ pub fn execute_compiled_request(
 /// Runs on the program the engine is about to execute, so every execution
 /// mode sees the same pinned program.
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
+    if pins.is_empty() {
+        return Ok(());
+    }
+    // Each pinned name's first rule, found in one pass over the program
+    // rather than one pass per pin. Rule names are unique in a validated
+    // program; keeping the first leaves an unvalidated one pinning the rule a
+    // linear search would find.
+    let mut positions = pins
+        .iter()
+        .map(|pin| (pin.rule.as_str(), None))
+        .collect::<HashMap<&str, Option<usize>>>();
+    for (position, derived) in program.derived.iter().enumerate() {
+        if let Some(first) = positions.get_mut(derived.name.as_str()) {
+            first.get_or_insert(position);
+        }
+    }
     for pin in pins {
-        let rule = program
-            .derived
-            .iter_mut()
-            .find(|derived| derived.name == pin.rule)
+        let rule = positions[pin.rule.as_str()]
+            .map(|position| &mut program.derived[position])
             .ok_or_else(|| ApiError::UnknownPinnedRule {
                 rule: pin.rule.clone(),
             })?;
@@ -406,6 +420,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod pin_tests;
 
 fn execute_explain(
     program: &crate::model::Program,
