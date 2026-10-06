@@ -1,0 +1,631 @@
+{
+  "description": "Shared module-target grammar corpus. Each `import` is an absolute RuleSpec import (a canonical module target, optionally with one #fragment). `valid` is the label every implementation must reproduce: Rust resolve_import_target (tests/module_target_grammar.rs), the published rulespec-module.v1 `imports` schema (same file, --features schema), and Python concepts._is_canonical_import (python/tests/test_concepts.py). Real ids come from rulespec-us, rulespec-uk and rulespec-be origin/main; the probes put one character between two letters of a path segment or a fragment.",
+  "importer": "us:statutes/7/2014/a",
+  "cases": [
+    {
+      "import": "us-la:statutes/47:294",
+      "valid": true,
+      "why": "real: colon in the module filename"
+    },
+    {
+      "import": "us-la:statutes/47:295",
+      "valid": true,
+      "why": "real: colon in the module filename"
+    },
+    {
+      "import": "us-la:statutes/47:297/4",
+      "valid": true,
+      "why": "real: colon in a directory component"
+    },
+    {
+      "import": "us-la:statutes/47:297/8",
+      "valid": true,
+      "why": "real: colon in a directory component"
+    },
+    {
+      "import": "us-la:statutes/47:32",
+      "valid": true,
+      "why": "real: colon in the module filename"
+    },
+    {
+      "import": "us-la:statutes/47:32#individual_income_tax_rate",
+      "valid": true,
+      "why": "real import in us-la:policies/income_tax/pilot_liability_pipeline"
+    },
+    {
+      "import": "us-la:statutes/47:297/4#low_income_federal_adjusted_gross_income_limit",
+      "valid": true,
+      "why": "real import in us-la:policies/income_tax/2026_resident_core"
+    },
+    {
+      "import": "us-nj:statutes/54a:4-7",
+      "valid": true,
+      "why": "real: colon in the module filename"
+    },
+    {
+      "import": "us-nj:statutes/54a:4-7#nj_earned_income_tax_credit_percentage",
+      "valid": true,
+      "why": "real rule id"
+    },
+    {
+      "import": "us:statutes/42/1437c–1",
+      "valid": true,
+      "why": "real: en dash (U+2013) in the module filename"
+    },
+    {
+      "import": "us:statutes/42/1437c–1/b#annual_public_housing_agency_plan_requirement",
+      "valid": true,
+      "why": "real deferred output id below an en-dash path"
+    },
+    {
+      "import": "us:statutes/7/2014/a",
+      "valid": true,
+      "why": "control"
+    },
+    {
+      "import": "us:statutes/7/2017/a#input.household_size",
+      "valid": true,
+      "why": "input fragment"
+    },
+    {
+      "import": "us:statutes/7/2012/j#relation.member_of_household",
+      "valid": true,
+      "why": "relation fragment"
+    },
+    {
+      "import": "uk-isle-of-wight:policies/isle-of-wight/council-tax-reduction",
+      "valid": true,
+      "why": "real multi-segment council jurisdiction"
+    },
+    {
+      "import": "uk-bath-and-north-east-somerset:policies/bath-and-north-east-somerset/council-tax-reduction",
+      "valid": true,
+      "why": "real multi-segment council jurisdiction"
+    },
+    {
+      "import": "uk-st-helens:policies/st-helens/council-tax-reduction",
+      "valid": true,
+      "why": "real multi-segment council jurisdiction"
+    },
+    {
+      "import": "be-vlg:regulations/employment/jobbonus",
+      "valid": true,
+      "why": "real subdivision jurisdiction"
+    },
+    {
+      "import": "us-co:regulations/10-ccr-2506-1/4.207.3",
+      "valid": true,
+      "why": "real: dots inside a segment"
+    },
+    {
+      "import": "us-la:statutes/47::294",
+      "valid": true,
+      "why": "consecutive colons inside a segment (ledger PATH admits them)"
+    },
+    {
+      "import": "us-la:statutes/47:",
+      "valid": true,
+      "why": "segment ending in a colon"
+    },
+    {
+      "import": "us-la:statutes/:/4",
+      "valid": true,
+      "why": "segment that is only a colon"
+    },
+    {
+      "import": "us:statutes/a––b",
+      "valid": true,
+      "why": "consecutive en dashes"
+    },
+    {
+      "import": "us:statutes/...",
+      "valid": true,
+      "why": "a three-dot segment is not a dot alias"
+    },
+    {
+      "import": "us:policies/irs/rev-proc~2025",
+      "valid": true,
+      "why": "deliberately wider than the ledger: '~' was accepted before and stays"
+    },
+    {
+      "import": "us-a:statutes/x",
+      "valid": true,
+      "why": "deliberately wider than the ledger: one-character subdivision segment"
+    },
+    {
+      "import": "us-nh:regulations/he-w-700/He-W 704/04",
+      "valid": false,
+      "why": "real module with a space: encoding debt, the ledger rejects it too"
+    },
+    {
+      "import": "us-la:statutes/47:297/4.yaml",
+      "valid": false,
+      "why": "extension"
+    },
+    {
+      "import": "us-la:statutes/47:297/4.yml",
+      "valid": false,
+      "why": "extension"
+    },
+    {
+      "import": "us-la:statutes/47:297/4.YAML",
+      "valid": false,
+      "why": "extension in another case"
+    },
+    {
+      "import": "us-la:statutes/47:297/4.test",
+      "valid": false,
+      "why": "companion-test spelling"
+    },
+    {
+      "import": "us-la:statutes/47:297/4.Test#rule",
+      "valid": false,
+      "why": "companion-test spelling with a fragment"
+    },
+    {
+      "import": "us-la:statutes/47:297//4",
+      "valid": false,
+      "why": "empty segment"
+    },
+    {
+      "import": "us-la:statutes/47:297/./4",
+      "valid": false,
+      "why": "dot segment"
+    },
+    {
+      "import": "us-la:statutes/47:297/../4",
+      "valid": false,
+      "why": "dot-dot segment"
+    },
+    {
+      "import": "us-la:statutes/..",
+      "valid": false,
+      "why": "trailing dot-dot segment"
+    },
+    {
+      "import": "us-la:statutes/.#rule",
+      "valid": false,
+      "why": "dot segment before a fragment"
+    },
+    {
+      "import": "us-la:statutes/",
+      "valid": false,
+      "why": "trailing slash"
+    },
+    {
+      "import": "us-la:statutes",
+      "valid": false,
+      "why": "no path below the atomic root"
+    },
+    {
+      "import": "us-la::statutes/47:294",
+      "valid": false,
+      "why": "colon in the jurisdiction part"
+    },
+    {
+      "import": "us:la:statutes/47:294",
+      "valid": false,
+      "why": "colon in the jurisdiction part"
+    },
+    {
+      "import": ":us-la:statutes/47:294",
+      "valid": false,
+      "why": "empty jurisdiction"
+    },
+    {
+      "import": "us-la:statutes:47/294",
+      "valid": false,
+      "why": "colon directly after the atomic root"
+    },
+    {
+      "import": "US-la:statutes/x",
+      "valid": false,
+      "why": "uppercase jurisdiction"
+    },
+    {
+      "import": "us-LA:statutes/x",
+      "valid": false,
+      "why": "uppercase jurisdiction"
+    },
+    {
+      "import": "us-:statutes/x",
+      "valid": false,
+      "why": "empty subdivision segment"
+    },
+    {
+      "import": "u:statutes/x",
+      "valid": false,
+      "why": "one-letter country"
+    },
+    {
+      "import": "us-la:Statutes/x",
+      "valid": false,
+      "why": "case variant of an atomic root"
+    },
+    {
+      "import": "us-la:programs/x",
+      "valid": false,
+      "why": "programs/ is not an atomic root"
+    },
+    {
+      "import": "us-la:manual/x",
+      "valid": false,
+      "why": "not an atomic root"
+    },
+    {
+      "import": "us-la:/statutes/x",
+      "valid": false,
+      "why": "leading slash"
+    },
+    {
+      "import": "us-la:statutes/47:294#",
+      "valid": false,
+      "why": "empty fragment"
+    },
+    {
+      "import": "us-la:statutes/47:294#a#b",
+      "valid": false,
+      "why": "two fragments"
+    },
+    {
+      "import": "us-la:statutes/47:294#bad fragment",
+      "valid": false,
+      "why": "space in the fragment"
+    },
+    {
+      "import": "us:statutes/42/1437c—1",
+      "valid": false,
+      "why": "em dash U+2014"
+    },
+    {
+      "import": "us:statutes/42/1437c‐1",
+      "valid": false,
+      "why": "hyphen U+2010"
+    },
+    {
+      "import": "us:statutes/42/1437c−1",
+      "valid": false,
+      "why": "minus sign U+2212"
+    },
+    {
+      "import": "us-la:statutes/47：294",
+      "valid": false,
+      "why": "fullwidth colon U+FF1A"
+    },
+    {
+      "import": "us:statutes/fóo",
+      "valid": false,
+      "why": "other non-ASCII letter"
+    },
+    {
+      "import": "us-la:statutes/47:294 ",
+      "valid": false,
+      "why": "trailing space"
+    },
+    {
+      "import": " us-la:statutes/47:294",
+      "valid": false,
+      "why": "leading space"
+    },
+    {
+      "import": "us-la:statutes/47:294\n",
+      "valid": false,
+      "why": "trailing newline"
+    },
+    {
+      "import": "us-la:statutes/47:\t294",
+      "valid": false,
+      "why": "tab"
+    },
+    {
+      "import": "us-la:statutes/47: 294",
+      "valid": false,
+      "why": "no-break space"
+    },
+    {
+      "import": "us-la:statutes/47\\294",
+      "valid": false,
+      "why": "backslash"
+    },
+    {
+      "import": "'us-la:statutes/47:294'",
+      "valid": false,
+      "why": "quoted"
+    },
+    {
+      "import": "us-la:statutes/47\"294",
+      "valid": false,
+      "why": "double quote"
+    },
+    {
+      "import": "",
+      "valid": false,
+      "why": "empty"
+    },
+    {
+      "import": "us-la:statutes/aab",
+      "valid": true,
+      "why": "path character probe U+0061"
+    },
+    {
+      "import": "us-la:statutes/aZb",
+      "valid": true,
+      "why": "path character probe U+005A"
+    },
+    {
+      "import": "us-la:statutes/a0b",
+      "valid": true,
+      "why": "path character probe U+0030"
+    },
+    {
+      "import": "us-la:statutes/a_b",
+      "valid": true,
+      "why": "path character probe U+005F"
+    },
+    {
+      "import": "us-la:statutes/a.b",
+      "valid": true,
+      "why": "path character probe U+002E"
+    },
+    {
+      "import": "us-la:statutes/a~b",
+      "valid": true,
+      "why": "path character probe U+007E"
+    },
+    {
+      "import": "us-la:statutes/a:b",
+      "valid": true,
+      "why": "path character probe U+003A"
+    },
+    {
+      "import": "us-la:statutes/a-b",
+      "valid": true,
+      "why": "path character probe U+002D"
+    },
+    {
+      "import": "us-la:statutes/a–b",
+      "valid": true,
+      "why": "path character probe U+2013"
+    },
+    {
+      "import": "us-la:statutes/a—b",
+      "valid": false,
+      "why": "path character probe U+2014"
+    },
+    {
+      "import": "us-la:statutes/a‐b",
+      "valid": false,
+      "why": "path character probe U+2010"
+    },
+    {
+      "import": "us-la:statutes/a−b",
+      "valid": false,
+      "why": "path character probe U+2212"
+    },
+    {
+      "import": "us-la:statutes/a：b",
+      "valid": false,
+      "why": "path character probe U+FF1A"
+    },
+    {
+      "import": "us-la:statutes/aób",
+      "valid": false,
+      "why": "path character probe U+00F3"
+    },
+    {
+      "import": "us-la:statutes/a b",
+      "valid": false,
+      "why": "path character probe U+0020"
+    },
+    {
+      "import": "us-la:statutes/a\tb",
+      "valid": false,
+      "why": "path character probe U+0009"
+    },
+    {
+      "import": "us-la:statutes/a b",
+      "valid": false,
+      "why": "path character probe U+00A0"
+    },
+    {
+      "import": "us-la:statutes/a　b",
+      "valid": false,
+      "why": "path character probe U+3000"
+    },
+    {
+      "import": "us-la:statutes/a\"b",
+      "valid": false,
+      "why": "path character probe U+0022"
+    },
+    {
+      "import": "us-la:statutes/a'b",
+      "valid": false,
+      "why": "path character probe U+0027"
+    },
+    {
+      "import": "us-la:statutes/a\\b",
+      "valid": false,
+      "why": "path character probe U+005C"
+    },
+    {
+      "import": "us-la:statutes/a@b",
+      "valid": false,
+      "why": "path character probe U+0040"
+    },
+    {
+      "import": "us-la:statutes/a+b",
+      "valid": false,
+      "why": "path character probe U+002B"
+    },
+    {
+      "import": "us-la:statutes/a%b",
+      "valid": false,
+      "why": "path character probe U+0025"
+    },
+    {
+      "import": "us-la:statutes/a!b",
+      "valid": false,
+      "why": "path character probe U+0021"
+    },
+    {
+      "import": "us-la:statutes/a$b",
+      "valid": false,
+      "why": "path character probe U+0024"
+    },
+    {
+      "import": "us-la:statutes/a&b",
+      "valid": false,
+      "why": "path character probe U+0026"
+    },
+    {
+      "import": "us-la:statutes/a(b",
+      "valid": false,
+      "why": "path character probe U+0028"
+    },
+    {
+      "import": "us-la:statutes/a)b",
+      "valid": false,
+      "why": "path character probe U+0029"
+    },
+    {
+      "import": "us-la:statutes/a*b",
+      "valid": false,
+      "why": "path character probe U+002A"
+    },
+    {
+      "import": "us-la:statutes/a,b",
+      "valid": false,
+      "why": "path character probe U+002C"
+    },
+    {
+      "import": "us-la:statutes/a;b",
+      "valid": false,
+      "why": "path character probe U+003B"
+    },
+    {
+      "import": "us-la:statutes/a=b",
+      "valid": false,
+      "why": "path character probe U+003D"
+    },
+    {
+      "import": "us-la:statutes/a[b",
+      "valid": false,
+      "why": "path character probe U+005B"
+    },
+    {
+      "import": "us-la:statutes/a]b",
+      "valid": false,
+      "why": "path character probe U+005D"
+    },
+    {
+      "import": "us-la:statutes/a{b",
+      "valid": false,
+      "why": "path character probe U+007B"
+    },
+    {
+      "import": "us-la:statutes/a}b",
+      "valid": false,
+      "why": "path character probe U+007D"
+    },
+    {
+      "import": "us-la:statutes/a|b",
+      "valid": false,
+      "why": "path character probe U+007C"
+    },
+    {
+      "import": "us-la:statutes/a^b",
+      "valid": false,
+      "why": "path character probe U+005E"
+    },
+    {
+      "import": "us-la:statutes/a`b",
+      "valid": false,
+      "why": "path character probe U+0060"
+    },
+    {
+      "import": "us-la:statutes/a?b",
+      "valid": false,
+      "why": "path character probe U+003F"
+    },
+    {
+      "import": "us-la:statutes/a<b",
+      "valid": false,
+      "why": "path character probe U+003C"
+    },
+    {
+      "import": "us-la:statutes/a>b",
+      "valid": false,
+      "why": "path character probe U+003E"
+    },
+    {
+      "import": "us-la:statutes/47:294#aab",
+      "valid": true,
+      "why": "fragment character probe U+0061"
+    },
+    {
+      "import": "us-la:statutes/47:294#aZb",
+      "valid": true,
+      "why": "fragment character probe U+005A"
+    },
+    {
+      "import": "us-la:statutes/47:294#a0b",
+      "valid": true,
+      "why": "fragment character probe U+0030"
+    },
+    {
+      "import": "us-la:statutes/47:294#a_b",
+      "valid": true,
+      "why": "fragment character probe U+005F"
+    },
+    {
+      "import": "us-la:statutes/47:294#a.b",
+      "valid": true,
+      "why": "fragment character probe U+002E"
+    },
+    {
+      "import": "us-la:statutes/47:294#a-b",
+      "valid": true,
+      "why": "fragment character probe U+002D"
+    },
+    {
+      "import": "us-la:statutes/47:294#a:b",
+      "valid": false,
+      "why": "fragment character probe U+003A"
+    },
+    {
+      "import": "us-la:statutes/47:294#a~b",
+      "valid": false,
+      "why": "fragment character probe U+007E"
+    },
+    {
+      "import": "us-la:statutes/47:294#a–b",
+      "valid": false,
+      "why": "fragment character probe U+2013"
+    },
+    {
+      "import": "us-la:statutes/47:294#aób",
+      "valid": false,
+      "why": "fragment character probe U+00F3"
+    },
+    {
+      "import": "us-la:statutes/47:294#a b",
+      "valid": false,
+      "why": "fragment character probe U+0020"
+    },
+    {
+      "import": "us-la:statutes/47:294#a@b",
+      "valid": false,
+      "why": "fragment character probe U+0040"
+    },
+    {
+      "import": "us-la:statutes/47:294#a+b",
+      "valid": false,
+      "why": "fragment character probe U+002B"
+    },
+    {
+      "import": "us-la:statutes/47:294#a/b",
+      "valid": false,
+      "why": "fragment character probe U+002F"
+    }
+  ]
+}
