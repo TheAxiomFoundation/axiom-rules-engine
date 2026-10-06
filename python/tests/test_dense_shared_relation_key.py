@@ -182,6 +182,23 @@ def test_malformed_related_count_returns_column_length_error(
     assert str(error.value) == expected
 
 
+@pytest.mark.parametrize("execute_name", ["execute", "execute_f64"])
+def test_omitted_related_columns_reject_unbounded_count(program, execute_name) -> None:
+    # Missing columns do not establish a related row count. Even the largest
+    # offset Python accepts must fail before allocating owners for that count.
+    (key,) = {schema.key for schema in program.relations}
+    relations = {
+        key: DenseRelationBatch(
+            offsets=np.array([0, np.iinfo(np.int64).max], dtype=np.int64),
+            inputs={},
+        )
+    }
+    with pytest.raises(
+        RuntimeError, match="type mismatch: dense relation.*related row count"
+    ):
+        getattr(program, execute_name)(**PERIOD, inputs={}, relations=relations)
+
+
 def test_counts_match_the_rules_on_random_households(program) -> None:
     # Property: for every batch, a household's adult SNAP unit is its members
     # with an SSN who are at least 18. Seeded, so a failure reproduces.
