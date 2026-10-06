@@ -47,10 +47,14 @@ struct Counting;
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 static SERIAL: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() > ALLOCATION_LIMIT.load(Ordering::SeqCst) {
+            return std::ptr::null_mut();
+        }
         // SAFETY: forwarded unchanged to the system allocator.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
@@ -74,6 +78,20 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct AllocationLimit(usize);
+
+impl AllocationLimit {
+    fn new(limit: usize) -> Self {
+        Self(ALLOCATION_LIMIT.swap(limit, Ordering::SeqCst))
+    }
+}
+
+impl Drop for AllocationLimit {
+    fn drop(&mut self) {
+        ALLOCATION_LIMIT.store(self.0, Ordering::SeqCst);
+    }
 }
 
 /// Bytes allocated at the peak of `run`, beyond what was live before it.
@@ -421,6 +439,138 @@ fn two_links() -> DenseCompiledProgram {
 
 fn one_household() -> Households {
     vec![vec![[1, 30, 5], [0, 40, 7]]]
+}
+
+fn no_related_inputs() -> DenseCompiledProgram {
+    compile_dense(&json!({
+        "relations": [relation("member", None, None)],
+        "derived": [rule("head_count", json!({
+            "kind": "count_related", "relation": "member", "current_slot": 0,
+            "related_slot": 1
+        }))],
+    }))
+}
+
+fn assert_unbounded_count_rejected(compiled: &DenseCompiledProgram, related_count: usize) {
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    for execute in [
+        DenseCompiledProgram::execute,
+        DenseCompiledProgram::execute_f64,
+    ] {
+        let result = execute(
+            compiled,
+            &period,
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: HashMap::from([(
+                    member_key(),
+                    DenseRelationBatchSpec {
+                        offsets: vec![0, related_count],
+                        inputs: HashMap::new(),
+                    },
+                )]),
+            },
+            &["head_count".to_string()],
+        );
+        assert!(
+            matches!(result, Err(EvalError::TypeMismatch(ref error))
+                if error.contains("related row count")),
+            "unexpected result: {result:?}"
+        );
+    }
+}
+
+/// Omitting required columns must not let an invalid count panic before
+/// evaluation has a chance to report an error.
+#[test]
+fn omitted_related_columns_reject_unbounded_count() {
+    let _serial = serial();
+    assert_unbounded_count_rejected(&two_links(), usize::MAX);
+}
+
+/// A schema that reads no columns still must reserve its owners fallibly.
+#[test]
+fn no_related_inputs_reject_unbounded_count() {
+    let _serial = serial();
+    let compiled = no_related_inputs();
+    assert!(compiled.relations()[0].related_inputs.is_empty());
+    assert_unbounded_count_rejected(&compiled, usize::MAX);
+}
+
+/// Exercise actual allocator refusal, as well as capacity overflow, without
+/// depending on the host's memory availability or overcommit policy.
+#[test]
+fn owner_reservation_failure_returns_type_mismatch() {
+    let _serial = serial();
+    for compiled in [two_links(), no_related_inputs()] {
+        let _limit = AllocationLimit::new(64 * 1024 * 1024);
+        assert_unbounded_count_rejected(&compiled, u32::MAX as usize);
+    }
+}
+
+/// Property: without any supplied column, reservation refusal is a bounded
+/// error for both schema types, independent of the declared count.
+#[test]
+fn unbounded_counts_fail_without_count_sized_allocations() {
+    let _serial = serial();
+    let programs = [two_links(), no_related_inputs()];
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(
+            &(4096_usize..=65_536, any::<bool>()),
+            |(count, no_inputs)| {
+                let _limit = AllocationLimit::new(16 * 1024);
+                let ((), peak) = peak_allocation(|| {
+                    assert_unbounded_count_rejected(&programs[usize::from(no_inputs)], count)
+                });
+                prop_assert!(
+                    peak < 16 * 1024,
+                    "rejecting count {} peaked at {} bytes",
+                    count,
+                    peak
+                );
+                Ok(())
+            },
+        )
+        .expect("failed owner reservations return bounded errors");
+}
+
+/// Small counts without supplied columns remain valid: omitted inputs fail
+/// only when evaluated, and a column-free schema can count related rows.
+#[test]
+fn column_free_batches_preserve_lazy_missing_inputs() {
+    let _serial = serial();
+    let programs = [two_links(), no_related_inputs()];
+    let mut runner = TestRunner::new(Config {
+        cases: 48,
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(&(1_usize..=128), |count| {
+            let batch = || DenseRelationBatchSpec {
+                offsets: vec![0, count],
+                inputs: HashMap::new(),
+            };
+            prop_assert_eq!(
+                execute(&programs[0], 1, batch(), &["one"]),
+                Ok(vec![vec![1]])
+            );
+            let missing = execute(&programs[0], 1, batch(), &["head_count"]);
+            prop_assert!(matches!(missing, Err(ref error) if error.contains("missing input")));
+            prop_assert_eq!(
+                execute(&programs[1], 1, batch(), &["head_count"]),
+                Ok(vec![vec![i64::try_from(count).expect("small count fits")]])
+            );
+            Ok(())
+        })
+        .expect("bounded column-free batches keep their evaluation semantics");
 }
 
 /// A supplied column read by the first schema must be checked before owners
