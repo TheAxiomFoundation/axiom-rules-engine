@@ -309,13 +309,12 @@ impl CorpusProvisionIndex {
             if line.trim().is_empty() {
                 continue;
             }
-            let record: ProvisionRecord = serde_json::from_str(line).map_err(|error| {
-                CompileError::ParseProvisionRecord {
+            let record: ProvisionRecord =
+                serde_json::from_str(line).map_err(|error| CompileError::ParseProvisionRecord {
                     path: path.to_string(),
                     line: index + 1,
                     error,
-                }
-            })?;
+                })?;
             let (Some(citation_path), Some(source_url)) = (record.citation_path, record.source_url)
             else {
                 continue;
@@ -368,7 +367,10 @@ fn collect_jsonl_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) -> std::
         let path = entry?.path();
         if path.is_dir() {
             collect_jsonl_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "jsonl") {
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
             files.push(path);
         }
     }
