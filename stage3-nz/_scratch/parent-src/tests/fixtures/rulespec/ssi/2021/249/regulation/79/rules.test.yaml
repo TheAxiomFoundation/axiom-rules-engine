@@ -1,0 +1,50 @@
+- name: band_d_sole_liable_no_non_dep
+  period: 2024
+  input:
+    ct_annual: 1460
+    ct_discounts: 0
+    ct_other_reductions: 0
+    band_number: 4
+    non_dep_deductions_daily: 0
+    partner_only_joint: false
+    liable_person:
+      - {is_not_student: true}
+  output:
+    num_non_student_liable: 1
+    a_raw: 1460
+    liable_divisor: 1
+    a_effective: 1460
+    is_band_e_to_h: not_holds
+    a_after_taper: 1460
+    # 1460 / 365 = 4
+    daily_max_reduction: 4
+- name: band_g_sole_liable_taper_applies
+  period: 2024
+  input:
+    ct_annual: 2350
+    ct_discounts: 0
+    ct_other_reductions: 0
+    band_number: 7
+    non_dep_deductions_daily: 0
+    partner_only_joint: false
+    liable_person:
+      - {is_not_student: true}
+  output:
+    is_band_e_to_h: holds
+    # taper C=1.175 → A_after = 2350 - 2350/1.175 = 2350 - 2000 = 350
+    a_after_taper: 350
+- name: joint_two_non_partner_divides
+  period: 2024
+  input:
+    ct_annual: 1000
+    ct_discounts: 0
+    ct_other_reductions: 0
+    band_number: 2
+    non_dep_deductions_daily: 0
+    partner_only_joint: false
+    liable_person:
+      - {is_not_student: true}
+      - {is_not_student: true}
+  output:
+    liable_divisor: 2
+    a_effective: 500

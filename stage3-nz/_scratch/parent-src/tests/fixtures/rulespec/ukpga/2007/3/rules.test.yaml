@@ -1,0 +1,78 @@
+- name: basic_rate_taxpayer_employment_only
+  period: 2025
+  input:
+    employment_income: 30000
+    pension_income: 0
+    trading_income: 0
+    property_income: 0
+    savings_income: 0
+    dividend_income: 0
+    reliefs_total: 0
+    gift_aid_net: 0
+    pension_contributions_gross: 0
+    receives_marriage_allowance: false
+    child_benefit_received: 0
+  output:
+    gross_income: 30000
+    personal_allowance: 12570
+    taxable_income: 17430
+    # 17430 * 0.20 = 3486
+    nsnd_tax: 3486
+    income_tax: 3486
+- name: higher_rate_taxpayer
+  period: 2025
+  input:
+    employment_income: 80000
+    pension_income: 0
+    trading_income: 0
+    property_income: 0
+    savings_income: 0
+    dividend_income: 0
+    reliefs_total: 0
+    gift_aid_net: 0
+    pension_contributions_gross: 0
+    receives_marriage_allowance: false
+    child_benefit_received: 0
+  output:
+    gross_income: 80000
+    personal_allowance: 12570
+    taxable_income: 67430
+    # 37700 * 0.20 + (67430-37700) * 0.40 = 7540 + 11892 = 19432
+    nsnd_tax: 19432
+    income_tax: 19432
+- name: pa_tapers_to_zero_at_125140
+  period: 2025
+  input:
+    employment_income: 130000
+    pension_income: 0
+    trading_income: 0
+    property_income: 0
+    savings_income: 0
+    dividend_income: 0
+    reliefs_total: 0
+    gift_aid_net: 0
+    pension_contributions_gross: 0
+    receives_marriage_allowance: false
+    child_benefit_received: 0
+  output:
+    pa_taper_amount: 15000
+    personal_allowance: 0
+    taxable_income: 130000
+- name: marriage_allowance_reduces_tax
+  period: 2025
+  input:
+    employment_income: 30000
+    pension_income: 0
+    trading_income: 0
+    property_income: 0
+    savings_income: 0
+    dividend_income: 0
+    reliefs_total: 0
+    gift_aid_net: 0
+    pension_contributions_gross: 0
+    receives_marriage_allowance: true
+    child_benefit_received: 0
+  output:
+    marriage_allowance_reducer: 252
+    # (17430 * 0.20) - 252 = 3234
+    income_tax: 3234

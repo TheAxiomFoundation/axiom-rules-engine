@@ -1,0 +1,214 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Housing Act 1988 s.21 — validity of a notice seeking possession of an
+    assured shorthold tenancy (post-Deregulation Act 2015 regime).
+
+    Top-level output is a statutory conclusion (`section_21_notice_valid`
+    : holds / not_holds / undetermined) rather than a monetary amount. No
+    arithmetic on the question asked — only a cascade of legal judgments,
+    absence conditions, and named time windows composed from several Acts:
+
+      HA 1988 s.19A + Sch 2A          tenancy must be an AST
+      HA 2004 s.213(3)                deposit protected within 30 days
+      HA 2004 s.213(6)                prescribed information within 30 days
+      HA 2004 s.215                   s.21 barred if scheme duties unmet
+      DerA 2015 s.38 + SI 2015/1646   EPC / gas safety / How-to-Rent guide
+      HA 2004 Parts 2/3 + DerA s.41   licensing duty
+      DerA 2015 s.33                  retaliatory-eviction bar
+      HA 1988 s.21(4B)                no notice in the first four months
+
+    The retaliation bar is expressed with the `count_where` filtered-
+    aggregation extension: each CouncilNotice carries an input
+    `is_in_retaliation_window: Boolean` pre-computed by the caller (the
+    served-on date falls 0–180 days before the s.21 notice was served).
+rules:
+  - name: deposit_protection_window_days
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2007-04-06'
+        formula: '30'
+  - name: earliest_notice_tenancy_age_days
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2015-10-01'
+        formula: '120'
+  - name: tenancy_is_assured_shorthold
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 1988 s.19A + Sch 2A
+    source_url: https://www.legislation.gov.uk/ukpga/1988/50/section/19A
+    versions:
+      - effective_from: '2015-10-01'
+        formula: is_assured_shorthold
+  - name: days_from_deposit_receipt_to_protection
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    source: Housing Act 2004 s.213(3)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: days_between(deposit_received_date, deposit_protected_date)
+  - name: days_from_deposit_receipt_to_info
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    source: Housing Act 2004 s.213(6)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: days_between(deposit_received_date, prescribed_info_given_date)
+  - name: deposit_protected_in_time
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 s.213(3)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: days_from_deposit_receipt_to_protection <= deposit_protection_window_days
+  - name: prescribed_info_in_time
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 s.213(6)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: days_from_deposit_receipt_to_info <= deposit_protection_window_days
+  - name: no_deposit_taken
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 s.213(1)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: not deposit_taken
+  - name: deposit_requirements_met
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 s.215
+    source_url: https://www.legislation.gov.uk/ukpga/2004/34/section/215
+    versions:
+      - effective_from: '2015-10-01'
+        formula: |-
+          no_deposit_taken
+          or (deposit_protected_in_time and prescribed_info_in_time)
+  - name: epc_requirement_met
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Deregulation Act 2015 s.38 + SI 2015/1646 reg 2(1)(b)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: epc_given_before_tenancy
+  - name: gas_safety_requirement_met
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: SI 2015/1646 reg 2(1)(a)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: gas_safety_given_before_occupation
+  - name: how_to_rent_requirement_met
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Deregulation Act 2015 s.39 + SI 2015/1646 reg 3
+    versions:
+      - effective_from: '2015-10-01'
+        formula: how_to_rent_guide_given
+  - name: licensing_not_required
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 Parts 2/3
+    versions:
+      - effective_from: '2015-10-01'
+        formula: not property_requires_licence
+  - name: landlord_holds_licence
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 2004 s.61 / s.85
+    versions:
+      - effective_from: '2015-10-01'
+        formula: landlord_has_licence
+  - name: licensing_requirement_met
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Deregulation Act 2015 s.41
+    source_url: https://www.legislation.gov.uk/ukpga/2015/20/section/41
+    versions:
+      - effective_from: '2015-10-01'
+        formula: licensing_not_required or landlord_holds_licence
+  - name: qualifying_council_notices
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    source: Deregulation Act 2015 s.33(2)(a) — 6-month lookback
+    source_url: https://www.legislation.gov.uk/ukpga/2015/20/section/33
+    versions:
+      - effective_from: '2015-10-01'
+        formula: count_where(council_notice_of_tenancy, is_in_retaliation_window)
+  - name: no_retaliation_bar
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Deregulation Act 2015 s.33
+    versions:
+      - effective_from: '2015-10-01'
+        formula: qualifying_council_notices == 0
+  - name: tenancy_age_days_at_notice
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    source: Housing Act 1988 s.21(4B)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: days_between(tenancy_start_date, notice_served_date)
+  - name: not_served_too_early
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 1988 s.21(4B)
+    versions:
+      - effective_from: '2015-10-01'
+        formula: tenancy_age_days_at_notice >= earliest_notice_tenancy_age_days
+  - name: section_21_notice_valid
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: Housing Act 1988 s.21 as modified by Deregulation Act 2015 Pt 3 Ch 1
+    source_url: https://www.legislation.gov.uk/ukpga/1988/50/section/21
+    versions:
+      - effective_from: '2015-10-01'
+        formula: |-
+          tenancy_is_assured_shorthold
+          and deposit_requirements_met
+          and epc_requirement_met
+          and gas_safety_requirement_met
+          and how_to_rent_requirement_met
+          and licensing_requirement_met
+          and no_retaliation_bar
+          and not_served_too_early

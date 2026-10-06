@@ -1,0 +1,1017 @@
+//! Authoritative JSON Schemas for the serialized RuleSpec surface.
+//!
+//! Current schemas are published for each format the engine and its consumers
+//! exchange, with superseded compiled-artifact schemas retained as archives:
+//!
+//! - `rulespec-module.v1` — the RuleSpec module/authoring format
+//!   (`format: rulespec/v1`): the document [`crate::rulespec::RulesDocument`]
+//!   deserializes, including module metadata, source verification, encoding
+//!   provenance, validation records, rule kinds, and effective-dated
+//!   versions.
+//! - `rulespec-test.v1` — the companion `*.test.yaml` format: the case list
+//!   the jurisdiction-repo and `axiom-encode` harnesses run against a module.
+//! - `compiled-artifact.v2` — [`crate::compile::CompiledProgramArtifact`], the
+//!   current compiled program (embedding the `ProgramSpec` IR) that ships to
+//!   consumers. `compiled-artifact.v1` remains published unchanged so stored
+//!   v1 artifacts have a stable historical schema, but this engine does not
+//!   execute them.
+//! - With both `schema` and `unit-derivation` enabled, four explicitly
+//!   experimental stage-3 schemas cover the aggregation authoring plan,
+//!   compiled artifact, Knowledge-valued request, and Knowledge-valued result.
+//!
+//! Fidelity is the whole point: a file that serde deserializes MUST validate
+//! against its schema, and a file that validates MUST deserialize. That goal
+//! forces two authoring strategies:
+//!
+//! - The current **artifact** schema is derived from the Rust types with `schemars`
+//!   (`#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]` on the
+//!   `*Spec` types). Those types are ordinary internally-tagged enums and
+//!   structs `schemars` mirrors exactly, so derivation is the source of
+//!   truth and cannot drift from the deserializer. Superseded artifact schemas
+//!   are frozen checked-in archives rather than regenerated from current types.
+//! - The **module** and **test** schemas are written by hand. Several fields
+//!   in the module format have hand-written `Deserialize` behavior a derive
+//!   cannot mirror — `RuleKind` accepts *any* string (deferring unknown
+//!   kinds to a compile-time error), `versions[].values` reads bare scalars
+//!   keyed by integers through a custom deserializer, many scalar fields
+//!   coerce string/bool/number, and the document permits unknown keys.
+//!   The test format has no Rust type at all; it is a harness contract.
+//!   Each hand-written divergence from a naive derive is commented at the
+//!   point it is introduced, and the conformance test over `rulespec-us` is
+//!   what pins these schemas to reality.
+
+#[cfg(feature = "schema")]
+use schemars::schema_for;
+use serde_json::{Value, json};
+
+/// A published schema: its stable file name and its JSON body.
+pub struct NamedSchema {
+    /// File name under `schemas/`, e.g. `rulespec-module.v1.schema.json`.
+    pub file_name: &'static str,
+    /// The JSON Schema document.
+    pub schema: Value,
+}
+
+/// `$id` prefix so the published schemas resolve as a coherent family.
+const ID_BASE: &str = "https://schemas.axiom-foundation.org/rules-engine";
+const CORPUS_CITATION_PATH_PATTERN: &str = "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$";
+
+/// All published schemas, in a stable order. The golden-file test writes
+/// each `schema` to `schemas/<file_name>` and asserts the checked-in copy is
+/// byte-identical; the `emit-schemas` CLI subcommand writes the same set.
+#[cfg(feature = "schema")]
+pub fn all_schemas() -> Vec<NamedSchema> {
+    let mut schemas = vec![
+        NamedSchema {
+            file_name: "rulespec-module.v1.schema.json",
+            schema: rulespec_module_schema(),
+        },
+        NamedSchema {
+            file_name: "rulespec-test.v1.schema.json",
+            schema: rulespec_test_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-artifact.v1.schema.json",
+            schema: archived_compiled_artifact_v1_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-artifact.v2.schema.json",
+            schema: compiled_artifact_schema(),
+        },
+    ];
+    #[cfg(feature = "unit-derivation")]
+    schemas.extend([
+        NamedSchema {
+            file_name: "experimental-unit-aggregation-plan.stage3.schema.json",
+            schema: unit_aggregation_plan_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-unit-aggregation.stage3.schema.json",
+            schema: compiled_unit_aggregation_schema(),
+        },
+        NamedSchema {
+            file_name: "unit-aggregation-request.stage3.schema.json",
+            schema: unit_aggregation_request_schema(),
+        },
+        NamedSchema {
+            file_name: "unit-aggregation-result.stage3.schema.json",
+            schema: unit_aggregation_result_schema(),
+        },
+    ]);
+    schemas
+}
+
+/// Serialize a schema to the canonical on-disk text: pretty-printed with two
+/// spaces and a trailing newline. The golden test and CLI both use this so
+/// the checked-in files and the generated bytes match exactly.
+pub fn to_pretty_string(schema: &Value) -> String {
+    let mut text = serde_json::to_string_pretty(schema).expect("schema serializes");
+    text.push('\n');
+    text
+}
+
+/// Write every published schema into `dir` (created if absent) as
+/// `<dir>/<file_name>`, using [`to_pretty_string`]. Returns the paths written.
+/// Backs the `emit-schemas` CLI subcommand; the golden-file test compares
+/// against the same [`to_pretty_string`] bytes without writing.
+#[cfg(all(feature = "schema", feature = "fs"))]
+pub fn write_all_to_dir(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let mut written = Vec::new();
+    for named in all_schemas() {
+        let path = dir.join(named.file_name);
+        std::fs::write(&path, to_pretty_string(&named.schema))?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+// ---------------------------------------------------------------------------
+// Compiled artifact — derived from the Rust types via schemars.
+// ---------------------------------------------------------------------------
+
+/// Archived v1 schema. It is loaded from the checked-in bytes instead of being
+/// regenerated from current Rust types because v1 predates executable
+/// `effective_to` fields and must remain immutable.
+#[cfg(feature = "schema")]
+fn archived_compiled_artifact_v1_schema() -> Value {
+    serde_json::from_str(include_str!("../schemas/compiled-artifact.v1.schema.json"))
+        .expect("archived compiled-artifact.v1 schema is valid JSON")
+}
+
+/// JSON Schema for the current [`crate::compile::CompiledProgramArtifact`],
+/// generated from the `schemars` derive so it tracks the serde types
+/// automatically.
+///
+/// Known, deliberate divergences from raw serde acceptance (documented in the
+/// PR and in `docs/schema-alignment.md`):
+///
+/// - `ScalarValueSpec::Decimal.value` is a Rust `String` but its deserializer
+///   also accepts a JSON integer; the schema says `["string","integer"]` via
+///   [`string_or_integer_schema`].
+/// - `usize` slot fields serialize as JSON numbers; schemars describes them as
+///   non-negative integers, which is correct.
+/// - `SourceVerification` is an exact mapping with one required singular
+///   corpus citation path, an optional source digest, and an optional typed
+///   higher-authority source check.
+#[cfg(feature = "schema")]
+pub fn compiled_artifact_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
+        .expect("artifact schema serializes");
+    harden_compiled_artifact_schema(&mut schema);
+    stamp_meta(
+        &mut schema,
+        "compiled-artifact.v2",
+        "Axiom compiled program artifact",
+        "A compiled RuleSpec program: the ProgramSpec IR plus evaluation \
+         order and fast-path metadata, stamped with an artifact format \
+         version. Produced by `axiom-rules-engine compile`.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_plan_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationPlan))
+        .expect("unit aggregation plan schema serializes");
+    set_property_const(
+        &mut schema,
+        "schema",
+        crate::unit_derivation::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA,
+    );
+    stamp_meta(
+        &mut schema,
+        "experimental-unit-aggregation-plan.stage3",
+        "Experimental unit aggregation plan",
+        "Feature-gated authoring document compiled into a canonically digested unit aggregation artifact.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn compiled_unit_aggregation_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(
+        crate::unit_derivation::CompiledAggregationArtifact
+    ))
+    .expect("compiled unit aggregation schema serializes");
+    set_property_const(
+        &mut schema,
+        "format",
+        crate::unit_derivation::COMPILED_AGGREGATION_ARTIFACT_FORMAT,
+    );
+    set_property_const(
+        &mut schema,
+        "semantics_version",
+        crate::unit_derivation::EXPERIMENTAL_SEMANTICS_VERSION,
+    );
+    stamp_meta(
+        &mut schema,
+        "compiled-unit-aggregation.stage3",
+        "Compiled experimental unit aggregation artifact",
+        "Feature-gated, canonically digested aggregation plan with an embedded production-validated phase-two artifact.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_request_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationRequest))
+        .expect("unit aggregation request schema serializes");
+    stamp_meta(
+        &mut schema,
+        "unit-aggregation-request.stage3",
+        "Experimental unit aggregation request",
+        "Evidence-bearing Knowledge-valued roster, relationship, person, child, and family inputs.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+pub fn unit_aggregation_result_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for!(crate::unit_derivation::AggregationResult))
+        .expect("unit aggregation result schema serializes");
+    set_property_const(
+        &mut schema,
+        "schema",
+        crate::unit_derivation::EXPERIMENTAL_AGGREGATION_PLAN_SCHEMA,
+    );
+    stamp_meta(
+        &mut schema,
+        "unit-aggregation-result.stage3",
+        "Experimental unit aggregation result",
+        "Knowledge-valued family aggregation outputs with canonical plan and request-bound trace digests.",
+    );
+    schema
+}
+
+#[cfg(all(feature = "schema", feature = "unit-derivation"))]
+fn set_property_const(schema: &mut Value, property: &str, value: &str) {
+    if let Some(property_schema) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut(property))
+        .and_then(Value::as_object_mut)
+    {
+        property_schema.insert("const".to_string(), json!(value));
+    }
+}
+
+#[cfg(feature = "schema")]
+fn harden_compiled_artifact_schema(value: &mut Value) {
+    match value {
+        Value::Object(mapping) => {
+            let mut forbidden = vec!["corpus_citation_paths"];
+            let object_schema = mapping.get("type").and_then(Value::as_str) == Some("object")
+                || mapping.contains_key("properties");
+            if let Some(Value::Object(properties)) = mapping.get_mut("properties") {
+                if properties.contains_key("source_verification")
+                    && properties.contains_key("encoding_provenance")
+                {
+                    forbidden.push("id");
+                }
+                if properties.contains_key("module")
+                    && properties.contains_key("units")
+                    && properties.contains_key("parameters")
+                    && properties.contains_key("derived")
+                {
+                    // The removed composition directive. The loader tolerates
+                    // exactly one shape — the key absent, or present as null
+                    // (v0.1-maintenance-line engines serialize it
+                    // unconditionally) — and the schema must say the same
+                    // thing: `not required` here would reject every published
+                    // artifact the engine accepts.
+                    properties.insert(
+                        "extends".to_string(),
+                        json!({
+                            "type": "null",
+                            "description": "Removed composition directive; \
+                             tolerated only as null. Compose before \
+                             compilation — any non-null value is rejected \
+                             at load."
+                        }),
+                    );
+                }
+                if let Some(Value::Object(version)) = properties.get_mut("artifact_format_version")
+                {
+                    version.insert(
+                        "const".to_string(),
+                        json!(crate::compile::ARTIFACT_FORMAT_VERSION),
+                    );
+                }
+                if let Some(Value::Object(citation)) = properties.get_mut("corpus_citation_path") {
+                    citation.insert("pattern".to_string(), json!(CORPUS_CITATION_PATH_PATTERN));
+                }
+                if let Some(Value::Object(digest)) = properties.get_mut("source_sha256") {
+                    digest.insert("pattern".to_string(), json!("^[0-9a-fA-F]{64}$"));
+                }
+                if let Some(Value::Object(id)) = properties.get_mut("id") {
+                    id.insert(
+                        "pattern".to_string(),
+                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$"),
+                    );
+                }
+                if let Some(Value::Object(slot)) = properties.get_mut("slot") {
+                    slot.insert("pattern".to_string(), json!("^[A-Za-z_][A-Za-z0-9_]*$"));
+                }
+                if let Some(Value::Object(request_names)) = properties.get_mut("request_names") {
+                    request_names.insert(
+                        "items".to_string(),
+                        json!({
+                            "type": "string",
+                            "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$"
+                        }),
+                    );
+                }
+                if let Some(Value::Object(request_name)) =
+                    properties.get_mut("canonical_request_name")
+                {
+                    request_name.insert(
+                        "pattern".to_string(),
+                        json!("^(?:[A-Za-z_][A-Za-z0-9_]*|[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#input\\.[A-Za-z_][A-Za-z0-9_]*)$"),
+                    );
+                }
+            }
+            if object_schema {
+                let constraints = mapping
+                    .entry("allOf".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(constraints) = constraints {
+                    constraints.extend(
+                        forbidden
+                            .into_iter()
+                            .map(|field| json!({ "not": { "required": [field] } })),
+                    );
+                }
+            }
+            for nested in mapping.values_mut() {
+                harden_compiled_artifact_schema(nested);
+            }
+        }
+        Value::Array(sequence) => {
+            for nested in sequence {
+                harden_compiled_artifact_schema(nested);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `{ "type": ["string", "integer"] }` — the accepted JSON for a decimal
+/// parameter value (quoted string for arbitrary precision, or a bare integer).
+/// Floats are rejected by the deserializer and so are absent here.
+#[cfg(feature = "schema")]
+pub fn string_or_integer_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "integer"],
+        "description": "Decimal value as a quoted string (arbitrary precision) or a JSON integer; floats are rejected."
+    })
+}
+
+/// The full set of `dtype` strings the `DTypeSpec` deserializer accepts: the
+/// six canonical snake_case names plus every serde alias (PascalCase forms and
+/// the `Money`/`money`/`Rate`/`rate` synonyms for `decimal`). `schemars`
+/// derives only the canonical names from the enum, dropping the aliases, which
+/// would make the artifact schema reject a `dtype` serde accepts — so the
+/// `dtype` field uses this instead. Emitted artifacts always use the canonical
+/// forms, but the schema must still accept a hand-written or round-tripped
+/// alias.
+#[cfg(feature = "schema")]
+pub fn dtype_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": [
+            "judgment", "Judgment",
+            "bool", "Bool", "Boolean", "boolean",
+            "integer", "Integer",
+            "decimal", "Decimal", "Money", "money", "Rate", "rate",
+            "text", "Text",
+            "date", "Date"
+        ],
+        "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal."
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Shared hand-written fragments.
+// ---------------------------------------------------------------------------
+
+/// A YAML/JSON date, `YYYY-MM-DD` (serde `NaiveDate`).
+fn date_schema() -> Value {
+    json!({
+        "type": "string",
+        "format": "date",
+        "pattern": r"^\d{4}-\d{2}-\d{2}$"
+    })
+}
+
+/// A scalar that many module fields coerce to a string on load via
+/// `deserialize_optional_string_like`: a string, bool, or number is accepted
+/// (and stringified); explicit null clears the field. Mirrors that
+/// deserializer exactly.
+fn string_like_schema() -> Value {
+    json!({
+        "type": ["string", "boolean", "number", "null"],
+        "description": "String, or a bool/number coerced to string on load; null clears the field."
+    })
+}
+
+/// An array field that also accepts an explicit `null`. `serde_yaml` coerces
+/// a `null` value into the empty vec for every `#[serde(default)]` `Vec`
+/// field, so a file with e.g. `imports:` (an empty/null value) deserializes
+/// and therefore must validate. Every list property in the module format uses
+/// this rather than a bare `{"type": "array"}`.
+fn nullable_array(items: Value) -> Value {
+    json!({
+        "type": ["array", "null"],
+        "items": items
+    })
+}
+
+/// An optional nested object that also accepts an explicit `null`. Optional
+/// struct fields (`Option<T>`) treat a `null` value as `None`, so a file that
+/// writes `data_relation:` (null) deserializes and must validate.
+fn nullable_object(mut object: Value) -> Value {
+    let type_field = object
+        .as_object_mut()
+        .expect("object schema")
+        .entry("type")
+        .or_insert(json!("object"));
+    *type_field = json!(["object", "null"]);
+    object
+}
+
+// ---------------------------------------------------------------------------
+// RuleSpec module format — hand-written.
+// ---------------------------------------------------------------------------
+
+/// JSON Schema for the RuleSpec module/authoring format
+/// ([`crate::rulespec::RulesDocument`]).
+///
+/// This is authored by hand rather than derived because the loader's
+/// acceptance is wider and stranger than a `#[derive(JsonSchema)]` on
+/// `RulesDocument` would emit. The specific divergences are commented inline;
+/// the headline ones:
+///
+/// - **`kind` accepts any string.** `RuleKind`'s hand-written `Deserialize`
+///   maps the five known kinds and folds every other string into
+///   `Unsupported(String)`, which deserializes fine and only fails later at
+///   lowering. A derived schema would emit a closed `enum`; this schema keeps
+///   `kind` an open string (with the known values advertised in the
+///   description) so serde-acceptance and schema-validity agree.
+/// - **`versions[].values` are bare scalars keyed by integer.** The custom
+///   `deserialize_parameter_value_map` reads a YAML mapping whose keys parse
+///   as integers and whose values are bare scalars (`3`, `"x"`, `true`) — not
+///   the internally-tagged `{kind: …}` form the artifact uses.
+/// - **The document does not deny unknown fields.** Real modules carry
+///   `module.proof_validation`, per-rule `metadata.proof.atoms`, and other
+///   tooling side-channels that serde ignores. `additionalProperties` is left
+///   open at the document, module, and rule levels to match.
+pub fn rulespec_module_schema() -> Value {
+    let mut schema = json!({
+        "type": "object",
+        // RulesDocument has no `deny_unknown_fields`; unknown top-level keys
+        // (e.g. tooling side-channels) deserialize and are ignored.
+        "additionalProperties": true,
+        "properties": {
+            "format": {
+                "type": "string",
+                "const": "rulespec/v1",
+                "description": "Exact RuleSpec format discriminator."
+            },
+            "imports": nullable_array(json!({
+                "type": "string",
+                "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+(?:#[A-Za-z0-9_.-]+)?$",
+                "not": {
+                    "pattern": "\\.(?:[Yy][Aa][Mm][Ll]|[Yy][Mm][Ll])(?:#|$)"
+                }
+            })),
+            "module": nullable_object(module_metadata_schema()),
+            "units": nullable_array(unit_spec_schema()),
+            // Top-level `relations:` deserializes but is rejected at lowering
+            // (`TopLevelRelationsUnsupported`). It is included so that files
+            // which *deserialize* still validate; consumers that lower will
+            // surface the same error the engine does.
+            "relations": nullable_array(json!({ "type": "object" })),
+            "rules": nullable_array(rule_definition_schema())
+        },
+        "required": ["format"],
+        // Unknown tooling side-channels remain open, but the removed engine
+        // composition directive is explicitly forbidden.
+        "allOf": [
+            { "not": { "required": ["extends"] } },
+            { "not": { "required": ["schema"] } }
+        ]
+    });
+    stamp_meta(
+        &mut schema,
+        "rulespec-module.v1",
+        "Axiom RuleSpec module",
+        "A RuleSpec module: `format: rulespec/v1` metadata, imports, units, \
+         and effective-dated rules (parameters, derived outputs, data/derived \
+         relations, and source-relation provenance edges).",
+    );
+    schema
+}
+
+/// `module:` block — [`crate::rulespec::ModuleMetadata`]. Every field is
+/// optional and inert. Unknown subfields are ignored (no
+/// `deny_unknown_fields`), which is why real files can hang `proof_validation`
+/// and similar here.
+fn module_metadata_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "not": { "required": ["id"] },
+        "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
+        "properties": {
+            "kind": { "type": "string" },
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "status": { "type": "string" },
+            "source_verification": nullable_object(source_verification_schema()),
+            "encoding_provenance": nullable_object(encoding_provenance_schema()),
+            "validation": nullable_array(validation_record_schema())
+        }
+    })
+}
+
+/// `module.source_verification` — [`crate::rulespec::SourceVerification`].
+/// Exact mapping: one required singular corpus path, plus an optional digest
+/// and typed higher-authority source check.
+fn source_verification_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["corpus_citation_path"],
+        "properties": {
+            "corpus_citation_path": {
+                "type": "string",
+                "pattern": CORPUS_CITATION_PATH_PATTERN,
+                "description": "Corpus provision path the module was encoded from."
+            },
+            "source_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$",
+                "description": "SHA-256 hex digest of the exact provision text. Validated at load — must be 64 hex chars."
+            },
+            "upstream_source_check": nullable_object(upstream_source_check_schema())
+        }
+    })
+}
+
+/// `module.source_verification.upstream_source_check` —
+/// [`crate::rulespec::UpstreamSourceCheck`]. Structural fidelity is enforced
+/// here; status and authority semantics remain encoder policy.
+fn upstream_source_check_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "checked_paths", "rationale"],
+        "properties": {
+            "status": { "type": "string" },
+            "checked_paths": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "rationale": { "type": "string" }
+        }
+    })
+}
+
+/// `module.encoding_provenance` — [`crate::rulespec::EncodingProvenance`].
+/// This is the one metadata block with `deny_unknown_fields`, so the schema
+/// closes `additionalProperties`.
+fn encoding_provenance_schema() -> Value {
+    json!({
+        "type": "object",
+        // EncodingProvenance is #[serde(deny_unknown_fields)] — a typo'd
+        // subfield is a hard load error, so the schema forbids extras too.
+        "additionalProperties": false,
+        "description": "Who/what produced the encoding. Unknown subfields are rejected at load.",
+        "properties": {
+            "encoder": { "type": "string" },
+            "model": { "type": "string" },
+            "run_id": { "type": "string" },
+            "reviewed_by": { "type": "string" }
+        }
+    })
+}
+
+/// One `module.validation[]` record — [`crate::rulespec::ValidationRecord`].
+fn validation_record_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["oracle", "status"],
+        "properties": {
+            "oracle": { "type": "string" },
+            // ValidationStatus is a closed snake_case enum; an unknown status
+            // is rejected at load, so the schema closes it too.
+            "status": {
+                "type": "string",
+                "enum": ["matches", "mismatches", "pending"]
+            },
+            "last_run": date_schema()
+        }
+    })
+}
+
+/// A `units[]` entry — [`crate::spec::UnitSpec`] (`name` + a `kind`-tagged
+/// [`crate::spec::UnitKindSpec`]). `Currency` carries `minor_units`; `Custom`
+/// carries a `label`.
+fn unit_spec_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["name", "kind"],
+        "properties": {
+            "name": { "type": "string" },
+            "kind": {
+                "type": "string",
+                "enum": ["currency", "count", "ratio", "duration", "custom"]
+            },
+            "minor_units": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255,
+                "description": "Required when kind is `currency`."
+            },
+            "label": {
+                "type": "string",
+                "description": "Required when kind is `custom`."
+            }
+        },
+        "allOf": [
+            {
+                "if": { "properties": { "kind": { "const": "currency" } } },
+                "then": { "required": ["minor_units"] }
+            },
+            {
+                "if": { "properties": { "kind": { "const": "custom" } } },
+                "then": { "required": ["label"] }
+            }
+        ]
+    })
+}
+
+/// A `rules[]` entry — [`crate::rulespec::RuleDefinition`]. `name` is the only
+/// required field; `kind` is required by the *loader* (a missing kind is an
+/// error) but is modeled here as optional-with-open-string because its
+/// hand-written deserializer accepts any string. Unknown keys (e.g.
+/// `metadata`) are ignored.
+fn rule_definition_schema() -> Value {
+    json!({
+        "type": "object",
+        // RuleDefinition has no deny_unknown_fields; per-rule `metadata:` and
+        // other tooling keys deserialize and are ignored.
+        "additionalProperties": true,
+        "required": ["name"],
+        "properties": {
+            "name": { "type": "string" },
+            // RuleKind::deserialize accepts ANY string: the five known kinds
+            // plus Unsupported(other). Unknown kinds deserialize and only
+            // fail at lowering, so this stays an open string rather than a
+            // closed enum. Known values are advertised for tooling.
+            "kind": {
+                "type": "string",
+                "description": "Rule kind. Known: parameter, derived, data_relation, derived_relation, source_relation. Any other string deserializes but fails at lowering (RuleKind::Unsupported).",
+                "examples": [
+                    "parameter",
+                    "derived",
+                    "data_relation",
+                    "derived_relation",
+                    "source_relation"
+                ]
+            },
+            "entity": string_like_schema(),
+            "dtype": string_like_schema(),
+            "period": string_like_schema(),
+            "unit": string_like_schema(),
+            // Opt-in output rounding for a `derived` currency rule. A closed
+            // snake_case enum: RoundingModeSpec deserializes only these four
+            // values, and an unknown mode is a load error, so (unlike `kind`)
+            // this stays a closed enum. Rejected at lowering on non-derived or
+            // non-currency rules.
+            "rounding": {
+                "type": "string",
+                "enum": ["half_up", "half_even", "floor", "ceil"],
+                "description": "Output-rounding mode for a derived currency rule: half_up (away from zero on .5), half_even (banker's), floor (toward -inf), ceil (toward +inf). Applies only to derived rules whose unit is a currency."
+            },
+            "label": string_like_schema(),
+            "description": string_like_schema(),
+            "default": string_like_schema(),
+            "indexed_by": string_like_schema(),
+            "status": string_like_schema(),
+            "source": string_like_schema(),
+            "source_url": string_like_schema(),
+            "sources": nullable_array(source_ref_schema()),
+            "data_relation": nullable_object(data_relation_ref_schema()),
+            "derived_relation": nullable_object(derived_relation_ref_schema()),
+            "source_relation": nullable_object(source_relation_ref_schema()),
+            // Free-form; parsed as an opaque YAML value and not interpreted by
+            // the engine.
+            "verification": true,
+            // Top-level `arity` deserializes but is rejected at lowering
+            // (TopLevelArityUnsupported); real arity goes under
+            // data_relation.arity / derived_relation.arity.
+            "arity": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Deserializes, but lowering rejects top-level arity — use data_relation.arity / derived_relation.arity."
+            },
+            "effective_from": date_schema(),
+            "effective_to": date_schema(),
+            "from": date_schema(),
+            "to": date_schema(),
+            "formula": string_like_schema(),
+            "versions": nullable_array(rule_version_schema())
+        }
+    })
+}
+
+/// A `rules[].sources[]` entry — [`crate::rulespec::SourceRef`]. `citation`
+/// also accepts the alias `source`; both fields coerce string-like scalars.
+fn source_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "citation": string_like_schema(),
+            "source": string_like_schema(),
+            "url": string_like_schema()
+        }
+    })
+}
+
+/// `rules[].data_relation` — [`crate::rulespec::DataRelationRef`].
+fn data_relation_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "arity": { "type": "integer", "minimum": 0 },
+            "arguments": nullable_array(json!({
+                "oneOf": [
+                    { "type": "string" },
+                    {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                            "name": { "type": "string" },
+                            "entity": { "type": "string" }
+                        },
+                        "required": ["entity"]
+                    }
+                ]
+            }))
+        }
+    })
+}
+
+/// `rules[].derived_relation` — [`crate::rulespec::DerivedRelationRef`].
+/// `source_relation` also accepts the alias `source`.
+fn derived_relation_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "arity": { "type": "integer", "minimum": 0 },
+            "source_relation": { "type": "string" },
+            "source": { "type": "string" },
+            "entity": string_like_schema(),
+            "member_relation": string_like_schema(),
+            "slot_entities": nullable_array(json!({ "type": "string" })),
+            "current_slot": { "type": "integer", "minimum": 0 },
+            "related_slot": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
+/// `rules[].source_relation` — [`crate::rulespec::SourceRelationRef`].
+/// `type` is a closed snake_case enum in the struct; `effective` under
+/// `amendment` is an opaque YAML value.
+fn source_relation_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            // SourceRelationType is a closed snake_case enum: an unknown type
+            // is a load error, so this stays a closed enum (unlike `kind`).
+            "type": {
+                "type": "string",
+                "enum": ["defines", "delegates", "implements", "sets", "amends", "restates", "cites"]
+            },
+            "target": string_like_schema(),
+            "authority": string_like_schema(),
+            "value": string_like_schema(),
+            "basis": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                    "delegation": string_like_schema()
+                }
+            },
+            "amendment": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                    "operation": string_like_schema(),
+                    // Opaque YAML value (date, string, or structured note).
+                    "effective": true,
+                    "superseding_rule": string_like_schema()
+                }
+            }
+        }
+    })
+}
+
+/// A `rules[].versions[]` entry — [`crate::rulespec::RuleVersion`].
+/// `effective_from`/`effective_to` accept the `from`/`to` aliases. `values`
+/// is the parameter-table map read by the custom deserializer.
+fn rule_version_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "effective_from": date_schema(),
+            "effective_to": date_schema(),
+            "from": date_schema(),
+            "to": date_schema(),
+            "formula": string_like_schema(),
+            // deserialize_parameter_value_map: a YAML mapping whose keys parse
+            // as integers and whose values are BARE scalars (bool, number,
+            // string; a string is re-parsed as int/decimal/date/text). This
+            // is NOT the internally-tagged {kind: …} ScalarValueSpec used by
+            // the artifact — expressing it needs the bare-scalar value shape
+            // and integer-string keys below.
+            "values": {
+                "type": "object",
+                "description": "Indexed parameter table: integer keys (as strings in JSON) to bare scalar values. Distinct from the tagged ScalarValueSpec in compiled artifacts.",
+                "propertyNames": { "pattern": "^-?\\d+$" },
+                "additionalProperties": {
+                    "type": ["string", "number", "boolean"]
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// RuleSpec companion test format — hand-written.
+// ---------------------------------------------------------------------------
+
+/// JSON Schema for the companion `*.test.yaml` format.
+///
+/// This format has **no Rust serde type** in the engine: it is the contract
+/// the jurisdiction-repo test harness and `axiom-encode` consume, not
+/// something `axiom-rules-engine` itself parses. Its authority is therefore
+/// the corpus plus the consuming harness, and the conformance test over
+/// `rulespec-us` is what keeps this schema honest.
+///
+/// Observed shape across the corpus (10,957 cases in 3,009 files; see the
+/// conformance test):
+///
+/// - The document is a list of case objects. Every case carries `name`,
+///   `period`, and `output`; `input` is present in all but ~0.4% (an empty
+///   `input: {}` or a `tables`-only case).
+/// - `period` is either a full object (`period_kind` + `start`/`end`, plus a
+///   `name` when `period_kind: custom`) OR a shorthand string like `2026-01`.
+///   Observed kinds: `tax_year`, `custom`, `benefit_week` (and `month` in the
+///   in-repo fixtures) — kept an open string.
+/// - `input` maps an input/flag name (a durable id) to a scalar or a list.
+/// - `output` maps an output name/id to an expected value: a scalar (amount,
+///   date, or judgment outcome such as `holds`/`not_holds`) or a
+///   single-element list wrapping one such scalar.
+/// - `tables` (~3.8% of cases) maps an entity name (only `Payment` seen) to a
+///   list of input-row objects.
+/// - `oracle_inputs` (~0.1%) maps an oracle name (only `policyengine` seen) to
+///   free-form key/value inputs for cross-engine validation.
+///
+/// The schema is deliberately permissive where the corpus shows variety; the
+/// conformance test, not tightness here, is the ratchet.
+pub fn rulespec_test_schema() -> Value {
+    let scalar = json!({ "type": ["string", "number", "boolean", "null"] });
+    // An input value: a scalar, or a list (of scalars or of related-entity
+    // objects), or a nested object.
+    let input_value = json!({
+        "oneOf": [
+            scalar.clone(),
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        scalar.clone(),
+                        { "type": "object", "additionalProperties": true }
+                    ]
+                }
+            },
+            { "type": "object", "additionalProperties": true }
+        ]
+    });
+    // An expected output value: a scalar, or a single-element list wrapping a
+    // scalar (both forms occur in the corpus).
+    let output_value = json!({
+        "oneOf": [
+            scalar.clone(),
+            { "type": "array", "items": scalar.clone() },
+            { "type": "object", "additionalProperties": true }
+        ]
+    });
+    let mut schema = json!({
+        "type": "array",
+        "description": "A list of test cases run against a companion RuleSpec module.",
+        "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["name", "period", "output"],
+            "properties": {
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "period": {
+                    "description": "A full period object, or a shorthand string such as `2026-01`.",
+                    "oneOf": [
+                        { "type": "string" },
+                        {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "required": ["period_kind"],
+                            "properties": {
+                                "period_kind": {
+                                    "type": "string",
+                                    "description": "e.g. month, tax_year, benefit_week, custom. When custom, `name` gives the label."
+                                },
+                                "name": { "type": "string" },
+                                // Dates are strings (`YYYY-MM-DD`); keep this a
+                                // plain string rather than a date/string
+                                // `oneOf`, which a date value would match twice
+                                // and thereby fail.
+                                "start": { "type": "string" },
+                                "end": { "type": "string" }
+                            }
+                        }
+                    ]
+                },
+                "input": {
+                    "type": "object",
+                    "description": "Input/flag values keyed by durable id. Scalars, or lists (of scalars or related-entity objects).",
+                    "additionalProperties": input_value.clone()
+                },
+                "tables": {
+                    "type": "object",
+                    "description": "Related-entity rows keyed by entity name (e.g. Payment): a list of input-row objects.",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": { "type": "object", "additionalProperties": input_value.clone() }
+                    }
+                },
+                "oracle_inputs": {
+                    "type": "object",
+                    "description": "Cross-engine validation inputs keyed by oracle name (e.g. policyengine).",
+                    "additionalProperties": { "type": "object", "additionalProperties": true }
+                },
+                "output": {
+                    "type": "object",
+                    "description": "Expected outputs keyed by output name or durable id. Amounts, dates, or judgment outcomes (holds/not_holds/undetermined), optionally single-element-list-wrapped.",
+                    "additionalProperties": output_value.clone()
+                }
+            }
+        }
+    });
+    stamp_meta(
+        &mut schema,
+        "rulespec-test.v1",
+        "Axiom RuleSpec companion test",
+        "A companion `*.test.yaml` case list: named cases with a period, \
+         inputs, and expected outputs, run against a RuleSpec module by the \
+         jurisdiction-repo and axiom-encode test harnesses.",
+    );
+    schema
+}
+
+// ---------------------------------------------------------------------------
+// Helpers.
+// ---------------------------------------------------------------------------
+
+/// Stamp the draft-07 `$schema`, a stable `$id`, a `title`, and a
+/// `description` onto a schema object. Applied uniformly so every published
+/// schema carries the same header, whether hand-written or derived.
+fn stamp_meta(schema: &mut Value, id_stem: &str, title: &str, description: &str) {
+    let object = schema
+        .as_object_mut()
+        .expect("schema root is a JSON object");
+    // schemars emits its own draft `$schema`; normalize every published
+    // schema to draft-07, which every consumer (jsonschema, ajv, python
+    // jsonschema) validates without a meta-schema fetch.
+    object.insert(
+        "$schema".to_string(),
+        json!("http://json-schema.org/draft-07/schema#"),
+    );
+    object.insert(
+        "$id".to_string(),
+        json!(format!("{ID_BASE}/{id_stem}.schema.json")),
+    );
+    // Put title/description first-ish by re-inserting; serde_json preserves
+    // insertion order only with the preserve_order feature, so ordering is
+    // not guaranteed — these are set for content, not position.
+    object.insert("title".to_string(), json!(title));
+    object.insert("description".to_string(), json!(description));
+}

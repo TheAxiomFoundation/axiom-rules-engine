@@ -1,0 +1,39 @@
+- name: size_3_eligible
+  period: 2025
+  input:
+    member_of_household:
+      - {earned_income: 800}
+      - {earned_income: 500}
+      - {earned_income: 0}
+  output:
+    household_size: 3
+    earned_income_total: 1300
+    income_limit: 3400
+    qualifies: holds
+    monthly_allowance: 360
+- name: size_2_ineligible_over_limit
+  period: 2025
+  input:
+    member_of_household:
+      - {earned_income: 1500}
+      - {earned_income: 1500}
+  output:
+    household_size: 2
+    earned_income_total: 3000
+    income_limit: 2600
+    qualifies: not_holds
+    monthly_allowance: 0
+- name: size_5_eligible_at_limit
+  period: 2025
+  input:
+    member_of_household:
+      - {earned_income: 5000}
+      - {earned_income: 0}
+      - {earned_income: 0}
+      - {earned_income: 0}
+      - {earned_income: 0}
+  output:
+    household_size: 5
+    income_limit: 5000
+    qualifies: holds
+    monthly_allowance: 600

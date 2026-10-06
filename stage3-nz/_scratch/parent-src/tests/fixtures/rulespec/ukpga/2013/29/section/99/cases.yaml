@@ -1,0 +1,104 @@
+cases:
+  - name: below_threshold_no_charge
+    interest_id: interest-1
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "450000"
+    in_charge_on_first_day: true
+    entry_day: "2024-04-01"
+    expected:
+      band_number: 0
+      annual_chargeable_amount: "0"
+      days_in_period: 365
+      days_from_entry: 365
+      tax_chargeable: "0"
+
+  - name: band_1_full_year
+    interest_id: interest-2
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "800000"
+    in_charge_on_first_day: true
+    entry_day: "2024-04-01"
+    expected:
+      band_number: 1
+      annual_chargeable_amount: "4400"
+      days_in_period: 365
+      days_from_entry: 365
+      tax_chargeable: "4400"
+
+  - name: band_3_full_year
+    interest_id: interest-3
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "3500000"
+    in_charge_on_first_day: true
+    entry_day: "2024-04-01"
+    expected:
+      band_number: 3
+      annual_chargeable_amount: "30550"
+      days_in_period: 365
+      days_from_entry: 365
+      tax_chargeable: "30550"
+
+  - name: band_6_over_20m
+    interest_id: interest-4
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "25000000"
+    in_charge_on_first_day: true
+    entry_day: "2024-04-01"
+    expected:
+      band_number: 6
+      annual_chargeable_amount: "287500"
+      days_in_period: 365
+      days_from_entry: 365
+      tax_chargeable: "287500"
+
+  - name: band_2_mid_year_entry_october
+    interest_id: interest-5
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "1500000"
+    in_charge_on_first_day: false
+    entry_day: "2024-10-01"
+    expected:
+      band_number: 2
+      annual_chargeable_amount: "9000"
+      days_in_period: 365
+      days_from_entry: 182
+      # 9000 * 182 / 365 = 4487.6712328767123287671232877
+      tax_chargeable: "4487.6712328767123287671232877"
+
+  - name: band_5_entry_day_1
+    interest_id: interest-6
+    period:
+      period_kind: custom
+      name: ated_chargeable_period
+      start: 2024-04-01
+      end: 2025-03-31
+    taxable_value: "12000000"
+    in_charge_on_first_day: false
+    entry_day: "2024-04-01"
+    expected:
+      band_number: 5
+      annual_chargeable_amount: "143550"
+      days_in_period: 365
+      days_from_entry: 365
+      # full year via pro-rata because in_charge_on_first_day=false but entry on day 1
+      tax_chargeable: "143550"

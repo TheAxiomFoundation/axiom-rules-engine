@@ -1,0 +1,325 @@
+cases:
+  - name: classic_entitled_pre_commencement_only
+    person_id: person-a
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 68
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: a-1990
+        year_start: "1990-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1991
+        year_start: "1991-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1992
+        year_start: "1992-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1993
+        year_start: "1993-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1994
+        year_start: "1994-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1995
+        year_start: "1995-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1996
+        year_start: "1996-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1997
+        year_start: "1997-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1998
+        year_start: "1998-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: a-1999
+        year_start: "1999-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 10
+      post_commencement_qy_count: 0
+      total_qy_count: 10
+      reached_pensionable_age: holds
+      meets_minimum_qy: holds
+      has_any_pre_commencement_year: holds
+      entitled_to_transitional_rate: holds
+
+  - name: mixed_pre_and_post_commencement
+    person_id: person-b
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 70
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: b-2010
+        year_start: "2010-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2012
+        year_start: "2012-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2014
+        year_start: "2014-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2017
+        year_start: "2017-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2018
+        year_start: "2018-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2019
+        year_start: "2019-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2020
+        year_start: "2020-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2021
+        year_start: "2021-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2022
+        year_start: "2022-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: b-2023
+        year_start: "2023-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 3
+      post_commencement_qy_count: 7
+      total_qy_count: 10
+      reached_pensionable_age: holds
+      meets_minimum_qy: holds
+      has_any_pre_commencement_year: holds
+      entitled_to_transitional_rate: holds
+
+  - name: not_yet_pensionable_age
+    person_id: person-c
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 63
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: c-1990
+        year_start: "1990-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1991
+        year_start: "1991-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1992
+        year_start: "1992-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1993
+        year_start: "1993-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1994
+        year_start: "1994-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1995
+        year_start: "1995-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1996
+        year_start: "1996-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1997
+        year_start: "1997-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1998
+        year_start: "1998-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: c-1999
+        year_start: "1999-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 10
+      total_qy_count: 10
+      reached_pensionable_age: not_holds
+      meets_minimum_qy: holds
+      has_any_pre_commencement_year: holds
+      entitled_to_transitional_rate: not_holds
+
+  - name: below_minimum_qy
+    person_id: person-d
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 68
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: d-1990
+        year_start: "1990-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: d-1991
+        year_start: "1991-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: d-1992
+        year_start: "1992-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: d-1993
+        year_start: "1993-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: d-1994
+        year_start: "1994-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 5
+      total_qy_count: 5
+      reached_pensionable_age: holds
+      meets_minimum_qy: not_holds
+      has_any_pre_commencement_year: holds
+      entitled_to_transitional_rate: not_holds
+
+  - name: post_commencement_only_no_pre
+    person_id: person-e
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 68
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: e-2016
+        year_start: "2016-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2017
+        year_start: "2017-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2018
+        year_start: "2018-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2019
+        year_start: "2019-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2020
+        year_start: "2020-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2021
+        year_start: "2021-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2022
+        year_start: "2022-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2023
+        year_start: "2023-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2024
+        year_start: "2024-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: e-2025
+        year_start: "2025-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 0
+      post_commencement_qy_count: 10
+      total_qy_count: 10
+      reached_pensionable_age: holds
+      meets_minimum_qy: holds
+      has_any_pre_commencement_year: not_holds
+      entitled_to_transitional_rate: not_holds
+
+  - name: reckonable_1979_counts_towards_minimum
+    person_id: person-f
+    period:
+      period_kind: tax_year
+      start: 2025-04-06
+      end: 2026-04-05
+    current_age_years: 68
+    pensionable_age_years: 66
+    qualifying_years:
+      - id: f-1970
+        year_start: "1970-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1971
+        year_start: "1971-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1972
+        year_start: "1972-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1973
+        year_start: "1973-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1974
+        year_start: "1974-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1975
+        year_start: "1975-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1976
+        year_start: "1976-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1977
+        year_start: "1977-04-06"
+        is_qualifying: false
+        is_reckonable_1979: true
+      - id: f-1978
+        year_start: "1978-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+      - id: f-1979
+        year_start: "1979-04-06"
+        is_qualifying: true
+        is_reckonable_1979: false
+    expected:
+      pre_commencement_qy_count: 10
+      total_qy_count: 10
+      reached_pensionable_age: holds
+      meets_minimum_qy: holds
+      has_any_pre_commencement_year: holds
+      entitled_to_transitional_rate: holds

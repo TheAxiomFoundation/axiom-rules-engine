@@ -1,0 +1,86 @@
+- name: single_25_plus_no_other_income
+  period: 2025-05
+  input:
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: 0
+    non_dep_deductions_total: 0
+    earned_income_monthly: 0
+    unearned_income_monthly: 0
+    capital_total: 0
+    adult_of_benefit_unit:
+      - {age_25_or_over: true, has_lcwra: false, is_carer: false}
+    child_of_benefit_unit: []
+  output:
+    standard_allowance: 400.14
+    uc_award: 400.14
+- name: single_under_25_no_other_income
+  period: 2025-05
+  input:
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: 0
+    non_dep_deductions_total: 0
+    earned_income_monthly: 0
+    unearned_income_monthly: 0
+    capital_total: 0
+    adult_of_benefit_unit:
+      - {age_25_or_over: false, has_lcwra: false, is_carer: false}
+    child_of_benefit_unit: []
+  output:
+    standard_allowance: 316.98
+    uc_award: 316.98
+- name: couple_both_25_plus_two_children
+  period: 2025-05
+  input:
+    is_couple: true
+    has_housing_costs: false
+    eligible_housing_costs: 0
+    non_dep_deductions_total: 0
+    earned_income_monthly: 0
+    unearned_income_monthly: 0
+    capital_total: 0
+    adult_of_benefit_unit:
+      - {age_25_or_over: true, has_lcwra: false, is_carer: false}
+      - {age_25_or_over: true, has_lcwra: false, is_carer: false}
+    child_of_benefit_unit:
+      - {qualifies_for_child_element: true, qualifies_for_higher_rate: true, qualifies_for_standard_rate: false, disability_is_lower: false, disability_is_higher: false}
+      - {qualifies_for_child_element: true, qualifies_for_higher_rate: false, qualifies_for_standard_rate: true, disability_is_lower: false, disability_is_higher: false}
+  output:
+    standard_allowance: 628.10
+    child_element_total: 631.81
+- name: over_capital_limit_zero_award
+  period: 2025-05
+  input:
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: 0
+    non_dep_deductions_total: 0
+    earned_income_monthly: 0
+    unearned_income_monthly: 0
+    capital_total: 20000
+    adult_of_benefit_unit:
+      - {age_25_or_over: true, has_lcwra: false, is_carer: false}
+    child_of_benefit_unit: []
+  output:
+    over_capital_limit: holds
+    uc_award: 0
+- name: earnings_taper_applies
+  period: 2025-05
+  input:
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: 0
+    non_dep_deductions_total: 0
+    earned_income_monthly: 1500
+    unearned_income_monthly: 0
+    capital_total: 0
+    adult_of_benefit_unit:
+      - {age_25_or_over: true, has_lcwra: true, is_carer: false}
+    child_of_benefit_unit: []
+  output:
+    # standard_allowance 400.14 + lcwra 423.27 = 823.41 max
+    # work_allowance 684 (no housing); earnings above 816; * 0.55 = 448.80
+    # award = 823.41 - 448.80 = 374.61
+    work_allowance_amount: 684
+    earnings_deduction: 448.80

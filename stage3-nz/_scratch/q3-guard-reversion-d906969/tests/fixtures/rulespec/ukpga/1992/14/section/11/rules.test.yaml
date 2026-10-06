@@ -1,0 +1,42 @@
+- name: single_non_disregarded_resident
+  period: 2024
+  input:
+    empty_home_override_applies: false
+    resident_of:
+      - {is_not_disregarded: true}
+  output:
+    num_non_disregarded_residents: 1
+    single_occupier_discount_applies: holds
+    discount_fraction: 0.25
+- name: all_disregarded_no_override
+  period: 2024
+  input:
+    empty_home_override_applies: false
+    resident_of:
+      - {is_not_disregarded: false}
+      - {is_not_disregarded: false}
+  output:
+    num_non_disregarded_residents: 0
+    empty_home_discount_applies: holds
+    discount_fraction: 0.50
+- name: full_charge_multiple_residents
+  period: 2024
+  input:
+    empty_home_override_applies: false
+    resident_of:
+      - {is_not_disregarded: true}
+      - {is_not_disregarded: true}
+  output:
+    num_non_disregarded_residents: 2
+    single_occupier_discount_applies: not_holds
+    empty_home_discount_applies: not_holds
+    discount_fraction: 0
+- name: empty_home_with_override_no_discount
+  period: 2024
+  input:
+    empty_home_override_applies: true
+    resident_of: []
+  output:
+    num_non_disregarded_residents: 0
+    empty_home_discount_applies: not_holds
+    discount_fraction: 0

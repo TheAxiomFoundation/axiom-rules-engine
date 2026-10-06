@@ -1,0 +1,57 @@
+- name: adult_compliant
+  period: 2025
+  input:
+    is_worker: true
+    works_in_uk: true
+    above_compulsory_school_age: true
+    is_apprentice_first_year: false
+    current_age_years: 30
+    remuneration_in_prp: 500
+    hours_worked_in_prp: 40
+  output:
+    rate_owed: 12.21
+    effective_hourly: 12.50
+    is_compliant: holds
+    shortfall_total: 0
+- name: adult_non_compliant
+  period: 2025
+  input:
+    is_worker: true
+    works_in_uk: true
+    above_compulsory_school_age: true
+    is_apprentice_first_year: false
+    current_age_years: 30
+    remuneration_in_prp: 400
+    hours_worked_in_prp: 40
+  output:
+    rate_owed: 12.21
+    effective_hourly: 10.00
+    is_compliant: not_holds
+    # (12.21 - 10.00) * 40 = 88.40
+    shortfall_total: 88.40
+- name: youth_band
+  period: 2025
+  input:
+    is_worker: true
+    works_in_uk: true
+    above_compulsory_school_age: true
+    is_apprentice_first_year: false
+    current_age_years: 19
+    remuneration_in_prp: 400
+    hours_worked_in_prp: 40
+  output:
+    rate_owed: 10.00
+    is_compliant: holds
+- name: apprentice_first_year
+  period: 2025
+  input:
+    is_worker: true
+    works_in_uk: true
+    above_compulsory_school_age: true
+    is_apprentice_first_year: true
+    current_age_years: 19
+    remuneration_in_prp: 350
+    hours_worked_in_prp: 40
+  output:
+    rate_owed: 7.55
+    is_compliant: holds

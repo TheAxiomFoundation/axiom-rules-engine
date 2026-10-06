@@ -1,0 +1,39 @@
+format: rulespec/v1
+module:
+  kind: composition
+  summary: |-
+    Audit-only composition of the statute-grounded New Zealand modules mapped
+    to NZ Treasury IncomeExplorer outputs. This file contains no policy
+    parameters or scenario-specific exceptions.
+imports:
+  - nz:statutes/income_tax/schedule_1/individual_income_tax
+  - nz:regulations/acc/earners_levy
+  - nz:statutes/income_tax/family_scheme/eligibility
+  - nz:statutes/income_tax/family_scheme/family_scheme_income
+  - nz:statutes/income_tax/family_scheme/tax_credits
+  - nz:statutes/income_tax/credits/individual_credits
+  - nz:statutes/social_security/main_benefits/entitlement
+  - nz:statutes/social_security/main_benefits/rates
+  - nz:statutes/social_security/winter_energy_payment/core
+  - nz:statutes/social_security/accommodation_supplement/core
+rules:
+  - name: wff_family_scheme_income_for_relationship_period
+    kind: derived
+    entity: Family
+    dtype: Money
+    period: Year
+    unit: NZD
+    versions:
+      - effective_from: '2026-04-01'
+        formula: |-
+          family_scheme_income
+  - name: best_start_family_scheme_income_for_relationship_period
+    kind: derived
+    entity: Child
+    dtype: Money
+    period: Year
+    unit: NZD
+    versions:
+      - effective_from: '2026-04-01'
+        formula: |-
+          family_scheme_income

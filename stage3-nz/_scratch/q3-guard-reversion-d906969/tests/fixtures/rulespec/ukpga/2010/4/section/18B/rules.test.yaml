@@ -1,0 +1,61 @@
+- name: sole_company_within_band
+  period: 2024
+  input:
+    ap_year_fraction: 1
+    uk_resident: true
+    close_investment_holding: false
+    ring_fence_profits: 0
+    augmented_profits: 150000
+    taxable_total_profits: 150000
+    associate_of: []
+  output:
+    associates_divisor: 1
+    lower_limit_effective: 50000
+    upper_limit_effective: 250000
+    eligible_for_marginal_relief: holds
+    # 0.015 * (250000 - 150000) * (150000 / 150000) = 1500
+    marginal_relief: 1500
+    gross_corporation_tax: 37500
+    corporation_tax_after_relief: 36000
+- name: below_lower_limit_no_relief
+  period: 2024
+  input:
+    ap_year_fraction: 1
+    uk_resident: true
+    close_investment_holding: false
+    ring_fence_profits: 0
+    augmented_profits: 30000
+    taxable_total_profits: 30000
+    associate_of: []
+  output:
+    within_marginal_band: not_holds
+    marginal_relief: 0
+- name: above_upper_limit_no_relief
+  period: 2024
+  input:
+    ap_year_fraction: 1
+    uk_resident: true
+    close_investment_holding: false
+    ring_fence_profits: 0
+    augmented_profits: 300000
+    taxable_total_profits: 300000
+    associate_of: []
+  output:
+    within_marginal_band: not_holds
+    marginal_relief: 0
+- name: two_associates_halves_band
+  period: 2024
+  input:
+    ap_year_fraction: 1
+    uk_resident: true
+    close_investment_holding: false
+    ring_fence_profits: 0
+    augmented_profits: 100000
+    taxable_total_profits: 100000
+    associate_of: [{}, {}]
+  output:
+    associates_divisor: 3
+    # upper_limit_effective = 250000 / 3 ≈ 83333
+    # augmented_profits 100000 > 83333 → outside band
+    within_marginal_band: not_holds
+    marginal_relief: 0

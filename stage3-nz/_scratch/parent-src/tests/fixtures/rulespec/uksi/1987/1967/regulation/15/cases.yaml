@@ -1,0 +1,77 @@
+cases:
+  - name: cb_receipt_wins_over_fallback
+    child_id: child-1
+    period:
+      period_kind: benefit_week
+      start: 2026-01-05
+      end: 2026-01-11
+    cb_recipients:
+      - person-alice
+    cb_claim_count: 1
+    cb_recipient_id: person-alice
+    sole_claimant_id: person-alice
+    usual_resident_id: person-bob
+    expected:
+      cb_recipient_count: 1
+      has_cb_recipient: holds
+      needs_fallback: not_holds
+      sole_claim_fallback: not_holds
+      usual_residence_fallback: not_holds
+      responsible_person: person-alice
+
+  - name: fallback_sole_claim_when_no_cb
+    child_id: child-2
+    period:
+      period_kind: benefit_week
+      start: 2026-01-05
+      end: 2026-01-11
+    cb_recipients: []
+    cb_claim_count: 1
+    cb_recipient_id: ""
+    sole_claimant_id: person-carol
+    usual_resident_id: person-dave
+    expected:
+      cb_recipient_count: 0
+      has_cb_recipient: not_holds
+      needs_fallback: holds
+      sole_claim_fallback: holds
+      usual_residence_fallback: not_holds
+      responsible_person: person-carol
+
+  - name: fallback_usual_residence_when_multiple_claims
+    child_id: child-3
+    period:
+      period_kind: benefit_week
+      start: 2026-01-05
+      end: 2026-01-11
+    cb_recipients: []
+    cb_claim_count: 2
+    cb_recipient_id: ""
+    sole_claimant_id: ""
+    usual_resident_id: person-erin
+    expected:
+      cb_recipient_count: 0
+      has_cb_recipient: not_holds
+      needs_fallback: holds
+      sole_claim_fallback: not_holds
+      usual_residence_fallback: holds
+      responsible_person: person-erin
+
+  - name: fallback_usual_residence_when_never_claimed
+    child_id: child-4
+    period:
+      period_kind: benefit_week
+      start: 2026-01-05
+      end: 2026-01-11
+    cb_recipients: []
+    cb_claim_count: 0
+    cb_recipient_id: ""
+    sole_claimant_id: ""
+    usual_resident_id: person-faye
+    expected:
+      cb_recipient_count: 0
+      has_cb_recipient: not_holds
+      needs_fallback: holds
+      sole_claim_fallback: not_holds
+      usual_residence_fallback: holds
+      responsible_person: person-faye

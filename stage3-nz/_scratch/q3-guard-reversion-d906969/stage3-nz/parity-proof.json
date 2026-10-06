@@ -1,0 +1,79 @@
+{
+  "schema": "axiom.stage3-nz.adversarial-cure-proof.v1",
+  "ops_harness_base_commit": "bcf631b5",
+  "certified_engine_commit": "d8d45a817b3700ed22ec49a9fcf1024aa6ed2198",
+  "certified_engine_binary_sha256": "c5a3d3d8b1fdb8480bef7cffc6dd85658ca1a48cf7ca70da968b7a46c1e8a430",
+  "engine_checkout_cleanliness": "tracked_and_untracked_nonignored",
+  "aggregation_plan_sha256": "4a0a53cdb3f6e41a3ac203e324c30871f967de397153f84c040c7d1de12a1ba3",
+  "ops_harness_patch_sha256": "9a98f3def4f4a734d69ca9563ed3bb09ab90a3a2b36c7ef68ea87cd39a0d6bab",
+  "flag_off": {
+    "parent_commit": "74881519c829106e4e696d77b38e10ba61c881d8",
+    "parent_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
+    "current_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
+    "artifact_byte_identical": true,
+    "top_level_help_byte_identical": true,
+    "artifact_format_version": 2,
+    "derived_outputs": 176
+  },
+  "tests": {
+    "cargo_test_flag_off": {
+      "passed": 285,
+      "failed": 0,
+      "ignored": 0
+    },
+    "cargo_test_unit_derivation": {
+      "passed": 328,
+      "failed": 0,
+      "ignored": 0
+    },
+    "cargo_test_all_features": {
+      "passed": 344,
+      "failed": 0,
+      "ignored": 0
+    },
+    "copied_harness_mutants": {
+      "passed": 14,
+      "failed": 0
+    }
+  },
+  "parity": {
+    "external_invocations": 2,
+    "fresh_runs_per_invocation": 2,
+    "amount_control_cells": 1976,
+    "amount_control_cells_agree_to_cent": 1454,
+    "amount_control_cells_outside_cent": 522,
+    "outside_cent_by_class": {
+      "a": 0,
+      "b": 520,
+      "c": 2,
+      "d": 0,
+      "match": 0
+    },
+    "comparison_csv_sha256_run_1": "ccaa4dcb61b112587b47afb0e1892f670df354670fcd35f4d801edc621dd4bf2",
+    "comparison_csv_sha256_run_2": "ccaa4dcb61b112587b47afb0e1892f670df354670fcd35f4d801edc621dd4bf2",
+    "comparison_csv_sha256_prior_review": "ccaa4dcb61b112587b47afb0e1892f670df354670fcd35f4d801edc621dd4bf2",
+    "comparison_csv_byte_identical": true,
+    "compiled_program_artifact_sha256": "355659bf30cef49c440d5fa24014f1bf6c9a17964befb164880196950462f3b2",
+    "compiled_unit_aggregation_artifact_sha256": "dc1d368844e071c17649cd463568eca5e1d82eacf822694cce0ac45f1882fc41",
+    "ordinary_engine_evaluations_per_fresh_run": 881,
+    "unit_aggregation_evaluations_per_fresh_run": 1411,
+    "disposition_identity": {
+      "fields": [
+        "scenario_id",
+        "weekly_wage",
+        "column",
+        "classification",
+        "reason_code",
+        "reason_title"
+      ],
+      "run_1_count": 522,
+      "run_2_count": 522,
+      "prior_review_count": 522,
+      "canonical_sorted_set_sha256": "44063af7ec7c3a4dc6a296b70efc18914762a0d88e59594610e025c4d671e14e",
+      "only_in_run_1": [],
+      "only_in_run_2": [],
+      "only_in_run_1_vs_prior_review": [],
+      "only_in_prior_review_vs_run_1": []
+    }
+  }
+}

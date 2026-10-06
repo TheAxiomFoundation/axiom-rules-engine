@@ -1,0 +1,19 @@
+- name: no_disposals
+  period: 2025
+  input:
+    actual_capital: 5000
+  output:
+    notional_capital: 0
+    capital_for_ctr: 5000
+- name: one_qualifying_disposal
+  period: 2025
+  input:
+    actual_capital: 2000
+    # Disposal records are supplied via relations; the caller pre-computes
+    # `is_qualifying_disposal` from SSI 2021/249 reg 71(1)(a) + exclusions.
+    applicant_disposal:
+      - {disposal_amount: 8000, is_qualifying_disposal: true, disposal_counts_for_ctr: true}
+  output:
+    notional_capital: 8000
+    counted_disposals: 1
+    capital_for_ctr: 10000

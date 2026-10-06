@@ -1,0 +1,163 @@
+{
+  "scope": "scenario:binding-best-start",
+  "segment": "2026-04-01/2027-03-31",
+  "roster_completeness": { "id": "complete:roster" },
+  "segment_completeness": { "id": "complete:segment" },
+  "persons": [
+    {
+      "id": "primary",
+      "role": "adult",
+      "evidence": { "id": "person:primary" },
+      "age_years": {
+        "status": "known",
+        "value": 25,
+        "evidence": { "id": "age:primary" }
+      },
+      "scalars": {
+        "annual_family_scheme_base_income": { "status": "known", "value": "52000", "evidence": { "id": "scalar:primary:base-income" } },
+        "annual_wage": { "status": "known", "value": "52000", "evidence": { "id": "scalar:primary:annual-wage" } },
+        "ietc_continuous_weekly": { "status": "known", "value": "4", "evidence": { "id": "scalar:primary:ietc-continuous" } },
+        "ietc_weekly": { "status": "known", "value": "3", "evidence": { "id": "scalar:primary:ietc" } },
+        "weekly_gross_benefit": { "status": "known", "value": "13", "evidence": { "id": "scalar:primary:gross-benefit" } },
+        "weekly_hours": { "status": "known", "value": "40", "evidence": { "id": "scalar:primary:hours" } },
+        "weekly_net_benefit": { "status": "known", "value": "11", "evidence": { "id": "scalar:primary:net-benefit" } },
+        "weekly_net_wage": { "status": "known", "value": "899", "evidence": { "id": "scalar:primary:net-wage" } },
+        "weekly_wage": { "status": "known", "value": "1000.12345678901234567890123456789012345", "evidence": { "id": "scalar:primary:weekly-wage" } },
+        "weekly_wage_tax": { "status": "known", "value": "101", "evidence": { "id": "scalar:primary:wage-tax" } }
+      },
+      "facts": {}
+    },
+    {
+      "id": "partner",
+      "role": "adult",
+      "evidence": { "id": "person:partner" },
+      "age_years": {
+        "status": "known",
+        "value": 25,
+        "evidence": { "id": "age:partner" }
+      },
+      "scalars": {
+        "annual_family_scheme_base_income": { "status": "known", "value": "38480", "evidence": { "id": "scalar:partner:base-income" } },
+        "annual_wage": { "status": "known", "value": "38480", "evidence": { "id": "scalar:partner:annual-wage" } },
+        "ietc_continuous_weekly": { "status": "known", "value": "6", "evidence": { "id": "scalar:partner:ietc-continuous" } },
+        "ietc_weekly": { "status": "known", "value": "2", "evidence": { "id": "scalar:partner:ietc" } },
+        "weekly_gross_benefit": { "status": "known", "value": "5", "evidence": { "id": "scalar:partner:gross-benefit" } },
+        "weekly_hours": { "status": "known", "value": "20", "evidence": { "id": "scalar:partner:hours" } },
+        "weekly_net_benefit": { "status": "known", "value": "7", "evidence": { "id": "scalar:partner:net-benefit" } },
+        "weekly_net_wage": { "status": "known", "value": "669", "evidence": { "id": "scalar:partner:net-wage" } },
+        "weekly_wage": { "status": "known", "value": "740.87654321098765432109876543210987655", "evidence": { "id": "scalar:partner:weekly-wage" } },
+        "weekly_wage_tax": { "status": "known", "value": "71", "evidence": { "id": "scalar:partner:wage-tax" } }
+      },
+      "facts": {}
+    },
+    {
+      "id": "child-0",
+      "role": "child",
+      "evidence": { "id": "person:child-0" },
+      "age_years": {
+        "status": "known",
+        "value": 1,
+        "evidence": { "id": "age:child-0" }
+      },
+      "scalars": {
+        "best_start_claimant_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-0:care" } },
+        "in_work_tax_credit_child_exclusive_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-0:iwtc-care" } }
+      },
+      "facts": {
+        "attending_school_or_tertiary_at_age_18": { "status": "known", "value": true, "evidence": { "id": "education:child-0" } },
+        "commissioner_period_contains_segment_at_age_18": { "status": "known", "value": true, "evidence": { "id": "mc9-period:child-0" } },
+        "in_work_tax_credit_principal_caregiver": { "status": "known", "value": true, "evidence": { "id": "iwtc-principal-care:child-0" } },
+        "not_financially_independent_at_age_18": { "status": "known", "value": true, "evidence": { "id": "financial-dependence:child-0" } },
+        "principal_care_for_family_scheme": { "status": "known", "value": true, "evidence": { "id": "principal-care:child-0" } }
+      },
+      "engine_computations": {
+        "best_start_before_care_and_abatement": {
+          "dataset": {
+            "inputs": [
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_entitlement_days", "entity": "Child", "entity_id": "child-0", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "integer", "value": 365 } },
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_child_care_fraction", "entity": "Child", "entity_id": "child-0", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "decimal", "value": "1" } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "child-1",
+      "role": "child",
+      "evidence": { "id": "person:child-1" },
+      "age_years": {
+        "status": "known",
+        "value": 2,
+        "evidence": { "id": "age:child-1" }
+      },
+      "scalars": {
+        "best_start_claimant_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-1:care" } },
+        "in_work_tax_credit_child_exclusive_care_fraction": { "status": "known", "value": "1", "evidence": { "id": "scalar:child-1:iwtc-care" } }
+      },
+      "facts": {
+        "attending_school_or_tertiary_at_age_18": { "status": "known", "value": true, "evidence": { "id": "education:child-1" } },
+        "commissioner_period_contains_segment_at_age_18": { "status": "known", "value": true, "evidence": { "id": "mc9-period:child-1" } },
+        "in_work_tax_credit_principal_caregiver": { "status": "known", "value": true, "evidence": { "id": "iwtc-principal-care:child-1" } },
+        "not_financially_independent_at_age_18": { "status": "known", "value": true, "evidence": { "id": "financial-dependence:child-1" } },
+        "principal_care_for_family_scheme": { "status": "known", "value": true, "evidence": { "id": "principal-care:child-1" } }
+      },
+      "engine_computations": {
+        "best_start_before_care_and_abatement": {
+          "dataset": {
+            "inputs": [
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_entitlement_days", "entity": "Child", "entity_id": "child-1", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "integer", "value": 365 } },
+              { "name": "nz:statutes/income_tax/family_scheme/tax_credits#input.best_start_child_care_fraction", "entity": "Child", "entity_id": "child-1", "interval": { "start": "2026-04-01", "end": "2027-03-31" }, "value": { "kind": "decimal", "value": "1" } }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "relations": [
+    {
+      "name": "partner_of",
+      "scope": "scenario:binding-best-start",
+      "completeness": { "id": "complete:partner-of" },
+      "facts": [
+        {
+          "tuple": ["primary", "partner"],
+          "knowledge": { "status": "known", "value": true, "evidence": { "id": "relation:partner:primary:partner" } }
+        }
+      ]
+    },
+    {
+      "name": "dependent_child_of",
+      "scope": "scenario:binding-best-start",
+      "completeness": { "id": "complete:dependent-child-of" },
+      "facts": [
+        {
+          "tuple": ["primary", "child-0"],
+          "knowledge": { "status": "known", "value": true, "evidence": { "id": "relation:child:primary:child-0" } }
+        },
+        {
+          "tuple": ["primary", "child-1"],
+          "knowledge": { "status": "known", "value": true, "evidence": { "id": "relation:child:primary:child-1" } }
+        }
+      ]
+    }
+  ],
+  "family_inputs": [
+    {
+      "anchor_person": "primary",
+      "evidence": { "id": "family-input:primary" },
+      "named_people": {
+        "family_unit_reference_person": {
+          "status": "known",
+          "value": "primary",
+          "evidence": { "id": "family-reference:primary" }
+        }
+      },
+      "scalars": {
+        "best_start_abatement_rate": { "status": "known", "value": "0.1", "evidence": { "id": "best-start-rate" } },
+        "best_start_abatement_threshold": { "status": "known", "value": "80000", "evidence": { "id": "best-start-threshold" } },
+        "best_start_family_abatement": { "status": "known", "value": "1000", "evidence": { "id": "best-start-adjustment" } },
+        "family_scheme_income": { "status": "known", "value": "90480", "evidence": { "id": "family-income" } }
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Scottish Statutory Instrument 2021/249 regulation 71 — notional capital
+    for Scottish Council Tax Reduction.
+
+    Where an applicant has disposed of capital for the purpose of securing or
+    increasing entitlement to a reduction, the amount disposed of is treated
+    as notional capital, except to the extent the disposal was for paying
+    debts or reasonable purchases. This RuleSpec module sums qualifying disposals
+    using the `sum_where` / `count_where` filtered-aggregation extension;
+    each Disposal record carries an input flag `is_qualifying_disposal`
+    pre-computed by the caller from the statutory purpose and reason tests.
+rules:
+  - name: notional_capital
+    kind: derived
+    entity: Applicant
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 71
+    source_url: https://www.legislation.gov.uk/ssi/2021/249/regulation/71
+    versions:
+      - effective_from: '2021-11-01'
+        formula: sum_where(applicant_disposal, disposal_amount, is_qualifying_disposal)
+  - name: counted_disposals
+    kind: derived
+    entity: Applicant
+    dtype: Integer
+    period: Day
+    source: SSI 2021/249 reg 71
+    versions:
+      - effective_from: '2021-11-01'
+        formula: count_where(applicant_disposal, disposal_counts_for_ctr)
+  - name: capital_for_ctr
+    kind: derived
+    entity: Applicant
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 71 taken with reg 67 actual capital
+    versions:
+      - effective_from: '2021-11-01'
+        formula: actual_capital + notional_capital

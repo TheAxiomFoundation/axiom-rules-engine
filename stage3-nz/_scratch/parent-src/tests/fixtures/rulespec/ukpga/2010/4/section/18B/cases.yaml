@@ -1,0 +1,156 @@
+cases:
+  - name: small_profits_below_lower_limit
+    company_id: company-1
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "30000"
+    taxable_total_profits: "30000"
+    ring_fence_profits: "0"
+    ap_year_fraction: "1"
+    associates: []
+    expected:
+      num_associates: 0
+      associates_divisor: 1
+      lower_limit_effective: "50000"
+      upper_limit_effective: "250000"
+      within_marginal_band: not_holds
+      eligible_for_marginal_relief: not_holds
+      marginal_relief: "0"
+      gross_corporation_tax: "7500"
+      corporation_tax_after_relief: "7500"
+
+  - name: large_profits_above_upper_limit
+    company_id: company-2
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "500000"
+    taxable_total_profits: "500000"
+    ring_fence_profits: "0"
+    ap_year_fraction: "1"
+    associates: []
+    expected:
+      num_associates: 0
+      associates_divisor: 1
+      lower_limit_effective: "50000"
+      upper_limit_effective: "250000"
+      within_marginal_band: not_holds
+      eligible_for_marginal_relief: not_holds
+      marginal_relief: "0"
+      gross_corporation_tax: "125000"
+      corporation_tax_after_relief: "125000"
+
+  - name: marginal_band_no_associates
+    company_id: company-3
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "150000"
+    taxable_total_profits: "150000"
+    ring_fence_profits: "0"
+    ap_year_fraction: "1"
+    associates: []
+    expected:
+      num_associates: 0
+      associates_divisor: 1
+      lower_limit_effective: "50000"
+      upper_limit_effective: "250000"
+      within_marginal_band: holds
+      eligible_for_marginal_relief: holds
+      marginal_relief: "1500"
+      gross_corporation_tax: "37500"
+      corporation_tax_after_relief: "36000"
+
+  - name: mid_profits_associates_push_above_upper
+    company_id: company-4
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "150000"
+    taxable_total_profits: "150000"
+    ring_fence_profits: "0"
+    ap_year_fraction: "1"
+    associates:
+      - associate-a
+      - associate-b
+      - associate-c
+    expected:
+      num_associates: 3
+      associates_divisor: 4
+      lower_limit_effective: "12500"
+      upper_limit_effective: "62500"
+      within_marginal_band: not_holds
+      eligible_for_marginal_relief: not_holds
+      marginal_relief: "0"
+      gross_corporation_tax: "37500"
+      corporation_tax_after_relief: "37500"
+
+  - name: low_profits_associates_still_in_band
+    company_id: company-5
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "40000"
+    taxable_total_profits: "40000"
+    ring_fence_profits: "0"
+    ap_year_fraction: "1"
+    associates:
+      - associate-d
+      - associate-e
+      - associate-f
+    expected:
+      num_associates: 3
+      associates_divisor: 4
+      lower_limit_effective: "12500"
+      upper_limit_effective: "62500"
+      within_marginal_band: holds
+      eligible_for_marginal_relief: holds
+      marginal_relief: "337.5"
+      gross_corporation_tax: "10000"
+      corporation_tax_after_relief: "9662.5"
+
+  - name: ring_fence_profits_disqualify
+    company_id: company-6
+    period:
+      period_kind: custom
+      name: accounting_period
+      start: 2024-04-01
+      end: 2025-03-31
+    uk_resident: true
+    close_investment_holding: false
+    augmented_profits: "150000"
+    taxable_total_profits: "150000"
+    ring_fence_profits: "50000"
+    ap_year_fraction: "1"
+    associates: []
+    expected:
+      num_associates: 0
+      associates_divisor: 1
+      lower_limit_effective: "50000"
+      upper_limit_effective: "250000"
+      within_marginal_band: holds
+      eligible_for_marginal_relief: not_holds
+      marginal_relief: "0"
+      gross_corporation_tax: "37500"
+      corporation_tax_after_relief: "37500"

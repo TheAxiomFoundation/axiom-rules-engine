@@ -1,0 +1,39 @@
+format: rulespec/v1
+module:
+  summary: >-
+    Minimal source program used to exercise the stage-3 aggregation fixture's
+    engine-computed Best Start gross binding. The production harness binds the
+    same public rule id in the full NZ composition artifact.
+units:
+  - name: NZD
+    kind: currency
+    minor_units: 2
+rules:
+  - name: best_start_tax_credit_prescribed_amount
+    kind: parameter
+    dtype: Money
+    unit: NZD
+    versions:
+      - effective_from: '2026-04-01'
+        formula: '4041'
+  - name: wff_days_in_tax_year
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2026-04-01'
+        formula: '365'
+  - name: best_start_tax_credit_before_abatement
+    kind: derived
+    entity: Child
+    dtype: Money
+    period: Year
+    unit: NZD
+    versions:
+      - effective_from: '2026-04-01'
+        formula: |-
+          (
+              best_start_tax_credit_prescribed_amount
+              * max(0, best_start_entitlement_days)
+              / wff_days_in_tax_year
+              * min(1, max(0, best_start_child_care_fraction))
+          )

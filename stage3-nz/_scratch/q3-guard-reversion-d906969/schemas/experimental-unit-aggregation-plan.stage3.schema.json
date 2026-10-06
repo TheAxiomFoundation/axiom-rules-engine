@@ -1,0 +1,949 @@
+{
+  "$defs": {
+    "AdultSelectionOperation": {
+      "enum": [
+        "explicit_person_role"
+      ],
+      "type": "string"
+    },
+    "AdultSelectionRule": {
+      "additionalProperties": false,
+      "properties": {
+        "caller_determination": {
+          "type": "string"
+        },
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "operation": {
+          "$ref": "#/$defs/AdultSelectionOperation"
+        }
+      },
+      "required": [
+        "operation",
+        "citation",
+        "caller_determination"
+      ],
+      "type": "object"
+    },
+    "Age18Conditions": {
+      "additionalProperties": false,
+      "properties": {
+        "age": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "attending_school_or_tertiary_input": {
+          "type": "string"
+        },
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "commissioner_period_input": {
+          "type": "string"
+        },
+        "not_financially_independent_input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "age",
+        "not_financially_independent_input",
+        "attending_school_or_tertiary_input",
+        "commissioner_period_input",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "AggregateSelector": {
+      "enum": [
+        "adults",
+        "all_members"
+      ],
+      "type": "string"
+    },
+    "AggregationCitation": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "provision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provision",
+        "authority"
+      ],
+      "type": "object"
+    },
+    "AggregationConstitution": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_type": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "participating_member_relation": {
+          "type": "string"
+        },
+        "roster_relation": {
+          "type": "string"
+        },
+        "unit_constituent_relation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "entity_type",
+        "roster_relation",
+        "unit_constituent_relation",
+        "participating_member_relation"
+      ],
+      "type": "object"
+    },
+    "AggregationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "engine_computation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EngineComputationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/AggregationInputKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reduction_key": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/AggregationInputScope"
+        }
+      },
+      "required": [
+        "name",
+        "scope",
+        "kind",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "AggregationInputKind": {
+      "enum": [
+        "additive_amount",
+        "child_gross_amount",
+        "family_adjustment",
+        "family_amount",
+        "decimal_rate",
+        "care_fraction",
+        "eligibility_boolean"
+      ],
+      "type": "string"
+    },
+    "AggregationInputScope": {
+      "enum": [
+        "adult",
+        "child",
+        "family"
+      ],
+      "type": "string"
+    },
+    "AggregationMembershipRelation": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "left_role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MembershipRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "relation": {
+          "type": "string"
+        },
+        "right_role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MembershipRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "symmetric": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "relation",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "CareSemantics": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "claimant_care_fraction_input": {
+          "type": "string"
+        },
+        "principal_care_input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "principal_care_input",
+        "claimant_care_fraction_input",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ChildAgreement": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "eligible_if": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "empty_value": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "input",
+        "empty_value",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ChildBroadcast": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "family_input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "family_input",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ChildCount": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "maximum_age": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minimum_age": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ChildMinimum": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "empty_value": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "input",
+        "empty_value",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ChildProjection": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "input",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "ContinuousFamilyReduction": {
+      "additionalProperties": false,
+      "properties": {
+        "family_income_input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "rate_input": {
+          "type": "string"
+        },
+        "threshold_input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "family_income_input",
+        "threshold_input",
+        "rate_input"
+      ],
+      "type": "object"
+    },
+    "DeclaredLimitation": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "id": {
+          "type": "string"
+        },
+        "statement": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "EngineComputationBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id"
+      ],
+      "type": "object"
+    },
+    "FamilyPredicate": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "operation": {
+          "$ref": "#/$defs/FamilyPredicateOperation"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "operation",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "FamilyPredicateOperation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "count_at_least",
+              "type": "string"
+            },
+            "minimum": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "count",
+            "minimum"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "youngest_age_at_least",
+              "type": "string"
+            },
+            "minimum": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "youngest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "youngest",
+            "minimum"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "sole_parent_with_children",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "sole_parent_youngest_age_at_least",
+              "type": "string"
+            },
+            "minimum": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "youngest": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count",
+            "youngest",
+            "minimum"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FamilyReduction": {
+      "additionalProperties": false,
+      "properties": {
+        "care_fraction_input": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_gross_input": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_value": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "continuous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContinuousFamilyReduction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "family_adjustment_input": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family_once_value": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gross_output": {
+          "type": "string"
+        },
+        "maximum_age": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minimum_age": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "#/$defs/FamilyReductionOperation"
+        },
+        "output": {
+          "type": "string"
+        },
+        "reduction_key": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output",
+        "gross_output",
+        "operation",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "FamilyReductionOperation": {
+      "enum": [
+        "sum_children_then_subtract_family_once"
+      ],
+      "type": "string"
+    },
+    "FamilyShapeScalar": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "operation": {
+          "$ref": "#/$defs/FamilyShapeScalarOperation"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "operation",
+        "citation"
+      ],
+      "type": "object"
+    },
+    "FamilyShapeScalarOperation": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "eldest_care_units",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "subsequent_care_units",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "absent": {
+              "type": "string"
+            },
+            "count": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "fixed_if_children",
+              "type": "string"
+            },
+            "present": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count",
+            "present",
+            "absent"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MembershipRole": {
+      "enum": [
+        "caregiver",
+        "child",
+        "partner"
+      ],
+      "type": "string"
+    },
+    "PartnerPresenceRule": {
+      "additionalProperties": false,
+      "properties": {
+        "caller_determination": {
+          "type": "string"
+        },
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "reference_person_input": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_person_input",
+        "citation",
+        "caller_determination"
+      ],
+      "type": "object"
+    },
+    "RelationDirection": {
+      "enum": [
+        "directed",
+        "symmetric"
+      ],
+      "type": "string"
+    },
+    "ScalarAggregation": {
+      "additionalProperties": false,
+      "properties": {
+        "citation": {
+          "$ref": "#/$defs/AggregationCitation"
+        },
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/AggregateSelector"
+        }
+      },
+      "required": [
+        "output",
+        "input",
+        "selector",
+        "citation"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/experimental-unit-aggregation-plan.stage3.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Feature-gated authoring document compiled into a canonically digested unit aggregation artifact.",
+  "properties": {
+    "adult_selection": {
+      "$ref": "#/$defs/AdultSelectionRule",
+      "default": {
+        "caller_determination": "",
+        "citation": {
+          "authority": "",
+          "provision": ""
+        },
+        "operation": "explicit_person_role"
+      }
+    },
+    "age_18_conditions": {
+      "$ref": "#/$defs/Age18Conditions",
+      "default": {
+        "age": 18,
+        "attending_school_or_tertiary_input": "",
+        "citation": {
+          "authority": "",
+          "provision": ""
+        },
+        "commissioner_period_input": "",
+        "not_financially_independent_input": ""
+      }
+    },
+    "broadcasts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChildBroadcast"
+      },
+      "type": "array"
+    },
+    "care": {
+      "$ref": "#/$defs/CareSemantics",
+      "default": {
+        "citation": {
+          "authority": "",
+          "provision": ""
+        },
+        "claimant_care_fraction_input": "",
+        "principal_care_input": ""
+      }
+    },
+    "child_agreements": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChildAgreement"
+      },
+      "type": "array"
+    },
+    "child_counts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChildCount"
+      },
+      "type": "array"
+    },
+    "child_minima": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChildMinimum"
+      },
+      "type": "array"
+    },
+    "child_projections": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChildProjection"
+      },
+      "type": "array"
+    },
+    "child_relation": {
+      "type": "string"
+    },
+    "constitution": {
+      "$ref": "#/$defs/AggregationConstitution"
+    },
+    "decimal_precision": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "family_predicates": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FamilyPredicate"
+      },
+      "type": "array"
+    },
+    "family_reductions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FamilyReduction"
+      },
+      "type": "array"
+    },
+    "family_shape_scalars": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FamilyShapeScalar"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "inputs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AggregationInput"
+      },
+      "type": "array"
+    },
+    "limitations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DeclaredLimitation"
+      },
+      "type": "array"
+    },
+    "membership_relations": {
+      "items": {
+        "$ref": "#/$defs/AggregationMembershipRelation"
+      },
+      "type": "array"
+    },
+    "partner_presence": {
+      "$ref": "#/$defs/PartnerPresenceRule",
+      "default": {
+        "caller_determination": "",
+        "citation": {
+          "authority": "",
+          "provision": ""
+        },
+        "reference_person_input": ""
+      }
+    },
+    "partner_relation": {
+      "type": "string"
+    },
+    "scalar_aggregations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ScalarAggregation"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "const": "axiom/unit-aggregation-plan-stage3/1",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "decimal_precision",
+    "constitution",
+    "membership_relations",
+    "partner_relation",
+    "child_relation"
+  ],
+  "title": "Experimental unit aggregation plan",
+  "type": "object"
+}

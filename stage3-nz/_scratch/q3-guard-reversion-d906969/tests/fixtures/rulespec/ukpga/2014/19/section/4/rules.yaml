@@ -1,0 +1,96 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Pensions Act 2014 s.4 — entitlement to state pension at the transitional
+    rate.
+
+    A person reaches entitlement when
+      s.4(1)(a): they have reached pensionable age,
+      s.4(1)(b): they have at least the minimum qualifying years (regs max 10),
+      s.4(1)(c): they have at least one pre-commencement qualifying year.
+
+    s.4(4) defines a pre-commencement qualifying year as either
+      * a qualifying year starting 1978-04-06 ≤ year_start < 2016-04-06, OR
+      * a reckonable year deemed qualifying under SI 1979/643 reg 13(1).
+
+    The "pre/post commencement" classification is a date-range test the
+    caller pre-applies on each QualifyingYear record as
+    `is_pre_commencement_qy` and `is_post_commencement_qy` so the filtered
+    `count_where` aggregator can count them without needing the deployed
+    DSL to evaluate date comparisons inside an aggregation predicate.
+rules:
+  - name: state_pension_minimum_qy_count
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: '2016-04-06'
+        formula: '10'
+  - name: pre_commencement_qy_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Day
+    source: Pensions Act 2014 s.4(4)
+    source_url: https://www.legislation.gov.uk/ukpga/2014/19/section/4
+    versions:
+      - effective_from: '2016-04-06'
+        formula: count_where(qualifying_year_of, is_pre_commencement_qy)
+  - name: post_commencement_qy_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Day
+    source: Pensions Act 2014 s.4(4)
+    source_url: https://www.legislation.gov.uk/ukpga/2014/19/section/4
+    versions:
+      - effective_from: '2016-04-06'
+        formula: count_where(qualifying_year_of, is_post_commencement_qy)
+  - name: total_qy_count
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Day
+    source: Pensions Act 2014 s.4(1)(b) and s.4(5)
+    versions:
+      - effective_from: '2016-04-06'
+        formula: pre_commencement_qy_count + post_commencement_qy_count
+  - name: reached_pensionable_age
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Day
+    source: Pensions Act 2014 s.4(1)(a)
+    versions:
+      - effective_from: '2016-04-06'
+        formula: current_age_years >= pensionable_age_years
+  - name: meets_minimum_qy
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Day
+    source: Pensions Act 2014 s.4(1)(b)
+    versions:
+      - effective_from: '2016-04-06'
+        formula: total_qy_count >= state_pension_minimum_qy_count
+  - name: has_any_pre_commencement_year
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Day
+    source: Pensions Act 2014 s.4(1)(c)
+    versions:
+      - effective_from: '2016-04-06'
+        formula: pre_commencement_qy_count >= 1
+  - name: entitled_to_transitional_rate
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Day
+    source: Pensions Act 2014 s.4(1) combined
+    source_url: https://www.legislation.gov.uk/ukpga/2014/19/section/4
+    versions:
+      - effective_from: '2016-04-06'
+        formula: |-
+          reached_pensionable_age
+          and meets_minimum_qy
+          and has_any_pre_commencement_year

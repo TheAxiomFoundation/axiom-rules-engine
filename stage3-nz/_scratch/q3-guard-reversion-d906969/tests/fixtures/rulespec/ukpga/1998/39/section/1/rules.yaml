@@ -1,0 +1,91 @@
+format: rulespec/v1
+module:
+  summary: |-
+    National Minimum Wage Act 1998 s.1 — worker's NMW entitlement and
+    compliance test.
+
+    Qualifies if (a) is a worker, (b) works in the UK, (c) above compulsory
+    school age (s.1(2)). Hourly rate is set by the Secretary of State
+    (s.1(3)); reg-made age bands apply. 2025-26 rates:
+      21+ National Living Wage    £12.21
+      18-20                       £10.00
+      16-17 or apprentice (1st yr) £7.55
+rules:
+  - name: nmw_apprentice_rate
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-01'
+        formula: '7.55'
+  - name: nmw_youth_rate
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-01'
+        formula: '10.00'
+  - name: nmw_adult_rate
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-01'
+        formula: '12.21'
+  - name: qualifies_for_nmw
+    kind: derived
+    entity: Worker
+    dtype: Judgment
+    period: Day
+    source: NMWA 1998 s.1(2)
+    source_url: https://www.legislation.gov.uk/ukpga/1998/39/section/1
+    versions:
+      - effective_from: '2025-04-01'
+        formula: is_worker and works_in_uk and above_compulsory_school_age
+  - name: rate_owed
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: NMWA 1998 s.1(3) with age-band regulations
+    source_url: https://www.legislation.gov.uk/ukpga/1998/39/section/1
+    versions:
+      - effective_from: '2025-04-01'
+        formula: |-
+          if is_apprentice_first_year: nmw_apprentice_rate
+          elif current_age_years < 18: nmw_apprentice_rate
+          elif current_age_years < 21: nmw_youth_rate
+          else: nmw_adult_rate
+  - name: effective_hourly
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: NMWA 1998 s.1(1) read with NMWR 2015 reg 2 — remuneration / hours
+    source_url: https://www.legislation.gov.uk/ukpga/1998/39/section/1
+    versions:
+      - effective_from: '2025-04-01'
+        formula: remuneration_in_prp / max(hours_worked_in_prp, 1)
+  - name: is_compliant
+    kind: derived
+    entity: Worker
+    dtype: Judgment
+    period: Day
+    source: NMWA 1998 s.1(1)
+    source_url: https://www.legislation.gov.uk/ukpga/1998/39/section/1
+    versions:
+      - effective_from: '2025-04-01'
+        formula: effective_hourly >= rate_owed
+  - name: shortfall_total
+    kind: derived
+    entity: Worker
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: Derived shortfall owed for the pay reference period
+    source_url: https://www.legislation.gov.uk/ukpga/1998/39/section/1
+    versions:
+      - effective_from: '2025-04-01'
+        formula: max(0, rate_owed - effective_hourly) * hours_worked_in_prp

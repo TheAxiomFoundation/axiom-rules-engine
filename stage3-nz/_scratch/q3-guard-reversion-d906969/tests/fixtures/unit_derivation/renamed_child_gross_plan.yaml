@@ -1,0 +1,315 @@
+# Experimental, compiled stage-3 plan for the pinned NZ IncomeExplorer
+# comparison. Tier-B legal determinations are explicit caller inputs; the
+# engine supplies no family, relationship, age-18, or care defaults.
+schema: axiom/unit-aggregation-plan-stage3/1
+id: nz:incomeexplorer:family-aggregation-2026-27
+decimal_precision: 40
+constitution:
+  id: nz:income-tax:family-unit-2026-27
+  entity_type: Family
+  roster_relation: nz:incomeexplorer#scenario_person
+  unit_constituent_relation: nz:incomeexplorer#family_member
+  participating_member_relation: nz:incomeexplorer#family_scheme_member
+
+inputs:
+  - name: weekly_wage
+    scope: adult
+    kind: additive_amount
+    citation: &mb2
+      provision: Income Tax Act 2007 s MB 2
+      authority: nz/statute/act/public/2007/0097/section/MB-2
+  - name: annual_wage
+    scope: adult
+    kind: additive_amount
+    citation: *mb2
+  - name: annual_family_scheme_base_income
+    scope: adult
+    kind: additive_amount
+    citation: *mb2
+  - name: weekly_net_benefit
+    scope: adult
+    kind: additive_amount
+    citation:
+      provision: Social Security Act 2018 main-benefit family rate provisions
+      authority: nz/statute/act/public/2018/0032/schedule/4
+  - name: weekly_gross_benefit
+    scope: adult
+    kind: additive_amount
+    citation: *mb2
+  - name: weekly_wage_tax
+    scope: adult
+    kind: additive_amount
+    citation:
+      provision: Income Tax Act 2007 Schedule 1 and s MB 2
+      authority: nz/statute/act/public/2007/0097/schedule/1
+  - name: weekly_net_wage
+    scope: adult
+    kind: additive_amount
+    citation:
+      provision: Income Tax Act 2007 Schedule 1; Accident Compensation Act 2001 s 219
+      authority: nz/statute/act/public/2007/0097/schedule/1
+  - name: weekly_hours
+    scope: adult
+    kind: additive_amount
+    citation:
+      provision: Income Tax Act 2007 ss MD 9 and ME 1
+      authority: nz/statute/act/public/2007/0097/section/MD-9
+  - name: ietc_weekly
+    scope: adult
+    kind: additive_amount
+    citation: &lc13
+      provision: Income Tax Act 2007 s LC 13
+      authority: nz/statute/act/public/2007/0097/section/LC-13
+  - name: ietc_continuous_weekly
+    scope: adult
+    kind: additive_amount
+    citation: *lc13
+  - name: best_start_after_per_child_abatement
+    scope: child
+    kind: child_gross_amount
+    reduction_key: best_start
+    engine_computation:
+      rule_id: nz:statutes/income_tax/family_scheme/tax_credits#best_start_tax_credit_before_abatement
+    citation: &mg2
+      provision: Income Tax Act 2007 ss MG 1 and MG 2
+      authority: nz/statute/act/public/2007/0097/section/MG-2
+  - name: best_start_claimant_care_fraction
+    scope: child
+    kind: care_fraction
+    citation: &mg25
+      provision: Income Tax Act 2007 s MG 2(5)
+      authority: nz/statute/act/public/2007/0097/section/MG-2
+  - name: in_work_tax_credit_child_exclusive_care_fraction
+    scope: child
+    kind: care_fraction
+    citation: &mc10_exclusive_care_period
+      provision: Income Tax Act 2007 ss MC 10(4) and MD 10(2), (3)(d)
+      authority: nz/statute/act/public/2007/0097/section/MC-10
+  - name: principal_care_for_family_scheme
+    scope: child
+    kind: eligibility_boolean
+    citation: &mc4
+      provision: Income Tax Act 2007 ss MC 4 and MC 10
+      authority: nz/statute/act/public/2007/0097/section/MC-4
+  - name: in_work_tax_credit_principal_caregiver
+    scope: child
+    kind: eligibility_boolean
+    citation: &mc10_principal_caregiver
+      provision: Income Tax Act 2007 s MC 10(3)
+      authority: nz/statute/act/public/2007/0097/section/MC-10
+  - name: not_financially_independent_at_age_18
+    scope: child
+    kind: eligibility_boolean
+    citation: &mc9_financial
+      provision: Income Tax Act 2007 s MC 9(1)(a)
+      authority: nz/statute/act/public/2007/0097/section/MC-9
+  - name: attending_school_or_tertiary_at_age_18
+    scope: child
+    kind: eligibility_boolean
+    citation: &mc9_education
+      provision: Income Tax Act 2007 s MC 9(1)(b)
+      authority: nz/statute/act/public/2007/0097/section/MC-9
+  - name: commissioner_period_contains_segment_at_age_18
+    scope: child
+    kind: eligibility_boolean
+    citation: &mc9_period
+      provision: Income Tax Act 2007 s MC 9(2)-(3)
+      authority: nz/statute/act/public/2007/0097/section/MC-9
+  - name: family_scheme_income
+    scope: family
+    kind: family_amount
+    citation: &mg3
+      provision: Income Tax Act 2007 ss MB 2 and MG 3
+      authority: nz/statute/act/public/2007/0097/section/MG-3
+  - name: best_start_family_abatement
+    scope: family
+    kind: family_adjustment
+    reduction_key: best_start
+    citation: *mg3
+  - name: best_start_abatement_threshold
+    scope: family
+    kind: family_amount
+    citation: *mg3
+  - name: best_start_abatement_rate
+    scope: family
+    kind: decimal_rate
+    citation: *mg3
+
+membership_relations:
+  - relation: partner_of
+    direction: symmetric
+    left_role: partner
+    right_role: partner
+    citation: &partner_input
+      provision: Caller-evidenced spouse or partner relation corresponding to the relationship in Income Tax Act 2007 s MC 7(1) chapeau; MC 7 applicability is not inferred
+      authority: nz/statute/act/public/2007/0097/section/MC-7
+  - relation: dependent_child_of
+    direction: directed
+    left_role: caregiver
+    right_role: child
+    citation:
+      provision: Caller-evidenced caregiver/dependent-child classification under Income Tax Act 2007 ss MC 4, MC 9, and MC 10
+      authority: nz/statute/act/public/2007/0097/section/MC-4
+partner_relation: partner_of
+child_relation: dependent_child_of
+partner_presence:
+  reference_person_input: family_unit_reference_person
+  citation: *partner_input
+  caller_determination: Caller supplies the adult reference person for this family unit; partner_present records only incidence on the plan-declared caller-evidenced partner_of relation and is not an MC 7 entitlement determination.
+adult_selection:
+  operation: explicit_person_role
+  citation: &mc2
+    provision: Caller-evidenced adult role after dependent-child classification under Income Tax Act 2007 ss MC 2, MC 4, MC 9, and MC 10
+    authority: nz/statute/act/public/2007/0097/section/MC-2
+  caller_determination: Every person carries an evidenced adult or child role; the engine does not infer adulthood by taking the complement of child relations.
+age_18_conditions:
+  age: 18
+  not_financially_independent_input: not_financially_independent_at_age_18
+  attending_school_or_tertiary_input: attending_school_or_tertiary_at_age_18
+  commissioner_period_input: commissioner_period_contains_segment_at_age_18
+  citation: &mc9_age_18
+    provision: Income Tax Act 2007 s MC 9(1)(a)-(b) and (2)-(3)
+    authority: nz/statute/act/public/2007/0097/section/MC-9
+care:
+  principal_care_input: principal_care_for_family_scheme
+  claimant_care_fraction_input: best_start_claimant_care_fraction
+  citation: *mc4
+
+scalar_aggregations:
+  - { output: weekly_wages, input: weekly_wage, selector: adults, citation: *mb2 }
+  - { output: annual_wages, input: annual_wage, selector: adults, citation: *mb2 }
+  - { output: annual_family_scheme_base_income, input: annual_family_scheme_base_income, selector: adults, citation: *mb2 }
+  - { output: weekly_net_benefit, input: weekly_net_benefit, selector: adults, citation: { provision: Social Security Act 2018 main-benefit family rate provisions, authority: nz/statute/act/public/2018/0032/schedule/4 } }
+  - { output: weekly_gross_benefit, input: weekly_gross_benefit, selector: adults, citation: *mb2 }
+  - { output: weekly_wage_tax, input: weekly_wage_tax, selector: adults, citation: { provision: Income Tax Act 2007 Schedule 1 and s MB 2, authority: nz/statute/act/public/2007/0097/schedule/1 } }
+  - { output: weekly_net_wage, input: weekly_net_wage, selector: adults, citation: { provision: Income Tax Act 2007 Schedule 1; Accident Compensation Act 2001 s 219, authority: nz/statute/act/public/2007/0097/schedule/1 } }
+  - { output: hours_total, input: weekly_hours, selector: adults, citation: { provision: Income Tax Act 2007 ss MD 9 and ME 1, authority: nz/statute/act/public/2007/0097/section/MD-9 } }
+  - { output: ietc_weekly, input: ietc_weekly, selector: adults, citation: *lc13 }
+  - { output: ietc_continuous_weekly, input: ietc_continuous_weekly, selector: adults, citation: *lc13 }
+
+child_counts:
+  - output: dependent_child_count
+    minimum_age: 0
+    maximum_age: 18
+    citation: *mc2
+  - output: best_start_eligible_child_count
+    minimum_age: 0
+    maximum_age: 2
+    citation: *mg2
+  - output: child_count_age_0_13
+    minimum_age: 0
+    maximum_age: 13
+    citation: *mc2
+  - output: child_count_age_14_18
+    minimum_age: 14
+    maximum_age: 18
+    citation:
+      provision: Caller-evidenced child classification under Income Tax Act 2007 s YA 1 definition of child para (a) for ages 14-15 and para (b), including not financially independent, for ages 16-17; para (c) with s MC 9(1)(a)-(b), (2)-(3) applies at age 18
+      authority: nz/statute/act/public/2007/0097/section/YA-1
+child_minima:
+  - output: youngest_child_age
+    input: age_years
+    empty_value: 0
+    citation: *mc2
+
+family_predicates:
+  - output: has_dependent_children
+    operation: { kind: count_at_least, count: dependent_child_count, minimum: 1 }
+    citation: *mc2
+  - output: has_two_or_more_dependent_children
+    operation: { kind: count_at_least, count: dependent_child_count, minimum: 2 }
+    citation: *mc2
+  - output: youngest_child_age_at_least_14
+    operation: { kind: youngest_age_at_least, youngest: youngest_child_age, minimum: 14 }
+    citation:
+      provision: Social Security Act 2018 Schedule 4 lone-parent benefit age branch
+      authority: nz/statute/act/public/2018/0032/schedule/4
+  - output: sole_parent_with_dependent_children
+    operation: { kind: sole_parent_with_children, count: dependent_child_count }
+    citation: *mc2
+  - output: jss_sole_parent_youngest_age_at_least_14
+    operation: { kind: sole_parent_youngest_age_at_least, count: dependent_child_count, youngest: youngest_child_age, minimum: 14 }
+    citation:
+      provision: Social Security Act 2018 Schedule 4 lone-parent benefit age branch
+      authority: nz/statute/act/public/2018/0032/schedule/4
+
+family_shape_scalars:
+  - output: family_tax_credit_eldest_dependent_child_care_units
+    operation: { kind: eldest_care_units, count: dependent_child_count }
+    citation: *mc2
+  - output: family_tax_credit_subsequent_dependent_child_care_units
+    operation: { kind: subsequent_care_units, count: dependent_child_count }
+    citation: *mc2
+  - output: family_tax_credit_entitlement_days
+    operation: { kind: fixed_if_children, count: dependent_child_count, present: "365", absent: "0" }
+    citation: *mc2
+  - output: wff_family_credit_abatement_days
+    operation: { kind: fixed_if_children, count: dependent_child_count, present: "365", absent: "0" }
+    citation: *mg3
+  - output: in_work_tax_credit_weekly_periods
+    operation: { kind: fixed_if_children, count: dependent_child_count, present: "52", absent: "0" }
+    citation: *mc2
+  - output: best_start_entitlement_days
+    operation: { kind: fixed_if_children, count: best_start_eligible_child_count, present: "365", absent: "0" }
+    citation: *mg2
+
+child_agreements:
+  - output: in_work_tax_credit_child_exclusive_care_fraction
+    input: in_work_tax_credit_child_exclusive_care_fraction
+    eligible_if: in_work_tax_credit_principal_caregiver
+    empty_value: "0"
+    citation: *mc10_exclusive_care_period
+child_projections:
+  - output: best_start_claimant_care_fraction
+    input: best_start_claimant_care_fraction
+    citation: *mg25
+broadcasts:
+  - output: family_scheme_income
+    family_input: family_scheme_income
+    citation: *mg3
+
+family_reductions:
+  - output: best_start_total
+    gross_output: best_start_total_before_abatement
+    operation: sum_children_then_subtract_family_once
+    reduction_key: best_start
+    child_gross_input: best_start_after_per_child_abatement
+    family_adjustment_input: best_start_family_abatement
+    care_fraction_input: best_start_claimant_care_fraction
+    minimum_age: 0
+    maximum_age: 2
+    continuous:
+      output: best_start_total_continuous_abatement
+      family_income_input: family_scheme_income
+      threshold_input: best_start_abatement_threshold
+      rate_input: best_start_abatement_rate
+    citation: *mg3
+
+limitations:
+  - id: mc7-applicability-and-selection-out-of-scope
+    statement: The partner_present output records only whether the family reference person participates in the caller-evidenced partner relation. MC 7(1) applicability and MC 7(2) allocation or Commissioner selection are outside this aggregation plan.
+    citation:
+      provision: Income Tax Act 2007 s MC 7(1)-(2)
+      authority: nz/statute/act/public/2007/0097/section/MC-7
+  - id: mc9-commissioner-period
+    statement: For an age-18 child the caller must explicitly state whether the Commissioner-determined MC 9 entitlement period contains the requested segment; omission remains Unknown.
+    citation: *mc9_period
+  - id: mg2-care-fact
+    statement: The caller supplies evidenced principal-care status and the claimant share after time in another qualifying person's exclusive care; no care fraction is defaulted.
+    citation: *mg25
+  - id: relationship-and-role-classification
+    statement: The caller supplies evidenced spouse/partner, caregiver/child, and adult/child classifications. This plan does not decide whether a legal relationship or dependent-child status exists, or whether MC 7 applies.
+    citation: *partner_input
+  - id: mc10-iwtc-care
+    statement: The caller separately supplies the MC 10(4) and MD 10(2), (3)(d) in-work-tax-credit exclusive-care period fraction and the MC 10(3) principal-caregiver determination; the MG 2(5) Best Start care share is never reused for IWTC.
+    citation:
+      provision: Income Tax Act 2007 ss MC 10(3)-(4) and MD 10(2), (3)(d)
+      authority: nz/statute/act/public/2007/0097/section/MC-10
+  - id: pinned-full-period-scenario
+    statement: The 365-day and 52-week shape scalars are mechanics of the pinned full-year comparison scenario, not general entitlement-period determinations. The caller must choose a different plan for partial periods.
+    citation: *mc2
+  - id: jss-scenario-gate
+    statement: The sole-parent youngest-age-at-least-14 output is only the relationship/age gate consumed by the pinned Jobseeker Support scenario; it is not a complete Social Security Act entitlement determination.
+    citation:
+      provision: Social Security Act 2018 Schedule 4 lone-parent benefit age branch
+      authority: nz/statute/act/public/2018/0032/schedule/4

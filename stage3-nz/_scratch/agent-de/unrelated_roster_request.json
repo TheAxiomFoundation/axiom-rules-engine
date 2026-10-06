@@ -1,0 +1,26 @@
+{
+  "scope": "scenario:missing-relations",
+  "segment": "2026-04-01/2027-03-31",
+  "primary_person": "primary",
+  "persons": [
+    {
+      "id": "primary",
+      "age_years": 25,
+      "scalars": {"amount": "10"}
+    },
+    {
+      "id": "possible-partner-or-child",
+      "age_years": 17,
+      "scalars": {"amount": "20"}
+    },
+    {
+      "id": "unrelated",
+      "age_years": 30,
+      "scalars": {"amount": "30"}
+    }
+  ],
+  "relations": {
+    "household_link": [["primary", "possible-partner-or-child"]]
+  },
+  "family_scalars": {}
+}

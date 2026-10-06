@@ -1,0 +1,75 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Family allowance example RuleSpec module.
+
+    Household receives a flat per-child monthly allowance provided total
+    earned income does not exceed a size-keyed limit. Size-keyed tables
+    aren't a parameter primitive in the deployed DSL, so we encode them as
+    `match household_size` statements. The caller supplies each member's
+    `earned_income` input; the household-size count comes from the
+    `member_of_household` relation.
+
+    Synthetic RuleSpec module — not modelled on any specific statute.
+rules:
+  - name: family_allowance_per_child
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: '2025-01-01'
+        formula: '120'
+  - name: household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2025-01-01'
+        formula: len(member_of_household)
+  - name: earned_income_total
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: '2025-01-01'
+        formula: sum(member_of_household.earned_income)
+  - name: income_limit
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          match household_size:
+              1 => 1800.0
+              2 => 2600.0
+              3 => 3400.0
+              4 => 4200.0
+              5 => 5000.0
+              6 => 5800.0
+              7 => 6600.0
+              8 => 7400.0
+  - name: qualifies
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2025-01-01'
+        formula: earned_income_total <= income_limit
+  - name: monthly_allowance
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          if qualifies: family_allowance_per_child * household_size
+          else: 0

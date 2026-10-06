@@ -1,0 +1,32 @@
+schema: axiom/unit-aggregation-plan-stage3/1
+id: adversarial:missing-knowledge
+decimal_precision: 40
+constitution:
+  id: adversarial:missing-knowledge-family
+  entity_type: Family
+  roster_relation: adversarial#roster
+  unit_constituent_relation: adversarial#family_member
+  participating_member_relation: adversarial#participating_member
+membership_relations:
+  - relation: household_link
+    symmetric: true
+    citation: &test_citation
+      provision: adversarial fixture
+      authority: adversarial:test
+  - relation: partner_of
+    symmetric: true
+    citation: *test_citation
+  - relation: dependent_child_of
+    symmetric: false
+    citation: *test_citation
+partner_relation: partner_of
+child_relation: dependent_child_of
+scalar_aggregations:
+  - output: total_amount
+    input: amount
+    selector: all_members
+    citation: *test_citation
+child_counts:
+  - output: child_count
+    citation: *test_citation
+

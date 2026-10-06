@@ -1,0 +1,37 @@
+# Synthetic 7 CFR 273.1 / 273.11 household-shape fixtures. These are engine
+# fixtures only; they do not encode or modify rulespec-us.
+cases:
+  - id: general_purchase_and_prepare_group
+    roster: [adult_a, adult_b, child_c]
+    base_groups:
+      - [adult_a, adult_b, child_c]
+    combination_edges: []
+    status_excluded: []
+    expected_constituent:
+      - [adult_a, adult_b, child_c]
+    expected_participating:
+      - [adult_a, adult_b, child_c]
+
+  - id: mandatory_under_22_parent_combination
+    roster: [parent, child_21, roommate]
+    base_groups: []
+    combination_edges:
+      - [parent, child_21]
+    status_excluded: []
+    expected_constituent:
+      - [child_21, parent]
+      - [roommate]
+    expected_participating:
+      - [child_21, parent]
+      - [roommate]
+
+  - id: excluded_member_kept_as_constituent
+    roster: [claimant, ssn_noncooperator]
+    base_groups:
+      - [claimant, ssn_noncooperator]
+    combination_edges: []
+    status_excluded: [ssn_noncooperator]
+    expected_constituent:
+      - [claimant, ssn_noncooperator]
+    expected_participating:
+      - [claimant]

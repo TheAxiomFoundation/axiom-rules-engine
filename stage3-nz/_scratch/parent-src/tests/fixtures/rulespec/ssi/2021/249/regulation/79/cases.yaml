@@ -1,0 +1,138 @@
+cases:
+  - name: band_d_sole_liable_no_non_dep
+    dwelling_id: dwelling-1
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "1460"
+    ct_discounts: "0"
+    ct_other_reductions: "0"
+    band_number: 4
+    non_dep_deductions_daily: "0"
+    partner_only_joint: false
+    liable_persons:
+      - id: person-1
+        is_student: false
+    expected:
+      days_in_fy: 365
+      num_non_student_liable: 1
+      a_raw: "1460"
+      liable_divisor: 1
+      a_effective: "1460"
+      is_band_e_to_h: not_holds
+      a_after_taper: "1460"
+      # 1460 / 365 = 4
+      daily_max_reduction: "4"
+
+  - name: band_g_sole_liable_taper_applies
+    dwelling_id: dwelling-2
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "2350"
+    ct_discounts: "0"
+    ct_other_reductions: "0"
+    band_number: 7
+    non_dep_deductions_daily: "0"
+    partner_only_joint: false
+    liable_persons:
+      - id: person-2
+        is_student: false
+    expected:
+      days_in_fy: 365
+      is_band_e_to_h: holds
+      # a_after_taper = 2350 - 2350/1.175 = 2350 - 2000 = 350
+      a_after_taper: "350"
+      # 350 / 365 = 0.9589041095890410958904109589
+      daily_max_reduction: "0.9589041095890410958904109589"
+
+  - name: band_b_joint_two_liable_non_partner
+    dwelling_id: dwelling-3
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "1000"
+    ct_discounts: "0"
+    ct_other_reductions: "0"
+    band_number: 2
+    non_dep_deductions_daily: "0"
+    partner_only_joint: false
+    liable_persons:
+      - id: person-3a
+        is_student: false
+      - id: person-3b
+        is_student: false
+    expected:
+      num_non_student_liable: 2
+      liable_divisor: 2
+      a_effective: "500"
+      # 500 / 365 = 1.369863...
+      daily_max_reduction: "1.3698630136986301369863013699"
+
+  - name: band_b_joint_partner_only_no_division
+    dwelling_id: dwelling-4
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "1000"
+    ct_discounts: "0"
+    ct_other_reductions: "0"
+    band_number: 2
+    non_dep_deductions_daily: "0"
+    partner_only_joint: true
+    liable_persons:
+      - id: person-4a
+        is_student: false
+      - id: person-4b
+        is_student: false
+    expected:
+      num_non_student_liable: 2
+      liable_divisor: 1
+      a_effective: "1000"
+      # 1000 / 365
+      daily_max_reduction: "2.7397260273972602739726027397"
+
+  - name: student_excluded_from_divisor
+    dwelling_id: dwelling-5
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "1460"
+    ct_discounts: "0"
+    ct_other_reductions: "0"
+    band_number: 4
+    non_dep_deductions_daily: "0"
+    partner_only_joint: false
+    liable_persons:
+      - id: person-5a
+        is_student: false
+      - id: person-5b
+        is_student: true
+    expected:
+      num_non_student_liable: 1
+      liable_divisor: 1
+      daily_max_reduction: "4"
+
+  - name: with_discount_and_non_dep_deductions
+    dwelling_id: dwelling-6
+    period:
+      period_kind: tax_year
+      start: 2024-04-01
+      end: 2025-03-31
+    ct_annual: "1825"
+    ct_discounts: "365"
+    ct_other_reductions: "0"
+    band_number: 4
+    non_dep_deductions_daily: "0.50"
+    partner_only_joint: false
+    liable_persons:
+      - id: person-6
+        is_student: false
+    expected:
+      a_raw: "1460"
+      daily_max_reduction: "3.50"

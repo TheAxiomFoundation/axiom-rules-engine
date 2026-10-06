@@ -1,0 +1,62 @@
+- name: entitled_full_career
+  period: 2025
+  input:
+    current_age_years: 66
+    pensionable_age_years: 66
+    qualifying_year_of:
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+  output:
+    pre_commencement_qy_count: 5
+    post_commencement_qy_count: 5
+    total_qy_count: 10
+    entitled_to_transitional_rate: holds
+- name: too_few_qy
+  period: 2025
+  input:
+    current_age_years: 66
+    pensionable_age_years: 66
+    qualifying_year_of:
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+  output:
+    total_qy_count: 2
+    meets_minimum_qy: not_holds
+    entitled_to_transitional_rate: not_holds
+- name: no_pre_commencement_year
+  period: 2025
+  input:
+    current_age_years: 66
+    pensionable_age_years: 66
+    qualifying_year_of:
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+      - {is_pre_commencement_qy: false, is_post_commencement_qy: true}
+  output:
+    has_any_pre_commencement_year: not_holds
+    entitled_to_transitional_rate: not_holds
+- name: below_pensionable_age
+  period: 2025
+  input:
+    current_age_years: 64
+    pensionable_age_years: 66
+    qualifying_year_of:
+      - {is_pre_commencement_qy: true, is_post_commencement_qy: false}
+  output:
+    reached_pensionable_age: not_holds
+    entitled_to_transitional_rate: not_holds

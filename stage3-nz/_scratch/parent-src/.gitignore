@@ -1,0 +1,32 @@
+/target
+**/target/
+**/*.egg-info
+**/__pycache__/
+
+# Python environments
+**/.venv/
+**/venv/
+
+# wasm-pack build output
+wasm/pkg-web/
+wasm/pkg-node/
+
+# macOS
+.DS_Store
+
+# Build artefacts from ad-hoc scripts
+**/*.png
+
+# Local tool state (beads issue tracker, visualiser scratch)
+.beads/
+viz/
+
+paper/_build/
+
+# setuptools build output from pip installs of python/
+python/build/
+
+# wasm npm packaging outputs
+wasm/pkg-npm-web/
+wasm/pkg-npm-node/
+wasm/npm-dist/

@@ -1,0 +1,4345 @@
+use axiom_rules_engine::api::{
+    ExecutionMode, ExecutionQuery, ExecutionRequest, OutputValue, execute_request,
+};
+use axiom_rules_engine::compile::{
+    CompileError, CompileOptions, CompiledProgramArtifact, compile_program_file_to_json,
+};
+use axiom_rules_engine::rulespec::{
+    CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
+    ValidationStatus, load_rulespec_file_with_options, lower_rulespec_str,
+    lower_rulespec_str_with_options,
+};
+use axiom_rules_engine::spec::{
+    DatasetBindingDiagnosticCode, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelationRecordSpec,
+    ScalarExprSpec, ScalarValueSpec, SpecError, UnitKindSpec,
+};
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+fn exact_temp_dir() -> PathBuf {
+    std::env::temp_dir()
+        .canonicalize()
+        .expect("system temp directory has an exact path")
+}
+
+fn unique_test_root() -> PathBuf {
+    exact_temp_dir().join(format!(
+        "axiom-rules-engine-test-{}-{}",
+        std::process::id(),
+        TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn canonical_roots_for(path: &Path) -> CanonicalRuleSpecRoots {
+    let root = path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.len() == "rulespec-xx".len() && name.starts_with("rulespec-")
+                })
+        })
+        .expect("test module is below an exact rulespec-<country> root");
+    CanonicalRuleSpecRoots::new([root]).expect("test RuleSpec root is canonical")
+}
+
+fn compile_rulespec_file(path: &Path) -> Result<CompiledProgramArtifact, CompileError> {
+    let roots = canonical_roots_for(path);
+    CompiledProgramArtifact::from_rulespec_file(path, &roots)
+}
+
+fn compile_rulespec_file_to_json(
+    path: &Path,
+    output: &Path,
+) -> Result<CompiledProgramArtifact, CompileError> {
+    let roots = canonical_roots_for(path);
+    compile_program_file_to_json(path, output, &roots)
+}
+
+#[test]
+fn rulespec_lowers_snap_like_formulas() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Texas SNAP overlay subset
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_state_sme_flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    source: "TWH / TW Bulletin 25-15 §2"
+    versions:
+      - effective_from: 2025-10-01
+        formula: "170"
+  - name: snap_medical_deduction_threshold
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2008-10-01
+        formula: "35"
+  - name: standard_deduction
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    sources:
+      - citation: "7 CFR 273.9(c)(1)(i)"
+        url: "https://www.ecfr.gov/current/title-7/section-273.9"
+    versions:
+      - effective_from: 2025-10-01
+        formula: |
+          match household_size:
+              1 => 209
+              2 => 209
+              3 => 209
+              4 => 223
+  - name: household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: len(member_of_household)
+  - name: earned_income_total
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: sum(member_of_household.earned_income)
+  - name: unearned_income_total
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: sum(member_of_household.unearned_income)
+  - name: gross_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: earned_income_total + unearned_income_total
+  - name: medical_deduction
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    source: "7 CFR 273.9(d)(3)(x) - Texas SME election"
+    versions:
+      - effective_from: 2025-10-01
+        formula: |
+          if has_elderly_or_disabled_member:
+              if total_medical_expenses > snap_medical_deduction_threshold:
+                  snap_state_sme_flat_amount
+              else: 0
+          else: 0
+  - name: snap_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: max(0, gross_income - medical_deduction)
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+    let program = &artifact.program;
+    assert_eq!(program.parameters.len(), 2);
+    assert_eq!(program.derived.len(), 7);
+    assert!(
+        program
+            .relations
+            .iter()
+            .any(|r| r.name == "member_of_household")
+    );
+    assert!(
+        artifact
+            .metadata
+            .evaluation_order
+            .contains(&"snap_allotment".to_string())
+    );
+}
+
+#[test]
+fn rulespec_lowers_ghana_cedi_money_parameter() {
+    // Ghana Cedi (GHS, ISO 4217, 2 minor units = pesewas) must be a seeded
+    // currency so rulespec-gh modules can declare `unit: GHS` without a repo
+    // inline unit declaration, exactly like USD/GBP/EUR.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Ghana income tax first schedule (GHS unit check)
+rules:
+  - name: first_band_upper_chargeable_income
+    kind: parameter
+    dtype: Money
+    unit: GHS
+    source: "Income Tax Act 2015 (Act 896), First Schedule para 1(1) as amended by Act 1111"
+    versions:
+      - effective_from: 2024-01-01
+        formula: "5880"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("GHS RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "GHS"),
+        "GHS should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_ugandan_shilling_money_parameter() {
+    // Uganda Shilling (UGX, ISO 4217, exponent 0 — no minor unit in
+    // circulation) must be a seeded currency so rulespec-ug modules can
+    // declare `unit: UGX` without a repo inline unit declaration, exactly
+    // like USD/GBP/EUR/GHS/NGN.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Uganda income tax third schedule (UGX unit check)
+rules:
+  - name: paye_annual_threshold
+    kind: parameter
+    dtype: Money
+    unit: UGX
+    source: "Income Tax Act (Cap 340), Third Schedule Part I"
+    versions:
+      - effective_from: 2025-07-01
+        formula: "2820000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("UGX RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "UGX"),
+        "UGX should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_ethiopian_birr_money_parameter() {
+    // Ethiopian Birr (ETB, ISO 4217, 2 minor units = santim) must be a
+    // seeded currency so rulespec-et modules can declare `unit: ETB`
+    // without a repo inline unit declaration, exactly like USD/GHS/ZMW.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Ethiopia income tax amendment schedule (ETB unit check)
+rules:
+  - name: employment_income_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: ETB
+    source: "Income Tax (Amendment) Proclamation No. 1395/2025, Schedule A"
+    versions:
+      - effective_from: 2025-07-01
+        formula: "2000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("ETB RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "ETB"),
+        "ETB should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_tanzanian_shilling_money_parameter() {
+    // Tanzanian Shilling (TZS, ISO 4217, 2 minor units = senti) must be
+    // a seeded currency so rulespec-tz modules can declare `unit: TZS`
+    // without a repo inline unit declaration, exactly like ZMW/ETB.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Tanzania income tax schedule (TZS unit check)
+rules:
+  - name: resident_individual_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: TZS
+    source: "Income Tax Act (Cap 332), First Schedule paragraph 1(1)"
+    versions:
+      - effective_from: 2020-07-01
+        formula: "3240000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("TZS RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "TZS"),
+        "TZS should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_danish_krone_money_parameter() {
+    // Danish Krone (DKK, ISO 4217, 2 minor units = øre) must be a
+    // seeded currency so rulespec-dk modules can declare `unit: DKK`
+    // without a repo inline unit declaration, exactly like ZMW/ETB/TZS.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Danish child and youth benefit base amounts (DKK unit check)
+rules:
+  - name: child_benefit_annual_base_age_under_3
+    kind: parameter
+    dtype: Money
+    unit: DKK
+    source: "Børne- og ungeydelsesloven (LBK nr 603 af 12/05/2025) § 1, stk. 1"
+    versions:
+      - effective_from: 2025-05-12
+        formula: "16992"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("DKK RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    let dkk = artifact
+        .program
+        .units
+        .iter()
+        .find(|u| u.name == "DKK")
+        .expect("DKK should be a seeded currency unit");
+    assert!(
+        matches!(dkk.kind, UnitKindSpec::Currency { minor_units: 2 }),
+        "DKK must carry the ISO 4217 exponent (100 øre = 1 krone): {:?}",
+        dkk.kind
+    );
+}
+
+#[test]
+fn rulespec_lowers_rwandan_franc_money_parameter() {
+    // Rwandan Franc (RWF, ISO 4217, exponent 0 — no minor unit in
+    // circulation) must be a seeded currency so rulespec-rw modules can
+    // declare `unit: RWF` without a repo inline unit declaration,
+    // exactly like UGX (the other exponent-0 seed).
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Rwanda income tax schedule (RWF unit check)
+rules:
+  - name: employment_income_exempt_bound
+    kind: parameter
+    dtype: Money
+    unit: RWF
+    source: "Law No 027/2022 of 20/10/2022 establishing taxes on income, Article 56"
+    versions:
+      - effective_from: 2022-10-28
+        formula: "60000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RWF RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "RWF"),
+        "RWF should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_zambian_kwacha_money_parameter() {
+    // Zambian Kwacha (ZMW, ISO 4217, 2 minor units = ngwee) must be a
+    // seeded currency so rulespec-zm modules can declare `unit: ZMW`
+    // without a repo inline unit declaration, exactly like USD/GHS/UGX.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Zambia income tax charging schedule (ZMW unit check)
+rules:
+  - name: paye_exempt_threshold
+    kind: parameter
+    dtype: Money
+    unit: ZMW
+    source: "Income Tax Act (Cap 323), Charging Schedule"
+    versions:
+      - effective_from: 2025-01-01
+        formula: "61200"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("ZMW RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "ZMW"),
+        "ZMW should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_nigerian_naira_money_parameter() {
+    // Nigerian Naira (NGN, ISO 4217, 2 minor units = kobo) must be a seeded
+    // currency so rulespec-ng modules can declare `unit: NGN` without a repo
+    // inline unit declaration, exactly like USD/GBP/EUR/GHS.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Nigeria Tax Act 2025 rate schedule (NGN unit check)
+rules:
+  - name: first_band_upper_chargeable_income
+    kind: parameter
+    dtype: Money
+    unit: NGN
+    source: "Nigeria Tax Act 2025, personal income tax rate schedule"
+    versions:
+      - effective_from: 2026-01-01
+        formula: "800000"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("NGN RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "NGN"),
+        "NGN should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_lowers_ghana_pesewa_money_parameter() {
+    // Ghana pesewas (GHp, 100 GHp = 1 GHS) must be a seeded currency unit:
+    // the Energy Sector Levies Act, 2025 schedule states its per-litre and
+    // per-kilogramme fuel-levy rates in GHp, and rulespec-gh grounds those
+    // amounts in the schedule's own unit.
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: Energy Sector Levies 2025 schedule (GHp unit check)
+rules:
+  - name: petrol_shortfall_debt_repayment_levy_rate_per_litre
+    kind: parameter
+    dtype: Money
+    unit: GHp
+    source: "Energy Sector Levies (Amendment) Act, 2025, Schedule second row"
+    versions:
+      - effective_from: 2025-06-04
+        formula: "195"
+"#;
+
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(rulespec).expect("GHp RuleSpec compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+    assert!(
+        artifact.program.units.iter().any(|u| u.name == "GHp"),
+        "GHp should be a seeded currency unit"
+    );
+}
+
+#[test]
+fn rulespec_source_metadata_allows_quoted_phrases() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: snap_household_food_contribution_rate
+    kind: parameter
+    dtype: Rate
+    source: 7 USC 2017(a), "30 per centum"
+    versions:
+      - effective_from: 2008-10-01
+        formula: "0.30"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+
+    assert_eq!(artifact.program.parameters.len(), 1);
+}
+
+#[test]
+fn rulespec_lowers_indexed_parameter_tables_and_lookup_syntax() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  summary: |-
+    The maximum monthly allotments are 298 and 546 for household sizes 1 and 2,
+    plus 218 for each additional person.
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    source: USDA SNAP FY 2026 COLA maximum monthly allotment table
+    versions:
+      - effective_from: 2025-10-01
+        effective_to: 2026-09-30
+        values:
+          1: 298
+          2: 546
+  - name: snap_maximum_allotment_additional_member
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: "218"
+  - name: max_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: |-
+          if household_size > 2:
+              snap_maximum_allotment_table[2] + ((household_size - 2) * snap_maximum_allotment_additional_member)
+          else: snap_maximum_allotment_table[household_size]
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+    let table = artifact
+        .program
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "snap_maximum_allotment_table")
+        .expect("indexed parameter is present");
+    assert_eq!(table.versions.len(), 1);
+    assert_eq!(
+        table.versions[0].effective_to,
+        Some("2026-09-30".parse().expect("valid effective_to"))
+    );
+    assert_eq!(table.versions[0].values.len(), 2);
+    assert_eq!(table.indexed_by.as_deref(), Some("household_size"));
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "household_size".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Integer { value: 3 },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["max_allotment".to_string()],
+        }],
+    })
+    .expect("indexed parameter lookup executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get("max_allotment")
+        .expect("max_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "764");
+}
+
+#[test]
+fn repo_backed_rulespec_outputs_reject_bare_friendly_names() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: "1"
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let program = artifact.program.to_program().expect("program lowers");
+
+    assert_eq!(
+        program.resolve_derived_name("us:statutes/7/2017/a#snap_regular_month_allotment"),
+        Some("snap_regular_month_allotment".to_string())
+    );
+    assert_eq!(
+        program.resolve_derived_name("snap_regular_month_allotment"),
+        None
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_rejects_bare_friendly_input_names() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+
+    let error = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "snap_maximum_allotment".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "298".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec!["us:statutes/7/2017/a#snap_regular_month_allotment".to_string()],
+        }],
+    })
+    .expect_err("repo-backed execution must reject bare input names");
+
+    assert!(error.to_string().contains(
+        "dataset input `snap_maximum_allotment` must use an absolute legal RuleSpec reference"
+    ));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_absolute_input_names() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2017/a.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:statutes/7/2017/a#snap_regular_month_allotment".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:statutes/7/2017/a#input.snap_maximum_allotment".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Decimal {
+                    value: "298".to_string(),
+                },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute input reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_regular_month_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "298");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_indexed_parameter_input_names() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/policies/irs/brackets.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: income_tax_bracket_rates
+    kind: parameter
+    dtype: Rate
+    indexed_by: bracket
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          1: 0.10
+  - name: first_bracket_rate
+    kind: derived
+    entity: TaxUnit
+    dtype: Rate
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: income_tax_bracket_rates[1]
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let output_id = "us:policies/irs/brackets#first_bracket_rate".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:policies/irs/brackets#input.bracket".to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Integer { value: 1 },
+            }],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute indexed parameter input reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("first_bracket_rate output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "0.1");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_requires_the_owning_input_slot_reference() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2014/e/6/A.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_net_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: max(0, snap_monthly_household_income - snap_standard_deduction)
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:statutes/7/2014/e/6/A#snap_net_income".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "us:statutes/7/2014/e/6/A#input.snap_monthly_household_income"
+                        .to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "1000".to_string(),
+                    },
+                },
+                InputRecordSpec {
+                    name: "us:statutes/7/2014/e/6/A#input.snap_standard_deduction".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "209".to_string(),
+                    },
+                },
+            ],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("exact owning input-slot reference executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_net_income output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "791");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn repo_backed_rulespec_execution_resolves_absolute_relation_names() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/7/2012/j.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_household_has_elderly_or_disabled_member
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_is_elderly_or_disabled) > 0
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id =
+        "us:statutes/7/2012/j#snap_household_has_elderly_or_disabled_member".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:statutes/7/2012/j#input.snap_member_is_elderly_or_disabled".to_string(),
+                entity: "Member".to_string(),
+                entity_id: "member-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: true },
+            }],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:statutes/7/2012/j#relation.member_of_household".to_string(),
+                tuple: vec!["member-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("absolute relation reference executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_household_has_elderly_or_disabled_member output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn count_where_can_use_related_derived_judgment_predicates() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/regulations/7-cfr/273/5.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_student_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: not snap_member_student_ineligible
+  - name: snap_student_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_student_eligible) > 0
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us:regulations/7-cfr/273/5#snap_student_eligible".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulations/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
+                entity: "Member".to_string(),
+                entity_id: "member-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: false },
+            }],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:regulations/7-cfr/273/5#relation.member_of_household".to_string(),
+                tuple: vec!["member-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("related derived predicate executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_student_eligible output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn composition_count_where_uses_imported_relation_for_imported_predicate() {
+    let root = unique_test_root();
+    let relation_file = root.join("rulespec-us/us/statutes/7/2012/j.yaml");
+    let member_rules_file = root.join("rulespec-us/us/regulations/7-cfr/273/5.yaml");
+    let program_file = root.join("rulespec-us/us-co/policies/snap.yaml");
+    fs::create_dir_all(relation_file.parent().expect("relation file has parent"))
+        .expect("create relation rules dir");
+    fs::create_dir_all(
+        member_rules_file
+            .parent()
+            .expect("member rules file has parent"),
+    )
+    .expect("create member rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
+    fs::write(
+        &relation_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+"#,
+    )
+    .expect("write relation RuleSpec");
+    fs::write(
+        &member_rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_member_student_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: not snap_member_student_ineligible
+"#,
+    )
+    .expect("write member RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/7/2012/j
+  - us:regulations/7-cfr/273/5
+rules:
+  - name: snap_student_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2025-10-01
+        formula: count_where(member_of_household, snap_member_student_eligible) > 0
+"#,
+    )
+    .expect("write composition RuleSpec");
+
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let output_id = "us-co:policies/snap#snap_student_eligible".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![InputRecordSpec {
+                name: "us:regulations/7-cfr/273/5#input.snap_member_student_ineligible".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+                value: ScalarValueSpec::Bool { value: false },
+            }],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:statutes/7/2012/j#relation.member_of_household".to_string(),
+                tuple: vec!["person-1".to_string(), "household-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("composition imported relation reference executes");
+
+    let OutputValue::Judgment { outcome, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_student_eligible output")
+    else {
+        panic!("expected judgment output");
+    };
+    assert_eq!(
+        *outcome,
+        axiom_rules_engine::spec::JudgmentOutcomeSpec::Holds
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sum_where_can_sum_related_derived_scalar_values() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/26/25A.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repo");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: education_credit_member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: aotc_first_expense_threshold
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "2000"
+  - name: aotc_student_potential
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: min(qualified_tuition_and_related_expenses, aotc_first_expense_threshold)
+  - name: aotc_eligible_student_claim
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: aotc_election_in_effect and not has_felony_drug_conviction
+  - name: american_opportunity_credit_before_phaseout
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: |-
+          sum_where(
+              education_credit_member_of_tax_unit,
+              aotc_student_potential,
+              aotc_eligible_student_claim
+          )
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let artifact = compile_rulespec_file(&rules_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let output_id = "us:statutes/26/25A#american_opportunity_credit_before_phaseout".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.qualified_tuition_and_related_expenses"
+                        .to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "3000".to_string(),
+                    },
+                },
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.aotc_election_in_effect".to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Bool { value: true },
+                },
+                InputRecordSpec {
+                    name: "us:statutes/26/25A#input.has_felony_drug_conviction".to_string(),
+                    entity: "Person".to_string(),
+                    entity_id: "student-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Bool { value: false },
+                },
+            ],
+            relations: vec![axiom_rules_engine::spec::RelationRecordSpec {
+                name: "us:statutes/26/25A#relation.education_credit_member_of_tax_unit".to_string(),
+                tuple: vec!["student-1".to_string(), "tax-unit-1".to_string()],
+                interval: IntervalSpec {
+                    start: period.start,
+                    end: period.end,
+                },
+            }],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("related derived scalar sum executes");
+
+    let OutputValue::Scalar { value, .. } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("american_opportunity_credit_before_phaseout output")
+    else {
+        panic!("expected scalar output");
+    };
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "2000");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_namespaces_same_named_relations_by_origin_target() {
+    let root = unique_test_root();
+    let first_file = root.join("rulespec-us/us/statutes/26/24/h.yaml");
+    let second_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
+    let program_file = root.join("rulespec-us/us/policies/test/relation-namespaces.yaml");
+    fs::create_dir_all(first_file.parent().expect("rules file has parent"))
+        .expect("create first rules dir");
+    fs::create_dir_all(second_file.parent().expect("rules file has parent"))
+        .expect("create second rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
+    fs::write(
+        &first_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: ctc_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write first RuleSpec");
+    fs::write(
+        &second_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: standard_deduction_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write second RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/26/24/h
+  - us:statutes/26/63/c
+rules: []
+"#,
+    )
+    .expect("write program RuleSpec");
+
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let ctc_output = "us:statutes/26/24/h#ctc_member_count".to_string();
+    let standard_deduction_output =
+        "us:statutes/26/63/c#standard_deduction_member_count".to_string();
+
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![],
+            relations: vec![
+                axiom_rules_engine::spec::RelationRecordSpec {
+                    name: "us:statutes/26/24/h#relation.member_of_tax_unit".to_string(),
+                    tuple: vec!["child-1".to_string(), "tax-unit-1".to_string()],
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                },
+                axiom_rules_engine::spec::RelationRecordSpec {
+                    name: "us:statutes/26/63/c#relation.member_of_tax_unit".to_string(),
+                    tuple: vec!["head-1".to_string(), "tax-unit-1".to_string()],
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                },
+            ],
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "tax-unit-1".to_string(),
+            period,
+            outputs: vec![ctc_output.clone(), standard_deduction_output.clone()],
+        }],
+    })
+    .expect("same-named relation references execute");
+
+    let OutputValue::Scalar {
+        value: ScalarValueSpec::Integer { value: ctc_count },
+        ..
+    } = response.results[0]
+        .outputs
+        .get(&ctc_output)
+        .expect("ctc member count output")
+    else {
+        panic!("expected integer scalar");
+    };
+    let OutputValue::Scalar {
+        value: ScalarValueSpec::Integer {
+            value: standard_deduction_count,
+        },
+        ..
+    } = response.results[0]
+        .outputs
+        .get(&standard_deduction_output)
+        .expect("standard deduction member count output")
+    else {
+        panic!("expected integer scalar");
+    };
+    assert_eq!(*ctc_count, 1);
+    assert_eq!(*standard_deduction_count, 1);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_rejects_namespaced_relation_arity_mismatch() {
+    let root = unique_test_root();
+    let rules_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create rules dir");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 1
+  - name: standard_deduction_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write RuleSpec");
+
+    let error =
+        compile_rulespec_file(&rules_file).expect_err("relation arity mismatch should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("us:statutes/26/63/c#relation.member_of_tax_unit"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("conflicting arities 2 and 1"),
+        "{error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_keeps_unscoped_inferred_relation_when_import_uses_same_short_name() {
+    let root = unique_test_root();
+    let imported_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
+    let program_file = root.join("rulespec-us/us/policies/test/unscoped-relation.yaml");
+    fs::create_dir_all(imported_file.parent().expect("rules file has parent"))
+        .expect("create rules dir");
+    fs::create_dir_all(program_file.parent().expect("program file has parent"))
+        .expect("create program rules dir");
+    fs::write(
+        &imported_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+"#,
+    )
+    .expect("write imported RuleSpec");
+    fs::write(
+        &program_file,
+        r#"
+format: rulespec/v1
+imports:
+  - us:statutes/26/63/c
+rules:
+  - name: local_member_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_tax_unit)
+"#,
+    )
+    .expect("write program RuleSpec");
+
+    let artifact = compile_rulespec_file(&program_file).expect("RuleSpec compiles");
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .any(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
+    );
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .any(|relation| relation.name == "member_of_tax_unit")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_rejects_parameter_values_without_indexed_by() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("missing indexed_by should fail");
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingIndexedBy { name } if name == "snap_maximum_allotment_table"
+    ));
+}
+
+#[test]
+fn rulespec_accepts_source_relations_without_emitting_program_items() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  summary: Colorado restates a federal SNAP maximum allotment table.
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source: 10 CCR 2506-1 section 4.207.3(D)
+    source_relation:
+      type: restates
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+      authority: federal
+    verification:
+      values:
+        snap_maximum_allotment_table:
+          1: 298
+          2: 546
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("source relation compiles");
+    assert!(program.parameters.is_empty());
+    assert!(program.derived.is_empty());
+    assert!(program.relations.is_empty());
+}
+
+#[test]
+fn rulespec_rejects_source_relation_without_target() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source: 10 CCR 2506-1 section 4.207.3(D)
+    source_relation:
+      type: restates
+      authority: federal
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("missing target should fail");
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingSourceRelationTarget { name }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_source_relation_without_type() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source_relation:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+"#,
+    )
+    .expect_err("missing source relation type should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingSourceRelationType { name }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_source_relation_bare_target() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_maximum_allotment_restates_usda_fy_2026
+    kind: source_relation
+    source_relation:
+      type: restates
+      target: snap_maximum_allotment
+"#,
+    )
+    .expect_err("bare source relation target should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::InvalidSourceRelationReference { name, field, value }
+            if name == "co_snap_maximum_allotment_restates_usda_fy_2026"
+                && field == "target"
+                && value == "snap_maximum_allotment"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_executable_body_on_source_relation() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_standard_deduction_restates_usda_fy_2026
+    kind: source_relation
+    entity: Household
+    dtype: Money
+    period: Month
+    source_relation:
+      type: restates
+      target: us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction
+    versions:
+      - effective_from: 2025-10-01
+        formula: "209"
+"#,
+    )
+    .expect_err("source relation executable body should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::SourceRelationHasExecutableBody { name }
+            if name == "co_snap_standard_deduction_restates_usda_fy_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_sets_relation_without_delegation_basis() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026#co_snap_heating_cooling_sua
+"#,
+    )
+    .expect_err("sets source relation without delegation should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingSourceRelationDelegation {
+            name,
+            relation_type
+        } if name == "co_snap_heating_cooling_sua_sets_federal_slot"
+            && relation_type == "sets"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_sets_relation_value_without_fragment() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026
+      basis:
+        delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+"#,
+    )
+    .expect_err("source relation value without fragment should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::InvalidSourceRelationReference { name, field, value }
+            if name == "co_snap_heating_cooling_sua_sets_federal_slot"
+                && field == "value"
+                && value == "us-co:policies/cdhs/snap/fy-2026"
+    ));
+}
+
+#[test]
+fn rulespec_accepts_sets_relation_with_absolute_value_and_delegation() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: co_snap_heating_cooling_sua_sets_federal_slot
+    kind: source_relation
+    source_relation:
+      type: sets
+      target: us:regulations/7-cfr/273/9#state_utility_allowance_amount
+      value: us-co:policies/cdhs/snap/fy-2026#co_snap_heating_cooling_sua
+      basis:
+        delegation: us:regulations/7-cfr/273/9#state_utility_allowance_delegation
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("valid sets source relation compiles");
+    assert!(program.parameters.is_empty());
+    assert!(program.derived.is_empty());
+    assert!(program.relations.is_empty());
+}
+
+#[test]
+fn rulespec_rejects_amendment_without_operation() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: emergency_act_amends_snap_resource_limit_2026
+    kind: source_relation
+    source_relation:
+      type: amends
+      target: us:regulations/7-cfr/273/8#snap_resource_limit
+      amendment:
+        effective:
+          start: 2026-04-01
+"#,
+    )
+    .expect_err("amendment without operation should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingAmendmentOperation { name }
+            if name == "emergency_act_amends_snap_resource_limit_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_amendment_without_effective_interval() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: emergency_act_amends_snap_resource_limit_2026
+    kind: source_relation
+    source_relation:
+      type: amends
+      target: us:regulations/7-cfr/273/8#snap_resource_limit
+      amendment:
+        operation: replace
+"#,
+    )
+    .expect_err("amendment without effective interval should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingAmendmentEffective { name }
+            if name == "emergency_act_amends_snap_resource_limit_2026"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_legacy_reiteration_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: legacy_restates
+    kind: reiteration
+    reiterates:
+      target: us:policies/usda/snap/fy-2026-cola#snap_maximum_allotment
+"#,
+    )
+    .expect_err("legacy reiteration kind should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::UnsupportedRuleKind { name, kind }
+            if name == "legacy_restates" && kind == "reiteration"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_top_level_relations_in_rulespec() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+relations:
+  - name: member_of_household
+    arity: 2
+"#,
+    )
+    .expect_err("RuleSpec relation declarations must be rule records");
+
+    assert!(matches!(err, RuleSpecError::TopLevelRelationsUnsupported));
+}
+
+#[test]
+fn rulespec_rejects_bare_relation_rule_without_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    arity: 2
+"#,
+    )
+    .expect_err("bare relation-shaped rule should fail");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::TopLevelArityUnsupported { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_data_relation_with_top_level_arity() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    arity: 2
+"#,
+    )
+    .expect_err("data relation arity must be nested under data_relation");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::TopLevelArityUnsupported { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_data_relation_without_nested_arity() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation: {}
+"#,
+    )
+    .expect_err("data relation must declare data_relation.arity");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingDataRelationArity { name }
+            if name == "member_of_household"
+    ));
+}
+
+#[test]
+fn rulespec_data_relation_arguments_round_trip_through_artifact() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(qualifying_child_of_tax_unit)
+"#,
+    )
+    .expect("declared relation entity kinds compile");
+
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
+    let relation = json["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation is present");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+
+    let reloaded = CompiledProgramArtifact::from_json_str(
+        &serde_json::to_string(&json).expect("artifact JSON serializes"),
+    )
+    .expect("artifact with declared relation entity kinds reloads");
+    let runtime_program = reloaded
+        .program
+        .to_program()
+        .expect("reloaded artifact builds the runtime model");
+    assert_eq!(
+        runtime_program
+            .relations
+            .get("qualifying_child_of_tax_unit")
+            .expect("runtime relation is present")
+            .slot_entities,
+        vec!["TaxUnit", "Person"]
+    );
+    let round_tripped = serde_json::to_value(reloaded).expect("reloaded artifact serializes");
+    let relation = round_tripped["program"]["relations"]
+        .as_array()
+        .expect("relations are an array")
+        .iter()
+        .find(|relation| relation["name"] == "qualifying_child_of_tax_unit")
+        .expect("declared relation survives reload");
+    assert_eq!(
+        relation["slot_entities"],
+        serde_json::json!(["TaxUnit", "Person"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_named_data_relation_arguments_carry_their_entity_kinds() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments:
+        - name: member
+          entity: Person
+        - name: household
+          entity: Household
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("legacy named relation arguments remain accepted");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Person", "Household"])
+    );
+}
+
+#[test]
+fn rulespec_legacy_role_labels_warn_and_leave_relation_untyped_by_default() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_individuals_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [individual, household_member]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("legacy role labels remain compile-compatible by default");
+
+    let json = serde_json::to_value(&artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::Value::Null,
+        "shape-failing role labels are unusable as entity metadata"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    let diagnostic = &artifact.diagnostics[0];
+    assert_eq!(diagnostic.code, "invalid_relation_argument_entity_shape");
+    assert_eq!(diagnostic.path, "<memory>");
+    assert!(
+        diagnostic
+            .message
+            .contains("member_of_individuals_household")
+    );
+    assert!(diagnostic.message.contains("individual"));
+    assert!(diagnostic.message.contains("household_member"));
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects legacy role labels");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid_relation_argument_entity_shape"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rulespec_lowercase_relation_argument_typos_warn_and_leave_relation_untyped() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [persno, houshold]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect("lowercase typos remain compile-compatible under the warning ratchet");
+    assert!(
+        artifact.program.relations[0].slot_entities.is_empty(),
+        "shape-failing labels must be treated as undeclared"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "invalid_relation_argument_entity_shape"
+    );
+    let message = artifact.diagnostics[0].to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("persno"), "{message}");
+    assert!(message.contains("houshold"), "{message}");
+}
+
+#[test]
+fn rulespec_scalar_is_known_only_when_lowering_materializes_it() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: scalar_link
+    kind: data_relation
+    data_relation:
+      arity: 1
+      arguments: [Scalar]
+  - name: base
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: computed_scalar
+    kind: derived
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: base + 1
+"#,
+    )
+    .expect("materialized Scalar pseudo-entity is a known relation kind");
+
+    let json = serde_json::to_value(artifact).expect("artifact serializes");
+    assert_eq!(
+        json["program"]["relations"][0]["slot_entities"],
+        serde_json::json!(["Scalar"])
+    );
+}
+
+const ORIENTATION_MISMATCH_RULESPEC: &str = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: eitc_qualifying_child
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: is_eligible
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: case_value
+  - name: eitc_child_count
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: count_where(qualifying_child_of_tax_unit, eitc_qualifying_child)
+"#;
+
+#[test]
+fn relation_orientation_mismatch_warns_by_default_and_errors_in_strict_compile_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation mismatch is warning-ratcheted by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Person"],
+        "the artifact must retain source order verbatim"
+    );
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = diagnostics[0].to_string();
+    assert!(diagnostic.contains("qualifying_child_of_tax_unit"));
+    assert!(diagnostic.contains("[TaxUnit, Person]"));
+    assert!(diagnostic.contains("[Person, TaxUnit]"));
+    assert!(diagnostic.contains("eitc_child_count"));
+
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    let reloaded = CompiledProgramArtifact::from_json_str(&json)
+        .expect("artifact loading recomputes the orientation warning");
+    assert_eq!(
+        reloaded
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+            .count(),
+        1
+    );
+    let reload_error = CompiledProgramArtifact::from_json_str_with_options(
+        &json,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict artifact loading recomputes and rejects the mismatch");
+    assert!(
+        reload_error
+            .to_string()
+            .contains("relation_orientation_mismatch"),
+        "{reload_error}"
+    );
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        ORIENTATION_MISMATCH_RULESPEC,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects executable orientation mismatch");
+    assert!(
+        error.to_string().contains("relation_orientation_mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn derived_relation_membership_contributes_usage_orientation() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Person]
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+  - name: eligible_member
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: eligible
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and eligible_member
+"#,
+    )
+    .expect("derived relation orientation mismatch is warning-ratcheted");
+    let diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = diagnostics[0].to_string();
+    assert!(warning.contains("member_of_household"), "{warning}");
+    assert!(warning.contains("[Household, Person]"), "{warning}");
+    assert!(warning.contains("[Person, Household]"), "{warning}");
+    assert!(warning.contains("snap_unit"), "{warning}");
+}
+
+fn nested_sum_program(outer_slots: &[&str], inner_slots: &[&str]) -> ProgramSpec {
+    serde_json::from_value(serde_json::json!({
+        "relations": [
+            {
+                "name": "member_of_tax_unit",
+                "arity": 2,
+                "slot_entities": outer_slots
+            },
+            {
+                "name": "payment_of_person",
+                "arity": 2,
+                "slot_entities": inner_slots
+            }
+        ],
+        "derived": [
+            {
+                "name": "payment_amount",
+                "entity": "Payment",
+                "dtype": "decimal",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "payment_amount_input"
+                }
+            },
+            {
+                "name": "person_marker",
+                "entity": "Person",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "person_marker_input"
+                }
+            },
+            {
+                "name": "tax_unit_marker",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "input",
+                    "name": "tax_unit_marker_input"
+                }
+            },
+            {
+                "name": "qualifying_person_count",
+                "entity": "TaxUnit",
+                "dtype": "integer",
+                "semantics": "scalar",
+                "expr": {
+                    "kind": "count_related",
+                    "relation": "member_of_tax_unit",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "where": {
+                        "kind": "comparison",
+                        "left": {
+                            "kind": "sum_related",
+                            "relation": "payment_of_person",
+                            "current_slot": 1,
+                            "related_slot": 0,
+                            "value": {
+                                "kind": "derived",
+                                "name": "payment_amount"
+                            }
+                        },
+                        "op": "gt",
+                        "right": {
+                            "kind": "literal",
+                            "value": {
+                                "kind": "decimal",
+                                "value": "0"
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+    .expect("nested aggregate ProgramSpec parses")
+}
+
+fn nested_sum_dataset() -> DatasetSpec {
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_marker_input".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "tax_unit_marker_input".to_string(),
+                entity: "TaxUnit".to_string(),
+                entity_id: "tax-unit".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "payment_amount_input".to_string(),
+                entity: "Payment".to_string(),
+                entity_id: "payment".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Decimal {
+                    value: "10".to_string(),
+                },
+            },
+        ],
+        relations: vec![
+            RelationRecordSpec {
+                name: "member_of_tax_unit".to_string(),
+                tuple: vec!["person".to_string(), "tax-unit".to_string()],
+                interval: interval.clone(),
+            },
+            RelationRecordSpec {
+                name: "payment_of_person".to_string(),
+                tuple: vec!["payment".to_string(), "person".to_string()],
+                interval,
+            },
+        ],
+    }
+}
+
+#[test]
+fn nested_sum_related_does_not_contaminate_outer_relation_orientation() {
+    let artifact = CompiledProgramArtifact::compile(nested_sum_program(
+        &["Person", "TaxUnit"],
+        &["Payment", "Person"],
+    ))
+    .expect("nested aggregate program compiles");
+    assert!(
+        artifact
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "relation_orientation_mismatch"),
+        "the Payment rule inside the nested sum must not type the outer Person slot: {:?}",
+        artifact.diagnostics
+    );
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "both executable tuple orders must remain warning-free: {:?}",
+        outcome.diagnostics
+    );
+}
+
+#[test]
+fn nested_sum_related_retains_partial_orientation_under_untyped_outer_relation() {
+    let artifact =
+        CompiledProgramArtifact::compile(nested_sum_program(&[], &["Person", "Payment"]))
+            .expect("nested aggregate program compiles");
+    let orientation_diagnostics = artifact
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "relation_orientation_mismatch")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        orientation_diagnostics.len(),
+        1,
+        "the nested sum remains a program use even when its owner kind starts unknown"
+    );
+    let diagnostic = orientation_diagnostics[0].to_string();
+    assert!(diagnostic.contains("payment_of_person"), "{diagnostic}");
+    assert!(diagnostic.contains("[Person, Payment]"), "{diagnostic}");
+    assert!(diagnostic.contains("[Payment, Person]"), "{diagnostic}");
+
+    let runtime = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let outcome = nested_sum_dataset()
+        .to_dataset_for_program_with_options(&runtime, DatasetBindingOptions::default())
+        .expect("working nested aggregate tuple orders bind");
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "partial usage must prevent declaration fallback from warning on the working inner tuple: {:?}",
+        outcome.diagnostics
+    );
+}
+
+#[test]
+fn usage_orientation_warns_only_for_the_empty_lookup_tuple_order() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("orientation fixture compiles in compatibility mode");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let inputs = vec![
+        InputRecordSpec {
+            name: "is_eligible".to_string(),
+            entity: "Person".to_string(),
+            entity_id: "related-0".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Bool { value: true },
+        },
+        InputRecordSpec {
+            name: "case_value".to_string(),
+            entity: "TaxUnit".to_string(),
+            entity_id: "case".to_string(),
+            interval: interval.clone(),
+            value: ScalarValueSpec::Integer { value: 1 },
+        },
+    ];
+    let dataset_with_tuple = |tuple: [&str; 2]| DatasetSpec {
+        inputs: inputs.clone(),
+        relations: vec![RelationRecordSpec {
+            name: "qualifying_child_of_tax_unit".to_string(),
+            tuple: tuple.into_iter().map(str::to_string).collect(),
+            interval: interval.clone(),
+        }],
+    };
+
+    let working = dataset_with_tuple(["related-0", "case"]);
+    let working_outcome = working
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("working order binds");
+    assert!(
+        working_outcome.diagnostics.is_empty(),
+        "the count-producing order must not receive a kind warning"
+    );
+
+    let broken = dataset_with_tuple(["case", "related-0"]);
+    let broken_outcome = broken
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("broken order remains compatible under the warning ratchet");
+    assert_eq!(
+        broken_outcome.diagnostics.len(),
+        2,
+        "both reversed concrete kinds must be diagnosed"
+    );
+    assert_eq!(broken_outcome.diagnostics[0].slot, 0);
+    assert_eq!(broken_outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(broken_outcome.diagnostics[0].actual_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].slot, 1);
+    assert_eq!(broken_outcome.diagnostics[1].expected_entity, "TaxUnit");
+    assert_eq!(broken_outcome.diagnostics[1].actual_entity, "Person");
+}
+
+#[test]
+fn relation_slot_entity_mismatch_warns_by_default_and_errors_in_strict_mode() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::default())
+        .expect("default binding keeps mismatched records under the warning ratchet");
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"],
+        "default mode must diagnose without rewriting or dropping the tuple"
+    );
+    assert_eq!(outcome.diagnostics.len(), 2);
+    assert_eq!(
+        outcome.diagnostics[0].code,
+        DatasetBindingDiagnosticCode::RelationSlotEntityMismatch
+    );
+    assert_eq!(outcome.diagnostics[0].relation, "member_of_household");
+    assert_eq!(outcome.diagnostics[0].slot, 0);
+    assert_eq!(outcome.diagnostics[0].entity_id, "household-1");
+    assert_eq!(outcome.diagnostics[0].expected_entity, "Person");
+    assert_eq!(outcome.diagnostics[0].actual_entity, "Household");
+    assert!(
+        outcome.diagnostics[0]
+            .to_string()
+            .contains("strict relation entity mode")
+    );
+
+    let error = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect_err("strict binding rejects the same mismatched tuple");
+    assert!(matches!(
+        &error,
+        SpecError::StrictDatasetBindingDiagnostics(report)
+            if report.diagnostics == outcome.diagnostics
+    ));
+    let message = error.to_string();
+    assert!(message.contains("member_of_household"), "{message}");
+    assert!(message.contains("household-1"), "{message}");
+    assert!(message.contains("expected `Person`"), "{message}");
+    assert!(message.contains("found `Household`"), "{message}");
+}
+
+#[test]
+fn relation_slot_entity_validation_skips_unknown_and_ambiguous_ids() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: value
+"#,
+    )
+    .expect("typed relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "ambiguous-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["ambiguous-1".to_string(), "not-in-inputs".to_string()],
+            interval,
+        }],
+    };
+
+    for inputs in [
+        dataset.inputs.clone(),
+        dataset.inputs.iter().cloned().rev().collect(),
+    ] {
+        let outcome = DatasetSpec {
+            inputs,
+            relations: dataset.relations.clone(),
+        }
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("unknown concrete ID kinds are skipped even in strict mode");
+        assert!(
+            outcome.diagnostics.is_empty(),
+            "ambiguous ID handling must not depend on input order"
+        );
+    }
+}
+
+#[test]
+fn strict_relation_slot_entity_validation_preserves_untyped_legacy_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_value
+  - name: household_marker
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_value
+"#,
+    )
+    .expect("legacy untyped relation RuleSpec compiles");
+    let program = artifact
+        .program
+        .to_program()
+        .expect("runtime program builds");
+    let interval = IntervalSpec {
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-12-31".parse().expect("valid date"),
+    };
+    let dataset = DatasetSpec {
+        inputs: vec![
+            InputRecordSpec {
+                name: "person_value".to_string(),
+                entity: "Person".to_string(),
+                entity_id: "person-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+            InputRecordSpec {
+                name: "household_value".to_string(),
+                entity: "Household".to_string(),
+                entity_id: "household-1".to_string(),
+                interval: interval.clone(),
+                value: ScalarValueSpec::Integer { value: 1 },
+            },
+        ],
+        relations: vec![RelationRecordSpec {
+            name: "member_of_household".to_string(),
+            tuple: vec!["household-1".to_string(), "person-1".to_string()],
+            interval,
+        }],
+    };
+
+    let outcome = dataset
+        .to_dataset_for_program_with_options(&program, DatasetBindingOptions::strict())
+        .expect("strict binding leaves untyped legacy relations compatible");
+    assert!(outcome.diagnostics.is_empty());
+    assert_eq!(
+        outcome.dataset.relations[0].tuple,
+        vec!["household-1", "person-1"]
+    );
+}
+
+#[test]
+fn rulespec_rejects_data_relation_argument_count_that_differs_from_arity() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit]
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    for options in [
+        CompileOptions::default(),
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    ] {
+        let error = CompiledProgramArtifact::from_rulespec_str_with_options(rulespec, options)
+            .expect_err("declared relation entity kinds must match arity in every mode");
+        let message = error.to_string();
+        assert!(
+            message.contains("qualifying_child_of_tax_unit"),
+            "{message}"
+        );
+        assert!(message.contains("arity 2"), "{message}");
+        assert!(message.contains("1 argument"), "{message}");
+    }
+}
+
+#[test]
+fn rulespec_unknown_data_relation_argument_entity_kind_warns_by_default_and_is_strict() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: qualifying_child_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Persno]
+  - name: person_marker
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: tax_unit_marker
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#;
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("unknown but well-shaped entity kinds warn by default");
+    assert_eq!(
+        artifact.program.relations[0].slot_entities,
+        vec!["TaxUnit", "Persno"],
+        "source-valid labels retain exact artifact fidelity"
+    );
+    assert_eq!(artifact.diagnostics.len(), 1);
+    assert_eq!(
+        artifact.diagnostics[0].code,
+        "unknown_relation_argument_entity"
+    );
+    let message = artifact.diagnostics[0].to_string();
+    assert!(
+        message.contains("qualifying_child_of_tax_unit"),
+        "{message}"
+    );
+    assert!(message.contains("Persno"), "{message}");
+    assert!(message.contains("Person"), "{message}");
+    assert!(message.contains("TaxUnit"), "{message}");
+
+    let error = CompiledProgramArtifact::from_rulespec_str_with_options(
+        rulespec,
+        CompileOptions {
+            strict_relation_entities: true,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("strict relation entity compilation rejects unknown kinds");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown_relation_argument_entity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn closure_absent_published_relation_kinds_compile_with_warnings_by_default() {
+    let cases = [
+        (
+            "member_of_budgetary_unit",
+            "Person",
+            "Person",
+            "Household",
+            "Household",
+        ),
+        (
+            "pays_received_to_date_by_person",
+            "Person",
+            "Person",
+            "Payment",
+            "Payment",
+        ),
+        (
+            "coverage_months",
+            "TaxUnit",
+            "TaxUnit",
+            "CoverageMonth",
+            "CoverageMonth",
+        ),
+        (
+            "capital_asset_beneficial_interest_holders",
+            "Asset",
+            "Person",
+            "Asset",
+            "Person",
+        ),
+        (
+            "income_component_of_taxpayer",
+            "Person",
+            "Payment",
+            "Person",
+            "Payment",
+        ),
+    ];
+
+    for (relation, closure_kind, first_kind, second_kind, absent_kind) in cases {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: {relation}
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [{first_kind}, {second_kind}]
+  - name: closure_marker
+    kind: derived
+    entity: {closure_kind}
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#
+        );
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&rulespec)
+            .unwrap_or_else(|error| panic!("{relation} must compile by default: {error}"));
+        assert_eq!(
+            artifact.program.relations[0].slot_entities,
+            vec![first_kind, second_kind],
+            "{relation} must retain its exact declaration"
+        );
+        assert_eq!(
+            artifact
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "unknown_relation_argument_entity")
+                .count(),
+            1,
+            "{relation} must report its absent closure kind"
+        );
+        let warning = artifact.diagnostics[0].to_string();
+        assert!(warning.contains(relation), "{warning}");
+        assert!(warning.contains(absent_kind), "{warning}");
+    }
+}
+
+#[test]
+fn rulespec_rejects_missing_rule_kind() {
+    let err = lower_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: inferred_parameter
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+"#,
+    )
+    .expect_err("RuleSpec rules must declare kind explicitly");
+
+    assert!(matches!(
+        err,
+        RuleSpecError::MissingRuleKind { name }
+            if name == "inferred_parameter"
+    ));
+}
+
+#[test]
+fn rulespec_lowers_date_and_relation_judgment_formulas() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+rules:
+  - name: minimum_notice_days
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2015-10-01
+        formula: "56"
+  - name: notice_days
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2015-10-01
+        formula: days_between(notice_served_date, possession_date)
+  - name: recent_council_notice_count
+    kind: derived
+    entity: Tenancy
+    dtype: Integer
+    period: Day
+    versions:
+      - effective_from: 2015-10-01
+        formula: count_where(council_notice_of_tenancy, notice_within_relevant_period)
+  - name: retaliatory_eviction_bar_applies
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    versions:
+      - effective_from: 2015-10-01
+        formula: recent_council_notice_count > 0
+  - name: section_21_notice_valid
+    kind: derived
+    entity: Tenancy
+    dtype: Judgment
+    period: Day
+    source: "Housing Act 1988 s.21"
+    versions:
+      - effective_from: 2015-10-01
+        formula: |
+          notice_days >= minimum_notice_days
+          and not retaliatory_eviction_bar_applies
+          and not tenancy_deposit_unprotected
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("RuleSpec compiles");
+    let program = &artifact.program;
+    assert_eq!(program.parameters.len(), 1);
+    assert_eq!(program.derived.len(), 4);
+    let notice = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "section_21_notice_valid")
+        .expect("notice validity output exists");
+    assert_eq!(notice.entity, "Tenancy");
+    assert_eq!(notice.source.as_deref(), Some("Housing Act 1988 s.21"));
+}
+
+#[test]
+fn rulespec_lowers_derived_relations_as_filtered_runtime_relations() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2025-01-01
+        formula: has_ssn and not student_ineligible
+  - name: eligible_member_of_household
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: 2025-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(eligible_member_of_household)
+"#,
+    )
+    .expect("derived relation RuleSpec compiles");
+
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "eligible_member_of_household")
+        .expect("derived relation emitted");
+    assert!(relation.derivation.is_some());
+    let member_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_member_eligible")
+        .expect("member predicate is ordered");
+    let unit_size_order = artifact
+        .metadata
+        .evaluation_order
+        .iter()
+        .position(|name| name == "snap_unit_size")
+        .expect("filtered relation consumer is ordered");
+    assert!(member_order < unit_size_order);
+}
+
+#[test]
+fn rulespec_rewrites_filtered_entity_member_alias_to_derived_relation() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2025-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2025-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: snap_unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(members)
+"#,
+    )
+    .expect("filtered entity RuleSpec compiles");
+
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .find(|relation| relation.name == "snap_unit")
+        .expect("snap_unit relation emitted");
+    let derivation = relation.derivation.as_ref().expect("relation is derived");
+    assert_eq!(derivation.entity.as_deref(), Some("SnapUnit"));
+    assert_eq!(derivation.member_relation.as_deref(), Some("members"));
+    assert_eq!(derivation.slot_entities, vec!["Person", "Household"]);
+    assert!(
+        artifact
+            .program
+            .relations
+            .iter()
+            .all(|relation| relation.name != "members")
+    );
+
+    let snap_unit_size = artifact
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "snap_unit_size")
+        .expect("snap unit size emitted");
+    let DerivedSemanticsSpec::Scalar { expr } = &snap_unit_size.semantics else {
+        panic!("snap_unit_size should be scalar");
+    };
+    let ScalarExprSpec::CountRelated { relation, .. } = expr else {
+        panic!("snap_unit_size should count a relation");
+    };
+    assert_eq!(relation, "snap_unit");
+}
+
+#[test]
+fn compile_rejects_derived_relation_cycles() {
+    let err = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: relation_a
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relation_b
+    versions:
+      - effective_from: 2025-01-01
+        formula: relation_b
+  - name: relation_b
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relation_a
+    versions:
+      - effective_from: 2025-01-01
+        formula: relation_a
+  - name: count_a
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: len(relation_a)
+"#,
+    )
+    .expect_err("relation derivation cycle should be rejected");
+
+    assert!(matches!(err, CompileError::CyclicRelationDependency { .. }));
+}
+
+#[test]
+fn compile_rejects_rules_yaml_without_rulespec_discriminator() {
+    let err = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+rules:
+  - name: ambiguous
+    formula: "1"
+"#,
+    )
+    .expect_err("ambiguous RuleSpec-shaped YAML must be rejected");
+
+    assert!(matches!(err, CompileError::AmbiguousRuleSpecYaml { .. }));
+}
+
+#[test]
+fn duplicate_derived_rule_names_return_compile_error() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: duplicate_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "1"
+  - name: duplicate_amount
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "2"
+"#;
+
+    let err = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect_err("duplicate derived names should fail compilation");
+    assert!(matches!(
+        err,
+        CompileError::DuplicateDerivedRule { name } if name == "duplicate_amount"
+    ));
+}
+
+#[test]
+fn rulespec_lowers_multi_version_derived_formula() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: savers_credit_gross_contributions
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2026-12-31
+        formula: qualified_retirement_contributions
+      - effective_from: 2027-01-01
+        formula: able_account_contributions
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("multi-version derived formulas lower");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "savers_credit_gross_contributions")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 2);
+    assert_eq!(
+        derived.versions[0].effective_to,
+        Some("2026-12-31".parse().expect("valid effective_to"))
+    );
+    assert!(matches!(
+        &derived.versions[0].semantics,
+        DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::Input { name },
+        } if name == "qualified_retirement_contributions"
+    ));
+    assert!(matches!(
+        &derived.versions[1].semantics,
+        DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::Input { name },
+        } if name == "able_account_contributions"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_duplicate_version_starts_in_either_order_and_on_table_parameters() {
+    for (first, second) in [("10", "20"), ("20", "10")] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: ambiguous_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "{first}"
+      - effective_from: 2026-01-01
+        formula: "{second}"
+"#
+        );
+        let error = lower_rulespec_str(&rulespec)
+            .expect_err("equal-start derived versions must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::DuplicateEffectiveFrom {
+                name,
+                effective_from,
+                ..
+            } if name == "ambiguous_amount"
+                && effective_from
+                    == chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+        ));
+    }
+
+    let table = r#"
+format: rulespec/v1
+rules:
+  - name: ambiguous_table
+    kind: parameter
+    dtype: Integer
+    indexed_by: household_size
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          1: 10
+      - effective_from: 2026-01-01
+        values:
+          1: 20
+"#;
+    assert!(matches!(
+        lower_rulespec_str(table),
+        Err(RuleSpecError::DuplicateEffectiveFrom { name, .. })
+            if name == "ambiguous_table"
+    ));
+}
+
+#[test]
+fn rulespec_rejects_explicit_inclusive_version_overlap_in_either_order() {
+    let versions = [
+        r#"
+      - effective_from: 2025-01-01
+        effective_to: 2026-01-01
+        formula: "10"
+      - effective_from: 2026-01-01
+        formula: "20""#,
+        r#"
+      - effective_from: 2026-01-01
+        formula: "20"
+      - effective_from: 2025-01-01
+        effective_to: 2026-01-01
+        formula: "10""#,
+    ];
+    for versions in versions {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: overlapping_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:{versions}
+"#
+        );
+        let error = lower_rulespec_str(&rulespec).expect_err("inclusive overlap must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::OverlappingVersionRanges {
+                name,
+                first_from,
+                first_to,
+                second_from,
+                ..
+            } if name == "overlapping_amount"
+                && first_from
+                    == chrono::NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid date")
+                && first_to
+                    == chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+                && second_from == first_to
+        ));
+    }
+}
+
+#[test]
+fn rulespec_allows_later_versions_to_supersede_open_ended_versions() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: superseded_amount
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+      - effective_from: 2026-01-01
+        formula: "20"
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("later start supersedes earlier version");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "superseded_amount")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 2);
+}
+
+#[test]
+fn rulespec_rejects_conflicting_unit_declarations_in_either_order() {
+    for (first, second) in [(2, 4), (4, 2)] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+units:
+  - name: EUR
+    kind: currency
+    minor_units: {first}
+  - name: EUR
+    kind: currency
+    minor_units: {second}
+rules: []
+"#
+        );
+
+        let error = lower_rulespec_str(&rulespec)
+            .expect_err("conflicting repeated unit declarations must be rejected");
+        assert!(matches!(
+            error,
+            RuleSpecError::ConflictingUnitDeclarations {
+                name,
+                first: first_kind,
+                second: second_kind,
+            } if name == "EUR"
+                && first_kind == format!("currency(minor_units: {first})")
+                && second_kind == format!("currency(minor_units: {second})")
+        ));
+    }
+}
+
+#[test]
+fn rulespec_allows_identical_repeated_unit_declarations() {
+    let rulespec = r#"
+format: rulespec/v1
+units:
+  - name: EUR
+    kind: currency
+    minor_units: 2
+  - name: EUR
+    kind: currency
+    minor_units: 2
+rules: []
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("identical declarations are idempotent");
+    let eur = program
+        .units
+        .iter()
+        .filter(|unit| unit.name == "EUR")
+        .collect::<Vec<_>>();
+    assert_eq!(eur.len(), 1);
+    assert!(matches!(
+        eur[0].kind,
+        UnitKindSpec::Currency { minor_units: 2 }
+    ));
+}
+
+#[test]
+fn rulespec_rejects_default_instead_of_discarding_it() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: amount_with_fallback
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    default: 17
+    versions:
+      - effective_from: 2026-01-01
+        formula: optional_amount
+"#;
+
+    let error =
+        lower_rulespec_str(rulespec).expect_err("an unsupported default must not be discarded");
+    assert!(matches!(
+        &error,
+        RuleSpecError::UnsupportedDefault { path, name }
+            if path == "<memory>" && name == "amount_with_fallback"
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("express the fallback explicitly in the formula")
+    );
+}
+
+#[test]
+fn non_exhaustive_match_warns_by_default_and_errors_in_strict_mode() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+"#;
+
+    let outcome = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::default())
+        .expect("compatibility lowering succeeds");
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let diagnostic = &outcome.diagnostics[0];
+    assert_eq!(diagnostic.code, RuleSpecDiagnosticCode::NonExhaustiveMatch);
+    assert_eq!(diagnostic.path, "<memory>");
+    assert_eq!(diagnostic.rule, "filing_credit");
+    assert_eq!(diagnostic.occurrences, 1);
+    assert!(
+        diagnostic
+            .to_string()
+            .contains("add a final `_ => <fallback>` arm")
+    );
+
+    // Compatibility lowering retains every concrete pattern. The final
+    // `joint` arm is an actual comparison, not an erased fallthrough.
+    let derived = outcome
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "filing_credit")
+        .expect("derived output present");
+    let DerivedSemanticsSpec::Scalar { expr } = &derived.semantics else {
+        panic!("filing_credit should lower as a scalar");
+    };
+    let ScalarExprSpec::If {
+        else_expr: joint_arm,
+        ..
+    } = expr
+    else {
+        panic!("single pattern should lower to an if");
+    };
+    assert!(
+        matches!(joint_arm.as_ref(), ScalarExprSpec::If { .. }),
+        "the final concrete pattern must be preserved as a comparison"
+    );
+
+    let error = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::strict())
+        .expect_err("strict lowering rejects a match without a wildcard");
+    assert!(matches!(
+        error,
+        RuleSpecError::StrictDiagnostics(report)
+            if report.diagnostics.len() == 1
+                && report.diagnostics[0].rule == "filing_credit"
+    ));
+}
+
+#[test]
+fn exhaustive_match_uses_an_explicit_wildcard_without_a_diagnostic() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+              _ => 0
+"#;
+
+    let outcome = lower_rulespec_str_with_options(rulespec, RuleSpecLoweringOptions::strict())
+        .expect("a final wildcard is exhaustive");
+    assert!(outcome.diagnostics.is_empty());
+
+    let derived = outcome
+        .program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "filing_credit")
+        .expect("derived output present");
+    let DerivedSemanticsSpec::Scalar { expr } = &derived.semantics else {
+        panic!("filing_credit should lower as a scalar");
+    };
+    let ScalarExprSpec::If {
+        else_expr: joint_arm,
+        ..
+    } = expr
+    else {
+        panic!("single pattern should lower to an if");
+    };
+    let ScalarExprSpec::If {
+        else_expr: wildcard,
+        ..
+    } = joint_arm.as_ref()
+    else {
+        panic!("joint pattern should lower to an if");
+    };
+    assert!(matches!(
+        wildcard.as_ref(),
+        ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value: 0 }
+        }
+    ));
+}
+
+#[test]
+fn match_diagnostic_names_the_canonical_source_file() {
+    let root = unique_test_root();
+    let repository = root.join("rulespec-us");
+    let rules_file = repository.join("us/policies/tax/filing-credit.yaml");
+    fs::create_dir_all(rules_file.parent().expect("rules file has parent"))
+        .expect("create temp rules repository");
+    fs::write(
+        &rules_file,
+        r#"
+format: rulespec/v1
+rules:
+  - name: filing_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: |
+          match filing_status:
+              "single" => 10
+              "joint" => 20
+"#,
+    )
+    .expect("write temp RuleSpec");
+
+    let roots = CanonicalRuleSpecRoots::new([&repository]).expect("repository root is valid");
+    let outcome =
+        load_rulespec_file_with_options(&rules_file, &roots, RuleSpecLoweringOptions::default())
+            .expect("compatibility lowering succeeds");
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(outcome.diagnostics[0].path, "us:policies/tax/filing-credit");
+    assert!(
+        outcome.diagnostics[0]
+            .to_string()
+            .contains("RuleSpec file `us:policies/tax/filing-credit`")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn rulespec_retains_single_bounded_derived_as_a_runtime_version() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: temporary_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2026-12-31
+        formula: "100"
+"#;
+
+    let program = lower_rulespec_str(rulespec).expect("bounded derived formula lowers");
+    let derived = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "temporary_credit")
+        .expect("derived output present");
+    assert_eq!(derived.versions.len(), 1);
+    assert_eq!(
+        derived.versions[0].effective_to,
+        Some("2026-12-31".parse().expect("valid effective_to"))
+    );
+}
+
+#[test]
+fn compile_rejects_an_effective_to_before_effective_from() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: impossible_window
+    kind: parameter
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        effective_to: 2025-12-31
+        formula: "1"
+"#;
+
+    let error = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect_err("an inverted effective range must fail compilation");
+    assert!(matches!(
+        error,
+        CompileError::Spec(SpecError::InvalidEffectiveRange { rule, .. })
+            if rule == "impossible_window"
+    ));
+}
+
+#[test]
+fn compile_program_file_to_json_accepts_rulespec_yaml() {
+    let temp_root = exact_temp_dir().join(format!(
+        "axiom-rules-engine-rulespec-yaml-test-{}",
+        std::process::id()
+    ));
+    let program_path = temp_root.join("rulespec-us/us/policies/test/rules.yaml");
+    let artifact_path = temp_root.join("rules.compiled.json");
+    std::fs::create_dir_all(program_path.parent().expect("program parent"))
+        .expect("temp dir is created");
+    std::fs::write(
+        &program_path,
+        r#"
+format: rulespec/v1
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#,
+    )
+    .expect("RuleSpec fixture is written");
+
+    let artifact = compile_rulespec_file_to_json(&program_path, &artifact_path)
+        .expect("RuleSpec file compiles");
+
+    assert!(
+        artifact_path.exists(),
+        "compiled artifact should be written"
+    );
+    assert_eq!(artifact.program.parameters.len(), 1);
+    std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}
+
+#[test]
+fn compile_program_file_to_json_merges_rulespec_imports() {
+    let temp_root = exact_temp_dir().join(format!(
+        "axiom-rules-engine-rulespec-import-test-{}",
+        std::process::id()
+    ));
+    let us_path = temp_root
+        .join("rulespec-us")
+        .join("us/policies/usda/snap/fy-2026-cola/maximum-allotments.yaml");
+    let co_path = temp_root
+        .join("rulespec-us")
+        .join("us-co/policies/cdhs/snap/fy-2026-benefit.yaml");
+    let artifact_path = temp_root.join("benefit.compiled.json");
+
+    std::fs::create_dir_all(us_path.parent().expect("us parent")).expect("us dir");
+    std::fs::create_dir_all(co_path.parent().expect("co parent")).expect("co dir");
+    std::fs::write(
+        &us_path,
+        r#"
+format: rulespec/v1
+rules:
+  - name: snap_maximum_allotment_table
+    kind: parameter
+    dtype: Money
+    unit: USD
+    indexed_by: household_size
+    versions:
+      - effective_from: 2025-10-01
+        values:
+          1: 298
+          2: 546
+  - name: snap_maximum_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: snap_maximum_allotment_table[household_size]
+"#,
+    )
+    .expect("import fixture is written");
+    std::fs::write(
+        &co_path,
+        r#"
+format: rulespec/v1
+imports:
+  - us:policies/usda/snap/fy-2026-cola/maximum-allotments
+rules:
+  - name: snap_household_food_contribution_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: 2025-10-01
+        formula: "0.30"
+  - name: snap_regular_month_allotment
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-10-01
+        formula: floor(snap_maximum_allotment - (net_income * snap_household_food_contribution_rate))
+"#,
+    )
+    .expect("program fixture is written");
+
+    let artifact = compile_rulespec_file_to_json(&co_path, &artifact_path)
+        .expect("RuleSpec file with canonical import compiles");
+    assert!(
+        artifact
+            .program
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == "snap_maximum_allotment_table")
+    );
+    assert!(
+        artifact
+            .program
+            .parameters
+            .iter()
+            .any(|parameter| parameter.id.as_deref()
+                == Some(
+                    "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_table"
+                ))
+    );
+    assert!(
+        artifact
+            .program
+            .derived
+            .iter()
+            .any(|derived| derived.name == "snap_regular_month_allotment")
+    );
+    let output_id =
+        "us-co:policies/cdhs/snap/fy-2026-benefit#snap_regular_month_allotment".to_string();
+    assert!(
+        artifact
+            .program
+            .derived
+            .iter()
+            .any(|derived| derived.id.as_deref() == Some(output_id.as_str()))
+    );
+
+    let period = PeriodSpec {
+        kind: PeriodKindSpec::Month,
+        start: "2026-01-01".parse().expect("valid date"),
+        end: "2026-01-31".parse().expect("valid date"),
+    };
+    let response = execute_request(ExecutionRequest {
+        mode: ExecutionMode::Explain,
+        program: artifact.program,
+        dataset: DatasetSpec {
+            inputs: vec![
+                InputRecordSpec {
+                    name:
+                        "us:policies/usda/snap/fy-2026-cola/maximum-allotments#input.household_size"
+                            .to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Integer { value: 1 },
+                },
+                InputRecordSpec {
+                    name: "us-co:policies/cdhs/snap/fy-2026-benefit#input.net_income".to_string(),
+                    entity: "Household".to_string(),
+                    entity_id: "household-1".to_string(),
+                    interval: IntervalSpec {
+                        start: period.start,
+                        end: period.end,
+                    },
+                    value: ScalarValueSpec::Decimal {
+                        value: "100".to_string(),
+                    },
+                },
+            ],
+            relations: Vec::new(),
+        },
+        queries: vec![ExecutionQuery {
+            assessment_date: None,
+            entity_id: "household-1".to_string(),
+            period,
+            outputs: vec![output_id.clone()],
+        }],
+    })
+    .expect("imported formula executes");
+
+    let OutputValue::Scalar {
+        name, id, value, ..
+    } = response.results[0]
+        .outputs
+        .get(&output_id)
+        .expect("snap_regular_month_allotment output")
+    else {
+        panic!("expected scalar output");
+    };
+    assert_eq!(name, "snap_regular_month_allotment");
+    assert_eq!(id.as_deref(), Some(output_id.as_str()));
+    let ScalarValueSpec::Decimal { value } = value else {
+        panic!("expected decimal scalar");
+    };
+    assert_eq!(value, "268");
+
+    std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}
+
+#[test]
+fn rulespec_module_provenance_round_trips_into_artifact() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  title: SNAP allotment
+  source_verification:
+    corpus_citation_path: us/guidance/agency/annual-parameter
+    source_sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/7/2017/a
+      rationale: The cited guidance supplies the annually determined parameter.
+  encoding_provenance:
+    encoder: axiom-encode/0.2.645
+    model: claude-fable-5
+    run_id: run-2026-06-10-001
+    reviewed_by: human-reviewer
+  validation:
+    - oracle: policyengine-us
+      status: matches
+      last_run: 2026-06-09
+    - oracle: snapscreener
+      status: pending
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec)
+        .expect("RuleSpec with provenance metadata compiles");
+    assert_eq!(artifact.program.parameters.len(), 1);
+
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    let artifact = CompiledProgramArtifact::from_json_str(&json).expect("artifact round-trips");
+
+    let module = artifact
+        .program
+        .module
+        .as_ref()
+        .expect("module metadata survives lowering and the artifact round trip");
+    let verification = module
+        .source_verification
+        .as_ref()
+        .expect("source verification block survives");
+    assert_eq!(
+        verification.corpus_citation_path,
+        "us/guidance/agency/annual-parameter"
+    );
+    assert_eq!(
+        verification.source_sha256.as_deref(),
+        Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+    );
+    let upstream_check = verification
+        .upstream_source_check
+        .as_ref()
+        .expect("upstream source check survives");
+    assert_eq!(upstream_check.status, "official_parameter_source");
+    assert_eq!(upstream_check.checked_paths, ["us/statute/7/2017/a"]);
+    assert_eq!(
+        upstream_check.rationale,
+        "The cited guidance supplies the annually determined parameter."
+    );
+    let provenance = module
+        .encoding_provenance
+        .as_ref()
+        .expect("encoding provenance survives");
+    assert_eq!(provenance.encoder.as_deref(), Some("axiom-encode/0.2.645"));
+    assert_eq!(provenance.model.as_deref(), Some("claude-fable-5"));
+    assert_eq!(provenance.run_id.as_deref(), Some("run-2026-06-10-001"));
+    assert_eq!(provenance.reviewed_by.as_deref(), Some("human-reviewer"));
+
+    assert_eq!(module.validation.len(), 2);
+    assert_eq!(module.validation[0].oracle, "policyengine-us");
+    assert_eq!(module.validation[0].status, ValidationStatus::Matches);
+    assert_eq!(
+        module.validation[0]
+            .last_run
+            .expect("last_run parses as a date")
+            .to_string(),
+        "2026-06-09"
+    );
+    assert_eq!(module.validation[1].oracle, "snapscreener");
+    assert_eq!(module.validation[1].status, ValidationStatus::Pending);
+    assert_eq!(module.validation[1].last_run, None);
+}
+
+#[test]
+fn rulespec_artifact_omits_module_key_when_metadata_absent() {
+    let rulespec = r#"
+format: rulespec/v1
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let artifact = CompiledProgramArtifact::from_rulespec_str(rulespec).expect("compiles");
+    let json = serde_json::to_string(&artifact).expect("artifact serializes");
+    assert!(
+        !json.contains("\"module\""),
+        "artifacts without module metadata stay byte-identical to today's shape"
+    );
+}
+
+#[test]
+fn rulespec_rejects_malformed_source_sha256() {
+    for bad_sha in [
+        "abc123",
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a0", // 63 chars
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a0g", // non-hex char
+    ] {
+        let rulespec = format!(
+            r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statute/7/2017/a
+    source_sha256: "{bad_sha}"
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#
+        );
+
+        let err = lower_rulespec_str(&rulespec).expect_err("malformed sha should fail");
+        assert!(matches!(
+            &err,
+            RuleSpecError::InvalidSourceSha256 { path, value }
+                if path == "<memory>" && value == bad_sha
+        ));
+    }
+}
+
+#[test]
+fn rulespec_rejects_plural_missing_and_noncanonical_corpus_paths_recursively() {
+    for (label, source) in [
+        (
+            "plural module path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_paths: [us/statute/7/2017/a]\nrules: []\n",
+        ),
+        (
+            "missing singular path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    source_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrules: []\n",
+        ),
+        (
+            "noncanonical path",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: ' us/statute/7/2017/a'\nrules: []\n",
+        ),
+        (
+            "document class rather than provision",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute\nrules: []\n",
+        ),
+        (
+            "empty provision segment",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/26//62\nrules: []\n",
+        ),
+        (
+            "traversal provision segment",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/26/../62\nrules: []\n",
+        ),
+        (
+            "backslash provision alias",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: 'us/statute/26\\62'\nrules: []\n",
+        ),
+        (
+            "nested plural proof path",
+            "format: rulespec/v1\nrules:\n  - name: p\n    kind: parameter\n    metadata:\n      proof:\n        source:\n          corpus_citation_paths: [us/statute/7/2017/a]\n    formula: '1'\n    effective_from: 2020-01-01\n",
+        ),
+        (
+            "nested malformed source digest",
+            "format: rulespec/v1\nrules:\n  - name: p\n    kind: parameter\n    metadata:\n      proof:\n        source:\n          corpus_citation_path: us/statute/7/2017/a\n          source_sha256: not-a-digest\n    formula: '1'\n    effective_from: 2020-01-01\n",
+        ),
+        (
+            "trailing provision whitespace",
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: 'us/statute/26/62 /a'\nrules: []\n",
+        ),
+    ] {
+        assert!(
+            lower_rulespec_str(source).is_err(),
+            "{label} must fail the canonical singular citation contract"
+        );
+    }
+}
+
+#[test]
+fn rulespec_rejects_malformed_upstream_source_checks() {
+    for (label, check) in [
+        (
+            "missing rationale",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]",
+        ),
+        (
+            "non-string checked path",
+            "status: official_parameter_source\n      checked_paths: [42]\n      rationale: checked",
+        ),
+        (
+            "non-string status",
+            "status: 42\n      checked_paths: [us/statute/7/2017/a]\n      rationale: checked",
+        ),
+        (
+            "non-string rationale",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: 42",
+        ),
+        (
+            "unknown nested field",
+            "status: official_parameter_source\n      checked_paths: [us/statute/7/2017/a]\n      rationale: checked\n      note: typo",
+        ),
+    ] {
+        let source = format!(
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/guidance/treasury/rate\n    upstream_source_check:\n      {check}\nrules: []\n"
+        );
+        assert!(
+            lower_rulespec_str(&source).is_err(),
+            "{label} must fail the exact upstream source check contract"
+        );
+    }
+}
+
+#[test]
+fn rulespec_rejects_removed_schema_discriminator_with_or_without_format() {
+    for source in [
+        "schema: axiom.rules.module.v1\nrules: []\n",
+        "format: rulespec/v1\nschema: axiom.rules.module.v1\nrules: []\n",
+    ] {
+        assert!(
+            lower_rulespec_str(source).is_err(),
+            "legacy schema discriminator must fail"
+        );
+    }
+}
+
+#[test]
+fn rulespec_accepts_canonical_multi_segment_corpus_jurisdictions() {
+    for citation in [
+        "uk-kingston-upon-thames/regulation/ctr/2026",
+        "nz/agency/msd/benefit-rates",
+        "nz/secondary-legislation/2026/He-W 704.04",
+    ] {
+        lower_rulespec_str(&format!(
+            "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: {citation}\nrules: []\n"
+        ))
+        .unwrap_or_else(|error| panic!("canonical corpus identity {citation} failed: {error}"));
+    }
+}
+
+#[test]
+fn rulespec_malformed_source_sha256_error_names_the_file() {
+    let temp_root = exact_temp_dir().join(format!(
+        "axiom-rules-engine-source-sha-test-{}",
+        std::process::id()
+    ));
+    let program_path = temp_root.join("rulespec-us/us/policies/test/rules.yaml");
+    std::fs::create_dir_all(program_path.parent().expect("program parent"))
+        .expect("temp dir is created");
+    std::fs::write(
+        &program_path,
+        r#"
+format: rulespec/v1
+module:
+  source_verification:
+    corpus_citation_path: us/statute/7/2017/a
+    source_sha256: not-a-digest
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#,
+    )
+    .expect("RuleSpec fixture is written");
+
+    let err = compile_rulespec_file(&program_path).expect_err("malformed sha should fail");
+    let message = err.to_string();
+    assert!(
+        message.contains("rules.yaml"),
+        "error should name the file, got: {message}"
+    );
+    assert!(
+        message.contains("not-a-digest"),
+        "error should echo the malformed value, got: {message}"
+    );
+    std::fs::remove_dir_all(temp_root).expect("temp dir is removed");
+}
+
+#[test]
+fn rulespec_rejects_unknown_validation_status() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  validation:
+    - oracle: policyengine-us
+      status: disputed
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("unknown validation status should fail");
+    assert!(matches!(err, RuleSpecError::Yaml(_)));
+    let message = err.to_string();
+    assert!(
+        message.contains("disputed"),
+        "error should name the rejected status, got: {message}"
+    );
+    assert!(
+        message.contains("pending"),
+        "error should list the accepted statuses, got: {message}"
+    );
+}
+
+#[test]
+fn rulespec_rejects_unknown_encoding_provenance_field() {
+    let rulespec = r#"
+format: rulespec/v1
+module:
+  encoding_provenance:
+    encoder: axiom-encode/0.2.645
+    vibes: high
+rules:
+  - name: flat_amount
+    kind: parameter
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        formula: "10"
+"#;
+
+    let err = lower_rulespec_str(rulespec).expect_err("unknown provenance field should fail");
+    assert!(matches!(err, RuleSpecError::Yaml(_)));
+    let message = err.to_string();
+    assert!(
+        message.contains("vibes"),
+        "error should name the rejected field, got: {message}"
+    );
+}

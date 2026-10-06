@@ -1,0 +1,122 @@
+cases:
+  - name: standard_employee_duty_applies
+    jobholder_id: jobholder-1
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 30
+    pensionable_age_years: 67
+    earnings_this_prp: "1500"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+    expected:
+      earnings_trigger_for_prp: "833.3333333333333333333333333"
+      age_at_least_22: holds
+      below_pensionable_age: holds
+      earnings_above_trigger: holds
+      not_already_active_member: holds
+      not_recently_opted_out: holds
+      employer_enrolment_duty: holds
+
+  - name: under_22_no_duty
+    jobholder_id: jobholder-2
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 19
+    pensionable_age_years: 67
+    earnings_this_prp: "1500"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+    expected:
+      age_at_least_22: not_holds
+      employer_enrolment_duty: not_holds
+
+  - name: over_spa_no_duty
+    jobholder_id: jobholder-3
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 68
+    pensionable_age_years: 67
+    earnings_this_prp: "1500"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+    expected:
+      age_at_least_22: holds
+      below_pensionable_age: not_holds
+      employer_enrolment_duty: not_holds
+
+  - name: earnings_below_trigger_no_duty
+    jobholder_id: jobholder-4
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 30
+    pensionable_age_years: 67
+    earnings_this_prp: "800"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+    expected:
+      earnings_trigger_for_prp: "833.3333333333333333333333333"
+      earnings_above_trigger: not_holds
+      employer_enrolment_duty: not_holds
+
+  - name: already_active_member_no_duty
+    jobholder_id: jobholder-5
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 30
+    pensionable_age_years: 67
+    earnings_this_prp: "1500"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: true
+    recently_opted_out: false
+    expected:
+      not_already_active_member: not_holds
+      employer_enrolment_duty: not_holds
+
+  - name: recently_opted_out_no_duty
+    jobholder_id: jobholder-6
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    current_age_years: 30
+    pensionable_age_years: 67
+    earnings_this_prp: "1500"
+    prp_months: "1"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: true
+    expected:
+      not_recently_opted_out: not_holds
+      employer_enrolment_duty: not_holds
+
+  - name: weekly_prp_trigger_pro_rated_down
+    jobholder_id: jobholder-7
+    period:
+      period_kind: benefit_week
+      start: 2025-05-05
+      end: 2025-05-11
+    current_age_years: 30
+    pensionable_age_years: 67
+    # Weekly PRP: £10,000 × (1/52 equivalent) — for simplicity passing
+    # prp_months = 12/52 = 0.230769... The trigger becomes 10000 × 0.230769 / 12
+    # = approx 192.31. Earnings of 250 exceed.
+    earnings_this_prp: "250"
+    prp_months: "0.230769230769"
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+    expected:
+      earnings_above_trigger: holds
+      employer_enrolment_duty: holds

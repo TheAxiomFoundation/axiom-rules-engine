@@ -1,0 +1,21 @@
+{
+  "scope": "scenario:missing-scalar",
+  "segment": "2026-04-01/2027-03-31",
+  "primary_person": "primary",
+  "persons": [
+    {
+      "id": "primary",
+      "age_years": 25,
+      "scalars": {"amount": "10"}
+    },
+    {
+      "id": "member-with-unknown-amount",
+      "age_years": 25,
+      "scalars": {}
+    }
+  ],
+  "relations": {
+    "household_link": [["primary", "member-with-unknown-amount"]]
+  },
+  "family_scalars": {}
+}

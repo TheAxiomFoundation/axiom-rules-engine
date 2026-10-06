@@ -1,0 +1,409 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Universal Credit Regulations 2013 (SI 2013/376) — core monthly award
+    calculation, 2025-26 rates.
+
+    Scope: standard allowance, child element (with two-child limit handled
+    by a pre-applied qualifying flag), disabled-child addition, LCWRA element,
+    carer element, housing element (net of non-dep deductions), capital
+    tariff income, unearned income deduction, earned income taper with work
+    allowance, capital disentitlement above £16,000.
+
+    Out of scope (each a layer of UC in its own right — adds incrementally
+    as operators land): childcare costs element, benefit cap, transitional
+    protection / managed-migration run-on, mixed-age-couple alternative
+    amount, sanctions / hardship / third-party deductions, Work Capability
+    Assessment determination (`has_lcwra` is an input), LHA / bedroom /
+    service-charge rules (`eligible_housing_costs` and
+    `non_dep_deductions_total` are pre-computed inputs), two-child-limit
+    exceptions (`qualifies_for_child_element` is pre-applied on each Child).
+rules:
+  - name: uc_standard_allowance_single_under_25
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '316.98'
+  - name: uc_standard_allowance_single_25_or_over
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '400.14'
+  - name: uc_standard_allowance_couple_under_25
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '497.55'
+  - name: uc_standard_allowance_couple_25_or_over
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '628.10'
+  - name: uc_child_element_higher
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '339.00'
+  - name: uc_child_element_standard
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '292.81'
+  - name: uc_disabled_child_lower
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '158.76'
+  - name: uc_disabled_child_higher
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '495.87'
+  - name: uc_lcwra_element
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '423.27'
+  - name: uc_carer_element
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '201.68'
+  - name: uc_work_allowance_with_housing
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '411.00'
+  - name: uc_work_allowance_without_housing
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '684.00'
+  - name: uc_taper_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '0.55'
+  - name: uc_capital_lower
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '6000'
+  - name: uc_capital_upper
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '16000'
+  - name: uc_capital_tariff_per_250
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '4.35'
+  - name: num_adults_25_or_over
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    source: UC Regs 2013 reg 36
+    source_url: https://www.legislation.gov.uk/uksi/2013/376/regulation/36
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(adult_of_benefit_unit, age_25_or_over)
+  - name: any_adult_25_or_over
+    kind: derived
+    entity: BenefitUnit
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: num_adults_25_or_over >= 1
+  - name: standard_allowance
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 36
+    source_url: https://www.legislation.gov.uk/uksi/2013/376/regulation/36
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          if is_couple:
+              if any_adult_25_or_over: uc_standard_allowance_couple_25_or_over
+              else: uc_standard_allowance_couple_under_25
+          else:
+              if any_adult_25_or_over: uc_standard_allowance_single_25_or_over
+              else: uc_standard_allowance_single_under_25
+  - name: num_qualifying_children
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    source: UC Regs 2013 reg 24B (two-child limit pre-applied)
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(child_of_benefit_unit, qualifies_for_child_element)
+  - name: num_higher_rate_children
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    source: UC Regs 2013 reg 24(2) first child pre-2017
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(child_of_benefit_unit, qualifies_for_higher_rate)
+  - name: num_standard_rate_children
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(child_of_benefit_unit, qualifies_for_standard_rate)
+  - name: child_element_total
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 24(2)
+    source_url: https://www.legislation.gov.uk/uksi/2013/376/regulation/24
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          num_higher_rate_children * uc_child_element_higher
+          + num_standard_rate_children * uc_child_element_standard
+  - name: num_children_disabled_lower
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(child_of_benefit_unit, disability_is_lower)
+  - name: num_children_disabled_higher
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(child_of_benefit_unit, disability_is_higher)
+  - name: disabled_child_element_total
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 24(2) disabled child addition
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          num_children_disabled_lower * uc_disabled_child_lower
+          + num_children_disabled_higher * uc_disabled_child_higher
+  - name: num_adults_with_lcwra
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(adult_of_benefit_unit, has_lcwra)
+  - name: has_lcwra_in_bu
+    kind: derived
+    entity: BenefitUnit
+    dtype: Judgment
+    period: Month
+    source: UC Regs 2013 reg 27
+    versions:
+      - effective_from: '2013-04-29'
+        formula: num_adults_with_lcwra >= 1
+  - name: lcwra_element
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 27
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          if has_lcwra_in_bu: uc_lcwra_element
+          else: 0
+  - name: num_adults_carer
+    kind: derived
+    entity: BenefitUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2013-04-29'
+        formula: count_where(adult_of_benefit_unit, is_carer)
+  - name: has_carer
+    kind: derived
+    entity: BenefitUnit
+    dtype: Judgment
+    period: Month
+    source: UC Regs 2013 reg 29
+    versions:
+      - effective_from: '2013-04-29'
+        formula: num_adults_carer >= 1
+  - name: carer_element
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 29
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          if has_carer: uc_carer_element
+          else: 0
+  - name: housing_element
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 25 and reg 28
+    source_url: https://www.legislation.gov.uk/uksi/2013/376/regulation/25
+    versions:
+      - effective_from: '2013-04-29'
+        formula: max(0, eligible_housing_costs - non_dep_deductions_total)
+  - name: max_uc
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 22
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          standard_allowance + child_element_total + disabled_child_element_total
+          + lcwra_element + carer_element + housing_element
+  - name: eligible_for_work_allowance
+    kind: derived
+    entity: BenefitUnit
+    dtype: Judgment
+    period: Month
+    source: UC Regs 2013 reg 22(2)
+    versions:
+      - effective_from: '2013-04-29'
+        formula: num_qualifying_children >= 1 or has_lcwra_in_bu
+  - name: work_allowance_amount
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 22(2) and Schedule 4
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          if eligible_for_work_allowance:
+              if has_housing_costs: uc_work_allowance_with_housing
+              else: uc_work_allowance_without_housing
+          else: 0
+  - name: earnings_above_work_allowance
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    versions:
+      - effective_from: '2013-04-29'
+        formula: max(0, earned_income_monthly - work_allowance_amount)
+  - name: earnings_deduction
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 22 — 55% taper
+    versions:
+      - effective_from: '2013-04-29'
+        formula: earnings_above_work_allowance * uc_taper_rate
+  - name: capital_above_lower
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 72
+    versions:
+      - effective_from: '2013-04-29'
+        formula: max(0, capital_total - uc_capital_lower)
+  - name: tariff_income
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 72
+    versions:
+      - effective_from: '2013-04-29'
+        formula: floor(capital_above_lower / 250) * uc_capital_tariff_per_250
+  - name: over_capital_limit
+    kind: derived
+    entity: BenefitUnit
+    dtype: Judgment
+    period: Month
+    source: UC Regs 2013 reg 18
+    versions:
+      - effective_from: '2013-04-29'
+        formula: capital_total > uc_capital_upper
+  - name: uc_award_before_capital_test
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 22
+    versions:
+      - effective_from: '2013-04-29'
+        formula: max(0, max_uc - earnings_deduction - unearned_income_monthly - tariff_income)
+  - name: uc_award
+    kind: derived
+    entity: BenefitUnit
+    dtype: Money
+    period: Month
+    unit: GBP
+    source: UC Regs 2013 reg 18 + reg 22
+    source_url: https://www.legislation.gov.uk/uksi/2013/376/regulation/22
+    versions:
+      - effective_from: '2013-04-29'
+        formula: |-
+          if over_capital_limit: 0
+          else: uc_award_before_capital_test

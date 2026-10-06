@@ -1,0 +1,97 @@
+- name: valid_notice_all_conditions_met
+  period: 2024
+  input:
+    is_assured_shorthold: true
+    tenancy_start_date: 2024-01-15
+    notice_served_date: 2024-09-01
+    deposit_taken: true
+    deposit_received_date: 2024-01-15
+    deposit_protected_date: 2024-02-01
+    prescribed_info_given_date: 2024-02-01
+    epc_given_before_tenancy: true
+    gas_safety_given_before_occupation: true
+    how_to_rent_guide_given: true
+    property_requires_licence: false
+    landlord_has_licence: false
+    council_notice_of_tenancy: []
+  output:
+    section_21_notice_valid: holds
+- name: deposit_protected_late
+  period: 2024
+  input:
+    is_assured_shorthold: true
+    tenancy_start_date: 2024-01-15
+    notice_served_date: 2024-09-01
+    deposit_taken: true
+    deposit_received_date: 2024-01-15
+    deposit_protected_date: 2024-03-10
+    prescribed_info_given_date: 2024-02-01
+    epc_given_before_tenancy: true
+    gas_safety_given_before_occupation: true
+    how_to_rent_guide_given: true
+    property_requires_licence: false
+    landlord_has_licence: false
+    council_notice_of_tenancy: []
+  output:
+    deposit_protected_in_time: not_holds
+    section_21_notice_valid: not_holds
+- name: retaliation_bar_fires
+  period: 2024
+  input:
+    is_assured_shorthold: true
+    tenancy_start_date: 2024-01-15
+    notice_served_date: 2024-09-01
+    deposit_taken: true
+    deposit_received_date: 2024-01-15
+    deposit_protected_date: 2024-02-01
+    prescribed_info_given_date: 2024-02-01
+    epc_given_before_tenancy: true
+    gas_safety_given_before_occupation: true
+    how_to_rent_guide_given: true
+    property_requires_licence: false
+    landlord_has_licence: false
+    council_notice_of_tenancy:
+      - {is_in_retaliation_window: true}
+  output:
+    qualifying_council_notices: 1
+    no_retaliation_bar: not_holds
+    section_21_notice_valid: not_holds
+- name: served_too_early
+  period: 2024
+  input:
+    is_assured_shorthold: true
+    tenancy_start_date: 2024-06-01
+    notice_served_date: 2024-08-01
+    deposit_taken: true
+    deposit_received_date: 2024-06-01
+    deposit_protected_date: 2024-06-10
+    prescribed_info_given_date: 2024-06-10
+    epc_given_before_tenancy: true
+    gas_safety_given_before_occupation: true
+    how_to_rent_guide_given: true
+    property_requires_licence: false
+    landlord_has_licence: false
+    council_notice_of_tenancy: []
+  output:
+    not_served_too_early: not_holds
+    section_21_notice_valid: not_holds
+- name: no_deposit_still_valid
+  period: 2024
+  input:
+    is_assured_shorthold: true
+    tenancy_start_date: 2024-01-15
+    notice_served_date: 2024-09-01
+    deposit_taken: false
+    deposit_received_date: 2024-01-15
+    deposit_protected_date: 2024-01-15
+    prescribed_info_given_date: 2024-01-15
+    epc_given_before_tenancy: true
+    gas_safety_given_before_occupation: true
+    how_to_rent_guide_given: true
+    property_requires_licence: false
+    landlord_has_licence: false
+    council_notice_of_tenancy: []
+  output:
+    no_deposit_taken: holds
+    deposit_requirements_met: holds
+    section_21_notice_valid: holds

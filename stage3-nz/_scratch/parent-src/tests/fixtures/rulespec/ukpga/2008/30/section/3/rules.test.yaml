@@ -1,0 +1,52 @@
+- name: in_scope_annual_prp
+  period: 2025
+  input:
+    current_age_years: 30
+    pensionable_age_years: 66
+    prp_months: 12
+    earnings_this_prp: 25000
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+  output:
+    earnings_trigger_for_prp: 10000
+    age_at_least_22: holds
+    below_pensionable_age: holds
+    earnings_above_trigger: holds
+    employer_enrolment_duty: holds
+- name: below_age_excluded
+  period: 2025
+  input:
+    current_age_years: 21
+    pensionable_age_years: 66
+    prp_months: 12
+    earnings_this_prp: 25000
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+  output:
+    age_at_least_22: not_holds
+    employer_enrolment_duty: not_holds
+- name: low_earner_excluded_quarterly_prp
+  period: 2025
+  input:
+    current_age_years: 30
+    pensionable_age_years: 66
+    prp_months: 3
+    earnings_this_prp: 2400
+    active_member_of_qualifying_scheme: false
+    recently_opted_out: false
+  output:
+    earnings_trigger_for_prp: 2500
+    earnings_above_trigger: not_holds
+    employer_enrolment_duty: not_holds
+- name: already_enrolled_excluded
+  period: 2025
+  input:
+    current_age_years: 30
+    pensionable_age_years: 66
+    prp_months: 12
+    earnings_this_prp: 25000
+    active_member_of_qualifying_scheme: true
+    recently_opted_out: false
+  output:
+    not_already_active_member: not_holds
+    employer_enrolment_duty: not_holds

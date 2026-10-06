@@ -1,0 +1,34 @@
+- name: existing_recipient_wins
+  period: 2024
+  input:
+    cb_recipient_id: "parent-a"
+    sole_claimant_id: "parent-b"
+    usual_resident_id: "parent-c"
+    cb_claim_count: 2
+    cb_receipt: [{}]
+  output:
+    has_cb_recipient: holds
+    responsible_person: "parent-a"
+- name: sole_claimant_fallback
+  period: 2024
+  input:
+    cb_recipient_id: "parent-a"
+    sole_claimant_id: "parent-b"
+    usual_resident_id: "parent-c"
+    cb_claim_count: 1
+    cb_receipt: []
+  output:
+    cb_recipient_count: 0
+    sole_claim_fallback: holds
+    responsible_person: "parent-b"
+- name: usual_residence_fallback_applied
+  period: 2024
+  input:
+    cb_recipient_id: "parent-a"
+    sole_claimant_id: "parent-b"
+    usual_resident_id: "parent-c"
+    cb_claim_count: 2
+    cb_receipt: []
+  output:
+    usual_residence_fallback: holds
+    responsible_person: "parent-c"

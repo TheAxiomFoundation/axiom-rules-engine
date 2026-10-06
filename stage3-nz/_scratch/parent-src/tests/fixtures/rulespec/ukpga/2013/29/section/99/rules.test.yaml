@@ -1,0 +1,41 @@
+- name: full_year_band_1
+  period: 2024
+  input:
+    taxable_value: 750000
+    entry_day: 2024-04-01
+    in_charge_on_first_day: true
+  output:
+    annual_chargeable_amount: 4400
+    tax_chargeable: 4400
+- name: mid_year_entry_band_2
+  period: 2024
+  input:
+    taxable_value: 1500000
+    entry_day: 2024-10-01
+    in_charge_on_first_day: false
+  output:
+    annual_chargeable_amount: 9000
+    # Days in period (2024-04-01 → 2025-03-31 inclusive) = 365
+    # Days from 2024-10-01 to 2025-03-31 inclusive = 182
+    # Pro rata: 9000 * 182 / 365 ≈ 4487.6712...
+    # Accept exact arithmetic
+    days_in_period: 365
+    days_from_entry: 182
+- name: below_threshold_no_charge
+  period: 2024
+  input:
+    taxable_value: 400000
+    entry_day: 2024-04-01
+    in_charge_on_first_day: true
+  output:
+    annual_chargeable_amount: 0
+    tax_chargeable: 0
+- name: top_band
+  period: 2024
+  input:
+    taxable_value: 25000000
+    entry_day: 2024-04-01
+    in_charge_on_first_day: true
+  output:
+    annual_chargeable_amount: 287500
+    tax_chargeable: 287500

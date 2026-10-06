@@ -1,0 +1,42 @@
+{
+  "schema": "axiom.nz_incomeexplorer.eligibility_closures.v1",
+  "version": "2026-08-13",
+  "choices": {
+    "residence": {
+      "wff_caregiver_disqualifying_status": false,
+      "iwtc_person_new_zealand_resident": true,
+      "iwtc_person_present_in_new_zealand_continuous_months": 12,
+      "iwtc_person_resident_under_yd1_on_credit_days": true,
+      "iwtc_person_transitional_resident": false,
+      "iwtc_person_spouse_or_partner_transitional_resident": false,
+      "iwtc_child_new_zealand_resident_when_present": true,
+      "iwtc_child_present_for_entitlement_period_when_present": true,
+      "ietc_person_resident_in_new_zealand": true
+    },
+    "care": {
+      "wff_commissioner_considers_primary_day_to_day_care_when_child_present": true,
+      "wff_care_is_temporary": false,
+      "wff_caregiver_lives_apart_when_child_present": true,
+      "iwtc_child_exclusive_care_fraction": 1,
+      "best_start_child_care_fraction": 1
+    },
+    "work_tests": {
+      "iwtc_allowed_paye_income_payment_when_wages_positive": true,
+      "iwtc_normally_earner_when_wages_positive": true,
+      "iwtc_currently_meets_fifth_requirement": true,
+      "mftc_single_full_time_hours_per_week": 20,
+      "mftc_couple_full_time_hours_per_week": 30
+    },
+    "gates": {
+      "iwtc_main_benefit_disqualifies": true,
+      "iwtc_basic_or_independent_grants_received": false,
+      "iwtc_parent_allowance_or_childrens_pension_received": false,
+      "ietc_main_benefit_disqualifies": true,
+      "ietc_wff_disqualifies": true,
+      "ietc_veterans_pension_received": false,
+      "ietc_new_zealand_superannuation_received": false,
+      "ietc_overseas_like_support_received": false
+    }
+  },
+  "scope": "Stylised eligibility product choices for the pinned Treasury IncomeExplorer scenario grid; not findings about legal entitlement for real households."
+}

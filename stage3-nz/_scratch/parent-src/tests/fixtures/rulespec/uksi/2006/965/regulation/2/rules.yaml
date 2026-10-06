@@ -1,0 +1,94 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Child Benefit (Rates) Regulations 2006, reg 2 — weekly rate of child
+    benefit.
+
+    Two rates apply:
+      enhanced  £26.05 — eldest child in the household
+      standard  £17.25 — every other child
+
+    reg 2(4)(a) disapplies the enhanced rate where the claimant is a
+    voluntary organisation; reg 2(4)(b) disapplies it where the claimant
+    resides with a parent of the child (other than as a cohabiting partner).
+    The "eldest in household" test (reg 2(2)) cuts across partnered households
+    — that legal determination is pre-applied by the caller on each Child
+    record as `is_eldest_in_household`, as is `resides_with_parent`.
+    Combined, `is_enhanced_eligible` on each Child reduces the three-way
+    test to a single boolean the filtered aggregator can count.
+rules:
+  - name: cb_enhanced_rate_weekly
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '26.05'
+  - name: cb_standard_rate_weekly
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-07'
+        formula: '17.25'
+  - name: claimant_can_enhance
+    kind: derived
+    entity: Claimant
+    dtype: Judgment
+    period: Day
+    source: SI 2006/965 reg 2(4)(a)
+    source_url: https://www.legislation.gov.uk/uksi/2006/965/regulation/2
+    versions:
+      - effective_from: '2025-04-07'
+        formula: not is_voluntary_org
+  - name: num_children_total
+    kind: derived
+    entity: Claimant
+    dtype: Integer
+    period: Day
+    source: SI 2006/965 reg 2(1)
+    versions:
+      - effective_from: '2025-04-07'
+        formula: len(child_of_claim)
+  - name: num_children_eligible_for_enhanced
+    kind: derived
+    entity: Claimant
+    dtype: Integer
+    period: Day
+    source: SI 2006/965 reg 2(1)(a) with reg 2(4)(b)
+    versions:
+      - effective_from: '2025-04-07'
+        formula: count_where(child_of_claim, is_enhanced_eligible)
+  - name: num_enhanced_rate
+    kind: derived
+    entity: Claimant
+    dtype: Integer
+    period: Day
+    source: SI 2006/965 reg 2(1)(a) gated by reg 2(4)(a)
+    versions:
+      - effective_from: '2025-04-07'
+        formula: |-
+          if claimant_can_enhance: num_children_eligible_for_enhanced
+          else: 0
+  - name: num_standard_rate
+    kind: derived
+    entity: Claimant
+    dtype: Integer
+    period: Day
+    source: SI 2006/965 reg 2(1)(b)
+    versions:
+      - effective_from: '2025-04-07'
+        formula: num_children_total - num_enhanced_rate
+  - name: weekly_child_benefit
+    kind: derived
+    entity: Claimant
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SI 2006/965 reg 2
+    source_url: https://www.legislation.gov.uk/uksi/2006/965/regulation/2
+    versions:
+      - effective_from: '2025-04-07'
+        formula: |-
+          num_enhanced_rate * cb_enhanced_rate_weekly
+          + num_standard_rate * cb_standard_rate_weekly

@@ -1,0 +1,35 @@
+- name: two_children_eldest_enhanced
+  period: 2025
+  input:
+    is_voluntary_org: false
+    child_of_claim:
+      - {is_enhanced_eligible: true}
+      - {is_enhanced_eligible: false}
+  output:
+    num_children_total: 2
+    num_enhanced_rate: 1
+    num_standard_rate: 1
+    # 26.05 + 17.25 = 43.30
+    weekly_child_benefit: 43.30
+- name: voluntary_org_cannot_enhance
+  period: 2025
+  input:
+    is_voluntary_org: true
+    child_of_claim:
+      - {is_enhanced_eligible: true}
+      - {is_enhanced_eligible: false}
+  output:
+    claimant_can_enhance: not_holds
+    num_enhanced_rate: 0
+    num_standard_rate: 2
+    # 2 * 17.25 = 34.50
+    weekly_child_benefit: 34.50
+- name: one_child_only
+  period: 2025
+  input:
+    is_voluntary_org: false
+    child_of_claim:
+      - {is_enhanced_eligible: true}
+  output:
+    num_enhanced_rate: 1
+    weekly_child_benefit: 26.05

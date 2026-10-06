@@ -1,0 +1,127 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Scottish Council Tax Reduction (SSI 2021/249) reg 79 — applicant's daily
+    maximum reduction.
+
+    For a dwelling with annual council tax A (net of discounts and other
+    reductions) and B days in the financial year:
+      bands A–D:  daily_max = A/B − non_dep_deductions
+      bands E–H:  daily_max = (A − A/C)/B − non_dep_deductions
+    where C is the band taper factor (E:1.075, F:1.125, G:1.175, H:1.225).
+
+    Reg 79(4): A is divided by the number of jointly and severally liable
+    persons, except where the joint liability is partner-only. Students
+    (reg 20(2) of the 2012 Act) are excluded from the liable count —
+    caller pre-applies `is_not_student` on each liable Person.
+rules:
+  - name: days_in_fy
+    kind: derived
+    entity: Dwelling
+    dtype: Integer
+    period: Day
+    source: SSI 2021/249 reg 79(1)(b)
+    source_url: https://www.legislation.gov.uk/ssi/2021/249/regulation/79
+    versions:
+      - effective_from: '2021-11-01'
+        formula: days_between(period_start, period_end) + 1
+  - name: num_non_student_liable
+    kind: derived
+    entity: Dwelling
+    dtype: Integer
+    period: Day
+    source: SSI 2021/249 reg 79(4), excluding students per 2012 Act reg 20(2)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: count_where(liable_person, is_not_student)
+  - name: a_raw
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 79(1)(a)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: ct_annual - ct_discounts - ct_other_reductions
+  - name: liable_divisor
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    source: SSI 2021/249 reg 79(4)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: |-
+          if partner_only_joint: 1.0
+          else: max(num_non_student_liable, 1.0)
+  - name: a_effective
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 79(1)(a) with reg 79(4)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: a_raw / liable_divisor
+  - name: is_band_e_to_h
+    kind: derived
+    entity: Dwelling
+    dtype: Judgment
+    period: Day
+    source: SSI 2021/249 reg 79(2)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: band_number > 4
+  - name: band_taper_factor
+    kind: derived
+    entity: Dwelling
+    dtype: Rate
+    period: Day
+    source: SSI 2021/249 reg 79(2) — C factor by band
+    versions:
+      - effective_from: '2021-11-01'
+        formula: |-
+          match band_number:
+              5 => 1.075
+              6 => 1.125
+              7 => 1.175
+              8 => 1.225
+              1 => 1.0
+              2 => 1.0
+              3 => 1.0
+              4 => 1.0
+  - name: a_after_taper
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 79(2)
+    versions:
+      - effective_from: '2021-11-01'
+        formula: |-
+          if is_band_e_to_h: a_effective - a_effective / band_taper_factor
+          else: a_effective
+  - name: daily_max_before_non_dep
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 79(1) — A_after_taper / B
+    versions:
+      - effective_from: '2021-11-01'
+        formula: a_after_taper / days_in_fy
+  - name: daily_max_reduction
+    kind: derived
+    entity: Dwelling
+    dtype: Money
+    period: Day
+    unit: GBP
+    source: SSI 2021/249 reg 79(1)
+    source_url: https://www.legislation.gov.uk/ssi/2021/249/regulation/79
+    versions:
+      - effective_from: '2021-11-01'
+        formula: max(0, daily_max_before_non_dep - non_dep_deductions_daily)

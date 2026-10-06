@@ -1,0 +1,246 @@
+cases:
+  - name: single_25_plus_no_other_income
+    benefit_unit_id: bu-1
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: "0"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "0"
+    adults:
+      - id: adult-1
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+    children: []
+    expected:
+      standard_allowance: "400.14"
+      child_element_total: "0"
+      lcwra_element: "0"
+      carer_element: "0"
+      housing_element: "0"
+      max_uc: "400.14"
+      uc_award: "400.14"
+
+  - name: couple_25_plus_two_children_housing
+    benefit_unit_id: bu-2
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: true
+    has_housing_costs: true
+    eligible_housing_costs: "650"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "1000"
+    adults:
+      - id: adult-2
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+      - id: adult-3
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+    children:
+      - id: child-1
+        qualifies_for_child_element: true
+        is_higher_rate_first_child: false
+        disability_level: none
+      - id: child-2
+        qualifies_for_child_element: true
+        is_higher_rate_first_child: false
+        disability_level: none
+    expected:
+      standard_allowance: "628.10"
+      child_element_total: "585.62"
+      lcwra_element: "0"
+      carer_element: "0"
+      housing_element: "650"
+      max_uc: "1863.72"
+      uc_award: "1863.72"
+
+  - name: single_25_plus_child_lcwra_earnings
+    benefit_unit_id: bu-3
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: false
+    has_housing_costs: true
+    eligible_housing_costs: "600"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "800"
+    unearned_income_monthly: "0"
+    capital_total: "0"
+    adults:
+      - id: adult-4
+        age_25_or_over: true
+        has_lcwra: true
+        is_carer: false
+    children:
+      - id: child-3
+        qualifies_for_child_element: true
+        is_higher_rate_first_child: false
+        disability_level: none
+    expected:
+      standard_allowance: "400.14"
+      child_element_total: "292.81"
+      lcwra_element: "423.27"
+      carer_element: "0"
+      housing_element: "600"
+      max_uc: "1716.22"
+      work_allowance_amount: "411.00"
+      earnings_deduction: "213.95"
+      uc_award: "1502.27"
+
+  - name: single_under_25_capital_tariff
+    benefit_unit_id: bu-4
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: "0"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "10000"
+    adults:
+      - id: adult-5
+        age_25_or_over: false
+        has_lcwra: false
+        is_carer: false
+    children: []
+    expected:
+      standard_allowance: "316.98"
+      tariff_income: "69.60"
+      uc_award: "247.38"
+
+  - name: single_capital_above_limit
+    benefit_unit_id: bu-5
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: "0"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "20000"
+    adults:
+      - id: adult-6
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+    children: []
+    expected:
+      over_capital_limit: holds
+      uc_award: "0"
+
+  - name: couple_childless_earnings_zero_out_award
+    benefit_unit_id: bu-6
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: true
+    has_housing_costs: false
+    eligible_housing_costs: "0"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "1500"
+    unearned_income_monthly: "0"
+    capital_total: "0"
+    adults:
+      - id: adult-7
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+      - id: adult-8
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+    children: []
+    expected:
+      standard_allowance: "628.10"
+      work_allowance_amount: "0"
+      earnings_deduction: "825.00"
+      uc_award: "0"
+
+  - name: carer_single_no_other
+    benefit_unit_id: bu-7
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: false
+    has_housing_costs: false
+    eligible_housing_costs: "0"
+    non_dep_deductions_total: "0"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "0"
+    adults:
+      - id: adult-9
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: true
+    children: []
+    expected:
+      standard_allowance: "400.14"
+      carer_element: "201.68"
+      uc_award: "601.82"
+
+  - name: couple_25_plus_three_children_lcwra_disabled_housing
+    benefit_unit_id: bu-8
+    period:
+      period_kind: month
+      start: 2025-05-01
+      end: 2025-05-31
+    is_couple: true
+    has_housing_costs: true
+    eligible_housing_costs: "900"
+    non_dep_deductions_total: "100"
+    earned_income_monthly: "0"
+    unearned_income_monthly: "0"
+    capital_total: "2500"
+    adults:
+      - id: adult-10
+        age_25_or_over: true
+        has_lcwra: true
+        is_carer: false
+      - id: adult-11
+        age_25_or_over: true
+        has_lcwra: false
+        is_carer: false
+    children:
+      - id: child-4
+        qualifies_for_child_element: true
+        is_higher_rate_first_child: true
+        disability_level: lower
+      - id: child-5
+        qualifies_for_child_element: true
+        is_higher_rate_first_child: false
+        disability_level: none
+      - id: child-6
+        qualifies_for_child_element: false
+        is_higher_rate_first_child: false
+        disability_level: none
+    expected:
+      standard_allowance: "628.10"
+      child_element_total: "631.81"
+      disabled_child_element_total: "158.76"
+      lcwra_element: "423.27"
+      housing_element: "800"
+      max_uc: "2641.94"
+      uc_award: "2641.94"

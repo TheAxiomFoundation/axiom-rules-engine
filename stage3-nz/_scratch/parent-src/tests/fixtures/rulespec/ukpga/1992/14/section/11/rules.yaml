@@ -1,0 +1,66 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Local Government Finance Act 1992 s.11 — council tax discounts on a
+    chargeable dwelling for any day.
+
+      s.11(1)(a): exactly one non-disregarded resident              → 25% discount
+      s.11(1)(b): two or more residents, all but one disregarded    → 25% discount
+      s.11(2):    no non-disregarded residents and no override      → 50% discount
+      otherwise:  full charge
+
+    "Appropriate percentage" is 25% unless the Secretary of State varies it by
+    order (s.11(3)). Disregard determination (Schedule 1: full-time students,
+    severely mentally impaired, foreign diplomats, etc.) is pre-applied by the
+    caller via the per-person boolean `is_disregarded`. Empty-home override
+    (ss.11A/11B/11C/12/12A/12B) is pre-applied via `empty_home_override_applies`.
+rules:
+  - name: ctax_appropriate_percentage
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '1993-04-01'
+        formula: '0.25'
+  - name: num_non_disregarded_residents
+    kind: derived
+    entity: Dwelling
+    dtype: Integer
+    period: Day
+    source: LGFA 1992 s.11(1) and Sch 1 disregards
+    source_url: https://www.legislation.gov.uk/ukpga/1992/14/section/11
+    versions:
+      - effective_from: '1993-04-01'
+        formula: count_where(resident_of, is_not_disregarded)
+  - name: single_occupier_discount_applies
+    kind: derived
+    entity: Dwelling
+    dtype: Judgment
+    period: Day
+    source: LGFA 1992 s.11(1)
+    source_url: https://www.legislation.gov.uk/ukpga/1992/14/section/11
+    versions:
+      - effective_from: '1993-04-01'
+        formula: num_non_disregarded_residents == 1
+  - name: empty_home_discount_applies
+    kind: derived
+    entity: Dwelling
+    dtype: Judgment
+    period: Day
+    source: LGFA 1992 s.11(2)
+    source_url: https://www.legislation.gov.uk/ukpga/1992/14/section/11
+    versions:
+      - effective_from: '1993-04-01'
+        formula: num_non_disregarded_residents == 0 and not empty_home_override_applies
+  - name: discount_fraction
+    kind: derived
+    entity: Dwelling
+    dtype: Rate
+    period: Day
+    source: LGFA 1992 s.11 combined
+    source_url: https://www.legislation.gov.uk/ukpga/1992/14/section/11
+    versions:
+      - effective_from: '1993-04-01'
+        formula: |-
+          if single_occupier_discount_applies: ctax_appropriate_percentage
+          elif empty_home_discount_applies: ctax_appropriate_percentage * 2
+          else: 0

@@ -1,0 +1,301 @@
+{
+  "$defs": {
+    "AggregatedChild": {
+      "additionalProperties": false,
+      "properties": {
+        "age_bands": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationValue"
+          },
+          "type": "object"
+        },
+        "age_years": {
+          "$ref": "#/$defs/AggregationValue3"
+        },
+        "family": {
+          "type": "string"
+        },
+        "person": {
+          "type": "string"
+        },
+        "scalars": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationValue2"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "person",
+        "family",
+        "age_years",
+        "age_bands",
+        "scalars"
+      ],
+      "type": "object"
+    },
+    "AggregatedFamily": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/AggregatedChild"
+          },
+          "type": "array"
+        },
+        "counts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationValue3"
+          },
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "partner_present": {
+          "$ref": "#/$defs/AggregationValue"
+        },
+        "predicates": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationValue"
+          },
+          "type": "object"
+        },
+        "scalars": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AggregationValue2"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "members",
+        "partner_present",
+        "scalars",
+        "counts",
+        "predicates",
+        "children"
+      ],
+      "type": "object"
+    },
+    "AggregationFamilyKnowledge": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "determined",
+              "type": "string"
+            },
+            "value": {
+              "items": {
+                "$ref": "#/$defs/AggregatedFamily"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "status": {
+              "const": "indeterminate",
+              "type": "string"
+            },
+            "value": {
+              "items": {
+                "$ref": "#/$defs/AggregatedFamily"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationValue": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "determined",
+              "type": "string"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "status": {
+              "const": "indeterminate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationValue2": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "determined",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "status": {
+              "const": "indeterminate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AggregationValue3": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "determined",
+              "type": "string"
+            },
+            "value": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "status": {
+              "const": "indeterminate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/unit-aggregation-result.stage3.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Knowledge-valued family aggregation outputs with canonical plan and request-bound trace digests.",
+  "properties": {
+    "families": {
+      "$ref": "#/$defs/AggregationFamilyKnowledge"
+    },
+    "plan": {
+      "type": "string"
+    },
+    "plan_digest": {
+      "type": "string"
+    },
+    "schema": {
+      "const": "axiom/unit-aggregation-plan-stage3/1",
+      "type": "string"
+    },
+    "trace_root": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "plan",
+    "plan_digest",
+    "trace_root",
+    "families"
+  ],
+  "title": "Experimental unit aggregation result",
+  "type": "object"
+}

@@ -1,0 +1,8 @@
+[package]
+name = "agent-de-indeterminate-probe"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+axiom-rules-engine = { path = "../../../..", features = ["unit-derivation"] }
+

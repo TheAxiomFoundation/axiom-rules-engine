@@ -1,0 +1,364 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Income Tax Act 2007 — UK income tax for the 2025-26 tax year.
+
+    Structured around the ITA 2007 s.23 seven-step skeleton:
+      step 1 — total income
+      step 2 — reliefs deducted → net income
+      step 3 — allowances deducted → taxable income
+      step 4 — rate applied at each band
+      step 5 — tax amounts summed
+      step 6 — tax reducers subtracted
+      step 7 — HICBC + Gift Aid recovery added
+
+    Scope of this RuleSpec encoding: rUK NSND income, personal allowance with
+    £100,000 taper, basic / higher / additional rate bands, marriage
+    allowance reducer, HICBC (ITEPA 2003 s.681B), Gift Aid band extension.
+
+    Deliberately not encoded in this RuleSpec version yet:
+    full savings / dividend channel split with PSA / starting-rate-for-savings
+    / dividend allowance / dividend band stacking, Scottish rate ladder,
+    EIS / SEIS / VCT reducers, Gift Aid basic-rate recovery, blind person's
+    allowance, marriage-allowance outbound transfer. These depend on richer
+    AST shapes (multi-step band stacking) that the Rust loader's lowering
+    should grow incrementally.
+rules:
+  - name: uk_personal_allowance
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '12570'
+  - name: uk_pa_taper_threshold
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '100000'
+  - name: uk_trading_allowance
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '1000'
+  - name: uk_property_allowance
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '1000'
+  - name: uk_basic_rate_band
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '37700'
+  - name: uk_additional_rate_threshold
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '125140'
+  - name: uk_basic_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '0.20'
+  - name: uk_higher_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '0.40'
+  - name: uk_additional_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '0.45'
+  - name: uk_marriage_allowance_reducer
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '252'
+  - name: uk_hicbc_threshold
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2024-04-06'
+        formula: '60000'
+  - name: uk_hicbc_step_amount
+    kind: parameter
+    dtype: Money
+    unit: GBP
+    versions:
+      - effective_from: '2024-04-06'
+        formula: '200'
+  - name: uk_hicbc_cap_percent
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2024-04-06'
+        formula: '1.0'
+  - name: uk_gift_aid_grossup_divisor
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2025-04-06'
+        formula: '0.80'
+  - name: trading_income_after_allowance
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.3 with ITTOIA 2005 s.783A
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, trading_income - uk_trading_allowance)
+  - name: property_income_after_allowance
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.3 with ITTOIA 2005 s.783B
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, property_income - uk_property_allowance)
+  - name: gross_income
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 1
+    versions:
+      - effective_from: '2025-04-06'
+        formula: |-
+          employment_income + pension_income
+          + trading_income_after_allowance + property_income_after_allowance
+          + savings_income + dividend_income
+  - name: step_2_net_income
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 2
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, gross_income - reliefs_total)
+  - name: gift_aid_gross
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: FA 1990 s.25; ITA 2007 s.414
+    versions:
+      - effective_from: '2025-04-06'
+        formula: gift_aid_net / uk_gift_aid_grossup_divisor
+  - name: band_extension
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.35, s.192 Gift Aid + pension band extension
+    versions:
+      - effective_from: '2025-04-06'
+        formula: gift_aid_gross + pension_contributions_gross
+  - name: adjusted_net_income
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.58
+    versions:
+      - effective_from: '2025-04-06'
+        formula: step_2_net_income - gift_aid_gross - pension_contributions_gross
+  - name: pa_taper_amount
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.35(2)
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, (adjusted_net_income - uk_pa_taper_threshold) / 2)
+  - name: personal_allowance
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.35
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, uk_personal_allowance - pa_taper_amount)
+  - name: taxable_income
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 3
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, step_2_net_income - personal_allowance)
+  - name: basic_rate_limit
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.10 with s.414
+    versions:
+      - effective_from: '2025-04-06'
+        formula: uk_basic_rate_band + band_extension
+  - name: additional_rate_threshold
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.10
+    versions:
+      - effective_from: '2025-04-06'
+        formula: uk_additional_rate_threshold
+  - name: nsnd_basic_band_amount
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: min(taxable_income, basic_rate_limit)
+  - name: nsnd_higher_band_amount
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, min(taxable_income, additional_rate_threshold - personal_allowance) - basic_rate_limit)
+  - name: nsnd_additional_band_amount
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, taxable_income - (additional_rate_threshold - personal_allowance))
+  - name: nsnd_tax
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 4 — rate ladder
+    versions:
+      - effective_from: '2025-04-06'
+        formula: |-
+          nsnd_basic_band_amount * uk_basic_rate
+          + nsnd_higher_band_amount * uk_higher_rate
+          + nsnd_additional_band_amount * uk_additional_rate
+  - name: income_tax_before_reducers
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 5
+    versions:
+      - effective_from: '2025-04-06'
+        formula: nsnd_tax
+  - name: marriage_allowance_reducer
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.55A-D
+    versions:
+      - effective_from: '2025-04-06'
+        formula: |-
+          if receives_marriage_allowance: uk_marriage_allowance_reducer
+          else: 0
+  - name: tax_after_reducers
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 step 6
+    versions:
+      - effective_from: '2025-04-06'
+        formula: max(0, income_tax_before_reducers - marriage_allowance_reducer)
+  - name: hicbc_excess_over_threshold
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITEPA 2003 s.681B
+    versions:
+      - effective_from: '2024-04-06'
+        formula: max(0, adjusted_net_income - uk_hicbc_threshold)
+  - name: hicbc_percentage
+    kind: derived
+    entity: Taxpayer
+    dtype: Rate
+    period: Year
+    source: ITEPA 2003 s.681B
+    versions:
+      - effective_from: '2024-04-06'
+        formula: min(uk_hicbc_cap_percent, hicbc_excess_over_threshold / uk_hicbc_step_amount / 100)
+  - name: hicbc
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITEPA 2003 s.681B
+    versions:
+      - effective_from: '2024-04-06'
+        formula: child_benefit_received * hicbc_percentage
+  - name: income_tax
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: ITA 2007 s.23 final step
+    source_url: https://www.legislation.gov.uk/ukpga/2007/3/section/23
+    versions:
+      - effective_from: '2025-04-06'
+        formula: tax_after_reducers + hicbc
+  - name: net_income
+    kind: derived
+    entity: Taxpayer
+    dtype: Money
+    period: Year
+    unit: GBP
+    source: Gross income minus income tax
+    versions:
+      - effective_from: '2025-04-06'
+        formula: gross_income - income_tax

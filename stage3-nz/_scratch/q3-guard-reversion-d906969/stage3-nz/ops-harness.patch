@@ -1,0 +1,2093 @@
+diff --git a/nz-lane/emtr_reproduction/run.py b/nz-lane/emtr_reproduction/run.py
+index d5f5d72..1fcff15 100644
+--- a/nz-lane/emtr_reproduction/run.py
++++ b/nz-lane/emtr_reproduction/run.py
+@@ -43,13 +43,23 @@ DEFAULT_TREASURY_ROOT = (
+     Path.home() / "_axiom-worktrees" / "nz-treasury-income-explorer"
+ )
+ DEFAULT_COMPOSITION = HERE / "composition.yaml"
++DEFAULT_AGGREGATION_PLAN = (
++    DEFAULT_ENGINE_ROOT
++    / "tests"
++    / "fixtures"
++    / "unit_derivation"
++    / "nz_income_explorer_family.yaml"
++)
+ DEFAULT_ELIGIBILITY_CLOSURES = HERE / "eligibility-closures.json"
+ DEFAULT_ORACLE_GENERATOR = HERE / "generate_treasury_emtr_snapshot_expanded.R"
+ DEFAULT_RSCRIPT = Path("/usr/local/bin/Rscript")
+ EXPANDED_ORACLE_NAME = "treasury-emtr-snapshot-expanded.json"
+
+ EXPECTED_RULESPEC_SHA = "89a7d25dc03a4d045348620283332de10b1047da"
+-EXPECTED_ENGINE_SHA = "d59969b53430ae2fd97eb4349d44ad23ce930d85"
++EXPECTED_ENGINE_SHA = "d8d45a817b3700ed22ec49a9fcf1024aa6ed2198"
++EXPECTED_ENGINE_BINARY_SHA256 = (
++    "c5a3d3d8b1fdb8480bef7cffc6dd85658ca1a48cf7ca70da968b7a46c1e8a430"
++)
+ EXPECTED_ORACLE_COMMIT = "741a6ca4f5d27b1dc00b43dc395e39ffc4040a4b"
+ EXPECTED_PARAMETER_FILE = "inst/parameters/TY27_BEFU25.yaml"
+ EXPECTED_PARAMETER_SHA256 = (
+@@ -190,9 +200,15 @@ EXPECTED_CLOSURE_KEYS = {
+         "wff_commissioner_considers_primary_day_to_day_care_when_child_present",
+         "wff_care_is_temporary",
+         "wff_caregiver_lives_apart_when_child_present",
++        "iwtc_child_is_principal_caregiver_when_present",
+         "iwtc_child_exclusive_care_fraction",
+         "best_start_child_care_fraction",
+     },
++    "age_18": {
++        "not_financially_independent_at_age_18",
++        "attending_school_or_tertiary_at_age_18",
++        "commissioner_period_contains_segment_at_age_18",
++    },
+     "work_tests": {
+         "iwtc_allowed_paye_income_payment_when_wages_positive",
+         "iwtc_normally_earner_when_wages_positive",
+@@ -276,6 +292,90 @@ def decimal_text(value: Decimal) -> str:
+     return text
+
+
++def known(value: Any, evidence_id: str) -> dict[str, Any]:
++    """Construct one explicitly evidenced Knowledge value."""
++
++    return {
++        "status": "known",
++        "value": value,
++        "evidence": {"id": evidence_id},
++    }
++
++
++def observations(
++    values: Sequence[tuple[Any, str]],
++) -> dict[str, Any]:
++    """Let the engine determine whether independent observations agree."""
++
++    return {
++        "status": "observations",
++        "observations": [
++            {"value": value, "evidence": {"id": evidence_id}}
++            for value, evidence_id in values
++        ],
++    }
++
++
++def determined(value: Any, label: str) -> Any:
++    """Unwrap an engine Knowledge result, rejecting every indeterminate use."""
++
++    if not isinstance(value, dict) or value.get("status") != "determined":
++        raise HarnessError(f"unit aggregation output {label} is indeterminate: {value!r}")
++    if "value" not in value:
++        raise HarnessError(f"unit aggregation output {label} has no value: {value!r}")
++    return value["value"]
++
++
++def unwrap_aggregated_family(family: Mapping[str, Any]) -> dict[str, Any]:
++    """Adapt Knowledge-wrapped engine output without performing reductions."""
++
++    family_id = str(family.get("id"))
++    return {
++        "id": family_id,
++        "members": list(family.get("members", ())),
++        "partner_present": determined(
++            family.get("partner_present"), f"{family_id}.partner_present"
++        ),
++        "scalars": {
++            name: determined(value, f"{family_id}.scalars.{name}")
++            for name, value in family.get("scalars", {}).items()
++        },
++        "counts": {
++            name: determined(value, f"{family_id}.counts.{name}")
++            for name, value in family.get("counts", {}).items()
++        },
++        "predicates": {
++            name: determined(value, f"{family_id}.predicates.{name}")
++            for name, value in family.get("predicates", {}).items()
++        },
++        "children": [
++            {
++                "person": child["person"],
++                "family": child["family"],
++                "age_years": determined(
++                    child.get("age_years"),
++                    f"{family_id}.children.{child.get('person')}.age_years",
++                ),
++                "age_bands": {
++                    name: determined(
++                        value,
++                        f"{family_id}.children.{child.get('person')}.age_bands.{name}",
++                    )
++                    for name, value in child.get("age_bands", {}).items()
++                },
++                "scalars": {
++                    name: determined(
++                        value,
++                        f"{family_id}.children.{child.get('person')}.scalars.{name}",
++                    )
++                    for name, value in child.get("scalars", {}).items()
++                },
++            }
++            for child in family.get("children", ())
++        ],
++    }
++
++
+ def json_number(value: Decimal | None) -> float | None:
+     if value is None:
+         return None
+@@ -335,6 +435,45 @@ def git_tracked_dirty(root: Path) -> bool:
+     return bool(status.strip())
+
+
++def git_dirty(root: Path) -> bool:
++    """Return whether tracked or untracked, non-ignored checkout data changed."""
++
++    status = run_checked(
++        ["git", "-C", str(root), "status", "--porcelain"],
++        label=f"git status check for {root}",
++    ).stdout
++    return bool(status.strip())
++
++
++def verify_engine_binding(engine_root: Path, engine_binary: Path) -> tuple[str, str]:
++    """Bind execution to one clean checkout and one reviewed release binary."""
++
++    expected_binary = (
++        engine_root / "target" / "release" / "axiom-rules-engine"
++    ).resolve()
++    if engine_binary.resolve() != expected_binary:
++        raise HarnessError(
++            "engine binary must be the release binary under the pinned engine "
++            f"checkout: expected {expected_binary}, found {engine_binary.resolve()}"
++        )
++    engine_sha = git_sha(engine_root)
++    if engine_sha != EXPECTED_ENGINE_SHA:
++        raise HarnessError(
++            f"engine SHA mismatch: expected {EXPECTED_ENGINE_SHA}, found {engine_sha}"
++        )
++    if git_dirty(engine_root):
++        raise HarnessError(
++            f"engine checkout has tracked or untracked modifications: {engine_root}"
++        )
++    binary_sha256 = sha256_file(engine_binary)
++    if binary_sha256 != EXPECTED_ENGINE_BINARY_SHA256:
++        raise HarnessError(
++            "engine binary SHA-256 mismatch: expected "
++            f"{EXPECTED_ENGINE_BINARY_SHA256}, found {binary_sha256}"
++        )
++    return engine_sha, binary_sha256
++
++
+ def require_file(path: Path, label: str) -> Path:
+     resolved = path.expanduser().resolve()
+     if not resolved.is_file():
+@@ -342,6 +481,27 @@ def require_file(path: Path, label: str) -> Path:
+     return resolved
+
+
++def verify_aggregation_plan_binding(
++    engine_root: Path, aggregation_plan_path: Path
++) -> Path:
++    """Require the plan tracked by the clean, pinned engine checkout."""
++
++    expected = (
++        engine_root
++        / "tests"
++        / "fixtures"
++        / "unit_derivation"
++        / "nz_income_explorer_family.yaml"
++    ).resolve()
++    if aggregation_plan_path.resolve() != expected:
++        raise HarnessError(
++            "unit aggregation plan must be the canonical plan under the "
++            f"pinned engine checkout: expected {expected}, found "
++            f"{aggregation_plan_path.resolve()}"
++        )
++    return aggregation_plan_path
++
++
+ def require_directory(path: Path, label: str) -> Path:
+     resolved = path.expanduser().resolve()
+     if not resolved.is_dir():
+@@ -373,6 +533,8 @@ class Provenance:
+     engine_binary_sha256: str
+     composition_path: Path
+     composition_sha256: str
++    aggregation_plan_path: Path
++    aggregation_plan_sha256: str
+     eligibility_closures_path: Path
+     eligibility_closures_sha256: str
+     eligibility_closures_version: str
+@@ -411,13 +573,20 @@ class Provenance:
+                 "git_sha": self.engine_sha,
+                 "expected_git_sha": EXPECTED_ENGINE_SHA,
+                 "tracked_dirty": self.engine_tracked_dirty,
++                "cleanliness_scope": "tracked_and_untracked_nonignored",
+                 "binary": str(self.engine_binary),
+                 "binary_sha256": self.engine_binary_sha256,
++                "expected_binary_sha256": EXPECTED_ENGINE_BINARY_SHA256,
+             },
+             "composition": {
+                 "path": str(self.composition_path),
+                 "sha256": self.composition_sha256,
+             },
++            "unit_aggregation_plan": {
++                "path": str(self.aggregation_plan_path),
++                "sha256": self.aggregation_plan_sha256,
++                "experimental_schema": "axiom/unit-aggregation-plan-stage3/1",
++            },
+             "eligibility_closures": {
+                 "path": str(self.eligibility_closures_path),
+                 "sha256": self.eligibility_closures_sha256,
+@@ -591,6 +760,7 @@ def verify_inputs(
+     engine_binary: Path,
+     treasury_root: Path,
+     composition_path: Path,
++    aggregation_plan_path: Path,
+     eligibility_closures_path: Path,
+     eligibility_closures: Mapping[str, Any],
+     oracle_generator: Path,
+@@ -601,18 +771,15 @@ def verify_inputs(
+     engine_root = require_directory(engine_root, "engine root")
+     engine_binary = require_file(engine_binary, "engine binary")
+     composition_path = require_file(composition_path, "composition")
++    aggregation_plan_path = require_file(
++        aggregation_plan_path, "unit aggregation plan"
++    )
++    aggregation_plan_path = verify_aggregation_plan_binding(
++        engine_root, aggregation_plan_path
++    )
+     eligibility_closures_path = require_file(
+         eligibility_closures_path, "eligibility closures"
+     )
+-    expected_engine_binary = (
+-        engine_root / "target" / "release" / "axiom-rules-engine"
+-    ).resolve()
+-    if engine_binary != expected_engine_binary:
+-        raise HarnessError(
+-            "engine binary must be the release binary under the pinned engine "
+-            f"checkout: expected {expected_engine_binary}, found {engine_binary}"
+-        )
+-
+     if rulespec_root.name != "rulespec-nz":
+         raise HarnessError(
+             f"RuleSpec root basename must be rulespec-nz, got {rulespec_root.name!r}"
+@@ -773,22 +940,18 @@ def verify_inputs(
+                 )
+
+     rulespec_sha = git_sha(rulespec_root)
+-    engine_sha = git_sha(engine_root)
++    engine_sha, engine_binary_sha256 = verify_engine_binding(
++        engine_root, engine_binary
++    )
+     if rulespec_sha != EXPECTED_RULESPEC_SHA:
+         raise HarnessError(
+             f"RuleSpec SHA mismatch: expected {EXPECTED_RULESPEC_SHA}, "
+             f"found {rulespec_sha}"
+         )
+-    if engine_sha != EXPECTED_ENGINE_SHA:
+-        raise HarnessError(
+-            f"engine SHA mismatch: expected {EXPECTED_ENGINE_SHA}, found {engine_sha}"
+-        )
+     rulespec_dirty = git_tracked_dirty(rulespec_root)
+-    engine_dirty = git_tracked_dirty(engine_root)
+     if rulespec_dirty:
+         raise HarnessError(f"RuleSpec checkout has tracked modifications: {rulespec_root}")
+-    if engine_dirty:
+-        raise HarnessError(f"engine checkout has tracked modifications: {engine_root}")
++    engine_dirty = False
+
+     treasury_root = require_directory(treasury_root, "Treasury source checkout")
+     treasury_present = True
+@@ -834,9 +997,11 @@ def verify_inputs(
+         engine_sha=engine_sha,
+         engine_tracked_dirty=engine_dirty,
+         engine_binary=engine_binary,
+-        engine_binary_sha256=sha256_file(engine_binary),
++        engine_binary_sha256=engine_binary_sha256,
+         composition_path=composition_path,
+         composition_sha256=sha256_file(composition_path),
++        aggregation_plan_path=aggregation_plan_path,
++        aggregation_plan_sha256=sha256_file(aggregation_plan_path),
+         eligibility_closures_path=eligibility_closures_path,
+         eligibility_closures_sha256=sha256_file(eligibility_closures_path),
+         eligibility_closures_version=str(eligibility_closures["version"]),
+@@ -857,12 +1022,15 @@ class Engine:
+         *,
+         binary: Path,
+         artifact: Path,
++        aggregation_artifact: Path,
+         catalog: Mapping[str, str],
+     ) -> None:
+         self.binary = binary
+         self.artifact = artifact
++        self.aggregation_artifact = aggregation_artifact
+         self.catalog = dict(catalog)
+         self.call_count = 0
++        self.aggregation_call_count = 0
+         self.observed_inputs: dict[str, set[str]] = {
+             slot: set() for slot in self.catalog
+         }
+@@ -875,6 +1043,8 @@ class Engine:
+         composition: Path,
+         rulespec_root: Path,
+         artifact: Path,
++        aggregation_plan: Path,
++        aggregation_artifact: Path,
+     ) -> tuple["Engine", dict[str, Any], str]:
+         process = run_checked(
+             [
+@@ -898,7 +1068,41 @@ class Engine:
+         }
+         if not catalog:
+             raise HarnessError("compiled artifact has an empty input catalog")
+-        engine = cls(binary=binary, artifact=artifact, catalog=catalog)
++        run_checked(
++            [
++                str(binary),
++                "compile-unit-aggregation",
++                "--plan",
++                str(aggregation_plan),
++                "--output",
++                str(aggregation_artifact),
++            ],
++            label="registered unit aggregation compile",
++        )
++        try:
++            compiled_aggregation = json.loads(
++                aggregation_artifact.read_text(encoding="utf-8")
++            )
++        except (OSError, json.JSONDecodeError) as exc:
++            raise HarnessError(
++                f"compiled unit aggregation artifact is invalid JSON: {exc}"
++            ) from exc
++        if (
++            compiled_aggregation.get("format")
++            != "axiom/compiled-unit-aggregation-stage3/1"
++            or not compiled_aggregation.get("plan_digest")
++            or not compiled_aggregation.get("phase_two_artifact")
++        ):
++            raise HarnessError(
++                "compiled unit aggregation artifact is incomplete or has an "
++                f"unknown format: {compiled_aggregation!r}"
++            )
++        engine = cls(
++            binary=binary,
++            artifact=artifact,
++            aggregation_artifact=aggregation_artifact,
++            catalog=catalog,
++        )
+         return engine, compiled, process.stdout.strip()
+
+     def input_record(
+@@ -1017,6 +1221,38 @@ class Engine:
+                 raise HarnessError(f"unknown engine output shape for {target}: {item!r}")
+         return values, results[0].get("trace", {})
+
++    def aggregate(self, request: Mapping[str, Any]) -> dict[str, Any]:
++        process = run_checked(
++            [
++                str(self.binary),
++                "run-unit-aggregation",
++                "--artifact",
++                str(self.aggregation_artifact),
++                "--enable-experimental-unit-derivation",
++            ],
++            stdin=json.dumps(request, sort_keys=True, separators=(",", ":")),
++            label="engine unit aggregation",
++        )
++        self.aggregation_call_count += 1
++        try:
++            response = json.loads(process.stdout)
++        except json.JSONDecodeError as exc:
++            raise HarnessError(
++                "engine returned invalid unit aggregation JSON: "
++                f"{process.stdout!r}"
++            ) from exc
++        if response.get("schema") != "axiom/unit-aggregation-plan-stage3/1":
++            raise HarnessError(
++                f"engine returned unknown aggregation schema: {response!r}"
++            )
++        families = determined(response.get("families"), "families")
++        if not isinstance(families, list) or len(families) != 1:
++            raise HarnessError(
++                "IncomeExplorer scenario must derive exactly one family, "
++                f"found {families!r}"
++            )
++        return unwrap_aggregated_family(families[0])
++
+
+ def normalize_children(raw: Any) -> list[int]:
+     if isinstance(raw, list):
+@@ -1260,8 +1496,9 @@ class ModelEvaluator:
+         ] = {}
+         self._gross_benefit_cache: dict[Decimal, Decimal] = {}
+         self._as_cutout_cache: dict[
+-            tuple[bool, int, bool], Decimal
++            tuple[bool, bool, bool], Decimal
+         ] = {}
++        self._family_shape_cache: dict[str, dict[str, Any]] = {}
+         self.tax_rates = selected_parameter_values(
+             compiled, "individual_income_tax_bracket_rates"
+         )
+@@ -1316,6 +1553,246 @@ class ModelEvaluator:
+                 f"unexpected tax-threshold indexes: {sorted(self.tax_thresholds)}"
+             )
+
++    @staticmethod
++    def _zero_adult_scalars() -> dict[str, Decimal]:
++        return {
++            "weekly_wage": D0,
++            "annual_wage": D0,
++            "annual_family_scheme_base_income": D0,
++            "weekly_net_benefit": D0,
++            "weekly_gross_benefit": D0,
++            "weekly_wage_tax": D0,
++            "weekly_net_wage": D0,
++            "weekly_hours": D0,
++            "ietc_weekly": D0,
++            "ietc_continuous_weekly": D0,
++        }
++
++    def aggregate_family(
++        self,
++        scenario: Scenario,
++        *,
++        adult_scalars: Mapping[int, Mapping[str, Decimal]] | None = None,
++        child_scalars: Mapping[int, Mapping[str, Decimal]] | None = None,
++        family_scheme_income: Decimal = D0,
++    ) -> dict[str, Any]:
++        adults = adult_scalars or {}
++        children = child_scalars or {}
++        scope = f"scenario:{scenario.id}"
++        primary_id = f"{scenario.id}:person:1"
++        persons: list[dict[str, Any]] = []
++        for person in (1, 2):
++            if person == 2 and not scenario.partnered:
++                continue
++            scalars = self._zero_adult_scalars()
++            if person == 2:
++                scalars.update(
++                    {
++                        "weekly_wage": scenario.gross_wage2,
++                        "annual_wage": (
++                            scenario.gross_wage2 * WEEKS_IN_MODEL_YEAR
++                        ),
++                        "annual_family_scheme_base_income": (
++                            scenario.gross_wage2 * WEEKS_IN_MODEL_YEAR
++                        ),
++                        "weekly_hours": scenario.hours2,
++                    }
++                )
++            scalars.update(adults.get(person, {}))
++            person_id = f"{scenario.id}:person:{person}"
++            persons.append(
++                {
++                    "id": person_id,
++                    "role": "adult",
++                    "evidence": {"id": f"{scope}:adult:{person}"},
++                    "age_years": known(
++                        25, f"{scope}:adult:{person}:age"
++                    ),
++                    "scalars": {
++                        name: known(
++                            decimal_text(value),
++                            f"{scope}:adult:{person}:scalar:{name}",
++                        )
++                        for name, value in sorted(scalars.items())
++                    },
++                    "facts": {},
++                }
++            )
++        for index, age in enumerate(scenario.children):
++            age_18 = self.closures["age_18"]
++            values = {
++                "best_start_before_care_and_abatement": D0,
++                "best_start_claimant_care_fraction": dec(
++                    self.closures["care"][
++                        "best_start_child_care_fraction"
++                    ]
++                ),
++                "in_work_tax_credit_child_exclusive_care_fraction": dec(
++                    self.closures["care"][
++                        "iwtc_child_exclusive_care_fraction"
++                    ]
++                ),
++            }
++            values.update(
++                {
++                    name: value
++                    for name, value in children.get(index, {}).items()
++                    if name != "best_start_family_abatement"
++                }
++            )
++            child_id = f"{scenario.id}:child:{index}"
++            persons.append(
++                {
++                    "id": child_id,
++                    "role": "child",
++                    "evidence": {"id": f"{scope}:child:{index}"},
++                    "age_years": known(
++                        age, f"{scope}:child:{index}:age"
++                    ),
++                    "scalars": {
++                        name: known(
++                            decimal_text(value),
++                            f"{scope}:child:{index}:scalar:{name}",
++                        )
++                        for name, value in sorted(values.items())
++                    },
++                    "facts": {
++                        "principal_care_for_family_scheme": known(
++                            bool(
++                                self.closures["care"][
++                                    "wff_commissioner_considers_primary_day_to_day_care_when_child_present"
++                                ]
++                            ),
++                            f"{scope}:child:{index}:principal-care",
++                        ),
++                        "in_work_tax_credit_principal_caregiver": known(
++                            bool(
++                                self.closures["care"][
++                                    "iwtc_child_is_principal_caregiver_when_present"
++                                ]
++                            ),
++                            f"{scope}:child:{index}:iwtc-principal-caregiver",
++                        ),
++                        "not_financially_independent_at_age_18": known(
++                            bool(
++                                age_18[
++                                    "not_financially_independent_at_age_18"
++                                ]
++                            ),
++                            f"{scope}:child:{index}:mc9-financial-dependence",
++                        ),
++                        "attending_school_or_tertiary_at_age_18": known(
++                            bool(
++                                age_18[
++                                    "attending_school_or_tertiary_at_age_18"
++                                ]
++                            ),
++                            f"{scope}:child:{index}:mc9-education",
++                        ),
++                        "commissioner_period_contains_segment_at_age_18": known(
++                            bool(
++                                age_18[
++                                    "commissioner_period_contains_segment_at_age_18"
++                                ]
++                            ),
++                            f"{scope}:child:{index}:mc9-period",
++                        ),
++                    },
++                }
++            )
++        partner_tuples: list[tuple[str, str]] = []
++        if scenario.partnered:
++            partner_tuples.append(
++                (primary_id, f"{scenario.id}:person:2")
++            )
++        child_tuples = [
++            (primary_id, f"{scenario.id}:child:{index}")
++            for index, _age in enumerate(scenario.children)
++        ]
++        relations = []
++        for relation, tuples in (
++            ("partner_of", partner_tuples),
++            ("dependent_child_of", child_tuples),
++        ):
++            relations.append(
++                {
++                    "name": relation,
++                    "scope": scope,
++                    "completeness": {
++                        "id": f"{scope}:complete:{relation}"
++                    },
++                    "facts": [
++                        {
++                            "tuple": list(pair),
++                            "knowledge": known(
++                                True,
++                                f"{scope}:relation:{relation}:{pair[0]}:{pair[1]}",
++                            ),
++                        }
++                        for pair in tuples
++                    ],
++                }
++            )
++        adjustment_values = [
++            (
++                decimal_text(values["best_start_family_abatement"]),
++                f"{scope}:child:{index}:best-start-family-abatement",
++            )
++            for index, values in sorted(children.items())
++            if "best_start_family_abatement" in values
++        ]
++        adjustment = (
++            observations(adjustment_values)
++            if adjustment_values
++            else known("0", f"{scope}:best-start-family-abatement:none")
++        )
++        family = self.engine.aggregate(
++            {
++                "scope": scope,
++                "segment": f"{EXPECTED_PERIOD_START}/{EXPECTED_PERIOD_END}",
++                "roster_completeness": {"id": f"{scope}:complete:roster"},
++                "segment_completeness": {"id": f"{scope}:complete:segment"},
++                "persons": persons,
++                "relations": relations,
++                "family_inputs": [
++                    {
++                        "anchor_person": primary_id,
++                        "evidence": {"id": f"{scope}:family-input"},
++                        "named_people": {
++                            "mc7_entitlement_holder": known(
++                                primary_id, f"{scope}:mc7-entitlement-holder"
++                            )
++                        },
++                        "scalars": {
++                            "family_scheme_income": known(
++                                decimal_text(family_scheme_income),
++                                f"{scope}:family-scheme-income",
++                            ),
++                            "best_start_family_abatement": adjustment,
++                            "best_start_abatement_threshold": known(
++                                decimal_text(
++                                    self.best_start_abatement_threshold
++                                ),
++                                f"{scope}:best-start-threshold",
++                            ),
++                            "best_start_abatement_rate": known(
++                                decimal_text(self.best_start_abatement_rate),
++                                f"{scope}:best-start-rate",
++                            ),
++                        },
++                    }
++                ],
++            }
++        )
++        return family
++
++    def family_shape(self, scenario: Scenario) -> dict[str, Any]:
++        if scenario.id not in self._family_shape_cache:
++            self._family_shape_cache[scenario.id] = self.aggregate_family(
++                scenario
++            )
++        return self._family_shape_cache[scenario.id]
++
+     def _evaluate(
+         self,
+         *,
+@@ -1419,17 +1896,19 @@ class ModelEvaluator:
+         scenario: Scenario,
+         weekly_family_income: Decimal,
+     ) -> Decimal:
+-        child_count = len(scenario.children)
+-        youngest = min(scenario.children) if scenario.children else 0
++        shape = self.family_shape(scenario)
++        child_count = int(shape["counts"]["dependent_child_count"])
++        youngest = int(shape["counts"]["youngest_child_age"])
++        partnered = bool(shape["partner_present"])
+         inputs: dict[str, bool | int | Decimal] = {
+             "jobseeker_support_applicant_age": 25,
+             "jobseeker_support_benefit_commenced_on_or_after_1998_07_01": False,
+             "jobseeker_support_dependent_children_count": child_count,
+             "jobseeker_support_living_with_parent": False,
+             "jobseeker_support_partner_ineligible_due_to_sanction_or_strike": False,
+-            "jobseeker_support_partner_receives_main_benefit": scenario.partnered,
++            "jobseeker_support_partner_receives_main_benefit": partnered,
+             "jobseeker_support_partner_receives_new_zealand_superannuation_or_veterans_pension": False,
+-            "jobseeker_support_single": not scenario.partnered,
++            "jobseeker_support_single": not partnered,
+             "jobseeker_support_total_income": weekly_family_income,
+             "jobseeker_support_transferred_2013_no_dependent_children": False,
+             "jobseeker_support_youngest_dependent_child_age": youngest,
+@@ -1459,25 +1938,39 @@ class ModelEvaluator:
+         return scalar_decimal(values, SOLE_PARENT_OUTPUT)
+
+     def raw_iwtc_branch(self, scenario: Scenario, weekly_wages: Decimal) -> bool:
+-        return bool(scenario.children) and weekly_wages >= ORACLE_IWTC_WEEKLY_THRESHOLD
++        has_children = bool(
++            self.family_shape(scenario)["predicates"][
++                "has_dependent_children"
++            ]
++        )
++        return has_children and weekly_wages >= ORACLE_IWTC_WEEKLY_THRESHOLD
+
+     def benefit_components(
+         self,
+         scenario: Scenario,
+         weekly_wages: Decimal,
+     ) -> tuple[Decimal, ...]:
+-        if scenario.partnered:
++        shape = self.family_shape(scenario)
++        partnered = bool(shape["partner_present"])
++        has_children = bool(
++            shape["predicates"]["has_dependent_children"]
++        )
++        jss_sole_parent = bool(
++            shape["predicates"][
++                "jss_sole_parent_youngest_age_at_least_14"
++            ]
++        )
++        if partnered:
+             per_person = self.jobseeker_payment(scenario, weekly_wages)
+             scheduled = (per_person, per_person)
+-        elif scenario.children:
+-            if min(scenario.children) >= 14:
+-                # Treasury R/emtr.R lines 310-319 deliberately select the
+-                # lone-parent JSS rate with the SPS income-test scale once the
+-                # youngest child is 14. RuleSpec's Jobseeker branch encodes
+-                # that same combination.
+-                scheduled = (self.jobseeker_payment(scenario, weekly_wages),)
+-            else:
+-                scheduled = (self.sole_parent_payment(scenario, weekly_wages),)
++        elif jss_sole_parent:
++            # Treasury R/emtr.R lines 310-319 deliberately select the
++            # lone-parent JSS rate with the SPS income-test scale once the
++            # youngest child is 14. The cited plan derives the full branch
++            # predicate; Python only composes the selected program call.
++            scheduled = (self.jobseeker_payment(scenario, weekly_wages),)
++        elif has_children:
++            scheduled = (self.sole_parent_payment(scenario, weekly_wages),)
+         else:
+             scheduled = (self.jobseeker_payment(scenario, weekly_wages),)
+         if self.raw_iwtc_branch(scenario, weekly_wages):
+@@ -1489,7 +1982,7 @@ class ModelEvaluator:
+         scenario: Scenario,
+     ) -> tuple[Decimal, ...]:
+         per_person = self.jobseeker_payment(scenario, D0)
+-        if scenario.partnered:
++        if bool(self.family_shape(scenario)["partner_present"]):
+             return (per_person, per_person)
+         return (per_person,)
+
+@@ -1545,7 +2038,10 @@ class ModelEvaluator:
+         weekly_wages: Decimal,
+         net_benefit: Decimal,
+     ) -> dict[str, bool | int | Decimal]:
+-        has_children = bool(scenario.children)
++        shape = self.family_shape(scenario)
++        has_children = bool(
++            shape["predicates"]["has_dependent_children"]
++        )
+         earns_paye = weekly_wages > 0
+         residence = self.closures["residence"]
+         care = self.closures["care"]
+@@ -1568,8 +2064,11 @@ class ModelEvaluator:
+                 has_children and care["wff_caregiver_lives_apart_when_child_present"]
+             ),
+             "in_work_tax_credit_child_exclusive_care_fraction": (
+-                dec(care["iwtc_child_exclusive_care_fraction"])
+-                if has_children else D0
++                dec(
++                    shape["scalars"][
++                        "in_work_tax_credit_child_exclusive_care_fraction"
++                    ]
++                )
+             ),
+             "in_work_tax_credit_person_age": 25,
+             "in_work_tax_credit_child_financially_dependent": has_children,
+@@ -1639,30 +2138,48 @@ class ModelEvaluator:
+         self,
+         *,
+         scenario: Scenario,
+-        weekly_wages: Decimal,
+-        weekly_gross_benefits: Decimal,
+-        net_benefit: Decimal,
+-        wage_tax_total: Decimal,
+-        hours_total: Decimal,
++        family_aggregate: Mapping[str, Any],
+     ) -> dict[str, Decimal | str]:
+-        child_count = len(scenario.children)
+-        annual_wages = weekly_wages * WEEKS_IN_MODEL_YEAR
+-        annual_base_income = (
+-            weekly_wages + weekly_gross_benefits
+-        ) * WEEKS_IN_MODEL_YEAR
++        child_count = int(
++            family_aggregate["counts"]["dependent_child_count"]
++        )
++        has_children = bool(
++            family_aggregate["predicates"]["has_dependent_children"]
++        )
++        values = family_aggregate["scalars"]
++        weekly_wages = dec(values["weekly_wages"])
++        annual_wages = dec(values["annual_wages"])
++        annual_base_income = dec(
++            values["annual_family_scheme_base_income"]
++        )
++        net_benefit = dec(values["weekly_net_benefit"])
++        wage_tax_total = dec(values["weekly_wage_tax"])
++        hours_total = dec(values["hours_total"])
+         inputs = self.family_scheme_inputs(annual_base_income, annual_wages)
+         inputs.update(
+             {
+                 "family_tax_credit_eldest_dependent_child_care_units": (
+-                    D1 if child_count else D0
++                    dec(
++                        values[
++                            "family_tax_credit_eldest_dependent_child_care_units"
++                        ]
++                    )
++                ),
++                "family_tax_credit_subsequent_dependent_child_care_units": dec(
++                    values[
++                        "family_tax_credit_subsequent_dependent_child_care_units"
++                    ]
++                ),
++                "family_tax_credit_entitlement_days": int(
++                    dec(values["family_tax_credit_entitlement_days"])
+                 ),
+-                "family_tax_credit_subsequent_dependent_child_care_units": Decimal(
+-                    max(0, child_count - 1)
++                "wff_family_credit_abatement_days": int(
++                    dec(values["wff_family_credit_abatement_days"])
+                 ),
+-                "family_tax_credit_entitlement_days": 365 if child_count else 0,
+-                "wff_family_credit_abatement_days": 365 if child_count else 0,
+                 "in_work_tax_credit_allowed_children_count": child_count,
+-                "in_work_tax_credit_weekly_periods": 52 if child_count else 0,
++                "in_work_tax_credit_weekly_periods": int(
++                    dec(values["in_work_tax_credit_weekly_periods"])
++                ),
+                 "child_tax_credit_for_entitlement_period": D0,
+                 "parental_tax_credit_for_entitlement_period": D0,
+                 "parental_tax_credit_additional_abatement": D0,
+@@ -1675,12 +2192,12 @@ class ModelEvaluator:
+         full_time_hours = Decimal(
+             work_tests[
+                 "mftc_couple_full_time_hours_per_week"
+-                if scenario.partnered
++                if bool(family_aggregate["partner_present"])
+                 else "mftc_single_full_time_hours_per_week"
+             ]
+         )
+         mftc_eligible = (
+-            bool(child_count)
++            has_children
+             and hours_total >= full_time_hours
+             and net_benefit == 0
+         )
+@@ -1719,24 +2236,44 @@ class ModelEvaluator:
+         self,
+         *,
+         scenario: Scenario,
+-        annual_base_income: Decimal,
+-        annual_wages: Decimal,
+-    ) -> tuple[Decimal, Decimal, Decimal]:
+-        eligible_children = [
+-            index for index, age in enumerate(scenario.children) if age in (0, 1, 2)
+-        ]
+-        total_before_abatement = D0
+-        per_child_total = D0
+-        family_abatement: Decimal | None = None
+-        for index in eligible_children:
+-            inputs = self.family_scheme_inputs(annual_base_income, annual_wages)
++        adult_scalars: Mapping[int, Mapping[str, Decimal]],
++        family_scheme_income: Decimal,
++    ) -> tuple[Decimal, Decimal, dict[int, dict[str, Decimal]]]:
++        projected = self.aggregate_family(
++            scenario,
++            adult_scalars=adult_scalars,
++            family_scheme_income=family_scheme_income,
++        )
++        annual_wages = dec(projected["scalars"]["annual_wages"])
++        child_values: dict[int, dict[str, Decimal]] = {}
++        for child in projected["children"]:
++            index = int(str(child["person"]).rsplit(":", 1)[1])
++            if not child["age_bands"]["best_start_eligible_child_count"]:
++                continue
++            projected_income = dec(child["scalars"]["family_scheme_income"])
++            inputs = self.family_scheme_inputs(
++                projected_income, annual_wages
++            )
+             inputs.update(
+                 {
+-                    "best_start_entitlement_days": 365,
+-                    "best_start_child_care_fraction": dec(
+-                        self.closures["care"]["best_start_child_care_fraction"]
++                    "best_start_entitlement_days": int(
++                        dec(
++                            projected["scalars"][
++                                "best_start_entitlement_days"
++                            ]
++                        )
++                    ),
++                    # The child program emits the pre-care statutory amount.
++                    # The aggregation plan applies each explicit MG 2(5) care
++                    # fraction exactly once at the family reduction.
++                    "best_start_child_care_fraction": D1,
++                    "best_start_abatement_days": int(
++                        dec(
++                            projected["scalars"][
++                                "best_start_entitlement_days"
++                            ]
++                        )
+                     ),
+-                    "best_start_abatement_days": 365,
+                 }
+             )
+             values = self._evaluate(
+@@ -1746,39 +2283,32 @@ class ModelEvaluator:
+                 outputs=[
+                     BEST_START_BEFORE_OUTPUT,
+                     BEST_START_ABATEMENT_OUTPUT,
+-                    BEST_START_OUTPUT,
+                 ],
+             )
+             child_before = scalar_decimal(values, BEST_START_BEFORE_OUTPUT)
+             child_abatement = scalar_decimal(
+                 values, BEST_START_ABATEMENT_OUTPUT
+             )
+-            total_before_abatement += child_before
+-            per_child_total += scalar_decimal(values, BEST_START_OUTPUT)
+-            if family_abatement is None:
+-                family_abatement = child_abatement
+-            elif child_abatement != family_abatement:
+-                raise HarnessError(
+-                    "Best Start family abatement changed between children for "
+-                    f"{scenario.id}"
+-                )
+-        aggregate_total = max(
+-            D0,
+-            total_before_abatement - (family_abatement or D0),
+-        )
+-        continuous_total = max(
+-            D0,
+-            total_before_abatement
+-            - max(
+-                D0,
+-                annual_base_income - self.best_start_abatement_threshold,
+-            )
+-            * self.best_start_abatement_rate,
++            child_values[index] = {
++                "best_start_before_care_and_abatement": child_before,
++                "best_start_family_abatement": child_abatement,
++            }
++        reduced = self.aggregate_family(
++            scenario,
++            adult_scalars=adult_scalars,
++            child_scalars=child_values,
++            family_scheme_income=family_scheme_income,
++        )
++        aggregate_total = dec(reduced["scalars"]["best_start_total"])
++        continuous_total = dec(
++            reduced["scalars"][
++                "best_start_total_continuous_abatement"
++            ]
+         )
+         return (
+             aggregate_total / WEEKS_IN_MODEL_YEAR,
+-            per_child_total / WEEKS_IN_MODEL_YEAR,
+             continuous_total / WEEKS_IN_MODEL_YEAR,
++            child_values,
+         )
+
+     def ietc_for_person(
+@@ -1863,13 +2393,18 @@ class ModelEvaluator:
+     ) -> Decimal:
+         if net_benefit <= 0:
+             return D0
++        shape = self.family_shape(scenario)
+         values = self._evaluate(
+             entity="Person",
+             entity_id=f"{scenario.id}:winter-energy-rate",
+             inputs={
+-                "winter_energy_payment_single": not scenario.partnered,
+-                "winter_energy_payment_has_dependent_children": bool(
+-                    scenario.children
++                "winter_energy_payment_single": not bool(
++                    shape["partner_present"]
++                ),
++                "winter_energy_payment_has_dependent_children": (
++                    bool(
++                        shape["predicates"]["has_dependent_children"]
++                    )
+                 ),
+             },
+             outputs=[WEP_RATE_OUTPUT],
+@@ -1882,14 +2417,22 @@ class ModelEvaluator:
+         *,
+         treasury_host_aligned: bool,
+     ) -> Decimal:
++        shape = self.family_shape(scenario)
++        partnered = bool(shape["partner_present"])
++        has_children = bool(
++            shape["predicates"]["has_dependent_children"]
++        )
++        sole_parent = bool(
++            shape["predicates"]["sole_parent_with_dependent_children"]
++        )
+         key = (
+-            scenario.partnered,
+-            len(scenario.children),
++            partnered,
++            has_children,
+             treasury_host_aligned,
+         )
+         if key in self._as_cutout_cache:
+             return self._as_cutout_cache[key]
+-        if not scenario.partnered and scenario.children:
++        if sole_parent:
+             # Treasury's source-defined lone-parent AS branch is deliberately
+             # not the SPS/JSS-with-children benefit schedule used for current
+             # net benefit. R/emtr.R lines 324-329 instead combine the lone-
+@@ -1931,11 +2474,30 @@ class ModelEvaluator:
+         eldest_ftc_annual: Decimal,
+         treasury_host_aligned: bool,
+     ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+-        zero_income_benefit = sum(
+-            self.zero_income_jobseeker_components(scenario), D0
++        shape = self.family_shape(scenario)
++        partnered = bool(shape["partner_present"])
++        has_children = bool(
++            shape["predicates"]["has_dependent_children"]
++        )
++        two_or_more = bool(
++            shape["predicates"]["has_two_or_more_dependent_children"]
++        )
++        sole_parent = bool(
++            shape["predicates"]["sole_parent_with_dependent_children"]
++        )
++        zero_components = self.zero_income_jobseeker_components(scenario)
++        zero_income_aggregate = self.aggregate_family(
++            scenario,
++            adult_scalars={
++                person: {"weekly_net_benefit": value}
++                for person, value in enumerate(zero_components, start=1)
++            },
++        )
++        zero_income_benefit = dec(
++            zero_income_aggregate["scalars"]["weekly_net_benefit"]
+         )
+         base_rate = zero_income_benefit
+-        if scenario.children:
++        if has_children:
+             # Social Security Regulations 2018 reg 17 uses the annual FTC rate
+             # divided by 52. Treasury raw emtr() instead divides by 365/7; that
+             # source-host convention is retained only in the labeled diagnostic.
+@@ -1956,13 +2518,11 @@ class ModelEvaluator:
+             "accommodation_supplement_boarder": boarder,
+             "accommodation_supplement_business_use_area": D0,
+             "accommodation_supplement_costs_are_homeownership": not rent,
+-            "accommodation_supplement_has_dependent_children": bool(
+-                scenario.children
+-            ),
++            "accommodation_supplement_has_dependent_children": has_children,
+             "accommodation_supplement_has_two_or_more_dependent_children": (
+-                len(scenario.children) >= 2
++                two_or_more
+             ),
+-            "accommodation_supplement_in_relationship": scenario.partnered,
++            "accommodation_supplement_in_relationship": partnered,
+             "accommodation_supplement_joint_owner_with_resident": False,
+             "accommodation_supplement_non_beneficiary": net_benefit == 0,
+             "accommodation_supplement_non_beneficiary_income_cutout_weekly_amount": (
+@@ -1984,7 +2544,7 @@ class ModelEvaluator:
+             "accommodation_supplement_self_contained_area_let_to_residents": D0,
+             "accommodation_supplement_social_housing_weekly_contributions_paid": D0,
+             "accommodation_supplement_sole_parent": (
+-                not scenario.partnered and bool(scenario.children)
++                sole_parent
+             ),
+             "accommodation_supplement_total_premises_area": D0,
+             "accommodation_supplement_weekly_board_and_lodgings_paid": (
+@@ -2024,21 +2584,54 @@ class ModelEvaluator:
+         scenario: Scenario,
+         weekly_wage1: Decimal,
+     ) -> dict[str, Decimal | str]:
+-        weekly_wage2 = scenario.gross_wage2
+-        weekly_wages = weekly_wage1 + weekly_wage2
++        shape = self.family_shape(scenario)
++        partnered = bool(shape["partner_present"])
++        # The cached shape request carries a zero-valued primary adult, so
++        # these family sums are exactly the partner scenario inputs when a
++        # partner is present and zero otherwise.
++        weekly_wage2 = dec(shape["scalars"]["weekly_wages"])
++        weekly_hours2 = dec(shape["scalars"]["hours_total"])
+         hours1 = (
+             weekly_wage1 / scenario.wage1_hourly
+             if scenario.wage1_hourly > 0
+             else D0
+         )
+-        hours_total = hours1 + scenario.hours2
++        adult_scalars: dict[int, dict[str, Decimal]] = {
++            1: {
++                "weekly_wage": weekly_wage1,
++                "annual_wage": weekly_wage1 * WEEKS_IN_MODEL_YEAR,
++                "annual_family_scheme_base_income": (
++                    weekly_wage1 * WEEKS_IN_MODEL_YEAR
++                ),
++                "weekly_hours": hours1,
++            }
++        }
++        if partnered:
++            adult_scalars[2] = {
++                "weekly_wage": weekly_wage2,
++                "annual_wage": weekly_wage2 * WEEKS_IN_MODEL_YEAR,
++                "annual_family_scheme_base_income": (
++                    weekly_wage2 * WEEKS_IN_MODEL_YEAR
++                ),
++                "weekly_hours": weekly_hours2,
++            }
++        wage_aggregate = self.aggregate_family(
++            scenario, adult_scalars=adult_scalars
++        )
++        weekly_wages = dec(wage_aggregate["scalars"]["weekly_wages"])
+         benefit_components = self.benefit_components(scenario, weekly_wages)
+-        net_benefit = sum(benefit_components, D0)
+         gross_benefits = tuple(
+             self.gross_benefit_from_net_weekly(value)
+             for value in benefit_components
+         )
+-        gross_benefit_total = sum(gross_benefits, D0)
++        for person, (net_component, gross_component) in enumerate(
++            zip(benefit_components, gross_benefits, strict=True), start=1
++        ):
++            adult_scalars[person]["weekly_net_benefit"] = net_component
++            adult_scalars[person]["weekly_gross_benefit"] = gross_component
++            adult_scalars[person]["annual_family_scheme_base_income"] = (
++                adult_scalars[person]["weekly_wage"] + gross_component
++            ) * WEEKS_IN_MODEL_YEAR
+
+         primary_gross_benefit = gross_benefits[0]
+         tax1 = (
+@@ -2051,11 +2644,13 @@ class ModelEvaluator:
+             weekly_wage1 * WEEKS_IN_MODEL_YEAR
+         ) / WEEKS_IN_MODEL_YEAR
+         net_wage1 = weekly_wage1 - tax1 - acc1
++        adult_scalars[1]["weekly_wage_tax"] = tax1
++        adult_scalars[1]["weekly_net_wage"] = net_wage1
+
+         tax2 = D0
+         acc2 = D0
+         net_wage2 = D0
+-        if scenario.partnered:
++        if partnered:
+             partner_gross_benefit = gross_benefits[1]
+             tax2 = (
+                 self.annual_tax(
+@@ -2068,15 +2663,22 @@ class ModelEvaluator:
+                 weekly_wage2 * WEEKS_IN_MODEL_YEAR
+             ) / WEEKS_IN_MODEL_YEAR
+             net_wage2 = weekly_wage2 - tax2 - acc2
+-        net_wage = net_wage1 + net_wage2
++            adult_scalars[2]["weekly_wage_tax"] = tax2
++            adult_scalars[2]["weekly_net_wage"] = net_wage2
++        family_aggregate = self.aggregate_family(
++            scenario, adult_scalars=adult_scalars
++        )
++        aggregate_scalars = family_aggregate["scalars"]
++        net_wage = dec(aggregate_scalars["weekly_net_wage"])
++        net_benefit = dec(aggregate_scalars["weekly_net_benefit"])
++        gross_benefit_total = dec(
++            aggregate_scalars["weekly_gross_benefit"]
++        )
++        hours_total = dec(aggregate_scalars["hours_total"])
+
+         family_values = self.family_credit_values(
+             scenario=scenario,
+-            weekly_wages=weekly_wages,
+-            weekly_gross_benefits=gross_benefit_total,
+-            net_benefit=net_benefit,
+-            wage_tax_total=tax1 + tax2,
+-            hours_total=hours_total,
++            family_aggregate=family_aggregate,
+         )
+         ftc_before = (
+             scalar_decimal(family_values, FTC_BEFORE_OUTPUT)
+@@ -2106,18 +2708,14 @@ class ModelEvaluator:
+             ),
+         )
+
+-        annual_wages = weekly_wages * WEEKS_IN_MODEL_YEAR
+-        annual_base_income = (
+-            weekly_wages + gross_benefit_total
+-        ) * WEEKS_IN_MODEL_YEAR
+         (
+             best_start,
+-            best_start_per_child,
+             best_start_continuous,
++            best_start_child_values,
+         ) = self.best_start_total(
+             scenario=scenario,
+-            annual_base_income=annual_base_income,
+-            annual_wages=annual_wages,
++            adult_scalars=adult_scalars,
++            family_scheme_income=family_scheme_income,
+         )
+         family_support_payable = (wff + mftc + best_start) > 0
+         ietc1, ietc1_continuous = self.ietc_for_person(
+@@ -2129,7 +2727,7 @@ class ModelEvaluator:
+         )
+         ietc2 = D0
+         ietc2_continuous = D0
+-        if scenario.partnered:
++        if partnered:
+             ietc2, ietc2_continuous = self.ietc_for_person(
+                 scenario=scenario,
+                 person=2,
+@@ -2137,8 +2735,32 @@ class ModelEvaluator:
+                 weekly_benefit=benefit_components[1],
+                 family_support_payable=family_support_payable,
+             )
+-        ietc = ietc1 + ietc2
+-        ietc_continuous = ietc1_continuous + ietc2_continuous
++        adult_scalars[1]["ietc_weekly"] = ietc1
++        adult_scalars[1]["ietc_continuous_weekly"] = ietc1_continuous
++        if partnered:
++            adult_scalars[2]["ietc_weekly"] = ietc2
++            adult_scalars[2][
++                "ietc_continuous_weekly"
++            ] = ietc2_continuous
++        final_aggregate = self.aggregate_family(
++            scenario,
++            adult_scalars=adult_scalars,
++            child_scalars=best_start_child_values,
++            family_scheme_income=family_scheme_income,
++        )
++        ietc = dec(final_aggregate["scalars"]["ietc_weekly"])
++        ietc_continuous = dec(
++            final_aggregate["scalars"]["ietc_continuous_weekly"]
++        )
++        final_best_start = (
++            dec(final_aggregate["scalars"]["best_start_total"])
++            / WEEKS_IN_MODEL_YEAR
++        )
++        if final_best_start != best_start:
++            raise HarnessError(
++                "Best Start family reduction changed between aggregation "
++                f"passes for {scenario.id}"
++            )
+         winter_energy = self.winter_energy_average(scenario, net_benefit)
+         (
+             as_unrounded,
+@@ -2192,9 +2814,6 @@ class ModelEvaluator:
+             "IETC_abated": ietc,
+             "WinterEnergy": winter_energy,
+             "BestStart_Total": best_start,
+-            "BestStart_Total_naive_per_child_abatement": (
+-                best_start_per_child
+-            ),
+             "BestStart_Total_continuous_abatement": (
+                 best_start_continuous
+             ),
+@@ -2214,6 +2833,13 @@ class ModelEvaluator:
+             "wage2_ACC_levy": acc2,
+             "net_wage2": net_wage2,
+             "family_scheme_income": scalar_decimal(family_values, FSI_OUTPUT),
++            "weekly_family_wages": weekly_wages,
++            "child_count_age_0_13": dec(
++                family_aggregate["counts"]["child_count_age_0_13"]
++            ),
++            "child_count_age_14_18": dec(
++                family_aggregate["counts"]["child_count_age_14_18"]
++            ),
+             "WFF_abated_continuous_abatement": continuous_wff,
+             "IETC_abated_continuous_abatement": ietc_continuous,
+             "iwtc_entitlement": str(
+@@ -2267,16 +2893,6 @@ def sweep_scenario(
+                 following_state, "AS_Amount_treasury_host_aligned"
+             )
+         )
+-        state["RuleSpec_EMTR_BestStart_Total_naive_per_child_abatement"] = (
+-            scalar_decimal(
+-                current_state,
+-                "BestStart_Total_naive_per_child_abatement",
+-            )
+-            - scalar_decimal(
+-                following_state,
+-                "BestStart_Total_naive_per_child_abatement",
+-            )
+-        )
+         recomposed_emtr = sum(
+             (
+                 scalar_decimal(state, f"RuleSpec_EMTR_{component}")
+@@ -2337,7 +2953,7 @@ def sweep_scenario(
+         )
+         net_income = scalar_decimal(state, "Net_Income")
+         state["RR"] = baseline / net_income if net_income != 0 else None
+-        gross_income = Decimal(wage) + scenario.gross_wage2
++        gross_income = scalar_decimal(state, "weekly_family_wages")
+         state["PTR"] = (
+             D1 - (net_income - baseline) / gross_income
+             if gross_income != 0
+@@ -2452,38 +3068,30 @@ def validate_expanded_coverage(
+             "treasury": dec(
+                 treasury_state(best_start_id, wage)["BestStart_Total"]
+             ),
+-            "rulespec_after_aggregate_once": scalar_decimal(
++            "rulespec_engine_family_reduction": scalar_decimal(
+                 state, "BestStart_Total"
+             ),
+-            "rulespec_before_naive_per_child_abatement": scalar_decimal(
+-                state, "BestStart_Total_naive_per_child_abatement"
+-            ),
+         }
+-        if (
+-            row["rulespec_after_aggregate_once"]
+-            < row["rulespec_before_naive_per_child_abatement"]
+-        ):
+-            raise HarnessError(
+-                "Best Start aggregate-once correction is not active at "
+-                f"wage {wage}"
+-            )
+         best_start_rows.append(row)
+-    if not any(
+-        row["rulespec_after_aggregate_once"]
+-        > row["rulespec_before_naive_per_child_abatement"]
+-        for row in best_start_rows
+-    ):
+-        raise HarnessError(
+-            "Best Start aggregate-once and naive per-child results never diverge"
+-        )
+     treasury_best_start_at_zero = dec(
+         treasury_state(best_start_id, 0)["BestStart_Total"]
+     )
++    rulespec_best_start_at_zero = scalar_decimal(
++        sweeps[best_start_id][0], "BestStart_Total"
++    )
+     if not any(
+         D0 < row["treasury"] < treasury_best_start_at_zero
+         for row in best_start_rows
+     ):
+         raise HarnessError("Treasury Best Start abatement is not binding")
++    if not any(
++        D0 < row["rulespec_engine_family_reduction"]
++        < rulespec_best_start_at_zero
++        for row in best_start_rows
++    ):
++        raise HarnessError(
++            "engine-side Best Start family abatement is not binding"
++        )
+
+     dual_id = "couple_two_children_dual_full_time"
+     dual_state = sweeps[dual_id][740]
+@@ -2533,6 +3141,25 @@ def validate_expanded_coverage(
+             "RuleSpec boarder path did not convert $400 to $248"
+         )
+
++    age_band_expectations = {
++        "couple_two_best_start_children_binding": (Decimal(2), D0),
++        "lone_parent_two_teens_jss": (D0, Decimal(2)),
++        "couple_two_children_dual_full_time": (D1, D1),
++        "large_family_four_children_age_bands": (Decimal(3), D1),
++        "single_childless_ietc_focused": (D0, D0),
++    }
++    for scenario_id, expected in age_band_expectations.items():
++        state = sweeps[scenario_id][0]
++        actual = (
++            scalar_decimal(state, "child_count_age_0_13"),
++            scalar_decimal(state, "child_count_age_14_18"),
++        )
++        if actual != expected:
++            raise HarnessError(
++                "engine age-band counts changed for "
++                f"{scenario_id}: expected {expected!r}, found {actual!r}"
++            )
++
+     large_id = "large_family_four_children_age_bands"
+     large_zero = sweeps[large_id][0]
+     if (
+@@ -2565,7 +3192,7 @@ def validate_expanded_coverage(
+         "sampled_point_count": sum(
+             len(scenario.sampled_wages) for scenario in scenarios
+         ),
+-        "best_start_aggregate_fix": best_start_rows,
++        "best_start_engine_family_reduction": best_start_rows,
+         "dual_full_time_partner_at_wage_740": {
+             "primary_hours": scalar_decimal(dual_state, "hours1"),
+             "partner_hours": scenario_by_id[dual_id].hours2,
+@@ -2593,6 +3220,7 @@ def validate_expanded_coverage(
+         },
+         "large_family_at_wage_0": {
+             "children": scenario_by_id[large_id].children,
++            "engine_age_band_counts": age_band_expectations[large_id],
+             "rulespec_ftc": scalar_decimal(large_zero, "FTC_abated"),
+             "rulespec_winter_energy": scalar_decimal(
+                 large_zero, "WinterEnergy"
+@@ -3576,13 +4204,13 @@ def build_diagnostic_rows(
+         "wage2_ACC_levy",
+         "net_wage2",
+         "family_scheme_income",
++        "child_count_age_0_13",
++        "child_count_age_14_18",
+         "iwtc_entitlement",
+-        "BestStart_Total_naive_per_child_abatement",
+         "BestStart_Total_continuous_abatement",
+         "WFF_abated_continuous_abatement",
+         "IETC_abated_continuous_abatement",
+         "RuleSpec_EMTR_AS_Amount_treasury_host_aligned",
+-        "RuleSpec_EMTR_BestStart_Total_naive_per_child_abatement",
+         "EMTR_ACC_rounding_component",
+         "EMTR_WFF_complete_dollar_component",
+         "EMTR_BestStart_complete_dollar_component",
+@@ -3848,8 +4476,10 @@ def render_report(
+     oracle: Mapping[str, Any],
+     provenance: Provenance,
+     compiled_artifact_sha256: str,
++    aggregation_artifact_sha256: str,
+     compiled_counts: Mapping[str, int],
+     engine_call_count: int,
++    aggregation_call_count: int,
+     scenarios: Sequence[Scenario],
+     rows: Sequence[ComparisonRow],
+     statistics: Mapping[str, Any],
+@@ -4012,9 +4642,9 @@ def render_report(
+             ),
+             (
+                 "| `couple_two_best_start_children_binding` | Two eligible "
+-                "children, full-time partner, aggregate Best Start abatement | "
++                "children, full-time partner, engine-side family Best Start abatement | "
+                 "775/776, 1125/1126, 1476/1477 | Abatement binds inside the "
+-                "grid; aggregate-once and old naive composition diverge. |"
++                "grid through the family-once reducer. |"
+             ),
+             (
+                 "| `couple_two_children_dual_full_time` | Partner wage tax/ACC "
+@@ -4048,7 +4678,10 @@ def render_report(
+                 "| `large_family_four_children_age_bands` | Four children "
+                 "aged 3, 6, 13, 16; FTC/IWTC subsequent-child scaling and "
+                 "dependent Winter Energy rate | none | FTC and Winter Energy "
+-                "are both positive at wage $0; Treasury/RuleSpec Winter Energy "
++                "are both positive at wage $0; engine age-band counts are "
++                f"{coverage_evidence['large_family_at_wage_0']['engine_age_band_counts'][0]} / "
++                f"{coverage_evidence['large_family_at_wage_0']['engine_age_band_counts'][1]} "
++                "for ages 0–13 / 14–18; Treasury/RuleSpec Winter Energy "
+                 f"is ${report_number(coverage_evidence['large_family_at_wage_0']['treasury_winter_energy'], 6)} / "
+                 f"${report_number(coverage_evidence['large_family_at_wage_0']['rulespec_winter_energy'], 6)} weekly. |"
+             ),
+@@ -4074,13 +4707,15 @@ def render_report(
+             "$248 to Treasury tests downstream arithmetic, not Treasury's "
+             "missing 62% transformation. This remains a named coverage gap.",
+             "",
+-            "## Class-(a) defect found and fixed",
++            "## Class-(a) regression structurally excluded",
+             "",
+-            "The binding two-child scenario exposed a host-composition defect. "
+-            "RuleSpec's Best Start module is child-entity based. The old harness "
+-            "summed each child's *post-abatement* result, thereby subtracting the "
+-            "same family abatement once per child. The fixed harness sums the "
+-            "per-child gross credits and subtracts one family abatement.",
++            "The prior binding two-child audit exposed a host-composition "
++            "defect: summing each child's post-abatement result subtracted the "
++            "same family abatement once per child. This pass has no Python "
++            "Best Start child-to-family reducer. The engine plan accepts typed child gross credits "
++            "and independent observations of one family-scoped abatement; it "
++            "rejects disagreement as Indeterminate and exposes one structural "
++            "sum-children-then-subtract-family-once operation.",
+             "",
+             "[Income Tax Act 2007 MG 1]"
+             "(https://www.legislation.govt.nz/act/public/2007/0097/latest/"
+@@ -4096,24 +4731,23 @@ def render_report(
+             "the threshold reduces the one-, two-, and three-child family totals "
+             "by the same amount, not once per child.",
+             "",
+-            "| Primary wage | Treasury | Before: naive per-child abatement | "
+-            "After: aggregate once |",
+-            "|---:|---:|---:|---:|",
++            "| Primary wage | Treasury | Engine family-once reduction |",
++            "|---:|---:|---:|",
+         ]
+     )
+-    for item in coverage_evidence["best_start_aggregate_fix"]:
++    for item in coverage_evidence["best_start_engine_family_reduction"]:
+         lines.append(
+             f"| {item['weekly_wage']} | "
+             f"{report_number(item['treasury'], 6)} | "
+-            f"{report_number(item['rulespec_before_naive_per_child_abatement'], 6)} | "
+-            f"{report_number(item['rulespec_after_aggregate_once'], 6)} |"
++            f"{report_number(item['rulespec_engine_family_reduction'], 6)} |"
+         )
+     lines.extend(
+         [
+             "",
+-            "This was a harness aggregation bug, not a defect in the underlying "
+-            "RuleSpec child-level amount formula. It is fixed in `run.py`; the "
+-            "isolated RuleSpec worktree remains unchanged. The final matrix has "
++            "The in-repo engine test reproduces the old 6,082-versus-7,082 "
++            "two-child defect and proves the plan grammar rejects a per-child "
++            "abatement reducer. The isolated RuleSpec worktree remains "
++            "unchanged. The final matrix has "
+             f"{statistics['classification_counts']['a']} class-(a) cells.",
+             "",
+             "The prior four-family phase also fixed two host mappings before its "
+@@ -4260,13 +4894,20 @@ def render_report(
+             "SHA-pinned parameter file. Require a byte-identical regeneration "
+             "of the original snapshot before generating the expanded oracle.",
+             "2. Verify the Treasury, RuleSpec, and engine commits; generator, "
+-            "parameter, composition, and binary hashes; clean tracked Treasury, "
+-            "RuleSpec, and engine trees; scenario semantics; dense wage "
++            "parameter, composition, aggregation artifact, and binary hashes; "
++            "clean tracked Treasury and RuleSpec trees and a wholly clean engine "
++            "tree; scenario semantics; dense wage "
+             "coordinates; and serialized continuity objects.",
+-            "3. Compile the ten-module RuleSpec composition from scratch and run "
+-            "all engine queries in `explain` mode.",
+-            "4. Map every profile to explicit person, child, and family inputs. "
+-            "The 14+ lone-parent path uses JSS with Income Test 1. Wage tax is "
++            "3. Compile the ten-module RuleSpec composition and the registered, "
++            "canonically digested aggregation artifact from scratch. Run "
++            "ordinary engine queries in `explain` mode and aggregation only "
++            "from that compiled artifact.",
++            "4. Map every profile to explicit Person records plus complete "
++            "partner/child relation facts. The engine derives the Family, "
++            "person sums, age-band counts, Child family-income projections, "
++            "child-shape/JSS/AS gates, care units, continuous and discrete Best "
++            "Start family reductions, and family wages used by PTR. The 14+ "
++            "lone-parent path uses JSS with Income Test 1. Wage tax is "
+             "incremental tax above grossed taxable benefit, matching raw "
+             "`emtr()`.",
+             "5. Evaluate the common wages `0, 160, 250, 370, 555, 740, 1000, "
+@@ -4284,6 +4925,10 @@ def render_report(
+             "`WFF_or_Benefit: Max` wrapper can select between transfers. This "
+             "audit deliberately calls raw `emtr()` on both the continuity and "
+             "expanded grids.",
++            "Python still evaluates each statute program for its proper Person, "
++            "Child, or Family entity and composes downstream program outputs "
++            "into Net Income/EMTR. Those are scenario mechanics and cross-program "
++            "composition, not person-to-family or child-to-family aggregation.",
+             "",
+             "## Coverage gaps",
+             "",
+@@ -4300,14 +4945,15 @@ def render_report(
+             "assets, social housing, duplicate claims, and take-up.",
+             "- Full WFF child eligibility: principal caregiver, residence, "
+             "shared care, exact birth/due dates, parental leave, and part-year "
+-            "entitlement. Every listed child is assumed full-care for 365 days.",
++            "entitlement. The versioned scenario closures explicitly supply "
++            "separate MC 10(3) IWTC and MG 2(5) Best Start full-care inputs, "
++            "plus principal-caregiver facts, for 365 days. They also supply "
++            "the three MC 9 age-18 facts—financial dependence, education, and "
++            "the Commissioner-determined period—as explicit caller choices; "
++            "the pinned comparison profiles contain no age-18 child.",
+             "- Full IWTC, MFTC, IETC, and Winter Energy legal eligibility. "
+             "Omitted facts are supplied as disclosed stylised assumptions; WEP "
+             "is host-gated by positive reconstructed benefit.",
+-            "- Relation-native person/child/family aggregation. The compiled "
+-            "composition has zero relations, so the auditable host harness "
+-            "performs aggregation, including the corrected Best Start family "
+-            "abatement.",
+             "- The IncomeExplorer UI wrapper, population representativeness, "
+             "non-integer wage kinks, or exhaustive threshold coverage. RR and "
+             "PTR are emitted in `secondary_rates.csv` but remain outside the "
+@@ -4334,12 +4980,18 @@ def render_report(
+             f"| Engine source commit | `{provenance.engine_sha}` |",
+             f"| Engine binary SHA-256 | `{provenance.engine_binary_sha256}` |",
+             f"| Composition SHA-256 | `{provenance.composition_sha256}` |",
++            f"| Unit aggregation plan SHA-256 | "
++            f"`{provenance.aggregation_plan_sha256}` |",
+             f"| Compiled artifact SHA-256 | `{compiled_artifact_sha256}` |",
++            f"| Compiled unit aggregation artifact SHA-256 | "
++            f"`{aggregation_artifact_sha256}` |",
+             f"| Compiled shape | {compiled_counts['derived_outputs']} derived, "
+             f"{compiled_counts['parameters']} parameters, "
+             f"{compiled_counts['input_slots']} inputs, "
+             f"{compiled_counts['relations']} relations |",
+             f"| Engine evaluations per fresh pass | {engine_call_count} |",
++            f"| Engine unit-aggregation evaluations per fresh pass | "
++            f"{aggregation_call_count} |",
+             "| Tax-year interval | `2026-04-01` to `2027-03-31` |",
+             "| Expanded snapshot `generated_at` | `2026-07-29` |",
+             "",
+@@ -4411,6 +5063,7 @@ def build_audit_artifacts(
+     engine_binary: Path,
+     treasury_root: Path,
+     composition_path: Path,
++    aggregation_plan_path: Path,
+     eligibility_closures_path: Path,
+     oracle_generator: Path,
+     rscript: Path,
+@@ -4432,6 +5085,7 @@ def build_audit_artifacts(
+         engine_binary=engine_binary,
+         treasury_root=treasury_root,
+         composition_path=composition_path,
++        aggregation_plan_path=aggregation_plan_path,
+         eligibility_closures_path=eligibility_closures_path,
+         eligibility_closures=eligibility_closures,
+         oracle_generator=oracle_generator,
+@@ -4441,13 +5095,19 @@ def build_audit_artifacts(
+     with tempfile.TemporaryDirectory(prefix="axiom-emtr-fresh-") as raw_temp:
+         temp_root = Path(raw_temp)
+         compiled_path = temp_root / "composition.json"
++        aggregation_artifact_path = temp_root / "unit-aggregation.json"
+         engine, compiled, _compile_stdout = Engine.compile(
+             binary=provenance.engine_binary,
+             composition=provenance.composition_path,
+             rulespec_root=provenance.rulespec_root,
+             artifact=compiled_path,
++            aggregation_plan=provenance.aggregation_plan_path,
++            aggregation_artifact=aggregation_artifact_path,
+         )
+         compiled_artifact_sha256 = sha256_file(compiled_path)
++        aggregation_artifact_sha256 = sha256_file(
++            aggregation_artifact_path
++        )
+         compiled_counts = {
+             "derived_outputs": len(compiled["program"]["derived"]),
+             "parameters": len(compiled["program"]["parameters"]),
+@@ -4587,6 +5247,12 @@ def build_audit_artifacts(
+                 **compiled_counts,
+                 "artifact_sha256": compiled_artifact_sha256,
+                 "engine_evaluations": engine.call_count,
++                "unit_aggregation_evaluations": (
++                    engine.aggregation_call_count
++                ),
++                "unit_aggregation_artifact_sha256": (
++                    aggregation_artifact_sha256
++                ),
+             },
+             "exercise_input_catalog": {
+                 slot: {
+@@ -4668,8 +5334,10 @@ def build_audit_artifacts(
+             oracle=oracle,
+             provenance=provenance,
+             compiled_artifact_sha256=compiled_artifact_sha256,
++            aggregation_artifact_sha256=aggregation_artifact_sha256,
+             compiled_counts=compiled_counts,
+             engine_call_count=engine.call_count,
++            aggregation_call_count=engine.aggregation_call_count,
+             scenarios=scenarios,
+             rows=comparison_rows,
+             statistics=statistics,
+@@ -4725,7 +5393,11 @@ def build_audit_artifacts(
+             "headline": machine_payload["headline"],
+             "statistics": statistics,
+             "compiled_artifact_sha256": compiled_artifact_sha256,
++            "unit_aggregation_artifact_sha256": (
++                aggregation_artifact_sha256
++            ),
+             "engine_evaluations": engine.call_count,
++            "unit_aggregation_evaluations": engine.aggregation_call_count,
+             "artifact_names": tuple(sorted(artifacts)),
+         }
+         return artifacts, run_summary
+@@ -4800,6 +5472,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+         type=Path,
+         default=DEFAULT_COMPOSITION,
+     )
++    parser.add_argument(
++        "--aggregation-plan",
++        type=Path,
++        default=None,
++        help=(
++            "Defaults to <engine-root>/tests/fixtures/unit_derivation/"
++            "nz_income_explorer_family.yaml"
++        ),
++    )
+     parser.add_argument(
+         "--eligibility-closures",
+         type=Path,
+@@ -4830,6 +5511,15 @@ def main(argv: Sequence[str] | None = None) -> int:
+         if args.engine_binary is not None
+         else args.engine_root / "target" / "release" / "axiom-rules-engine"
+     )
++    aggregation_plan = (
++        args.aggregation_plan
++        if args.aggregation_plan is not None
++        else args.engine_root
++        / "tests"
++        / "fixtures"
++        / "unit_derivation"
++        / "nz_income_explorer_family.yaml"
++    )
+     try:
+         first, summary = build_audit_artifacts(
+             rulespec_root=args.rulespec_root,
+@@ -4837,6 +5527,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+             engine_binary=engine_binary,
+             treasury_root=args.treasury_root,
+             composition_path=args.composition,
++            aggregation_plan_path=aggregation_plan,
+             eligibility_closures_path=args.eligibility_closures,
+             oracle_generator=args.oracle_generator,
+             rscript=args.rscript,
+@@ -4848,6 +5539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+             engine_binary=engine_binary,
+             treasury_root=args.treasury_root,
+             composition_path=args.composition,
++            aggregation_plan_path=aggregation_plan,
+             eligibility_closures_path=args.eligibility_closures,
+             oracle_generator=args.oracle_generator,
+             rscript=args.rscript,
+diff --git a/nz-lane/emtr_reproduction/eligibility-closures.json b/nz-lane/emtr_reproduction/eligibility-closures.json
+index f66e5e0..5fb441b 100644
+--- a/nz-lane/emtr_reproduction/eligibility-closures.json
++++ b/nz-lane/emtr_reproduction/eligibility-closures.json
+@@ -1,6 +1,6 @@
+ {
+   "schema": "axiom.nz_incomeexplorer.eligibility_closures.v1",
+-  "version": "2026-08-13",
++  "version": "2026-08-17",
+   "choices": {
+     "residence": {
+       "wff_caregiver_disqualifying_status": false,
+@@ -17,9 +17,15 @@
+       "wff_commissioner_considers_primary_day_to_day_care_when_child_present": true,
+       "wff_care_is_temporary": false,
+       "wff_caregiver_lives_apart_when_child_present": true,
++      "iwtc_child_is_principal_caregiver_when_present": true,
+       "iwtc_child_exclusive_care_fraction": 1,
+       "best_start_child_care_fraction": 1
+     },
++    "age_18": {
++      "not_financially_independent_at_age_18": true,
++      "attending_school_or_tertiary_at_age_18": true,
++      "commissioner_period_contains_segment_at_age_18": true
++    },
+     "work_tests": {
+       "iwtc_allowed_paye_income_payment_when_wages_positive": true,
+       "iwtc_normally_earner_when_wages_positive": true,
+diff --git a/nz-lane/emtr_reproduction/test_declared_closures.py b/nz-lane/emtr_reproduction/test_declared_closures.py
+index cc2dedf..8e7b32c 100644
+--- a/nz-lane/emtr_reproduction/test_declared_closures.py
++++ b/nz-lane/emtr_reproduction/test_declared_closures.py
+@@ -1,7 +1,10 @@
+ """Mutants proving declared eligibility closures are mandatory inputs."""
+
++import ast
+ import importlib.util
++import inspect
+ import json
++import subprocess
+ import sys
+ from pathlib import Path
+
+@@ -35,3 +38,339 @@ def test_incomplete_declared_closures_fail(tmp_path):
+     path.write_text(json.dumps(mutant))
+     with pytest.raises(harness.HarnessError, match="work_tests"):
+         harness.load_eligibility_closures(path)
++
++
++def test_missing_separate_mc10_principal_caregiver_choice_fails(tmp_path):
++    harness = _harness()
++    mutant = json.loads((HERE / "eligibility-closures.json").read_text())
++    del mutant["choices"]["care"][
++        "iwtc_child_is_principal_caregiver_when_present"
++    ]
++    path = tmp_path / "missing-mc10-care.json"
++    path.write_text(json.dumps(mutant))
++    with pytest.raises(harness.HarnessError, match="care"):
++        harness.load_eligibility_closures(path)
++
++
++def test_missing_mc9_age_18_choice_fails(tmp_path):
++    harness = _harness()
++    mutant = json.loads((HERE / "eligibility-closures.json").read_text())
++    del mutant["choices"]["age_18"][
++        "attending_school_or_tertiary_at_age_18"
++    ]
++    path = tmp_path / "missing-mc9-age-18.json"
++    path.write_text(json.dumps(mutant))
++    with pytest.raises(harness.HarnessError, match="age_18"):
++        harness.load_eligibility_closures(path)
++
++
++def test_aggregation_plan_must_be_the_pinned_checkout_fixture(tmp_path):
++    harness = _harness()
++    root = tmp_path / "engine"
++    canonical = (
++        root
++        / "tests"
++        / "fixtures"
++        / "unit_derivation"
++        / "nz_income_explorer_family.yaml"
++    )
++    canonical.parent.mkdir(parents=True)
++    canonical.write_text("canonical")
++    foreign = tmp_path / "foreign.yaml"
++    foreign.write_text("mutant")
++    assert harness.verify_aggregation_plan_binding(root, canonical) == canonical
++    with pytest.raises(harness.HarnessError, match="canonical plan"):
++        harness.verify_aggregation_plan_binding(root, foreign)
++
++
++def test_engine_preflight_rejects_dirty_checkout(tmp_path, monkeypatch):
++    harness = _harness()
++    root = tmp_path / "engine"
++    binary = root / "target" / "release" / "axiom-rules-engine"
++    binary.parent.mkdir(parents=True)
++    binary.write_bytes(b"reviewed-binary")
++    monkeypatch.setattr(harness, "git_sha", lambda _root: "reviewed-commit")
++    monkeypatch.setattr(harness, "git_dirty", lambda _root: True)
++    monkeypatch.setattr(harness, "EXPECTED_ENGINE_SHA", "reviewed-commit")
++    with pytest.raises(harness.HarnessError, match="tracked or untracked"):
++        harness.verify_engine_binding(root, binary)
++
++
++def test_engine_preflight_rejects_wrong_commit(tmp_path, monkeypatch):
++    harness = _harness()
++    root = tmp_path / "engine"
++    binary = root / "target" / "release" / "axiom-rules-engine"
++    binary.parent.mkdir(parents=True)
++    binary.write_bytes(b"reviewed-binary")
++    monkeypatch.setattr(harness, "git_sha", lambda _root: "wrong-parent")
++    monkeypatch.setattr(harness, "EXPECTED_ENGINE_SHA", "implementation-commit")
++    with pytest.raises(harness.HarnessError, match="engine SHA mismatch"):
++        harness.verify_engine_binding(root, binary)
++
++
++def test_engine_preflight_rejects_unbound_binary(tmp_path, monkeypatch):
++    harness = _harness()
++    root = tmp_path / "engine"
++    binary = root / "target" / "release" / "axiom-rules-engine"
++    binary.parent.mkdir(parents=True)
++    binary.write_bytes(b"mutant-binary")
++    monkeypatch.setattr(harness, "git_sha", lambda _root: "reviewed-commit")
++    monkeypatch.setattr(harness, "git_dirty", lambda _root: False)
++    monkeypatch.setattr(harness, "EXPECTED_ENGINE_SHA", "reviewed-commit")
++    monkeypatch.setattr(harness, "EXPECTED_ENGINE_BINARY_SHA256", "0" * 64)
++    with pytest.raises(harness.HarnessError, match="binary SHA-256 mismatch"):
++        harness.verify_engine_binding(root, binary)
++
++
++def test_runtime_uses_compiled_registered_artifact_not_raw_plan(tmp_path, monkeypatch):
++    harness = _harness()
++    artifact = tmp_path / "aggregation.json"
++    artifact.write_text("{}")
++    engine = harness.Engine(
++        binary=tmp_path / "axiom-rules-engine",
++        artifact=tmp_path / "composition.json",
++        aggregation_artifact=artifact,
++        catalog={"slot": "canonical"},
++    )
++    observed = []
++
++    family = {
++        "id": "Family:test",
++        "members": ["primary"],
++        "partner_present": {"status": "determined", "value": False},
++        "scalars": {},
++        "counts": {},
++        "predicates": {},
++        "children": [],
++    }
++
++    def fake_run(argv, **_kwargs):
++        observed.append(argv)
++        return subprocess.CompletedProcess(
++            argv,
++            0,
++            stdout=json.dumps(
++                {
++                    "schema": "axiom/unit-aggregation-plan-stage3/1",
++                    "families": {
++                        "status": "determined",
++                        "value": [family],
++                    },
++                }
++            ),
++            stderr="",
++        )
++
++    monkeypatch.setattr(harness, "run_checked", fake_run)
++    assert engine.aggregate({"request": "known"})["id"] == "Family:test"
++    assert "--artifact" in observed[0]
++    assert "--plan" not in observed[0]
++
++
++def test_compile_boundary_materializes_registered_aggregation_artifact(
++    tmp_path, monkeypatch
++):
++    harness = _harness()
++    composition_artifact = tmp_path / "composition.json"
++    aggregation_artifact = tmp_path / "aggregation.json"
++    commands = []
++
++    def fake_run(argv, **_kwargs):
++        commands.append(argv)
++        if "compile-composed" in argv:
++            composition_artifact.write_text(
++                json.dumps(
++                    {
++                        "metadata": {
++                            "input_catalog": [
++                                {
++                                    "slot": "taxable_income",
++                                    "canonical_request_name": "canonical-taxable-income",
++                                }
++                            ]
++                        }
++                    }
++                )
++            )
++        elif "compile-unit-aggregation" in argv:
++            aggregation_artifact.write_text(
++                json.dumps(
++                    {
++                        "format": "axiom/compiled-unit-aggregation-stage3/1",
++                        "plan_digest": "sha256:registered",
++                        "phase_two_artifact": {"format_version": 2},
++                    }
++                )
++            )
++        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
++
++    monkeypatch.setattr(harness, "run_checked", fake_run)
++    engine, _compiled, _stdout = harness.Engine.compile(
++        binary=tmp_path / "axiom-rules-engine",
++        composition=tmp_path / "composition.yaml",
++        rulespec_root=tmp_path / "rulespec-nz",
++        artifact=composition_artifact,
++        aggregation_plan=tmp_path / "aggregation.yaml",
++        aggregation_artifact=aggregation_artifact,
++    )
++    assert engine.aggregation_artifact == aggregation_artifact
++    assert any("compile-unit-aggregation" in command for command in commands)
++
++
++def test_indeterminate_aggregation_result_never_becomes_a_default():
++    harness = _harness()
++    with pytest.raises(harness.HarnessError, match="indeterminate"):
++        harness.determined(
++            {"status": "indeterminate", "reasons": ["child:age:unknown"]},
++            "child_count",
++        )
++
++
++def test_operational_code_reads_scenario_relationship_shape_only_at_boundary():
++    harness = _harness()
++    tree = ast.parse(inspect.getsource(harness.ModelEvaluator))
++    evaluator = tree.body[0]
++    assert isinstance(evaluator, ast.ClassDef)
++    forbidden = (
++        "scenario.partnered",
++        "scenario.children",
++        "scenario.gross_wage2",
++    )
++    for method in evaluator.body:
++        if not isinstance(method, ast.FunctionDef) or method.name == "aggregate_family":
++            continue
++        source = ast.unparse(method)
++        assert all(term not in source for term in forbidden), method.name
++
++
++def test_engine_outputs_are_consumed_for_every_migrated_reduction():
++    harness = _harness()
++    family_credit = inspect.getsource(harness.ModelEvaluator.family_credit_values)
++    benefit = inspect.getsource(harness.ModelEvaluator.benefit_components)
++    best_start = inspect.getsource(harness.ModelEvaluator.best_start_total)
++    sweep = inspect.getsource(harness.sweep_scenario)
++    state = inspect.getsource(harness.ModelEvaluator.evaluate_state)
++    coverage = inspect.getsource(harness.validate_expanded_coverage)
++    assert "family_tax_credit_subsequent_dependent_child_care_units" in family_credit
++    assert "max(0, child_count - 1)" not in family_credit
++    assert "jss_sole_parent_youngest_age_at_least_14" in benefit
++    assert "youngest >= 14" not in benefit
++    assert "best_start_total_continuous_abatement" in best_start
++    assert "family_scheme_income - self.best_start_abatement_threshold" not in best_start
++    assert 'scalar_decimal(state, "weekly_family_wages")' in sweep
++    assert "scenario.gross_wage2" not in sweep
++    for output in ("child_count_age_0_13", "child_count_age_14_18"):
++        assert output in state
++        assert output in coverage
++
++
++def test_request_boundary_supplies_roles_evidence_legal_facts_and_observations():
++    harness = _harness()
++
++    class RecordingEngine:
++        def __init__(self):
++            self.request = None
++
++        def aggregate(self, request):
++            self.request = request
++            return {"engine": "boundary-only"}
++
++    engine = RecordingEngine()
++    evaluator = object.__new__(harness.ModelEvaluator)
++    evaluator.engine = engine
++    evaluator.best_start_abatement_threshold = harness.Decimal("79000")
++    evaluator.best_start_abatement_rate = harness.Decimal("0.21")
++    evaluator.closures = {
++        "care": {
++            "best_start_child_care_fraction": 0.5,
++            "iwtc_child_exclusive_care_fraction": 0.75,
++            "iwtc_child_is_principal_caregiver_when_present": True,
++            "wff_commissioner_considers_primary_day_to_day_care_when_child_present": True,
++        },
++        "age_18": {
++            "not_financially_independent_at_age_18": False,
++            "attending_school_or_tertiary_at_age_18": True,
++            "commissioner_period_contains_segment_at_age_18": False,
++        },
++    }
++    scenario = harness.Scenario(
++        id="boundary",
++        description="request boundary",
++        partnered=True,
++        wage1_hourly=harness.Decimal("25"),
++        children=(1, 18),
++        gross_wage2=harness.Decimal("740"),
++        hours2=harness.Decimal("20"),
++        accommodation_costs=harness.Decimal("0"),
++        accommodation_rent=True,
++        accommodation_area=1,
++        accommodation_boarder=False,
++        weekly_board_and_lodgings_paid=harness.Decimal("0"),
++        sampled_wages=(0,),
++    )
++    evaluator.aggregate_family(
++        scenario,
++        child_scalars={
++            0: {"best_start_family_abatement": harness.Decimal("1000")},
++            1: {"best_start_family_abatement": harness.Decimal("1001")},
++        },
++        family_scheme_income=harness.Decimal("90480"),
++    )
++    request = engine.request
++    assert request is not None
++    assert "named_people" not in request
++    assert "family_scalars" not in request
++    assert request["roster_completeness"]["id"]
++    assert request["segment_completeness"]["id"]
++    assert [person["role"] for person in request["persons"]] == [
++        "adult",
++        "adult",
++        "child",
++        "child",
++    ]
++    partner = request["persons"][1]
++    assert partner["scalars"]["weekly_wage"]["value"] == "740"
++    for child in request["persons"][2:]:
++        assert child["scalars"][
++            "best_start_claimant_care_fraction"
++        ]["value"] == "0.5"
++        assert child["scalars"][
++            "in_work_tax_credit_child_exclusive_care_fraction"
++        ]["value"] == "0.75"
++        assert child["facts"][
++            "principal_care_for_family_scheme"
++        ]["value"] is True
++        assert child["facts"][
++            "in_work_tax_credit_principal_caregiver"
++        ]["value"] is True
++        assert {
++            "not_financially_independent_at_age_18",
++            "attending_school_or_tertiary_at_age_18",
++            "commissioner_period_contains_segment_at_age_18",
++        } <= set(child["facts"])
++        assert child["facts"][
++            "not_financially_independent_at_age_18"
++        ]["value"] is False
++        assert child["facts"][
++            "attending_school_or_tertiary_at_age_18"
++        ]["value"] is True
++        assert child["facts"][
++            "commissioner_period_contains_segment_at_age_18"
++        ]["value"] is False
++    assert all(relation["completeness"]["id"] for relation in request["relations"])
++    assert all(
++        fact["knowledge"]["evidence"]["id"]
++        for relation in request["relations"]
++        for fact in relation["facts"]
++    )
++    family_input = request["family_inputs"][0]
++    assert family_input["anchor_person"] == "boundary:person:1"
++    assert family_input["named_people"][
++        "mc7_entitlement_holder"
++    ]["value"] == "boundary:person:1"
++    adjustment = family_input["scalars"]["best_start_family_abatement"]
++    assert adjustment["status"] == "observations"
++    assert [item["value"] for item in adjustment["observations"]] == [
++        "1000",
++        "1001",
++    ]

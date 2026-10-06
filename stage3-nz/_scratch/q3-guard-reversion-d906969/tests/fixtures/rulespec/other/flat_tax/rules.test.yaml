@@ -1,0 +1,25 @@
+- name: under_personal_allowance
+  period: 2025
+  input:
+    income: 500
+  output:
+    income_tax: 0
+    net_income: 500
+- name: basic_rate_band
+  period: 2025
+  input:
+    income: 1500
+  output:
+    # (1500 - 1000) * 0.1 = 50
+    income_tax: 50
+    net_income: 1450
+- name: high_rate_band
+  period: 2025
+  input:
+    income: 5000
+  output:
+    # gross 5000 >= 3000 threshold → high rate
+    # (5000 - 1000) * 0.2 = 800
+    high_income: holds
+    income_tax: 800
+    net_income: 4200

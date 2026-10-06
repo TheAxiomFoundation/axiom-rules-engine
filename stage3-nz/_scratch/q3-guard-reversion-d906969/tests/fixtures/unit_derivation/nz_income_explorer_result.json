@@ -1,0 +1,224 @@
+{
+  "schema": "axiom/unit-aggregation-plan-stage3/1",
+  "plan": "nz:incomeexplorer:family-aggregation-2026-27",
+  "plan_digest": "sha256:e0a833232e758efbe1da4a6212cb93906719e62a6f9298909169d71f1db64b6c",
+  "trace_root": "sha256:80ed812db8a13e57b708218c0d6a3320dd59915494374e1c942eb9cc06b34085",
+  "families": {
+    "status": "determined",
+    "value": [
+      {
+        "id": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
+        "members": [
+          "child-0",
+          "child-1",
+          "partner",
+          "primary"
+        ],
+        "partner_present": {
+          "status": "determined",
+          "value": true
+        },
+        "scalars": {
+          "annual_family_scheme_base_income": {
+            "status": "determined",
+            "value": "90480"
+          },
+          "annual_wages": {
+            "status": "determined",
+            "value": "90480"
+          },
+          "best_start_entitlement_days": {
+            "status": "determined",
+            "value": "365"
+          },
+          "best_start_total": {
+            "status": "determined",
+            "value": "7082"
+          },
+          "best_start_total_before_abatement": {
+            "status": "determined",
+            "value": "8082"
+          },
+          "best_start_total_continuous_abatement": {
+            "status": "determined",
+            "value": "7034"
+          },
+          "family_tax_credit_eldest_dependent_child_care_units": {
+            "status": "determined",
+            "value": "1"
+          },
+          "family_tax_credit_entitlement_days": {
+            "status": "determined",
+            "value": "365"
+          },
+          "family_tax_credit_subsequent_dependent_child_care_units": {
+            "status": "determined",
+            "value": "1"
+          },
+          "hours_total": {
+            "status": "determined",
+            "value": "60"
+          },
+          "ietc_continuous_weekly": {
+            "status": "determined",
+            "value": "10"
+          },
+          "ietc_weekly": {
+            "status": "determined",
+            "value": "5"
+          },
+          "in_work_tax_credit_child_exclusive_care_fraction": {
+            "status": "determined",
+            "value": "1"
+          },
+          "in_work_tax_credit_weekly_periods": {
+            "status": "determined",
+            "value": "52"
+          },
+          "weekly_gross_benefit": {
+            "status": "determined",
+            "value": "18"
+          },
+          "weekly_net_benefit": {
+            "status": "determined",
+            "value": "18"
+          },
+          "weekly_net_wage": {
+            "status": "determined",
+            "value": "1568"
+          },
+          "weekly_wage_tax": {
+            "status": "determined",
+            "value": "172"
+          },
+          "weekly_wages": {
+            "status": "determined",
+            "value": "1741"
+          },
+          "wff_family_credit_abatement_days": {
+            "status": "determined",
+            "value": "365"
+          }
+        },
+        "counts": {
+          "best_start_eligible_child_count": {
+            "status": "determined",
+            "value": 2
+          },
+          "child_count_age_0_13": {
+            "status": "determined",
+            "value": 2
+          },
+          "child_count_age_14_18": {
+            "status": "determined",
+            "value": 0
+          },
+          "dependent_child_count": {
+            "status": "determined",
+            "value": 2
+          },
+          "youngest_child_age": {
+            "status": "determined",
+            "value": 1
+          }
+        },
+        "predicates": {
+          "has_dependent_children": {
+            "status": "determined",
+            "value": true
+          },
+          "has_two_or_more_dependent_children": {
+            "status": "determined",
+            "value": true
+          },
+          "jss_sole_parent_youngest_age_at_least_14": {
+            "status": "determined",
+            "value": false
+          },
+          "sole_parent_with_dependent_children": {
+            "status": "determined",
+            "value": false
+          },
+          "youngest_child_age_at_least_14": {
+            "status": "determined",
+            "value": false
+          }
+        },
+        "children": [
+          {
+            "person": "child-0",
+            "family": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
+            "age_years": {
+              "status": "determined",
+              "value": 1
+            },
+            "age_bands": {
+              "best_start_eligible_child_count": {
+                "status": "determined",
+                "value": true
+              },
+              "child_count_age_0_13": {
+                "status": "determined",
+                "value": true
+              },
+              "child_count_age_14_18": {
+                "status": "determined",
+                "value": false
+              },
+              "dependent_child_count": {
+                "status": "determined",
+                "value": true
+              }
+            },
+            "scalars": {
+              "best_start_claimant_care_fraction": {
+                "status": "determined",
+                "value": "1"
+              },
+              "family_scheme_income": {
+                "status": "determined",
+                "value": "90480"
+              }
+            }
+          },
+          {
+            "person": "child-1",
+            "family": "Family:sha256:60490911749d9bc93f5a692773d70ff5da97d9e86fcc5ea558f02faeabbca18d",
+            "age_years": {
+              "status": "determined",
+              "value": 2
+            },
+            "age_bands": {
+              "best_start_eligible_child_count": {
+                "status": "determined",
+                "value": true
+              },
+              "child_count_age_0_13": {
+                "status": "determined",
+                "value": true
+              },
+              "child_count_age_14_18": {
+                "status": "determined",
+                "value": false
+              },
+              "dependent_child_count": {
+                "status": "determined",
+                "value": true
+              }
+            },
+            "scalars": {
+              "best_start_claimant_care_fraction": {
+                "status": "determined",
+                "value": "1"
+              },
+              "family_scheme_income": {
+                "status": "determined",
+                "value": "90480"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

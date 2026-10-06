@@ -1,0 +1,74 @@
+format: rulespec/v1
+module:
+  summary: |-
+    Child Benefit (General) Regulations 1987 reg 15 — who is responsible for
+    a child.
+
+    Priority cascade:
+      1. Any person already receiving child benefit for the child — they are
+         the responsible person.
+      2. Otherwise, if exactly one claim has been made, the sole claimant.
+      3. Otherwise, the person with whom the child is usually residing.
+
+    Counting over the `cb_receipt` relation shows an absence condition
+    (count == 0 → no existing recipient).
+rules:
+  - name: cb_recipient_count
+    kind: derived
+    entity: Child
+    dtype: Integer
+    period: Day
+    source: SI 1987/1967 reg 15(1)
+    source_url: https://www.legislation.gov.uk/uksi/1987/1967/regulation/15
+    versions:
+      - effective_from: '1987-10-01'
+        formula: len(cb_receipt)
+  - name: has_cb_recipient
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    period: Day
+    source: SI 1987/1967 reg 15(1)
+    versions:
+      - effective_from: '1987-10-01'
+        formula: cb_recipient_count > 0
+  - name: needs_fallback
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    period: Day
+    source: SI 1987/1967 reg 15(2) — no existing recipient
+    versions:
+      - effective_from: '1987-10-01'
+        formula: cb_recipient_count == 0
+  - name: sole_claim_fallback
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    period: Day
+    source: SI 1987/1967 reg 15(2)(a)
+    versions:
+      - effective_from: '1987-10-01'
+        formula: needs_fallback and cb_claim_count == 1
+  - name: usual_residence_fallback
+    kind: derived
+    entity: Child
+    dtype: Judgment
+    period: Day
+    source: SI 1987/1967 reg 15(2)(b)
+    versions:
+      - effective_from: '1987-10-01'
+        formula: needs_fallback and not (cb_claim_count == 1)
+  - name: responsible_person
+    kind: derived
+    entity: Child
+    dtype: Text
+    period: Day
+    source: SI 1987/1967 reg 15
+    source_url: https://www.legislation.gov.uk/uksi/1987/1967/regulation/15
+    versions:
+      - effective_from: '1987-10-01'
+        formula: |-
+          if has_cb_recipient: cb_recipient_id
+          elif sole_claim_fallback: sole_claimant_id
+          else: usual_resident_id

@@ -1,0 +1,65 @@
+schema: axiom/unit-aggregation-plan-stage3/1
+id: adversarial:per-child-abatement-is-expressible
+decimal_precision: 40
+constitution:
+  id: adversarial:nz-family
+  entity_type: Family
+  roster_relation: adversarial#roster
+  unit_constituent_relation: adversarial#family_member
+  participating_member_relation: adversarial#family_scheme_member
+membership_relations:
+  - relation: partner_of
+    symmetric: true
+    citation:
+      provision: test partner relationship
+      authority: adversarial:test
+  - relation: dependent_child_of
+    symmetric: false
+    citation:
+      provision: Income Tax Act 2007 ss MC 2 and MC 6
+      authority: nz/statute/act/public/2007/0097/section/mc-2
+partner_relation: partner_of
+child_relation: dependent_child_of
+scalar_aggregations:
+  # This is the old defect: the ordinary child calculation has already applied
+  # the family abatement once to each child, and the generic family sum accepts
+  # and sums those post-abatement person scalars without rejection.
+  - output: unsafe_best_start_total
+    input: post_abated_for_generic_sum
+    selector: all_members
+    citation:
+      provision: adversarial expression of the old per-child host reduction
+      authority: adversarial:test
+family_reductions:
+  - output: safe_best_start_total
+    gross_output: safe_best_start_gross
+    operation: sum_children_then_subtract_family_once
+    child_value: best_start_before_abatement
+    family_once_value: best_start_family_abatement
+    minimum_age: 0
+    maximum_age: 2
+    citation:
+      provision: Income Tax Act 2007 ss MG 1, MG 2, and MG 3
+      authority: nz/statute/act/public/2007/0097/section/mg-3
+  # Even the sole nominally-safe reducer accepts a post-abatement child field
+  # and a caller-supplied zero as its "family once" field.
+  - output: best_start_total
+    gross_output: best_start_total_before_abatement
+    operation: sum_children_then_subtract_family_once
+    child_value: best_start_before_abatement
+    family_once_value: two_child_abatement
+    minimum_age: 0
+    maximum_age: 2
+    citation:
+      provision: adversarial expression using the nominally safe operator
+      authority: adversarial:test
+  - output: unsafe_post_abatement_via_family_once
+    gross_output: unsafe_post_abatement_via_family_once_gross
+    operation: sum_children_then_subtract_family_once
+    child_value: best_start_after_per_child_abatement
+    family_once_value: zero_family_abatement
+    minimum_age: 0
+    maximum_age: 2
+    citation:
+      provision: adversarial post-abatement child inputs through nominally safe operator
+      authority: adversarial:test

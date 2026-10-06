@@ -1,0 +1,46 @@
+{
+  "scope": "scenario:adversarial-per-child",
+  "segment": "2026-04-01/2027-03-31",
+  "primary_person": "primary",
+  "persons": [
+    {
+      "id": "primary",
+      "age_years": 25,
+      "scalars": {
+        "post_abated_for_generic_sum": "0"
+      }
+    },
+    {
+      "id": "child-0",
+      "age_years": 1,
+      "scalars": {
+        "post_abated_for_generic_sum": "3041",
+        "best_start_after_per_child_abatement": "3041",
+        "best_start_before_abatement": "4041",
+        "best_start_family_abatement": "1000",
+        "two_child_abatement": "2000",
+        "zero_family_abatement": "0"
+      }
+    },
+    {
+      "id": "child-1",
+      "age_years": 2,
+      "scalars": {
+        "post_abated_for_generic_sum": "3041",
+        "best_start_after_per_child_abatement": "3041",
+        "best_start_before_abatement": "4041",
+        "best_start_family_abatement": "1000",
+        "two_child_abatement": "2000",
+        "zero_family_abatement": "0"
+      }
+    }
+  ],
+  "relations": {
+    "partner_of": [],
+    "dependent_child_of": [
+      ["primary", "child-0"],
+      ["primary", "child-1"]
+    ]
+  },
+  "family_scalars": {}
+}
