@@ -1,0 +1,69 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.1.1",
+  "program": {
+    "extends": null,
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "result",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "amount"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "result"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    }
+  }
+}

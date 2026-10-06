@@ -1,0 +1,3306 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.1.1",
+  "program": {
+    "extends": null,
+    "module": {
+      "summary": "Tables I through VII show Food Stamp Program income standards, coupon allotment, standard deductions, maximum shelter/dependent-care deductions, utility and telephone allowances, and homeless shelter allowance. Table VIII shows AFDC gross income standards, consolidated need standards, standard payment amounts, and a $10 minimum AFDC payment.",
+      "source_verification": {
+        "corpus_citation_path": "us-tn/regulation/1240-01/04/27/block-1"
+      }
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "us:statutes/7/2012/j#relation.member_of_household",
+        "arity": 2
+      }
+    ],
+    "parameters": [
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_maximum_excess_shelter_deduction_48_states_dc",
+        "name": "snap_maximum_excess_shelter_deduction_48_states_dc",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 744
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_maximum_excess_shelter_deduction_alaska",
+        "name": "snap_maximum_excess_shelter_deduction_alaska",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 1189
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_maximum_excess_shelter_deduction_guam",
+        "name": "snap_maximum_excess_shelter_deduction_guam",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 873
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_maximum_excess_shelter_deduction_hawaii",
+        "name": "snap_maximum_excess_shelter_deduction_hawaii",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 1003
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_maximum_excess_shelter_deduction_virgin_islands",
+        "name": "snap_maximum_excess_shelter_deduction_virgin_islands",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 586
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_homeless_shelter_deduction",
+        "name": "snap_homeless_shelter_deduction",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "198.99"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_asset_limit_elderly_or_disabled_member",
+        "name": "snap_asset_limit_elderly_or_disabled_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 4500
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_asset_limit_other_households",
+        "name": "snap_asset_limit_other_households",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 3000
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_additional_member",
+        "name": "snap_maximum_allotment_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 218
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_urban_additional_member",
+        "name": "snap_maximum_allotment_alaska_urban_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 282
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_rural_1_additional_member",
+        "name": "snap_maximum_allotment_alaska_rural_1_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 360
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_rural_2_additional_member",
+        "name": "snap_maximum_allotment_alaska_rural_2_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 438
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_guam_additional_member",
+        "name": "snap_maximum_allotment_guam_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 322
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_hawaii_additional_member",
+        "name": "snap_maximum_allotment_hawaii_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 371
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_virgin_islands_additional_member",
+        "name": "snap_maximum_allotment_virgin_islands_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 281
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_earned_income_deduction_rate_for_net_income",
+        "name": "snap_earned_income_deduction_rate_for_net_income",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.2"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_medical_expense_threshold",
+        "name": "snap_medical_expense_threshold",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 35
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_excess_shelter_income_share",
+        "name": "snap_excess_shelter_income_share",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.5"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_allotment_net_income_reduction_rate",
+        "name": "snap_allotment_net_income_reduction_rate",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.3"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_initial_month_minimum_issuance",
+        "name": "snap_initial_month_minimum_issuance",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 10
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_minimum_benefit_rate",
+        "name": "snap_minimum_benefit_rate",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.08"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_minimum_benefit_household_size_limit",
+        "name": "snap_minimum_benefit_household_size_limit",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 2
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_net_income_limit_100_percent_fpl_48_states_dc_additional_member",
+        "name": "snap_net_income_limit_100_percent_fpl_48_states_dc_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 459
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_130_percent_fpl_48_states_dc_additional_member",
+        "name": "snap_gross_income_limit_130_percent_fpl_48_states_dc_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 596
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_165_percent_fpl_48_states_dc_additional_member",
+        "name": "snap_gross_income_limit_165_percent_fpl_48_states_dc_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 757
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_gross_income_standard_additional_member",
+        "name": "snap_gross_income_standard_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 406
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_max_net_income_additional_member",
+        "name": "snap_max_net_income_additional_member",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 312
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_max_shelter_deduction_non_elderly_disabled",
+        "name": "snap_max_shelter_deduction_non_elderly_disabled",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 458
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_basic_utility_allowance",
+        "name": "snap_basic_utility_allowance",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 126
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_telephone_standard",
+        "name": "snap_telephone_standard",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 25
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_homeless_shelter_standard",
+        "name": "snap_homeless_shelter_standard",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 143
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#minimum_afdc_payment",
+        "name": "minimum_afdc_payment",
+        "unit": "USD",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 10
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_48_states_dc_table",
+        "name": "snap_standard_deduction_48_states_dc_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 209
+              },
+              "2": {
+                "kind": "integer",
+                "value": 209
+              },
+              "3": {
+                "kind": "integer",
+                "value": 209
+              },
+              "4": {
+                "kind": "integer",
+                "value": 223
+              },
+              "5": {
+                "kind": "integer",
+                "value": 261
+              },
+              "6": {
+                "kind": "integer",
+                "value": 299
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_alaska_table",
+        "name": "snap_standard_deduction_alaska_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 358
+              },
+              "2": {
+                "kind": "integer",
+                "value": 358
+              },
+              "3": {
+                "kind": "integer",
+                "value": 358
+              },
+              "4": {
+                "kind": "integer",
+                "value": 358
+              },
+              "5": {
+                "kind": "integer",
+                "value": 358
+              },
+              "6": {
+                "kind": "integer",
+                "value": 374
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_guam_table",
+        "name": "snap_standard_deduction_guam_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 420
+              },
+              "2": {
+                "kind": "integer",
+                "value": 420
+              },
+              "3": {
+                "kind": "integer",
+                "value": 420
+              },
+              "4": {
+                "kind": "integer",
+                "value": 445
+              },
+              "5": {
+                "kind": "integer",
+                "value": 522
+              },
+              "6": {
+                "kind": "integer",
+                "value": 598
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_hawaii_table",
+        "name": "snap_standard_deduction_hawaii_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 295
+              },
+              "2": {
+                "kind": "integer",
+                "value": 295
+              },
+              "3": {
+                "kind": "integer",
+                "value": 295
+              },
+              "4": {
+                "kind": "integer",
+                "value": 295
+              },
+              "5": {
+                "kind": "integer",
+                "value": 300
+              },
+              "6": {
+                "kind": "integer",
+                "value": 344
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_virgin_islands_table",
+        "name": "snap_standard_deduction_virgin_islands_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 184
+              },
+              "2": {
+                "kind": "integer",
+                "value": 184
+              },
+              "3": {
+                "kind": "integer",
+                "value": 185
+              },
+              "4": {
+                "kind": "integer",
+                "value": 223
+              },
+              "5": {
+                "kind": "integer",
+                "value": 261
+              },
+              "6": {
+                "kind": "integer",
+                "value": 299
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_table",
+        "name": "snap_maximum_allotment_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 298
+              },
+              "2": {
+                "kind": "integer",
+                "value": 546
+              },
+              "3": {
+                "kind": "integer",
+                "value": 785
+              },
+              "4": {
+                "kind": "integer",
+                "value": 994
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1183
+              },
+              "6": {
+                "kind": "integer",
+                "value": 1421
+              },
+              "7": {
+                "kind": "integer",
+                "value": 1571
+              },
+              "8": {
+                "kind": "integer",
+                "value": 1789
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_urban_table",
+        "name": "snap_maximum_allotment_alaska_urban_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 385
+              },
+              "2": {
+                "kind": "integer",
+                "value": 707
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1015
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1285
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1529
+              },
+              "6": {
+                "kind": "integer",
+                "value": 1838
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2031
+              },
+              "8": {
+                "kind": "integer",
+                "value": 2314
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_rural_1_table",
+        "name": "snap_maximum_allotment_alaska_rural_1_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 491
+              },
+              "2": {
+                "kind": "integer",
+                "value": 901
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1295
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1639
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1950
+              },
+              "6": {
+                "kind": "integer",
+                "value": 2344
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2590
+              },
+              "8": {
+                "kind": "integer",
+                "value": 2950
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_alaska_rural_2_table",
+        "name": "snap_maximum_allotment_alaska_rural_2_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 598
+              },
+              "2": {
+                "kind": "integer",
+                "value": 1097
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1576
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1995
+              },
+              "5": {
+                "kind": "integer",
+                "value": 2374
+              },
+              "6": {
+                "kind": "integer",
+                "value": 2853
+              },
+              "7": {
+                "kind": "integer",
+                "value": 3152
+              },
+              "8": {
+                "kind": "integer",
+                "value": 3591
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_guam_table",
+        "name": "snap_maximum_allotment_guam_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 439
+              },
+              "2": {
+                "kind": "integer",
+                "value": 806
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1157
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1465
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1743
+              },
+              "6": {
+                "kind": "integer",
+                "value": 2095
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2315
+              },
+              "8": {
+                "kind": "integer",
+                "value": 2637
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_hawaii_table",
+        "name": "snap_maximum_allotment_hawaii_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 506
+              },
+              "2": {
+                "kind": "integer",
+                "value": 929
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1334
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1689
+              },
+              "5": {
+                "kind": "integer",
+                "value": 2010
+              },
+              "6": {
+                "kind": "integer",
+                "value": 2415
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2668
+              },
+              "8": {
+                "kind": "integer",
+                "value": 3040
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment_virgin_islands_table",
+        "name": "snap_maximum_allotment_virgin_islands_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 383
+              },
+              "2": {
+                "kind": "integer",
+                "value": 703
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1009
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1278
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1521
+              },
+              "6": {
+                "kind": "integer",
+                "value": 1827
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2019
+              },
+              "8": {
+                "kind": "integer",
+                "value": 2300
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_net_income_limit_100_percent_fpl_48_states_dc_table",
+        "name": "snap_net_income_limit_100_percent_fpl_48_states_dc_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 1305
+              },
+              "2": {
+                "kind": "integer",
+                "value": 1763
+              },
+              "3": {
+                "kind": "integer",
+                "value": 2221
+              },
+              "4": {
+                "kind": "integer",
+                "value": 2680
+              },
+              "5": {
+                "kind": "integer",
+                "value": 3138
+              },
+              "6": {
+                "kind": "integer",
+                "value": 3596
+              },
+              "7": {
+                "kind": "integer",
+                "value": 4055
+              },
+              "8": {
+                "kind": "integer",
+                "value": 4513
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_130_percent_fpl_48_states_dc_table",
+        "name": "snap_gross_income_limit_130_percent_fpl_48_states_dc_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 1696
+              },
+              "2": {
+                "kind": "integer",
+                "value": 2292
+              },
+              "3": {
+                "kind": "integer",
+                "value": 2888
+              },
+              "4": {
+                "kind": "integer",
+                "value": 3483
+              },
+              "5": {
+                "kind": "integer",
+                "value": 4079
+              },
+              "6": {
+                "kind": "integer",
+                "value": 4675
+              },
+              "7": {
+                "kind": "integer",
+                "value": 5271
+              },
+              "8": {
+                "kind": "integer",
+                "value": 5867
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_165_percent_fpl_48_states_dc_table",
+        "name": "snap_gross_income_limit_165_percent_fpl_48_states_dc_table",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "2025-10-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 2152
+              },
+              "2": {
+                "kind": "integer",
+                "value": 2909
+              },
+              "3": {
+                "kind": "integer",
+                "value": 3665
+              },
+              "4": {
+                "kind": "integer",
+                "value": 4421
+              },
+              "5": {
+                "kind": "integer",
+                "value": 5177
+              },
+              "6": {
+                "kind": "integer",
+                "value": 5934
+              },
+              "7": {
+                "kind": "integer",
+                "value": 6690
+              },
+              "8": {
+                "kind": "integer",
+                "value": 7446
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_gross_income_standard",
+        "name": "snap_gross_income_standard",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 1174
+              },
+              "2": {
+                "kind": "integer",
+                "value": 1579
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1984
+              },
+              "4": {
+                "kind": "integer",
+                "value": 2389
+              },
+              "5": {
+                "kind": "integer",
+                "value": 2794
+              },
+              "6": {
+                "kind": "integer",
+                "value": 3200
+              },
+              "7": {
+                "kind": "integer",
+                "value": 3605
+              },
+              "8": {
+                "kind": "integer",
+                "value": 4010
+              },
+              "9": {
+                "kind": "integer",
+                "value": 4416
+              },
+              "10": {
+                "kind": "integer",
+                "value": 4822
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_max_net_income",
+        "name": "snap_max_net_income",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 903
+              },
+              "2": {
+                "kind": "integer",
+                "value": 1215
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1526
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1838
+              },
+              "5": {
+                "kind": "integer",
+                "value": 2150
+              },
+              "6": {
+                "kind": "integer",
+                "value": 2461
+              },
+              "7": {
+                "kind": "integer",
+                "value": 2773
+              },
+              "8": {
+                "kind": "integer",
+                "value": 3085
+              },
+              "9": {
+                "kind": "integer",
+                "value": 3397
+              },
+              "10": {
+                "kind": "integer",
+                "value": 3709
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_max_coupon_allotment",
+        "name": "snap_max_coupon_allotment",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 200
+              },
+              "2": {
+                "kind": "integer",
+                "value": 367
+              },
+              "3": {
+                "kind": "integer",
+                "value": 526
+              },
+              "4": {
+                "kind": "integer",
+                "value": 668
+              },
+              "5": {
+                "kind": "integer",
+                "value": 793
+              },
+              "6": {
+                "kind": "integer",
+                "value": 952
+              },
+              "7": {
+                "kind": "integer",
+                "value": 1052
+              },
+              "8": {
+                "kind": "integer",
+                "value": 1202
+              },
+              "9": {
+                "kind": "integer",
+                "value": 1352
+              },
+              "10": {
+                "kind": "integer",
+                "value": 1502
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_standard_deduction",
+        "name": "snap_standard_deduction",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 142
+              },
+              "2": {
+                "kind": "integer",
+                "value": 142
+              },
+              "3": {
+                "kind": "integer",
+                "value": 142
+              },
+              "4": {
+                "kind": "integer",
+                "value": 153
+              },
+              "5": {
+                "kind": "integer",
+                "value": 179
+              },
+              "6": {
+                "kind": "integer",
+                "value": 205
+              },
+              "7": {
+                "kind": "integer",
+                "value": 205
+              },
+              "8": {
+                "kind": "integer",
+                "value": 205
+              },
+              "9": {
+                "kind": "integer",
+                "value": 205
+              },
+              "10": {
+                "kind": "integer",
+                "value": 205
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_standard_utility_allowance",
+        "name": "snap_standard_utility_allowance",
+        "unit": "USD",
+        "indexed_by": "household_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 314
+              },
+              "2": {
+                "kind": "integer",
+                "value": 326
+              },
+              "3": {
+                "kind": "integer",
+                "value": 338
+              },
+              "4": {
+                "kind": "integer",
+                "value": 350
+              },
+              "5": {
+                "kind": "integer",
+                "value": 360
+              },
+              "6": {
+                "kind": "integer",
+                "value": 372
+              },
+              "7": {
+                "kind": "integer",
+                "value": 384
+              },
+              "8": {
+                "kind": "integer",
+                "value": 396
+              },
+              "9": {
+                "kind": "integer",
+                "value": 408
+              },
+              "10": {
+                "kind": "integer",
+                "value": 419
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#afdc_gross_income_standard",
+        "name": "afdc_gross_income_standard",
+        "unit": "USD",
+        "indexed_by": "assistance_unit_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 777
+              },
+              "2": {
+                "kind": "integer",
+                "value": 1110
+              },
+              "3": {
+                "kind": "integer",
+                "value": 1252
+              },
+              "4": {
+                "kind": "integer",
+                "value": 1289
+              },
+              "5": {
+                "kind": "integer",
+                "value": 1489
+              },
+              "6": {
+                "kind": "integer",
+                "value": 1507
+              },
+              "7": {
+                "kind": "integer",
+                "value": 1633
+              },
+              "8": {
+                "kind": "integer",
+                "value": 1655
+              },
+              "9": {
+                "kind": "integer",
+                "value": 1838
+              },
+              "10": {
+                "kind": "integer",
+                "value": 1875
+              },
+              "11": {
+                "kind": "integer",
+                "value": 1929
+              },
+              "12": {
+                "kind": "integer",
+                "value": 1977
+              },
+              "13": {
+                "kind": "integer",
+                "value": 2020
+              },
+              "14": {
+                "kind": "integer",
+                "value": 2055
+              },
+              "15": {
+                "kind": "integer",
+                "value": 2083
+              },
+              "16": {
+                "kind": "integer",
+                "value": 2109
+              },
+              "17": {
+                "kind": "integer",
+                "value": 2131
+              },
+              "18": {
+                "kind": "integer",
+                "value": 2149
+              },
+              "19": {
+                "kind": "integer",
+                "value": 2162
+              },
+              "20": {
+                "kind": "integer",
+                "value": 2173
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#afdc_consolidated_need_standard",
+        "name": "afdc_consolidated_need_standard",
+        "unit": "USD",
+        "indexed_by": "assistance_unit_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 420
+              },
+              "2": {
+                "kind": "integer",
+                "value": 600
+              },
+              "3": {
+                "kind": "integer",
+                "value": 677
+              },
+              "4": {
+                "kind": "integer",
+                "value": 697
+              },
+              "5": {
+                "kind": "integer",
+                "value": 805
+              },
+              "6": {
+                "kind": "integer",
+                "value": 815
+              },
+              "7": {
+                "kind": "integer",
+                "value": 883
+              },
+              "8": {
+                "kind": "integer",
+                "value": 895
+              },
+              "9": {
+                "kind": "integer",
+                "value": 994
+              },
+              "10": {
+                "kind": "integer",
+                "value": 1014
+              },
+              "11": {
+                "kind": "integer",
+                "value": 1043
+              },
+              "12": {
+                "kind": "integer",
+                "value": 1069
+              },
+              "13": {
+                "kind": "integer",
+                "value": 1092
+              },
+              "14": {
+                "kind": "integer",
+                "value": 1111
+              },
+              "15": {
+                "kind": "integer",
+                "value": 1126
+              },
+              "16": {
+                "kind": "integer",
+                "value": 1140
+              },
+              "17": {
+                "kind": "integer",
+                "value": 1152
+              },
+              "18": {
+                "kind": "integer",
+                "value": 1162
+              },
+              "19": {
+                "kind": "integer",
+                "value": 1169
+              },
+              "20": {
+                "kind": "integer",
+                "value": 1175
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#afdc_standard_payment_amount",
+        "name": "afdc_standard_payment_amount",
+        "unit": "USD",
+        "indexed_by": "assistance_unit_size",
+        "versions": [
+          {
+            "effective_from": "0001-01-01",
+            "values": {
+              "1": {
+                "kind": "integer",
+                "value": 95
+              },
+              "2": {
+                "kind": "integer",
+                "value": 142
+              },
+              "3": {
+                "kind": "integer",
+                "value": 185
+              },
+              "4": {
+                "kind": "integer",
+                "value": 226
+              },
+              "5": {
+                "kind": "integer",
+                "value": 264
+              },
+              "6": {
+                "kind": "integer",
+                "value": 305
+              },
+              "7": {
+                "kind": "integer",
+                "value": 345
+              },
+              "8": {
+                "kind": "integer",
+                "value": 386
+              },
+              "9": {
+                "kind": "integer",
+                "value": 425
+              },
+              "10": {
+                "kind": "integer",
+                "value": 467
+              },
+              "11": {
+                "kind": "integer",
+                "value": 508
+              },
+              "12": {
+                "kind": "integer",
+                "value": 549
+              },
+              "13": {
+                "kind": "integer",
+                "value": 589
+              },
+              "14": {
+                "kind": "integer",
+                "value": 630
+              },
+              "15": {
+                "kind": "integer",
+                "value": 670
+              },
+              "16": {
+                "kind": "integer",
+                "value": 711
+              },
+              "17": {
+                "kind": "integer",
+                "value": 750
+              },
+              "18": {
+                "kind": "integer",
+                "value": 790
+              },
+              "19": {
+                "kind": "integer",
+                "value": 831
+              },
+              "20": {
+                "kind": "integer",
+                "value": 871
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "id": "us:statutes/7/2012/j#snap_household_has_elderly_or_disabled_member",
+        "name": "snap_household_has_elderly_or_disabled_member",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "7 USC 2012(j)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "count_related",
+            "relation": "us:statutes/7/2012/j#relation.member_of_household",
+            "current_slot": 1,
+            "related_slot": 0,
+            "where": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "snap_member_is_elderly_or_disabled"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          },
+          "op": "gt",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_standard_deduction_48_states_dc",
+        "name": "snap_standard_deduction_48_states_dc",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 maximum allotments and deductions",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_standard_deduction_48_states_dc_table",
+          "index": {
+            "kind": "min",
+            "items": [
+              {
+                "kind": "derived",
+                "name": "household_size"
+              },
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 6
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_standard_deduction",
+        "name": "snap_standard_deduction",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 maximum allotments and deductions",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "derived",
+          "name": "snap_standard_deduction_48_states_dc"
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/deductions#snap_asset_limit",
+        "name": "snap_asset_limit",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 maximum allotments and deductions",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "snap_household_has_elderly_or_disabled_member"
+          },
+          "then_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "snap_asset_limit_elderly_or_disabled_member",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "snap_asset_limit_other_households",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_maximum_allotment",
+        "name": "snap_maximum_allotment",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 maximum allotments and deductions",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "parameter_lookup",
+              "parameter": "snap_maximum_allotment_table",
+              "index": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "min",
+                    "items": [
+                      {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 8
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "8"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "0"
+                    }
+                  }
+                ]
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "snap_maximum_allotment_additional_member",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/maximum-allotments#snap_one_person_thrifty_food_plan_cost",
+        "name": "snap_one_person_thrifty_food_plan_cost",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 maximum allotments and deductions",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_maximum_allotment_table",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_total_gross_income",
+        "name": "snap_total_gross_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(A)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sub",
+          "left": {
+            "kind": "add",
+            "items": [
+              {
+                "kind": "input",
+                "name": "snap_gross_monthly_earned_income"
+              },
+              {
+                "kind": "input",
+                "name": "snap_total_monthly_unearned_income"
+              }
+            ]
+          },
+          "right": {
+            "kind": "input",
+            "name": "snap_income_exclusions"
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_earned_income_deduction_for_net_income",
+        "name": "snap_earned_income_deduction_for_net_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(B) with the (e)(1)(ii) rounding election",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "floor",
+          "value": {
+            "kind": "mul",
+            "left": {
+              "kind": "input",
+              "name": "snap_gross_monthly_earned_income"
+            },
+            "right": {
+              "kind": "parameter_lookup",
+              "parameter": "snap_earned_income_deduction_rate_for_net_income",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_excess_medical_deduction_for_net_income",
+        "name": "snap_excess_medical_deduction_for_net_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(D)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "household_entitled_to_excess_medical_deduction"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "max",
+            "items": [
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              },
+              {
+                "kind": "sub",
+                "left": {
+                  "kind": "input",
+                  "name": "snap_total_medical_expenses"
+                },
+                "right": {
+                  "kind": "parameter_lookup",
+                  "parameter": "snap_medical_expense_threshold",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_homeless_shelter_deduction_for_net_income",
+        "name": "snap_homeless_shelter_deduction_for_net_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(G)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "floor",
+          "value": {
+            "kind": "add",
+            "items": [
+              {
+                "kind": "min",
+                "items": [
+                  {
+                    "kind": "input",
+                    "name": "snap_claimed_homeless_shelter_deduction"
+                  },
+                  {
+                    "kind": "parameter_lookup",
+                    "parameter": "snap_homeless_shelter_deduction",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0.5"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_net_income_before_shelter",
+        "name": "snap_net_income_before_shelter",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(A)-(H)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "sub",
+                "left": {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "sub",
+                      "left": {
+                        "kind": "sub",
+                        "left": {
+                          "kind": "derived",
+                          "name": "snap_total_gross_income"
+                        },
+                        "right": {
+                          "kind": "derived",
+                          "name": "snap_earned_income_deduction_for_net_income"
+                        }
+                      },
+                      "right": {
+                        "kind": "parameter_lookup",
+                        "parameter": "snap_standard_deduction",
+                        "index": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 0
+                          }
+                        }
+                      }
+                    },
+                    "right": {
+                      "kind": "derived",
+                      "name": "snap_excess_medical_deduction_for_net_income"
+                    }
+                  },
+                  "right": {
+                    "kind": "input",
+                    "name": "snap_allowable_monthly_dependent_care_expenses"
+                  }
+                },
+                "right": {
+                  "kind": "input",
+                  "name": "snap_allowable_monthly_child_support_payments"
+                }
+              },
+              "right": {
+                "kind": "derived",
+                "name": "snap_homeless_shelter_deduction_for_net_income"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_excess_shelter_cost",
+        "name": "snap_excess_shelter_cost",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(H)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "snap_homeless_shelter_deduction_for_net_income"
+            },
+            "op": "gt",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          },
+          "else_expr": {
+            "kind": "max",
+            "items": [
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              },
+              {
+                "kind": "floor",
+                "value": {
+                  "kind": "add",
+                  "items": [
+                    {
+                      "kind": "sub",
+                      "left": {
+                        "kind": "input",
+                        "name": "snap_total_allowable_shelter_expenses"
+                      },
+                      "right": {
+                        "kind": "mul",
+                        "left": {
+                          "kind": "derived",
+                          "name": "snap_net_income_before_shelter"
+                        },
+                        "right": {
+                          "kind": "parameter_lookup",
+                          "parameter": "snap_excess_shelter_income_share",
+                          "index": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 0
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "0.5"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_excess_shelter_deduction_for_net_income",
+        "name": "snap_excess_shelter_deduction_for_net_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)(I)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "snap_household_has_elderly_or_disabled_member"
+          },
+          "then_expr": {
+            "kind": "derived",
+            "name": "snap_excess_shelter_cost"
+          },
+          "else_expr": {
+            "kind": "min",
+            "items": [
+              {
+                "kind": "derived",
+                "name": "snap_excess_shelter_cost"
+              },
+              {
+                "kind": "parameter_lookup",
+                "parameter": "snap_maximum_excess_shelter_deduction_48_states_dc",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_net_monthly_income",
+        "name": "snap_net_monthly_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(1)(i)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "derived",
+                "name": "snap_net_income_before_shelter"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "snap_excess_shelter_deduction_for_net_income"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_minimum_benefit",
+        "name": "snap_minimum_benefit",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(2)(ii)(C)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "floor",
+          "value": {
+            "kind": "add",
+            "items": [
+              {
+                "kind": "mul",
+                "left": {
+                  "kind": "derived",
+                  "name": "snap_one_person_thrifty_food_plan_cost"
+                },
+                "right": {
+                  "kind": "parameter_lookup",
+                  "parameter": "snap_minimum_benefit_rate",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              },
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0.5"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_calculated_monthly_allotment_before_minimums",
+        "name": "snap_calculated_monthly_allotment_before_minimums",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(2)(ii)(A)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "state_agency_rounds_thirty_percent_net_income_up"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "max",
+            "items": [
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              },
+              {
+                "kind": "sub",
+                "left": {
+                  "kind": "derived",
+                  "name": "snap_maximum_allotment"
+                },
+                "right": {
+                  "kind": "ceil",
+                  "value": {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "derived",
+                      "name": "snap_net_monthly_income"
+                    },
+                    "right": {
+                      "kind": "parameter_lookup",
+                      "parameter": "snap_allotment_net_income_reduction_rate",
+                      "index": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else_expr": {
+            "kind": "max",
+            "items": [
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              },
+              {
+                "kind": "floor",
+                "value": {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "derived",
+                    "name": "snap_maximum_allotment"
+                  },
+                  "right": {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "derived",
+                      "name": "snap_net_monthly_income"
+                    },
+                    "right": {
+                      "kind": "parameter_lookup",
+                      "parameter": "snap_allotment_net_income_reduction_rate",
+                      "index": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/10#snap_monthly_allotment",
+        "name": "snap_monthly_allotment",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.10(e)(2)(ii)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "and",
+            "items": [
+              {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "household_initial_month"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              },
+              {
+                "kind": "comparison",
+                "left": {
+                  "kind": "derived",
+                  "name": "snap_calculated_monthly_allotment_before_minimums"
+                },
+                "op": "lt",
+                "right": {
+                  "kind": "parameter_lookup",
+                  "parameter": "snap_initial_month_minimum_issuance",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "not",
+                      "item": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "input",
+                          "name": "household_initial_month"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "bool",
+                            "value": true
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      "op": "lte",
+                      "right": {
+                        "kind": "parameter_lookup",
+                        "parameter": "snap_minimum_benefit_household_size_limit",
+                        "index": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 0
+                          }
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "snap_calculated_monthly_allotment_before_minimums"
+                  },
+                  "op": "lt",
+                  "right": {
+                    "kind": "derived",
+                    "name": "snap_minimum_benefit"
+                  }
+                }
+              ]
+            },
+            "then_expr": {
+              "kind": "derived",
+              "name": "snap_minimum_benefit"
+            },
+            "else_expr": {
+              "kind": "derived",
+              "name": "snap_calculated_monthly_allotment_before_minimums"
+            }
+          }
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_net_income_limit_100_percent_fpl_48_states_dc",
+        "name": "snap_net_income_limit_100_percent_fpl_48_states_dc",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 income eligibility standards",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "parameter_lookup",
+              "parameter": "snap_net_income_limit_100_percent_fpl_48_states_dc_table",
+              "index": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "min",
+                    "items": [
+                      {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 8
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "8"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "0"
+                    }
+                  }
+                ]
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "snap_net_income_limit_100_percent_fpl_48_states_dc_additional_member",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_130_percent_fpl_48_states_dc",
+        "name": "snap_gross_income_limit_130_percent_fpl_48_states_dc",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 income eligibility standards",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "parameter_lookup",
+              "parameter": "snap_gross_income_limit_130_percent_fpl_48_states_dc_table",
+              "index": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "min",
+                    "items": [
+                      {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 8
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "8"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "0"
+                    }
+                  }
+                ]
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "snap_gross_income_limit_130_percent_fpl_48_states_dc_additional_member",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:policies/usda/snap/fy-2026-cola/income-eligibility-standards#snap_gross_income_limit_165_percent_fpl_48_states_dc",
+        "name": "snap_gross_income_limit_165_percent_fpl_48_states_dc",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "USDA SNAP FY 2026 income eligibility standards",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "parameter_lookup",
+              "parameter": "snap_gross_income_limit_165_percent_fpl_48_states_dc_table",
+              "index": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "min",
+                    "items": [
+                      {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 8
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "8"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "0"
+                    }
+                  }
+                ]
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "snap_gross_income_limit_165_percent_fpl_48_states_dc_additional_member",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_standard_gross_income_eligible",
+        "name": "snap_standard_gross_income_eligible",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "7 CFR 273.9(a)(1)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "or",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "snap_household_has_elderly_or_disabled_member"
+            },
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "snap_total_gross_income"
+              },
+              "op": "lte",
+              "right": {
+                "kind": "derived",
+                "name": "snap_gross_income_limit_130_percent_fpl_48_states_dc"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_standard_net_income_eligible",
+        "name": "snap_standard_net_income_eligible",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "7 CFR 273.9(a)(2)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "snap_net_monthly_income"
+          },
+          "op": "lte",
+          "right": {
+            "kind": "derived",
+            "name": "snap_net_income_limit_100_percent_fpl_48_states_dc"
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_standard_income_eligible",
+        "name": "snap_standard_income_eligible",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "7 CFR 273.9(a)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "snap_standard_gross_income_eligible"
+            },
+            {
+              "kind": "derived",
+              "name": "snap_standard_net_income_eligible"
+            }
+          ]
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_full_excess_shelter_deduction_applies",
+        "name": "snap_full_excess_shelter_deduction_applies",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "7 CFR 273.9(d)(6)(ii)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "derived",
+          "name": "snap_household_has_elderly_or_disabled_member"
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_standard_utility_allowance_state_option",
+        "name": "snap_standard_utility_allowance_state_option",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.9(d)(6)(iii)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_standard_utility_allowance",
+          "index": {
+            "kind": "derived",
+            "name": "household_size"
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_limited_utility_allowance_state_option",
+        "name": "snap_limited_utility_allowance_state_option",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.9(d)(6)(iii)(B)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_basic_utility_allowance",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_individual_utility_allowance_state_option",
+        "name": "snap_individual_utility_allowance_state_option",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.9(d)(6)(iii)(C)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_telephone_standard",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "us:regulations/7-cfr/273/9#snap_utility_allowance_for_shelter_costs",
+        "name": "snap_utility_allowance_for_shelter_costs",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "7 CFR 273.9(d)(6)(iii)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "snap_standard_utility_allowance_state_option"
+                },
+                {
+                  "kind": "derived",
+                  "name": "snap_limited_utility_allowance_state_option"
+                }
+              ]
+            },
+            {
+              "kind": "derived",
+              "name": "snap_individual_utility_allowance_state_option"
+            }
+          ]
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#household_size",
+        "name": "household_size",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": null,
+        "period": "Month",
+        "source": "Tables I-VII row key",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "household_member_count"
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_standard_utility_allowance_state_value",
+        "name": "snap_standard_utility_allowance_state_value",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "Table V-A",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_standard_utility_allowance",
+          "index": {
+            "kind": "derived",
+            "name": "household_size"
+          }
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_limited_utility_allowance_state_value",
+        "name": "snap_limited_utility_allowance_state_value",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "Table V-B",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_basic_utility_allowance",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#snap_individual_utility_allowance_state_value",
+        "name": "snap_individual_utility_allowance_state_value",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": "Food Stamp Standard Telephone Allowance",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "parameter_lookup",
+          "parameter": "snap_telephone_standard",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "us-tn:regulations/1240-01/04/27/block-1#assistance_unit_size",
+        "name": "assistance_unit_size",
+        "entity": "TanfUnit",
+        "dtype": "decimal",
+        "unit": null,
+        "period": "Month",
+        "source": "Table VIII row key",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "assistance_unit_member_count"
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "assistance_unit_size",
+      "household_size",
+      "snap_earned_income_deduction_for_net_income",
+      "snap_excess_medical_deduction_for_net_income",
+      "snap_gross_income_limit_130_percent_fpl_48_states_dc",
+      "snap_gross_income_limit_165_percent_fpl_48_states_dc",
+      "snap_homeless_shelter_deduction_for_net_income",
+      "snap_household_has_elderly_or_disabled_member",
+      "snap_asset_limit",
+      "snap_full_excess_shelter_deduction_applies",
+      "snap_individual_utility_allowance_state_option",
+      "snap_individual_utility_allowance_state_value",
+      "snap_limited_utility_allowance_state_option",
+      "snap_limited_utility_allowance_state_value",
+      "snap_maximum_allotment",
+      "snap_net_income_limit_100_percent_fpl_48_states_dc",
+      "snap_one_person_thrifty_food_plan_cost",
+      "snap_minimum_benefit",
+      "snap_standard_deduction_48_states_dc",
+      "snap_standard_deduction",
+      "snap_standard_utility_allowance_state_option",
+      "snap_standard_utility_allowance_state_value",
+      "snap_total_gross_income",
+      "snap_net_income_before_shelter",
+      "snap_excess_shelter_cost",
+      "snap_excess_shelter_deduction_for_net_income",
+      "snap_net_monthly_income",
+      "snap_calculated_monthly_allotment_before_minimums",
+      "snap_monthly_allotment",
+      "snap_standard_gross_income_eligible",
+      "snap_standard_net_income_eligible",
+      "snap_standard_income_eligible",
+      "snap_utility_allowance_for_shelter_costs"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    }
+  }
+}

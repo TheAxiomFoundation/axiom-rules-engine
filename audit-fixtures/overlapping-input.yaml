@@ -1,0 +1,11 @@
+format: rulespec/v1
+rules:
+  - name: result
+    kind: derived
+    entity: Household
+    dtype: Money
+    unit: USD
+    period: Month
+    versions:
+      - effective_from: 2025-01-01
+        formula: amount

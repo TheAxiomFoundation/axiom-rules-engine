@@ -1,0 +1,670 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.1.1",
+  "program": {
+    "extends": null,
+    "module": {
+      "summary": "This module encodes the Flemish jobbonus for the 2025 EUROMOD-facing\nannual worker slice. It applies the decree's beneficiary and eligibility\nframework and the Flemish Government implementing order's 2025 wage\nthresholds, degressive amount schedule, work-fraction proration,\nsmall-payment suppression, and fixed 50 euro top-up. It leaves quarterly\nDimona/DMFA reconstruction, frontier-worker annual-income conversion,\nadministrative application/payment procedure, recovery, and objections to\nlater payroll-administration surfaces.",
+      "source_verification": {
+        "corpus_citation_path": "be-vlg/statute/codex-vlaanderen/jobbonus/decree-2022-05-20/block-4"
+      }
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_lower_monthly_gross_wage_threshold",
+        "name": "flanders_jobbonus_2025_lower_monthly_gross_wage_threshold",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 2115
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_upper_monthly_gross_wage_threshold",
+        "name": "flanders_jobbonus_2025_upper_monthly_gross_wage_threshold",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "3114.99"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_maximum_annual_full_time_amount",
+        "name": "flanders_jobbonus_2025_maximum_annual_full_time_amount",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 650
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_degressive_floor_annual_full_time_amount",
+        "name": "flanders_jobbonus_2025_degressive_floor_annual_full_time_amount",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 50
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_fixed_top_up",
+        "name": "flanders_jobbonus_2025_fixed_top_up",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 50
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_2025_part_time_minimum_payable_amount",
+        "name": "flanders_jobbonus_2025_part_time_minimum_payable_amount",
+        "unit": "EUR",
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 10
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_bounded_work_fraction",
+        "name": "flanders_jobbonus_bounded_work_fraction",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": null,
+        "period": "Year",
+        "source": "Flemish Government implementing order article 2 sections 2 and 6, PB work-fraction factor capped at 1",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "min",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "1"
+              }
+            },
+            {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "input",
+                  "name": "flanders_jobbonus_work_fraction"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_statutory_eligibility_flag",
+        "name": "flanders_jobbonus_statutory_eligibility_flag",
+        "entity": "Person",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Year",
+        "source": "Flemish jobbonus decree articles 3 and 4, beneficiary class, Flemish domicile, wage condition, and below-retirement-age condition",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "flanders_jobbonus_is_beneficiary_class"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "flanders_jobbonus_is_domiciled_in_flanders_on_january_1_after_reference_year"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "flanders_jobbonus_is_below_retirement_age_in_worked_quarter"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "else_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_annual_full_time_amount_before_proration",
+        "name": "flanders_jobbonus_annual_full_time_amount_before_proration",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish Government implementing order article 2/1, annual full-time 2025 amount schedule by average monthly gross wage",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "flanders_jobbonus_average_monthly_gross_wage_at_full_time"
+            },
+            "op": "gt",
+            "right": {
+              "kind": "parameter_lookup",
+              "parameter": "flanders_jobbonus_2025_upper_monthly_gross_wage_threshold",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "flanders_jobbonus_average_monthly_gross_wage_at_full_time"
+              },
+              "op": "lte",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "flanders_jobbonus_2025_lower_monthly_gross_wage_threshold",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "flanders_jobbonus_2025_maximum_annual_full_time_amount",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "else_expr": {
+              "kind": "sub",
+              "left": {
+                "kind": "parameter_lookup",
+                "parameter": "flanders_jobbonus_2025_maximum_annual_full_time_amount",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              },
+              "right": {
+                "kind": "div",
+                "left": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "parameter_lookup",
+                      "parameter": "flanders_jobbonus_2025_maximum_annual_full_time_amount",
+                      "index": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 0
+                        }
+                      }
+                    },
+                    "right": {
+                      "kind": "parameter_lookup",
+                      "parameter": "flanders_jobbonus_2025_degressive_floor_annual_full_time_amount",
+                      "index": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 0
+                        }
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "input",
+                      "name": "flanders_jobbonus_average_monthly_gross_wage_at_full_time"
+                    },
+                    "right": {
+                      "kind": "parameter_lookup",
+                      "parameter": "flanders_jobbonus_2025_lower_monthly_gross_wage_threshold",
+                      "index": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 0
+                        }
+                      }
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "parameter_lookup",
+                    "parameter": "flanders_jobbonus_2025_upper_monthly_gross_wage_threshold",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "flanders_jobbonus_2025_lower_monthly_gross_wage_threshold",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_prorated_amount_before_suppression",
+        "name": "flanders_jobbonus_prorated_amount_before_suppression",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish Government implementing order article 2 section 6, annual jobbonus prorated by worked period and work regime",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "mul",
+          "left": {
+            "kind": "derived",
+            "name": "flanders_jobbonus_annual_full_time_amount_before_proration"
+          },
+          "right": {
+            "kind": "derived",
+            "name": "flanders_jobbonus_bounded_work_fraction"
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_small_payment_threshold",
+        "name": "flanders_jobbonus_small_payment_threshold",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish Government implementing order article 2 section 6, full-time and part-time payment suppression thresholds",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "flanders_jobbonus_is_full_time_worker"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "flanders_jobbonus_2025_degressive_floor_annual_full_time_amount",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "flanders_jobbonus_2025_part_time_minimum_payable_amount",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_payable_base_amount",
+        "name": "flanders_jobbonus_payable_base_amount",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish jobbonus decree articles 3 through 5 and Flemish Government implementing order article 2 section 6, base amount after eligibility and small-payment suppression",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "flanders_jobbonus_statutory_eligibility_flag"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "flanders_jobbonus_prorated_amount_before_suppression"
+              },
+              "op": "lt",
+              "right": {
+                "kind": "derived",
+                "name": "flanders_jobbonus_small_payment_threshold"
+              }
+            },
+            "then_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            "else_expr": {
+              "kind": "derived",
+              "name": "flanders_jobbonus_prorated_amount_before_suppression"
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_fixed_top_up_amount",
+        "name": "flanders_jobbonus_fixed_top_up_amount",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish Government implementing order article 2/2, fixed top-up for 2025 beneficiaries for whom the jobbonus is payable",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "flanders_jobbonus_payable_base_amount"
+            },
+            "op": "gt",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "flanders_jobbonus_2025_fixed_top_up",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        }
+      },
+      {
+        "id": "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_annual_amount",
+        "name": "flanders_jobbonus_annual_amount",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "EUR",
+        "period": "Year",
+        "source": "Flemish jobbonus decree articles 3 through 5 and Flemish Government implementing order articles 2, 2/1, and 2/2, final annual jobbonus for the 2025 worker slice",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "flanders_jobbonus_payable_base_amount"
+            },
+            {
+              "kind": "derived",
+              "name": "flanders_jobbonus_fixed_top_up_amount"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "flanders_jobbonus_annual_full_time_amount_before_proration",
+      "flanders_jobbonus_bounded_work_fraction",
+      "flanders_jobbonus_prorated_amount_before_suppression",
+      "flanders_jobbonus_small_payment_threshold",
+      "flanders_jobbonus_statutory_eligibility_flag",
+      "flanders_jobbonus_payable_base_amount",
+      "flanders_jobbonus_fixed_top_up_amount",
+      "flanders_jobbonus_annual_amount"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    }
+  }
+}

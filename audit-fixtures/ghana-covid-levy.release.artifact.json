@@ -1,0 +1,271 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.1.1",
+  "program": {
+    "extends": null,
+    "module": {
+      "summary": "There is imposed a COVID-19 Health Recovery Levy on supplies made in the\ncountry, other than exempt goods or services, and on imports other than\nexempt imports. The Levy rate is One per cent and is calculated on the\nvalue of the taxable supply or imports. The COVID-19 Health Recovery\nLevy (Repeal) Act, 2025 (Act 1150, assent and gazette 10 December 2025)\nrepeals Act 1068 with savings for pre-repeal rights and liabilities, so\nthe levy's live window is 2021-03-31 to 2025-12-09 and the rate is nil\nfrom 2025-12-10 (encoded as a repeal version). GHAMOD GH_2025 correctly\nincludes the levy for its 2025 policy year.",
+      "source_verification": {
+        "corpus_citation_path": "gh/statute/act-1068/covid-19-health-recovery-levy-2021/section-1-imposition-of-levy"
+      }
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [
+      {
+        "id": "gh:statutes/act-1068/covid-19-health-recovery-levy-2021/section-1-imposition-of-levy#covid_health_recovery_levy_rate",
+        "name": "covid_health_recovery_levy_rate",
+        "unit": null,
+        "indexed_by": null,
+        "versions": [
+          {
+            "effective_from": "2021-03-31",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.01"
+              }
+            }
+          },
+          {
+            "effective_from": "2025-12-10",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "id": "gh:statutes/act-1068/covid-19-health-recovery-levy-2021/section-1-imposition-of-levy#covid_health_recovery_levy_applies_to_transaction",
+        "name": "covid_health_recovery_levy_applies_to_transaction",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Year",
+        "source": "Act 1068 section 1(1)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "or",
+          "items": [
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "supply_of_goods_or_services_made_in_country"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "bool",
+                      "value": true
+                    }
+                  }
+                },
+                {
+                  "kind": "not",
+                  "item": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "supply_is_exempt_goods_or_services"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "bool",
+                        "value": true
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "import_of_goods_or_services"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "bool",
+                      "value": true
+                    }
+                  }
+                },
+                {
+                  "kind": "not",
+                  "item": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "import_is_exempt_import"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "bool",
+                        "value": true
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "gh:statutes/act-1068/covid-19-health-recovery-levy-2021/section-1-imposition-of-levy#covid_health_recovery_levy_amount",
+        "name": "covid_health_recovery_levy_amount",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "GHS",
+        "period": "Year",
+        "source": "Act 1068 section 1(4)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "covid_health_recovery_levy_applies_to_transaction"
+          },
+          "then_expr": {
+            "kind": "mul",
+            "left": {
+              "kind": "input",
+              "name": "taxable_supply_or_import_value"
+            },
+            "right": {
+              "kind": "parameter_lookup",
+              "parameter": "covid_health_recovery_levy_rate",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        }
+      },
+      {
+        "id": "gh:statutes/act-1068/covid-19-health-recovery-levy-2021/section-1-imposition-of-levy#vat_flat_rate_person_charges_covid_health_recovery_levy",
+        "name": "vat_flat_rate_person_charges_covid_health_recovery_levy",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Year",
+        "source": "Act 1068 section 1(3)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "person_charges_value_added_tax_flat_rate"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            },
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "person_makes_supply_of_goods_or_services"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "covid_health_recovery_levy_applies_to_transaction",
+      "covid_health_recovery_levy_amount",
+      "vat_flat_rate_person_charges_covid_health_recovery_levy"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    }
+  }
+}

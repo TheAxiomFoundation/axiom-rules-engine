@@ -1,0 +1,4 @@
+0000000000000000000000000000000000000000 2c057673be7321b3600215201684f262088fadbf Codex Lane B Auditor <codex-laneb-audit@localhost> 1785189541 -0400	commit (initial): audit: initialize lane B progress ledger
+2c057673be7321b3600215201684f262088fadbf 71f0823d802fea8a93c641f18d391b177de3bb0c Codex Lane B Auditor <codex-laneb-audit@localhost> 1785189807 -0400	commit: audit: checkpoint parity test and rounding evidence
+71f0823d802fea8a93c641f18d391b177de3bb0c b63f1e168b32ffc867f54fa4a6e086a4b71dbfca Codex Lane B Auditor <codex-laneb-audit@localhost> 1785190409 -0400	commit: audit: reproduce published-rule mode divergence
+b63f1e168b32ffc867f54fa4a6e086a4b71dbfca b57d13e697b1ad965401b0c9959fec15f39f0950 Codex Lane B Auditor <codex-laneb-audit@localhost> 1785190705 -0400	commit: audit: reproduce Bristol f64 money mis-rounding

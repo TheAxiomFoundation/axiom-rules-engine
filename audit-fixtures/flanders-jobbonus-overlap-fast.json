@@ -1,0 +1,47 @@
+{
+  "mode": "fast",
+  "dataset": {
+    "inputs": [
+      {
+        "name": "be-vlg:regulations/employment/jobbonus#input.flanders_jobbonus_average_monthly_gross_wage_at_full_time",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2024-07-01",
+          "end": "2025-12-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "2000"
+        }
+      },
+      {
+        "name": "be-vlg:regulations/employment/jobbonus#input.flanders_jobbonus_average_monthly_gross_wage_at_full_time",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2024-01-01",
+          "end": "2025-12-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "4000"
+        }
+      }
+    ],
+    "relations": []
+  },
+  "queries": [
+    {
+      "entity_id": "person-1",
+      "period": {
+        "period_kind": "tax_year",
+        "start": "2025-01-01",
+        "end": "2025-12-31"
+      },
+      "outputs": [
+        "be-vlg:regulations/employment/jobbonus#flanders_jobbonus_annual_full_time_amount_before_proration"
+      ]
+    }
+  ]
+}

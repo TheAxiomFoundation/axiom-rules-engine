@@ -1,0 +1,99 @@
+{
+  "mode": "fast",
+  "dataset": {
+    "inputs": [
+      {
+        "name": "supply_of_goods_or_services_made_in_country",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2021-03-31",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "bool",
+          "value": true
+        }
+      },
+      {
+        "name": "supply_is_exempt_goods_or_services",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2021-03-31",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "bool",
+          "value": false
+        }
+      },
+      {
+        "name": "import_of_goods_or_services",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2021-03-31",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "bool",
+          "value": false
+        }
+      },
+      {
+        "name": "import_is_exempt_import",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2021-03-31",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "bool",
+          "value": false
+        }
+      },
+      {
+        "name": "taxable_supply_or_import_value",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2024-07-01",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "2000"
+        }
+      },
+      {
+        "name": "taxable_supply_or_import_value",
+        "entity": "Person",
+        "entity_id": "person-1",
+        "interval": {
+          "start": "2024-01-01",
+          "end": "2025-12-09"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "1000"
+        }
+      }
+    ],
+    "relations": []
+  },
+  "queries": [
+    {
+      "entity_id": "person-1",
+      "period": {
+        "period_kind": "tax_year",
+        "start": "2025-01-01",
+        "end": "2025-12-09"
+      },
+      "outputs": [
+        "covid_health_recovery_levy_amount"
+      ]
+    }
+  ]
+}

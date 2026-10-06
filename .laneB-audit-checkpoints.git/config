@@ -1,0 +1,10 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	ignorecase = true
+	precomposeunicode = true
+	worktree = ..
+[user]
+	name = Codex Lane B Auditor
+	email = codex-laneb-audit@localhost

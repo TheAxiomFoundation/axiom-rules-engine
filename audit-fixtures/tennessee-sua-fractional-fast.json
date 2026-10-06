@@ -1,0 +1,34 @@
+{
+  "mode": "fast",
+  "dataset": {
+    "inputs": [
+      {
+        "name": "us-tn:regulations/1240-01/04/27/block-1#input.household_member_count",
+        "entity": "Household",
+        "entity_id": "household-1",
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "1.5"
+        }
+      }
+    ],
+    "relations": []
+  },
+  "queries": [
+    {
+      "entity_id": "household-1",
+      "period": {
+        "period_kind": "month",
+        "start": "2026-01-01",
+        "end": "2026-01-31"
+      },
+      "outputs": [
+        "us-tn:regulations/1240-01/04/27/block-1#snap_standard_utility_allowance_state_value"
+      ]
+    }
+  ]
+}
