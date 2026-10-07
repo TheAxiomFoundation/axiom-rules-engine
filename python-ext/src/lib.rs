@@ -468,11 +468,14 @@ fn build_batch(
 
     // Every link of a derived-relation chain is keyed to the chain's base
     // relation, so several schemas can share one key, each reading its own
-    // related inputs. A key's batch carries the union of those inputs: its
-    // offsets are read once, for the first schema keyed to it, and each column
-    // once, for the first schema that reads it. Schemas are walked in order,
-    // so a malformed batch fails with the error the first schema reading it
-    // raises.
+    // related inputs. A key's batch carries the union of those inputs. In
+    // this loop its offsets are read once, for the first schema keyed to it,
+    // and each column once, for the first schema that reads it. When no root
+    // input column is supplied, the row count above came from the first
+    // schema's offsets, so that key's offsets are extracted twice. Schemas are
+    // walked in order, and a later schema skips only reads that already
+    // succeeded, so a malformed batch fails with the first error that reading
+    // each schema's batch afresh, in schema order, would raise.
     let relation_batches = relations.unwrap_or_else(|| PyDict::new(inputs.py()));
     let mut bound_relations: HashMap<
         DenseRelationKey,

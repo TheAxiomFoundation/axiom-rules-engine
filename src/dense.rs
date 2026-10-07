@@ -1080,13 +1080,16 @@ impl DenseCompiledProgram {
             .collect::<Vec<Option<DenseColumn>>>();
 
         // Every link of a derived-relation chain is keyed to the chain's base
-        // relation, so many schemas can share one key. Each key's batch is
-        // validated and bound once, when the first schema keyed to it is
-        // reached, and the schemas after it share those rows and columns.
+        // relation, so many schemas can share one key. A key's offsets are
+        // validated, and its owners built, once, when the first schema keyed
+        // to it is reached; the schemas after it share them. Each supplied
+        // column is length-checked when a schema first reads it, then shared,
+        // and a later schema reading it gets the shared column unchecked (the
+        // first schema's columns are also pre-checked in `bind_relation_key`).
         // Schemas are still walked in order, so the first error reported is
-        // the one a per-schema binding reports: a key's offsets are checked
-        // for the first schema that reads it, and supplied columns are
-        // length-checked in schema/input order before sharing them.
+        // the one a per-schema binding reports: a key's offsets, related count
+        // and shared columns never change once bound, so every check a later
+        // schema skips would pass.
         let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for relation in &self.relations {
@@ -1149,9 +1152,10 @@ impl DenseCompiledProgram {
         })
     }
 
-    /// Validate the first schema's offsets and supplied columns before
-    /// allocating owners from the caller's related count. Later schemas
-    /// still check their own columns in schema order when binding their views.
+    /// Validate the key's offsets and the first schema's supplied columns
+    /// before allocating owners from the caller's related count. Binding the
+    /// views then length-checks each column on its first read, in schema
+    /// order, so a later schema checks only the columns no earlier one read.
     fn bind_relation_key(
         schema: &DenseRelationSchema,
         relation_batch: DenseRelationBatchSpec,

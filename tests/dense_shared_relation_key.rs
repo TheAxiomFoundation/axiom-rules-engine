@@ -18,8 +18,8 @@
 //!   reading its own input, dense answers exactly what explain answers.
 //! * **Errors.** A malformed batch fails with the error a per-schema binding
 //!   reports, in schema order: a missing key names the first schema's key,
-//!   bad offsets name the key, and each schema's columns are length-checked
-//!   in its own input order.
+//!   bad offsets name the key, and columns are length-checked in schema and
+//!   input order, each on its first read.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
@@ -694,9 +694,10 @@ fn malformed_offsets_name_the_shared_key() {
     }
 }
 
-/// Each schema checks its own columns, in schema order: a short column read
-/// only by the second schema is reported although the first schema bound the
-/// key, and when a column the first schema reads is short too, that one is.
+/// Columns are length-checked in schema order, each on its first read: a short
+/// column read only by the second schema is reported although the first schema
+/// bound the key, and when a column the first schema reads is short too, that
+/// one is.
 #[test]
 fn every_schema_checks_its_own_columns_in_schema_order() {
     let _serial = serial();
