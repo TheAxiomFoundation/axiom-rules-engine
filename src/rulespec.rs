@@ -36,8 +36,19 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 pub enum RuleSpecError {
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// A module reached through the import walk failed to deserialize. Names
+    /// the module the YAML belongs to, which may be an import several levels
+    /// below the root a caller asked to load: line and column refer to it.
+    #[error("RuleSpec module `{target}`: yaml parse error: {error}")]
+    ModuleYaml {
+        target: String,
+        error: serde_yaml::Error,
+    },
     #[error("RuleSpec requires exact `format: rulespec/v1`")]
     MissingDiscriminator,
+    /// A module reached through the import walk lacks the discriminator.
+    #[error("RuleSpec module `{target}` requires exact `format: rulespec/v1`")]
+    ModuleMissingDiscriminator { target: String },
     #[error(
         "RuleSpec module `{path}` declares removed top-level `extends`; use `imports` for atomic dependencies and axiom-compose for program composition"
     )]
@@ -1139,8 +1150,18 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    // Parse once up front so a syntax error names this module and keeps its
+    // position, instead of surfacing as a missing discriminator.
+    if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        return Err(RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        });
+    }
     if !looks_like_rulespec_yaml(&text) {
-        return Err(RuleSpecError::MissingDiscriminator);
+        return Err(RuleSpecError::ModuleMissingDiscriminator {
+            target: target.to_string(),
+        });
     }
     reject_removed_extends(&text, target)?;
     reject_removed_schema_discriminator(&text, target)?;
@@ -1151,7 +1172,11 @@ fn load_rulespec_document_from_source(
     }
     validate_recursive_corpus_contract(&text, target)?;
     context.stack.push(target.to_string());
-    let mut document: RulesDocument = serde_yaml::from_str(&text)?;
+    let mut document: RulesDocument =
+        serde_yaml::from_str(&text).map_err(|error| RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        })?;
     match surface {
         ModuleSurface::Atomic => document.validate_atomic_module_metadata(target)?,
         #[cfg(feature = "fs")]
