@@ -1150,6 +1150,14 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    // Parse once up front so a syntax error names this module and keeps its
+    // position, instead of surfacing as a missing discriminator.
+    if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        return Err(RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        });
+    }
     if !looks_like_rulespec_yaml(&text) {
         return Err(RuleSpecError::ModuleMissingDiscriminator {
             target: target.to_string(),

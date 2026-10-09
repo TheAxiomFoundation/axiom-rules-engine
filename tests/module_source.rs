@@ -947,8 +947,86 @@ rules:
         "got: {message}"
     );
     assert!(
-        message.contains("line 6"),
-        "the position is the import's own line, got: {message}"
+        message.contains("at line 6 column 5"),
+        "the position is the import's own line and column, got: {message}"
+    );
+}
+
+/// A YAML syntax error in an import also names the import and keeps its
+/// position; it is not misreported as a missing discriminator.
+#[test]
+fn imported_module_syntax_error_names_the_imported_module() {
+    let root = r#"
+format: rulespec/v1
+imports:
+  - us:policies/agency/broken
+rules: []
+"#;
+    let source = InMemoryModuleSource::new(&[
+        ("us:statutes/1/2", root),
+        (
+            "us:policies/agency/broken",
+            "format: rulespec/v1\nrules: [\n",
+        ),
+    ]);
+    let error = load_rulespec_with_source("us:statutes/1/2", &source)
+        .expect_err("an unclosed flow sequence must fail");
+    match &error {
+        RuleSpecError::ModuleYaml { target, .. } => {
+            assert_eq!(target, "us:policies/agency/broken");
+        }
+        other => panic!("expected ModuleYaml, got {other:?}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.starts_with("RuleSpec module `us:policies/agency/broken`: yaml parse error: "),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("line "),
+        "the position survives, got: {message}"
+    );
+}
+
+/// The failing module is named however deep it sits in the import walk.
+#[test]
+fn deep_import_yaml_error_names_the_failing_module() {
+    let root = r#"
+format: rulespec/v1
+imports:
+  - us:statutes/1/3
+rules: []
+"#;
+    let middle = r#"
+format: rulespec/v1
+imports:
+  - us:policies/agency/leaf
+rules: []
+"#;
+    let leaf = "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/1/9\n    values:\n      a: 1\nrules: []\n";
+    let source = InMemoryModuleSource::new(&[
+        ("us:statutes/1/2", root),
+        ("us:statutes/1/3", middle),
+        ("us:policies/agency/leaf", leaf),
+    ]);
+    let error = load_rulespec_with_source("us:statutes/1/2", &source)
+        .expect_err("the leaf's unknown source_verification field must fail");
+    assert!(
+        matches!(&error, RuleSpecError::ModuleYaml { target, .. } if target == "us:policies/agency/leaf"),
+        "got: {error:?}"
+    );
+}
+
+/// A root that fails its typed parse is named as itself.
+#[test]
+fn root_yaml_error_names_the_root() {
+    let root = "format: rulespec/v1\nmodule:\n  source_verification:\n    corpus_citation_path: us/statute/1/9\n    values:\n      a: 1\nrules: []\n";
+    let source = InMemoryModuleSource::new(&[("us:statutes/1/2", root)]);
+    let error = load_rulespec_with_source("us:statutes/1/2", &source)
+        .expect_err("an unknown source_verification field must fail");
+    assert!(
+        matches!(&error, RuleSpecError::ModuleYaml { target, .. } if target == "us:statutes/1/2"),
+        "got: {error:?}"
     );
 }
 
@@ -970,5 +1048,9 @@ rules: []
     assert!(
         matches!(&error, RuleSpecError::ModuleMissingDiscriminator { target } if target == "us:policies/agency/not-rulespec"),
         "got: {error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "RuleSpec module `us:policies/agency/not-rulespec` requires exact `format: rulespec/v1`"
     );
 }
