@@ -911,19 +911,22 @@ engine evaluates one set of choices and marks which inputs are elections, and
 who makes each one, in the artifact interface block
 ([#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155)).
 
-**What still holds from this contract.** Scoped completeness (tier A entry 6);
-separate unknown and conflict states; elections with named actors and no
-default (A3); composition kept apart from participation (A4); refusal of a
-supplied tuple for a relation the program derives (A5); the comparison
-protocol with a ledger frozen before results (D7); whole-period coverage; no
-engine default for a contested reading; and the 7 CFR 273.1 decomposition in
-§ 3 with its tier B and tier C entries.
+**What still holds from this contract.** Entry numbers refer to the
+ratification matrix in § 13. Scoped completeness (entry 6); separate unknown
+and conflict states; elections with named actors, defaulted only with cited
+authority and otherwise unknown (entry 3); composition kept apart from
+participation (entry 4); refusal of a supplied tuple for a relation the
+program derives (entry 5); the comparison protocol with a ledger frozen
+before results (entry 16); whole-period coverage; no engine default for a
+contested reading; and the 7 CFR 273.1 decomposition in § 3 with its tier B
+and tier C entries (7–15).
 
 **What no longer applies.** The partition pipeline in § 4 (cuts, blocking,
-attachments as set operations), tier A entry 2 (cut discipline), tier D
-entry 8 (content-derived unit ids), the entity registry and materialization
-barrier in §§ 8 and 10, and admissible-world enumeration as the semantics of
-§ 5, which remains a test oracle.
+attachments as set operations), cut discipline (entry 2), the
+content-derived unit ids of entry 17 (its canonical ordering of tuples and
+trace nodes still applies), the entity registry and materialization barrier in
+§§ 8 and 10 (part of entry 18), and admissible-world enumeration as the
+semantics of § 5, which remains a test oracle.
 
 **Plan.**
 
