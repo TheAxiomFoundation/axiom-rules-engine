@@ -4,12 +4,14 @@ use std::fs;
 #[cfg(feature = "fs")]
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::interface::ProgramInterface;
+use crate::rulespec::ModuleMetadata;
 use crate::spec::{
     DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
-    ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
+    ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, RelationSpec, ScalarExprSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -161,20 +163,150 @@ impl std::fmt::Display for CompileDiagnostic {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A compiled program. On the wire (`ArtifactWire`) the interface sits
+/// inside `program`, at `program.interface`; in memory it is a field beside
+/// the `ProgramSpec`, which does not change, so a raw `ExecutionRequest`
+/// program never carries one.
+#[derive(Clone, Debug)]
 pub struct CompiledProgramArtifact {
     pub artifact_format_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
     pub program: ProgramSpec,
+    /// The program's entity roster, input slots and relations
+    /// ([`crate::interface`]), derived by every compile. Execution never
+    /// reads it.
+    pub interface: Option<ProgramInterface>,
     pub metadata: CompiledProgramMetadata,
     /// Compile-time warnings are intentionally not part of the executable
     /// artifact contract. They are available to the invoking host and emitted
     /// by `compile_summary_lines`, while serialized artifact bytes stay stable.
-    #[serde(skip)]
-    #[cfg_attr(feature = "schema", schemars(skip))]
     pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// The serialized artifact. `program` repeats `ProgramSpec`'s fields in
+/// order, with their serde attributes, and appends `interface`, so the block
+/// sits at `program.interface` while `ProgramSpec` itself is unchanged. It
+/// does not use `#[serde(flatten)]`: flattening buffers values, and the
+/// buffered form cannot read the integer keys of a parameter table.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "CompiledProgramArtifact"))]
+struct ArtifactWire {
+    artifact_format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_version: Option<String>,
+    program: ArtifactProgramWire,
+    metadata: CompiledProgramMetadata,
+}
+
+/// `ProgramSpec` plus `interface`, as written inside an artifact.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "ArtifactProgram"))]
+struct ArtifactProgramWire {
+    /// Module-level metadata (source pinning, encoding provenance,
+    /// validation status) carried through RuleSpec lowering for tooling and
+    /// artifact pass-through. Load/compile boundaries validate it; execution
+    /// semantics do not depend on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module: Option<ModuleMetadata>,
+    #[serde(default)]
+    units: Vec<UnitSpec>,
+    #[serde(default)]
+    relations: Vec<RelationSpec>,
+    #[serde(default)]
+    parameters: Vec<IndexedParameterSpec>,
+    #[serde(default)]
+    derived: Vec<DerivedSpec>,
+    /// The program's entity roster, input slots and relations. Execution
+    /// never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interface: Option<ProgramInterface>,
+}
+
+/// [`ArtifactWire`], borrowed, for serialization.
+#[derive(Serialize)]
+struct ArtifactWireRef<'a> {
+    artifact_format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_version: Option<&'a String>,
+    program: ArtifactProgramWireRef<'a>,
+    metadata: &'a CompiledProgramMetadata,
+}
+
+/// [`ArtifactProgramWire`], borrowed, for serialization.
+#[derive(Serialize)]
+struct ArtifactProgramWireRef<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module: Option<&'a ModuleMetadata>,
+    units: &'a [UnitSpec],
+    relations: &'a [RelationSpec],
+    parameters: &'a [IndexedParameterSpec],
+    derived: &'a [DerivedSpec],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<&'a ProgramInterface>,
+}
+
+impl<'a> ArtifactProgramWireRef<'a> {
+    fn new(program: &'a ProgramSpec, interface: Option<&'a ProgramInterface>) -> Self {
+        Self {
+            module: program.module.as_ref(),
+            units: &program.units,
+            relations: &program.relations,
+            parameters: &program.parameters,
+            derived: &program.derived,
+            interface,
+        }
+    }
+}
+
+impl Serialize for CompiledProgramArtifact {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ArtifactWireRef {
+            artifact_format_version: self.artifact_format_version,
+            engine_version: self.engine_version.as_ref(),
+            program: ArtifactProgramWireRef::new(&self.program, self.interface.as_ref()),
+            metadata: &self.metadata,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompiledProgramArtifact {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ArtifactWire::deserialize(deserializer)?;
+        Ok(Self {
+            artifact_format_version: wire.artifact_format_version,
+            engine_version: wire.engine_version,
+            program: ProgramSpec {
+                module: wire.program.module,
+                units: wire.program.units,
+                relations: wire.program.relations,
+                parameters: wire.program.parameters,
+                derived: wire.program.derived,
+            },
+            interface: wire.program.interface,
+            metadata: wire.metadata,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
+/// The artifact's schema is the wire struct's, so it describes the block at
+/// `program.interface`.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for CompiledProgramArtifact {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        ArtifactWire::schema_name()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        ArtifactWire::schema_id()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ArtifactWire::json_schema(generator)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -285,16 +417,19 @@ impl CompiledProgramArtifact {
         program.validate_effective_ranges()?;
         let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
-        crate::relation_typing::check_program(&program.to_program()?).map_err(|report| {
+        let model = program.to_program()?;
+        crate::relation_typing::check_program(&model).map_err(|report| {
             CompileError::RelationTyping {
                 path: path.to_string(),
                 report,
             }
         })?;
+        let interface = crate::interface::derive_from_model(&model);
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             program,
+            interface: Some(interface),
             metadata,
             diagnostics,
         })
@@ -2149,5 +2284,102 @@ rules:
             conflict_error,
             CompileError::ConflictingParameterDeclarations { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{ArtifactProgramWireRef, CompiledProgramArtifact};
+
+    /// Every in-repo RuleSpec fixture that compiles: the sources of the
+    /// frozen format-2 artifacts under `tests/fixtures/artifacts/format2/`.
+    pub(crate) const RULESPEC_FIXTURES: [&str; 20] = [
+        "tests/fixtures/artifacts/nz_best_start_carer_sum.rulespec.yaml",
+        "tests/fixtures/artifacts/related_derived_sums.rulespec.yaml",
+        "tests/fixtures/rulespec/other/family_allowance/rules.yaml",
+        "tests/fixtures/rulespec/other/flat_tax/rules.yaml",
+        "tests/fixtures/rulespec/rounding/snap_allotment.yaml",
+        "tests/fixtures/rulespec/ssi/2021/249/regulation/71/rules.yaml",
+        "tests/fixtures/rulespec/ssi/2021/249/regulation/79/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1988/50/section/21/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1992/14/section/11/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1998/39/section/1/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2007/3/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2008/30/section/3/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2010/4/section/18B/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2013/29/section/99/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2014/19/section/4/rules.yaml",
+        "tests/fixtures/rulespec/uksi/1987/1967/regulation/15/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2006/965/regulation/2/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2013/376/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2026/148/rules.yaml",
+        "tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml",
+    ];
+
+    fn compile_fixture(fixture: &str) -> CompiledProgramArtifact {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
+        let source = std::fs::read_to_string(&path).expect("fixture is readable");
+        CompiledProgramArtifact::from_rulespec_str(&source).expect("fixture compiles")
+    }
+
+    /// The wire struct without an interface serializes byte for byte as
+    /// `ProgramSpec` does, compact and pretty, for every fixture; with one,
+    /// the artifact's `program` is that object plus `interface`.
+    #[test]
+    fn the_wire_program_without_an_interface_serializes_as_program_spec() {
+        for fixture in RULESPEC_FIXTURES {
+            let artifact = compile_fixture(fixture);
+            let wire = ArtifactProgramWireRef::new(&artifact.program, None);
+            assert_eq!(
+                serde_json::to_string(&wire).unwrap(),
+                serde_json::to_string(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+            assert_eq!(
+                serde_json::to_string_pretty(&wire).unwrap(),
+                serde_json::to_string_pretty(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+            let mut value = serde_json::to_value(&artifact).unwrap();
+            let program = value["program"].as_object_mut().unwrap();
+            let interface = program.remove("interface").expect("compile derives it");
+            assert_eq!(
+                interface,
+                serde_json::to_value(artifact.interface.as_ref().unwrap()).unwrap(),
+                "{fixture}"
+            );
+            assert_eq!(
+                value["program"],
+                serde_json::to_value(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+        }
+    }
+
+    /// Every compile derives the interface of the program it emits, and the
+    /// artifact reads it back from `program.interface`.
+    #[test]
+    fn compile_always_derives_the_interface() {
+        for fixture in RULESPEC_FIXTURES {
+            let artifact = compile_fixture(fixture);
+            assert_eq!(
+                artifact.interface,
+                Some(crate::interface::derive_interface(&artifact.program).unwrap()),
+                "{fixture}"
+            );
+            let reread: CompiledProgramArtifact =
+                serde_json::from_str(&serde_json::to_string(&artifact).unwrap()).unwrap();
+            assert_eq!(reread.interface, artifact.interface, "{fixture}");
+        }
+        let artifact = CompiledProgramArtifact::compile(crate::spec::ProgramSpec::default())
+            .expect("an empty program compiles");
+        assert_eq!(
+            artifact.interface,
+            Some(crate::interface::ProgramInterface {
+                entities: Vec::new(),
+                inputs: Vec::new(),
+                relations: Vec::new(),
+            })
+        );
     }
 }

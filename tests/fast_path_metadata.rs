@@ -175,7 +175,13 @@ fn a_fresh_compile_drops_only_the_retired_blocker() {
     // The fixture records the engine version that wrote it; this engine stamps
     // its own.
     expected["engine_version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
-    let actual = serde_json::to_value(&fresh).expect("fresh artifact serialises");
+    let mut actual = serde_json::to_value(&fresh).expect("fresh artifact serialises");
+    // The fixture predates the interface block, which execution never reads.
+    actual["program"]
+        .as_object_mut()
+        .expect("program is an object")
+        .remove("interface")
+        .expect("a fresh compile carries the interface");
     assert_eq!(actual, expected);
 
     // A fresh artifact loads with no stale diagnostic and round-trips exactly.
