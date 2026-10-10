@@ -6,8 +6,8 @@ jurisdiction with no engine default). This document is the contract for
 [#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134): the
 semantics a `kind: unit` rule must satisfy. Nothing in it changes the release
 line. Supplied membership remains the default and continues to work; derivation
-is opt-in per program and off by default. What is built so far, and what is
-not, is in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
+is opt-in per program and off by default. What is built so far, what is
+not, and a design review now in progress are in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
 household composition), from the eCFR text as of 2026-07-01, with
 7 CFR 273.11(c) read for the excluded-member treatment it prescribes.
 
@@ -553,9 +553,10 @@ supplied-wins or derived-wins are both rejected.
   behavior this contract forbids. In v2 execution nothing originates
   Undetermined (it only propagates through `and`, `or` and `not`, and a
   missing input is an error), so the drop is latent; it becomes live the
-  moment Knowledge states enter the ordinary engine, which is why the lift
+  moment Knowledge states enter the ordinary engine, so the lift
   ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215))
-  precedes them. The constitution path requires the lifted semantics. Direct
+  must precede them. `if` conditions and `where` clauses test `is_holds()`
+  the same way. The constitution path requires the lifted semantics. Direct
   records supplied under a derived relation's own name — accepted and
   unioned by the current engine — are likewise excluded from the
   constitution path outside the shadow channel.
@@ -727,8 +728,8 @@ Constitution rules run before unit-scoped rules. Precisely:
 The earlier draft listed four decisions and called the rest settled; the
 cross-model audit showed that undercounts. The matrix below is the complete
 set of result-affecting choices, tiered by who resolves them. Tier A is
-ratified and freezes the contract; tier B entries are resolved in the
-7 CFR 273.1 pilot with cited legal authority, each with conformance tests for
+ratified and freezes the contract; tier B entries are resolved when
+7 CFR 273.1 is encoded, with cited legal authority and conformance tests for
 the chosen branch; tier C entries are per-jurisdiction parameters encoded with
 citations, never engine defaults; tier D are interface decisions ratified
 with tier A. No legal reading may be selected after comparison results are
@@ -806,9 +807,9 @@ testable):**
     constitution binder, and the lifted `derived_relation` semantics (§ 8).
 
 Tiers A and D were ratified on 2026-08-15 and fix the contract. Tier B is
-resolved by the 7 CFR 273.1 pilot
-([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428))
-with legal review as it encodes; tier C is parameterized per jurisdiction.
+resolved when 7 CFR 273.1 is encoded
+([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428)),
+with legal review; tier C is parameterized per jurisdiction.
 
 ## 14. Implementation status
 
@@ -854,36 +855,33 @@ unit-derivation"`).
 **What that covers.** Stage 3 exercises derivation from supplied
 relationship facts, projections, and reductions that keep Unknown and
 Conflict. Constitution from purchase-and-prepare facts (elective cuts,
-blocking, attachments, bars) has met synthetic plans only; the SNAP pilot is
-its first real law.
+blocking, attachments, bars) has met synthetic plans only. An encoding of
+7 CFR 273.1 would be its first real law.
 
-**Not built** (stage 4,
-[#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214),
-run as one artifact-v3 workstream with
-[#125](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/125) and
-[#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155)):
+**Not built.**
 
-- RuleSpec `kind: unit`, its lowering, and the § 10 stratification check
-  ([#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214)).
-  Until then the NZ family plan lives in
-  `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` rather than
-  in a jurisdiction repo.
-- Knowledge-valued phase 1 and the lifted `derived_relation`
-  ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215)).
-  In v2 a missing input is an error unless the rule declares a default.
-- Derived-versus-supplied provenance in the artifact
-  ([#216](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/216));
-  artifacts remain format 2.
-- The materialization barrier in `run-compiled`
-  ([#217](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/217)),
-  dense and PyO3 support or refusal
-  ([#218](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/218)),
-  cited membership in the execution trace
-  ([#219](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/219)),
-  and output rendering
-  ([#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220)).
-- Encoder support for `kind: unit`
-  ([axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715))
-  and the 7 CFR 273.1 pilot
-  ([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428)),
-  which resolves tier B.
+- RuleSpec has no `kind: unit`. Constitution plans exist only as Rust types
+  and the stage-3 plan grammar, so the NZ family plan lives in
+  `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` and not in a
+  jurisdiction repo.
+- The ordinary engine has no unknown. A missing input is an error unless the
+  rule declares a default, and no expression originates `Undetermined`.
+- Artifacts remain format 2 and do not mark a relation derived or supplied.
+- `run-compiled`, the dense path and the execution trace know nothing of
+  derived units.
+- No SNAP household has been derived from encoded law, and no tier B reading
+  is resolved.
+
+**Direction under review (2026-10-10).** A stage-4 plan was filed on
+2026-09-27 ([#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214)
+to [#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220),
+[axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715),
+[rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428))
+and is on hold. A design review found that 42 CFR 435.603(f) defines the
+Medicaid household per individual, so the households of people in one home
+can overlap, which the partition in this contract cannot express. The review
+recommends deriving membership as a relation anchored on a claimant. Its
+result and the pending decision are on
+[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134).
+Until that decision is recorded, this document is the ratified contract for
+the partition construct and no more.
