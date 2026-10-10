@@ -1463,6 +1463,11 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 return Err(FormulaError::lower("`not` in scalar position".to_string()));
             }
         },
+        Expr::Call { func, args } if args.is_empty() && matches!(func.as_str(), "max" | "min") => {
+            return Err(FormulaError::lower(format!(
+                "{func}() requires at least one operand"
+            )));
+        }
         Expr::Call { func, args } => match func.as_str() {
             "max" => ScalarExprSpec::Max {
                 items: args

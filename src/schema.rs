@@ -169,6 +169,8 @@ fn archived_compiled_artifact_v1_schema() -> Value {
 /// - `SourceVerification` is an exact mapping with one required singular
 ///   corpus citation path, an optional source digest, and an optional typed
 ///   higher-authority source check.
+/// - `max` / `min` `items` deserialize from an empty list, but
+///   `ProgramSpec::to_program` refuses one, so the schema says `minItems: 1`.
 #[cfg(feature = "schema")]
 pub fn compiled_artifact_schema() -> Value {
     let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
