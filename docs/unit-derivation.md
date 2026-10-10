@@ -812,7 +812,7 @@ with legal review as it encodes; tier C is parameterized per jurisdiction.
 
 ## 14. Implementation status
 
-As of 2026-09-27. Everything below sits behind the off-by-default
+As of 2026-10-10. Everything below sits behind the off-by-default
 `unit-derivation` Cargo feature; the runtime switch
 (`UnitDerivationConfig.enabled`) is also off by default, and CI runs the
 unit-derivation tests with the feature on (`cargo test --features "schema
@@ -836,11 +836,20 @@ unit-derivation"`).
   `--enable-experimental-unit-derivation`). Its consumer is the NZ
   IncomeExplorer comparison: one Family unit derived from explicit, complete
   partner and dependent-child relation facts, member projections, and
-  Knowledge-lifted family and child reductions, reproducing 1,454 of 1,976
-  cells to the cent with the same 522 dispositioned exceptions. The NZ
-  consumer came before the SNAP pilot because seven NZ certificates in
-  axiom-oracles were blocked on host-side aggregation; stage 3 cleared that
-  blocker.
+  Knowledge-lifted family and child reductions. With aggregation moved
+  engine-side, the pinned comparison is byte-identical to the host-side run
+  (`comparison.csv` SHA-256 `ccaa4dcb…4bf2`, receipt in
+  `stage3-nz/parity-proof.json`). That comparison agrees with Treasury to the
+  cent in 1,454 of 1,976 amount and control cells; 416 of those cells echo
+  inputs (wages and hours), so rule outputs agree in 1,038 of 1,560. The
+  other 522 are dispositioned: 520 forecast-vintage against enacted law and
+  2 convention. The NZ consumer came before the SNAP pilot because the NZ
+  certificates in axiom-oracles name this capability as a blocker: six list
+  a host-side aggregation pin and the seventh an unproven person-locality.
+  Stage 3 is the engine side of that blocker. It has not cleared it: on
+  axiom-oracles main (2026-10-10) all seven certificates are still
+  `certified: false` and still list those blockers, and regenerating them is
+  draft [axiom-oracles#493](https://github.com/TheAxiomFoundation/axiom-oracles/pull/493).
 
 **What that covers.** Stage 3 exercises derivation from supplied
 relationship facts, projections, and reductions that keep Unknown and
