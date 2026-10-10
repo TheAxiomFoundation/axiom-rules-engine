@@ -1,11 +1,13 @@
 # Unit derivation: semantics RFC
 
-**Status: RFC v2 — semantics only, no implementation.** This document is stage 1
-of [#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134):
-the contract a `kind: unit` rule must satisfy before any code exists. Nothing in
-it changes the release line. Supplied membership remains the default and
-continues to work; derivation, when it eventually exists, is opt-in per program
-and off by default. The concrete case worked throughout is 7 CFR 273.1 (SNAP
+**Status: RFC v2, ratified 2026-08-15** ([ratification](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-5299498361):
+tiers A and D as written, tier B deferred to cited authority, tier C per
+jurisdiction with no engine default). This document is the contract for
+[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134): the
+semantics a `kind: unit` rule must satisfy. Nothing in it changes the release
+line. Supplied membership remains the default and continues to work; derivation
+is opt-in per program and off by default. What is built so far, and what is
+not, is in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
 household composition), from the eCFR text as of 2026-07-01, with
 7 CFR 273.11(c) read for the excluded-member treatment it prescribes.
 
@@ -546,10 +548,14 @@ supplied-wins or derived-wins are both rejected.
   Unknown/Conflict makes the candidate's membership in the view unresolved,
   and complete-list reductions (count, sum) over unresolved candidates are
   Indeterminate with reasons. The current v2 filter pushes a candidate only
-  on `is_holds()`, so an Undetermined predicate silently drops it and a
-  count returns a confident smaller number — precisely the unknown-as-absence
-  behavior this contract forbids. That behavior stays quarantined in v2
-  semantics; the constitution path requires the lifted semantics. Direct
+  on `is_holds()`, so an Undetermined predicate would drop it and a count
+  would return a confident smaller number — precisely the unknown-as-absence
+  behavior this contract forbids. In v2 execution nothing originates
+  Undetermined (it only propagates through `and`, `or` and `not`, and a
+  missing input is an error), so the drop is latent; it becomes live the
+  moment Knowledge states enter the ordinary engine, which is why the lift
+  ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215))
+  precedes them. The constitution path requires the lifted semantics. Direct
   records supplied under a derived relation's own name — accepted and
   unioned by the current engine — are likewise excluded from the
   constitution path outside the shadow channel.
@@ -721,9 +727,9 @@ Constitution rules run before unit-scoped rules. Precisely:
 The earlier draft listed four decisions and called the rest settled; the
 cross-model audit showed that undercounts. The matrix below is the complete
 set of result-affecting choices, tiered by who resolves them. Tier A is
-ratified now and freezes the contract; tier B entries are resolved during
-stage 2 with cited legal authority, each with conformance tests for the
-chosen branch; tier C entries are per-jurisdiction parameters encoded with
+ratified and freezes the contract; tier B entries are resolved in the
+7 CFR 273.1 pilot with cited legal authority, each with conformance tests for
+the chosen branch; tier C entries are per-jurisdiction parameters encoded with
 citations, never engine defaults; tier D are interface decisions ratified
 with tier A. No legal reading may be selected after comparison results are
 observed.
@@ -799,7 +805,76 @@ testable):**
     emitter's compile-resolved-id boundary, Knowledge normalization at the
     constitution binder, and the lifted `derived_relation` semantics (§ 8).
 
-Ratifying tier A and D fixes the contract; stage 2 of #134 (off-by-default
-prototype, SNAP household pilot in rulespec-us, shadow-channel comparison on
-fixtures satisfying entry 16) then proceeds, resolving tier B with legal
-review as it encodes and parameterizing tier C per jurisdiction.
+Tiers A and D were ratified on 2026-08-15 and fix the contract. Tier B is
+resolved by the 7 CFR 273.1 pilot
+([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428))
+with legal review as it encodes; tier C is parameterized per jurisdiction.
+
+## 14. Implementation status
+
+As of 2026-09-27. Everything below sits behind the off-by-default
+`unit-derivation` Cargo feature; the runtime switch
+(`UnitDerivationConfig.enabled`) is also off by default, and CI runs the
+unit-derivation tests with the feature on (`cargo test --features "schema
+unit-derivation"`).
+
+**Built.**
+
+- **Stage 2 ([#159](https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/159)):**
+  the tier A and D semantics as a Rust library in `src/unit_derivation/`.
+  Plans are the Rust `ConstitutionPlan` type; guards are boolean expressions
+  over supplied facts. Admissible worlds are enumerated exhaustively up to
+  4,096; a larger world space is the named error `UncheckableWorldSpace`,
+  never a sampled answer. No tier-B reading is decided: the (b)(1)/(b)(2)
+  precedence can be declared either way or left unresolved, and every other
+  tier-B term is an explicit plan input. Coverage is synthetic 7 CFR 273.1
+  and 273.11 household shapes plus named tests for each ratified entry.
+- **Stage 3 ([#161](https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/161)):**
+  a typed aggregation-plan grammar (`axiom/unit-aggregation-plan-stage3/1`)
+  and two experimental commands, `compile-unit-aggregation` and
+  `run-unit-aggregation` (the second requires
+  `--enable-experimental-unit-derivation`). Its consumer is the NZ
+  IncomeExplorer comparison: one Family unit derived from explicit, complete
+  partner and dependent-child relation facts, member projections, and
+  Knowledge-lifted family and child reductions, reproducing 1,454 of 1,976
+  cells to the cent with the same 522 dispositioned exceptions. The NZ
+  consumer came before the SNAP pilot because seven NZ certificates in
+  axiom-oracles were blocked on host-side aggregation; stage 3 cleared that
+  blocker.
+
+**What that covers.** Stage 3 exercises derivation from supplied
+relationship facts, projections, and reductions that keep Unknown and
+Conflict. Constitution from purchase-and-prepare facts (elective cuts,
+blocking, attachments, bars) has met synthetic plans only; the SNAP pilot is
+its first real law.
+
+**Not built** (stage 4,
+[#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214),
+run as one artifact-v3 workstream with
+[#125](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/125) and
+[#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155)):
+
+- RuleSpec `kind: unit`, its lowering, and the § 10 stratification check
+  ([#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214)).
+  Until then the NZ family plan lives in
+  `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` rather than
+  in a jurisdiction repo.
+- Knowledge-valued phase 1 and the lifted `derived_relation`
+  ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215)).
+  In v2 a missing input is an error unless the rule declares a default.
+- Derived-versus-supplied provenance in the artifact
+  ([#216](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/216));
+  artifacts remain format 2.
+- The materialization barrier in `run-compiled`
+  ([#217](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/217)),
+  dense and PyO3 support or refusal
+  ([#218](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/218)),
+  cited membership in the execution trace
+  ([#219](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/219)),
+  and output rendering
+  ([#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220)).
+- Encoder support for `kind: unit`
+  ([axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715))
+  and the 7 CFR 273.1 pilot
+  ([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428)),
+  which resolves tier B.
