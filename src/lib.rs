@@ -6,6 +6,7 @@ mod bulk;
 pub mod compile;
 pub mod dense;
 pub mod depth;
+mod digest;
 pub mod engine;
 mod formula;
 mod lazy;

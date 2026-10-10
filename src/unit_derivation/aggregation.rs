@@ -1617,7 +1617,10 @@ fn canonical_constitution_bytes(plan: &AggregationPlan) -> Result<Vec<u8>, UnitD
 }
 
 fn digest_text(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex(&super::evaluate::sha256(bytes)))
+    format!(
+        "sha256:{}",
+        crate::digest::hex(&crate::digest::sha256(bytes))
+    )
 }
 
 fn decode_digest(value: &str) -> Result<[u8; 32], UnitDerivationError> {
@@ -1640,16 +1643,6 @@ fn decode_digest(value: &str) -> Result<[u8; 32], UnitDerivationError> {
         })?;
     }
     Ok(output)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 pub(crate) fn execute_aggregation_plan(
