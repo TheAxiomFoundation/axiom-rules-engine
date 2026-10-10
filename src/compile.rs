@@ -748,12 +748,7 @@ fn compiled_input_catalog(
         .input_catalog()
         .into_iter()
         .map(|(slot, request_names)| {
-            let canonical_request_name = request_names
-                .iter()
-                .find(|request_name| request_name.as_str() == slot)
-                .or_else(|| request_names.first())
-                .expect("every discovered input slot has an owning request name")
-                .clone();
+            let canonical_request_name = canonical_request_name(&slot, &request_names).to_string();
             CompiledInputCatalogEntry {
                 slot,
                 canonical_request_name,
@@ -761,6 +756,16 @@ fn compiled_input_catalog(
             }
         })
         .collect())
+}
+
+/// The catalog's preferred request name for `slot`: the bare slot when it is
+/// one of the names, else the first of them.
+pub(crate) fn canonical_request_name<'a>(slot: &str, request_names: &'a [String]) -> &'a str {
+    request_names
+        .iter()
+        .find(|request_name| request_name.as_str() == slot)
+        .or_else(|| request_names.first())
+        .expect("every discovered input slot has an owning request name")
 }
 
 fn validate_raw_artifact_contract(
