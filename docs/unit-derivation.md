@@ -31,8 +31,9 @@ whose semantics this contract is written to survive.
 RuleSpec can encode what a household gets, but not what a household is.
 Entities and their membership relations arrive as dataset inputs. The law that
 constitutes them — 7 CFR 273.1's purchase-and-prepare rules for SNAP, filing
-units for tax, benefit units elsewhere — cannot be encoded, so every consumer
-computes unit membership outside the engine, in uncited, unversioned code. The
+units for tax, benefit units elsewhere — cannot be encoded in RuleSpec, so a
+consumer of ordinary RuleSpec computes unit membership outside the engine, in
+uncited, unversioned code. The
 single most contested determination in benefits administration happens outside
 the audited, traced machinery.
 
@@ -714,7 +715,8 @@ Constitution rules run before unit-scoped rules. Precisely:
   (b)(3)–(b)(6) — classification candidates, bars, attachments, request
   actors — but their full decomposition (thresholds' size keys, provider
   candidates, carry-along nuances, the institution exceptions' children/
-  spouse clauses) requires legal review and is validated in stage 2. The
+  spouse clauses) requires legal review and is validated when 7 CFR 273.1
+  is encoded. The
   earlier draft's claim that these semantics were "complete now" is
   withdrawn; what is fixed now is the operation kinds and their composition
   rules, so that no (b)(3)–(b)(6) provision requires a *new* operation kind.
@@ -758,8 +760,8 @@ observed.
 6. **Scoped completeness semantics** for roster and every constitution
    relation family (§ 5.1).
 
-**Tier B — legal interpretation (stage 2, cited authority, both branches
-testable):**
+**Tier B — legal interpretation (when 7 CFR 273.1 is encoded; cited
+authority, both branches testable):**
 
 7. (b)(1)/(b)(2) precedence — does the elderly-disabled separation cross a
    mandatory combination? (§ 3 anchor 1; worked example shows both.)
@@ -824,9 +826,10 @@ unit-derivation"`).
 - **Stage 2 ([#159](https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/159)):**
   the tier A and D semantics as a Rust library in `src/unit_derivation/`.
   Plans are the Rust `ConstitutionPlan` type; guards are boolean expressions
-  over supplied facts. Admissible worlds are enumerated exhaustively up to
-  4,096; a larger world space is the named error `UncheckableWorldSpace`,
-  never a sampled answer. No tier-B reading is decided: the (b)(1)/(b)(2)
+  over supplied facts. Candidate worlds are enumerated exhaustively up to a
+  default cap of 4,096, counted before integrity constraints are applied; a
+  larger space is the named error `UncheckableWorldSpace`, never a sampled
+  answer. No tier-B reading is decided: the (b)(1)/(b)(2)
   precedence can be declared either way or left unresolved, and every other
   tier-B term is an explicit plan input. Coverage is synthetic 7 CFR 273.1
   and 273.11 household shapes plus named tests for each ratified entry.
