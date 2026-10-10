@@ -142,9 +142,10 @@ fails a build:
 - `build.rs` joins the `include` list in `Cargo.toml`, or a published crate
   would not build.
 
-The same source compiled by two builds of one commit gives the same bytes.
-Two commits give artifacts that differ in `engine_build` only when nothing
-else changed.
+Compilation is byte-deterministic for a fixed build: the same source, the
+same compile options and an engine with the same `engine_build` give the same
+bytes. Builds whose `engine_build` differs (another commit, a dirty tree, an
+override) give artifacts that differ in that field.
 
 `source_closure.modules` lists every module text the loader read to lower the
 program, the root included, sorted by target, each with the SHA-256 of the
@@ -218,18 +219,21 @@ somewhere this block does not list.
 
 One entry per entity kind the program can evaluate on: each derived rule's
 `entity`, each kind in a relation's effective slot kinds
-(`relation_typing::effective_slot_entities`), and each filtered entity (a
-derived relation's `entity`).
+(`relation_typing::effective_slot_entities`), and each entity a derived
+relation filters to.
 
 - `instances.source: "supplied"`: the caller supplies the instances, and the
   count is the number supplied. The engine has no other count source: nothing
   in a program ties the number of `Person` ids to an input such as
   `household_size`.
-- `instances.source: "alias"`: a filtered entity. Its ids are the ids of `of`
-  (`relation_typing::filtered_entity_kinds`), and `via` names the derived
-  relations that filter to it. `of` is null when the program does not
-  establish the kind, which happens only when nothing executes those
-  relations (`relation_typing::unresolved_filtered_entities`).
+- `instances.source: "alias"`: a filtered entity whose ids are the ids of
+  another kind, `of` (`relation_typing::filtered_entity_names` and
+  `filtered_entity_kinds`); `via` names the derived relations that filter to
+  it. `of` is null when the program does not establish the kind, which
+  happens only when nothing executes those relations
+  (`relation_typing::unresolved_filtered_entities`). A filter of a kind to
+  itself (households filtered to households) is a physical kind and stays
+  `supplied`, as relation typing treats it.
 - `instances.source: "unscoped"`: the entity-free scope, `Scalar`. It is
   listed whenever an input lists it.
 
@@ -312,8 +316,9 @@ is no uniform default.
 the slot is the index of a `parameter_lookup`; it is then the sorted union,
 over those parameters and all their versions, of the table keys, and
 `values_basis` is `"parameter_index"`. No whole number outside it can be read
-successfully (`lookup_parameter` returns `MissingParameterValue`); a value in
-it can still miss in a period whose table version lacks the key. Values
+successfully: the lookup fails with a missing parameter value, or with a
+type error for a number no table key can hold. A value in it can still miss
+in a period whose table version lacks the key. Values
 compare as numbers, so a decimal `1.0` is the key `1`. An equality
 comparison does not close a domain, and neither does a mixed use.
 
@@ -352,6 +357,9 @@ so the block sits at `program.interface` on the wire. The wire struct does
 not use `#[serde(flatten)]`: flattening buffers values, and the buffered form
 cannot read the integer keys of a parameter table. A test pins that the wire
 struct without `interface` serializes byte for byte as `ProgramSpec` does.
+The artifact's `JsonSchema` delegates to the wire struct, so the generated
+schema describes the block at `program.interface`; a test checks that path
+in the emitted schema.
 
 ## Loading
 
@@ -454,16 +462,23 @@ transcribe what the evaluators enforce. Golden fixtures pin it.
    value, removing it (nullable keys included) and adding an unknown key are
    each refused at load.
 6. **`dtype` and `values` are sound.** For a generated program and a slot
-   with a dtype, give every other input a well-typed value. If evaluating a
-   rule without the slot fails for want of that slot, evaluating it with a
-   value outside the dtype fails with a type error; if it succeeds without
-   the slot, it gives the same result with that value. The same property with
-   a whole number outside `values` and a missing-parameter-value error.
+   with a dtype, give every other input a well-typed value and evaluate each
+   rule twice: without the slot, and with a value outside the dtype. The
+   second evaluation either fails with a type error or returns exactly what
+   the first returned, and where the first failed for want of the slot the
+   second fails with a type error. So an out-of-type value is never read
+   successfully, whether the site has a default or not, and an unreached
+   site changes nothing. The same property holds for a whole number outside
+   `values`, where the failure is a missing parameter value or a type
+   error.
 7. **`entities` is sound.** For a generated multi-entity program with
-   well-kinded queries and tuples, every missing-input error an evaluation
-   can raise names an id whose kind the slot lists, where an entity-free
-   query's id has kind `Scalar`. The probe is the evaluator's own error, not
-   the derivation.
+   well-kinded queries and tuples, every missing-input error the explain
+   evaluator raises names an id whose kind, by the generator's own
+   assignment of ids to kinds, the slot lists; an entity-free query's id has
+   kind `Scalar`. The probe is the evaluator's error, not the derivation.
+   The generator reads slots through plain `input` nodes so every read can
+   surface as that error, and supplies the reported slot and re-runs until
+   the evaluation succeeds.
 8. **Execution parity.** In each of explain, fast and dense, the format-2
    artifact through the legacy loader and the format-3 artifact of the same
    source give identical results.
@@ -536,6 +551,11 @@ draft. Each finding and what the note does about it:
     struct.
 12. `snake_case` was unspecified and could collide. Fixed: the template uses
     the kind verbatim.
+
+A delta check of this revision approved it with four changes, all made:
+invariant 6 no longer treats a defaulted read as an unreached one; a filter
+of a kind to itself stays `supplied`; the artifact's schema delegates to the
+wire struct; and byte determinism is stated for a fixed build.
 
 The review also asked that read sites be defined as potential reads (done,
 matching the catalog), that parity be compared within each mode (invariant
