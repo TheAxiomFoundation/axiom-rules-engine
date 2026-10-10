@@ -36,19 +36,22 @@ Execution does not read any of it. `program` minus `interface`, and
   A `where` clause and a summed value run on the related id
   (`fold_member`). So a rule's declared `entity` does not fix the ids its
   inputs are read on.
-- **That difference is real in the corpus.** In 234 rulespec-us modules
-  compiled at 16a667719 (149 from the first states alphabetically, 85 sampled
-  from the federal tree), a `TaxUnit` rule references a `Person` rule directly
-  in `us/statutes/26/25B`, `Person` rules reference `StateAgency` and
-  `FinancialMethodology` rules in `us/regulations/42-cfr/435/601/d/1`, and
-  entity-free (`Scalar`) rules read inputs on behalf of `Household` rules in
-  `us-al/policies/dhr/poe/.../802`. Four slots are read by rules of two kinds.
+- **That difference is real in the corpus.** Main compiles 4,342 of the 4,878
+  atomic modules in rulespec-us at 16a667719. In those artifacts, counting
+  base and version expressions, 168 rule references in 52 modules go directly
+  from a rule of one named kind to a rule of another (a `TaxUnit` rule to a
+  `Person` rule in `us/statutes/26/151`, `Person` rules to `StateAgency` rules
+  in `us/regulations/42-cfr/435/601/d/1`), and 172 go to an entity-free
+  (`Scalar`) rule. Entity-free rules read nine input slots; where a
+  `Household` rule references one (`us-al/policies/dhr/poe/.../802`), the slot
+  is read on the household's id. Sixty-one slots are read directly by rules
+  of two kinds.
 - **`metadata.input_catalog` lists names nothing reads.** A parameter's
   `indexed_by` label enters the catalog whether or not an expression reads it
-  (`Program::input_catalog`, `src/model.rs`); 16 such slots appear in the
-  sample.
+  (`Program::input_catalog`, `src/model.rs`); 99 such slots appear in those
+  artifacts.
 - **`input_or_else` is the only declared default**, and the formula language
-  cannot produce it; none appears in the sample.
+  cannot produce it; none appears in those artifacts.
 - **A derived relation also reads tuples supplied under its own name.**
   `related_entity_ids_at_level` unions the filtered source members with
   `direct_related_ids(relation, ...)`.
@@ -71,8 +74,9 @@ Execution does not read any of it. `program` minus `interface`, and
     "commit": "5d63e8f3...40 hex" ,    //   or null when the build cannot know
     "dirty": false                     //   or null
   },
-  "source_closure": {                  // source-closure identity, or null
-    "root": "us:statutes/26/32",       //   null for an originless root
+  "source_closure": {                  // source-closure identity; omitted when
+    "root": "us:statutes/26/32",       //   there is no RuleSpec source. null root
+                                       //   for an originless root
     "modules": [ { "target": "us:statutes/26/32", "sha256": "..." } ],
     "digest": "sha256:..."
   },
@@ -88,7 +92,7 @@ Execution does not read any of it. `program` minus `interface`, and
 | Wire format | `artifact_format_version` | Exact match, or the named legacy loader |
 | Semantic version | `engine_version` (required in format 3) | Recorded, not gated |
 | Build identity | `engine_build` | Recorded, not gated |
-| Source closure | `source_closure` | Shape only |
+| Source closure | `source_closure` (omitted when compiled from IR) | Shape only |
 
 `engine_build.commit` comes from `build.rs`: the `AXIOM_RULES_ENGINE_BUILD_COMMIT`
 environment variable, else `git rev-parse HEAD` when the git top level is the
@@ -104,7 +108,7 @@ exact text. An originless root (an in-memory string, or a composition file)
 has `target: null`. `digest` is the SHA-256 of
 `axiom-rules-engine/source-closure/v1\n` followed by one `<target>\t<sha256>\n`
 line per module. A program compiled from a `ProgramSpec` has no RuleSpec
-source, so `source_closure` is null. The closure covers RuleSpec module text
+source, so `source_closure` is omitted. The closure covers RuleSpec module text
 only: a `--corpus-provisions` index used to resolve `source_url` is not in it.
 
 The crate version does not move in this change; versions are cut in their own
@@ -270,8 +274,8 @@ in `docs/unit-derivation.md`) is not part of this change.
 - a higher version: "this engine (...) is older than compiled artefact
   `<path>` (format 4, written by engine ...); upgrade the engine";
 - format 3: top-level keys are a closed set, `engine_version`, `engine_build`,
-  `source_closure`, `program.interface` and `metadata.input_catalog` are
-  required, `program.extends` is refused outright, and `interface` must equal
+  `program.interface` and `metadata.input_catalog` are required,
+  `program.extends` is refused outright, and `interface` must equal
   what this engine derives from the embedded program. The existing metadata
   and relation-typing checks are unchanged.
 
