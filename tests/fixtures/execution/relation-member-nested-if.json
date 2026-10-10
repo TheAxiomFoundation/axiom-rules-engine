@@ -1,0 +1,202 @@
+{
+  "mode": "explain",
+  "program": {
+    "relations": [
+      {
+        "name": "member",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ]
+      },
+      {
+        "name": "head",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ]
+      },
+      {
+        "name": "heads",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ],
+        "derivation": {
+          "source_relation": "member",
+          "current_slot": 1,
+          "related_slot": 0,
+          "slot_entities": [
+            "Person",
+            "Household"
+          ],
+          "predicate": {
+            "kind": "comparison",
+            "left": {
+              "kind": "if",
+              "condition": {
+                "kind": "relation_member",
+                "relation": "head",
+                "current_slot": 1,
+                "related_slot": 0
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          }
+        }
+      }
+    ],
+    "derived": [
+      {
+        "name": "n",
+        "entity": "Household",
+        "dtype": "integer",
+        "unit": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "heads",
+          "current_slot": 1,
+          "related_slot": 0
+        }
+      },
+      {
+        "name": "size",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "hh_size"
+        }
+      },
+      {
+        "name": "age",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input",
+          "name": "p_age"
+        }
+      }
+    ]
+  },
+  "dataset": {
+    "inputs": [
+      {
+        "name": "hh_size",
+        "entity": "Household",
+        "entity_id": "h1",
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "2"
+        }
+      },
+      {
+        "name": "p_age",
+        "entity": "Person",
+        "entity_id": "p1",
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "30"
+        }
+      },
+      {
+        "name": "p_age",
+        "entity": "Person",
+        "entity_id": "p2",
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        },
+        "value": {
+          "kind": "decimal",
+          "value": "9"
+        }
+      }
+    ],
+    "relations": [
+      {
+        "name": "member",
+        "tuple": [
+          "p1",
+          "h1"
+        ],
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        }
+      },
+      {
+        "name": "member",
+        "tuple": [
+          "p2",
+          "h1"
+        ],
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        }
+      },
+      {
+        "name": "head",
+        "tuple": [
+          "p1",
+          "h1"
+        ],
+        "interval": {
+          "start": "2026-01-01",
+          "end": "2026-01-31"
+        }
+      }
+    ]
+  },
+  "queries": [
+    {
+      "entity_id": "h1",
+      "period": {
+        "period_kind": "month",
+        "start": "2026-01-01",
+        "end": "2026-01-31"
+      },
+      "outputs": [
+        "n"
+      ]
+    }
+  ]
+}

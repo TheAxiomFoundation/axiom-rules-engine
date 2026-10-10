@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
+    DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
+    ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
 };
 
 #[derive(Debug, Error)]
@@ -72,6 +72,18 @@ pub enum CompileError {
     AmbiguousRuleSpecYaml { path: String },
     #[error("strict relation entity validation failed:\n{0}")]
     StrictRelationEntityDiagnostics(CompileDiagnosticReport),
+    #[error("{path}: relation entity typing failed:\n{report}")]
+    RelationTyping {
+        path: String,
+        report: crate::relation_typing::RelationTypingReport,
+    },
+    #[error(
+        "compiled artefact `{path}` executes relations that fail mandatory entity typing:\n{report}\nRecompile the program with this engine, or type the artefact in place with `axiom-rules-engine migrate artifact --artifact {path} --output <typed.json>` (add `--relation-entities <relation>=<Kind>,<Kind>` for any slot it cannot infer)"
+    )]
+    LegacyArtifactRelationTyping {
+        path: String,
+        report: crate::relation_typing::RelationTypingReport,
+    },
     #[error(
         "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
     )]
@@ -98,14 +110,24 @@ pub enum CompileError {
 /// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
 pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
+/// Whether an artefact load enforces mandatory relation entity typing. Only
+/// the migration tool defers it, to type an artefact the loader rejects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelationTypingGate {
+    Enforce,
+    DeferToMigration,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CompileOptions {
     /// Escalate compatible duplicate-namespace diagnostics to compile errors.
     /// This is deliberately narrower than issue #83's future
     /// `--strict-resolution`, which also needs declared-input provenance.
     pub strict_namespaces: bool,
-    /// Escalate relation argument name/shape and executable-orientation
-    /// diagnostics to compile errors. Arity is structural in every mode.
+    /// Escalate relation argument label diagnostics (a label that is not an
+    /// UpperCamelCase entity kind, or a kind no rule in the closure uses) to
+    /// compile errors. Arity is structural in every mode, and executed
+    /// relations must be entity-typed in every mode (`relation_typing`).
     pub strict_relation_entities: bool,
 }
 
@@ -159,6 +181,13 @@ pub struct CompiledProgramArtifact {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledProgramMetadata {
     pub evaluation_order: Vec<String>,
+    /// Advisory: the compiling engine's static scan for constructs bulk fast
+    /// mode declines or cannot answer, one blocker per occurrence. Execution
+    /// never reads it. Fast mode decides per request and reports
+    /// any fallback in the response's `metadata.fallback_reason`. A later
+    /// engine whose fast mode has since gained a listed construct still loads
+    /// the artifact and keeps this value unchanged, with a
+    /// `stale_fast_path_metadata` diagnostic.
     pub fast_path: FastPathMetadata,
     /// Defaulted only so an artifact that predates the catalog can be read at
     /// all. Absence is filled from the embedded program in `from_json_source`;
@@ -179,8 +208,17 @@ pub struct CompiledInputCatalogEntry {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FastPathMetadata {
+    /// Always `generic_bulk`.
     pub strategy: String,
+    /// True exactly when `blockers` is empty.
     pub compatible: bool,
+    /// One `<rule>: <reason>` entry per occurrence of a construct bulk fast
+    /// mode declines or cannot answer, in rule order, each rule's formula
+    /// before its versions. It is a static scan: a construct only a dead
+    /// branch reaches never forces a fallback at runtime; nothing inside a
+    /// relation aggregation is listed, because fast mode evaluates those on
+    /// the explain interpreter; and date-valued literals, inputs and parameter
+    /// values, which bulk fast mode also declines, are not listed.
     pub blockers: Vec<String>,
 }
 
@@ -245,17 +283,14 @@ impl CompiledProgramArtifact {
         // re-check the same invariant via `to_program`.
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
-        let mut diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
+        let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
-        let orientation_diagnostics = relation_orientation_diagnostics(&program, path)?;
-        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
-            return Err(CompileError::StrictRelationEntityDiagnostics(
-                CompileDiagnosticReport {
-                    diagnostics: orientation_diagnostics,
-                },
-            ));
-        }
-        diagnostics.extend(orientation_diagnostics);
+        crate::relation_typing::check_program(&program.to_program()?).map_err(|report| {
+            CompileError::RelationTyping {
+                path: path.to_string(),
+                report,
+            }
+        })?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -270,6 +305,7 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
         fill_absent_catalog: bool,
+        typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
         if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
             return Err(CompileError::UnsupportedArtifactFormatVersion {
@@ -294,20 +330,35 @@ impl CompiledProgramArtifact {
         // agrees with the embedded program, not that either payload is untampered.
         let expected_metadata = compiled_metadata(&self.program)?;
         if self.metadata != expected_metadata {
-            return Err(invalid_artifact_contract(
+            // `fast_path` describes the compiling engine's fast mode, so it is
+            // also accepted as computed under a retired rule set. The stored
+            // copy is kept: unit aggregation digests the loaded artifact's
+            // serialization, which must not change on load.
+            let retired = (self.metadata.evaluation_order == expected_metadata.evaluation_order
+                && self.metadata.input_catalog == expected_metadata.input_catalog)
+                .then(|| retired_fast_path_rules(&self.program, &self.metadata.fast_path))
+                .flatten();
+            let Some(retired) = retired else {
+                return Err(invalid_artifact_contract(
+                    path,
+                    "metadata does not match the compiled program",
+                ));
+            };
+            self.diagnostics.push(stale_fast_path_diagnostic(
+                &self.program,
                 path,
-                "metadata does not match the compiled program",
+                self.engine_version.as_deref(),
+                retired,
             ));
         }
-        let orientation_diagnostics = relation_orientation_diagnostics(&self.program, path)?;
-        if options.strict_relation_entities && !orientation_diagnostics.is_empty() {
-            return Err(CompileError::StrictRelationEntityDiagnostics(
-                CompileDiagnosticReport {
-                    diagnostics: orientation_diagnostics,
+        if typing == RelationTypingGate::Enforce {
+            crate::relation_typing::check_program(&self.program.to_program()?).map_err(
+                |report| CompileError::LegacyArtifactRelationTyping {
+                    path: path.to_string(),
+                    report,
                 },
-            ));
+            )?;
         }
-        self.diagnostics.extend(orientation_diagnostics);
         Ok(self)
     }
 
@@ -470,6 +521,30 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
+        Self::from_json_source_gated(source, path, options, RelationTypingGate::Enforce)
+    }
+
+    /// Load an artefact without the mandatory relation typing gate, so the
+    /// migration tool can type an artefact the loader would reject. Every
+    /// other contract check still runs.
+    pub(crate) fn from_json_str_for_relation_migration(
+        source: &str,
+        path: &str,
+    ) -> Result<Self, CompileError> {
+        Self::from_json_source_gated(
+            source,
+            path,
+            CompileOptions::default(),
+            RelationTypingGate::DeferToMigration,
+        )
+    }
+
+    fn from_json_source_gated(
+        source: &str,
+        path: &str,
+        options: CompileOptions,
+        typing: RelationTypingGate,
+    ) -> Result<Self, CompileError> {
         let value: serde_json::Value =
             serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
@@ -506,7 +581,7 @@ impl CompiledProgramArtifact {
                 path: path.to_string(),
                 error,
             })?;
-        artifact.check_format_version(path, options, catalog_absent)
+        artifact.check_format_version(path, options, catalog_absent, typing)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -541,66 +616,6 @@ impl CompiledProgramArtifact {
 }
 
 const DUPLICATE_PARAMETER_DIAGNOSTIC: &str = "duplicate_parameter_name";
-const RELATION_ORIENTATION_DIAGNOSTIC: &str = "relation_orientation_mismatch";
-
-fn relation_orientation_diagnostics(
-    program: &ProgramSpec,
-    path: &str,
-) -> Result<Vec<CompileDiagnostic>, CompileError> {
-    let runtime_program = program.to_program()?;
-    let usages = crate::model::relation_usage_records(&runtime_program);
-    let mut relations = program
-        .relations
-        .iter()
-        .filter(|relation| relation.derivation.is_none() && !relation.slot_entities.is_empty())
-        .collect::<Vec<_>>();
-    relations.sort_by(|left, right| left.name.cmp(&right.name));
-
-    let mut diagnostics = Vec::new();
-    for relation in relations {
-        let Some(usage) = usages.iter().find(|usage| {
-            usage.relation == relation.name
-                && usage
-                    .slot_entities
-                    .iter()
-                    .zip(&relation.slot_entities)
-                    .any(|(used, declared)| used.as_ref().is_some_and(|used| used != declared))
-        }) else {
-            continue;
-        };
-        diagnostics.push(CompileDiagnostic {
-            code: RELATION_ORIENTATION_DIAGNOSTIC,
-            path: relation
-                .name
-                .split_once("#relation.")
-                .map_or_else(|| path.to_string(), |(target, _)| target.to_string()),
-            message: format!(
-                "data relation `{}` declares slot entity order {}, but executable usage derives order {} (citing rule `{}`); the declaration remains verbatim, and strict relation entity mode treats this warning as an error",
-                relation.name,
-                format_declared_slot_entities(&relation.slot_entities),
-                format_usage_slot_entities(&usage.slot_entities),
-                usage.citing_rule,
-            ),
-        });
-    }
-    Ok(diagnostics)
-}
-
-fn format_declared_slot_entities(entities: &[String]) -> String {
-    format!("[{}]", entities.join(", "))
-}
-
-fn format_usage_slot_entities(entities: &[Option<String>]) -> String {
-    format!(
-        "[{}]",
-        entities
-            .iter()
-            .map(|entity| entity.as_deref().unwrap_or("?"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 fn normalize_parameter_duplicates(
     program: &mut ProgramSpec,
     path: &str,
@@ -1191,14 +1206,53 @@ fn reject_relation_routed_cycles(
     })
 }
 
+/// What a fast-path analysis reports as a blocker. Artifacts record the
+/// analysis of the engine that compiled them, so every rule set an earlier
+/// engine stamped into v2 artifacts stays listed in [`RETIRED_FAST_PATH_RULES`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FastPathRules {
+    /// Report `sum_related` over a related derived value. Fast mode declined
+    /// it until it began running relation aggregations row by row on the
+    /// explain interpreter (#201).
+    sum_related_over_derived: bool,
+}
+
+/// This engine's analysis.
+const FAST_PATH_RULES: FastPathRules = FastPathRules {
+    sum_related_over_derived: false,
+};
+
+/// A rule set earlier engines stamped into v2 artifacts, and what fast mode
+/// has gained since.
+struct RetiredFastPathRules {
+    rules: FastPathRules,
+    superseded_because: &'static str,
+}
+
+/// Every retired rule set, newest first. Each must reproduce byte for byte
+/// the `fast_path` an earlier engine wrote, so changing a blocker message or
+/// the traversal order means adding an entry here, never editing one.
+const RETIRED_FAST_PATH_RULES: &[RetiredFastPathRules] = &[RetiredFastPathRules {
+    // v0.1.1, v0.1.2 and v0.2.0 through v0.2.2, and main before this set was
+    // retired.
+    rules: FastPathRules {
+        sum_related_over_derived: true,
+    },
+    superseded_because: "fast mode answers `sum_related` over related derived values, running relation aggregations row by row on the explain interpreter",
+}];
+
+const STALE_FAST_PATH_DIAGNOSTIC: &str = "stale_fast_path_metadata";
+
 fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
-    let mut blockers = Vec::new();
-    for derived in &program.derived {
-        collect_fast_blockers_from_semantics(&derived.name, &derived.semantics, &mut blockers);
-        for version in &derived.versions {
-            collect_fast_blockers_from_semantics(&derived.name, &version.semantics, &mut blockers);
-        }
-    }
+    fast_path_metadata_under(program, FAST_PATH_RULES)
+}
+
+fn fast_path_metadata_under(program: &ProgramSpec, rules: FastPathRules) -> FastPathMetadata {
+    let blockers = program
+        .derived
+        .iter()
+        .flat_map(|derived| derived_fast_blockers(derived, rules))
+        .collect::<Vec<_>>();
 
     FastPathMetadata {
         strategy: "generic_bulk".to_string(),
@@ -1207,23 +1261,86 @@ fn fast_path_metadata(program: &ProgramSpec) -> FastPathMetadata {
     }
 }
 
+fn derived_fast_blockers(derived: &DerivedSpec, rules: FastPathRules) -> Vec<String> {
+    let mut blockers = Vec::new();
+    collect_fast_blockers_from_semantics(&derived.name, rules, &derived.semantics, &mut blockers);
+    for version in &derived.versions {
+        collect_fast_blockers_from_semantics(
+            &derived.name,
+            rules,
+            &version.semantics,
+            &mut blockers,
+        );
+    }
+    blockers
+}
+
+/// The retired rule set under which `stored` was computed for `program`, if
+/// any. Metadata this engine would compute itself never reaches here.
+fn retired_fast_path_rules(
+    program: &ProgramSpec,
+    stored: &FastPathMetadata,
+) -> Option<&'static RetiredFastPathRules> {
+    RETIRED_FAST_PATH_RULES
+        .iter()
+        .find(|retired| fast_path_metadata_under(program, retired.rules) == *stored)
+}
+
+fn stale_fast_path_diagnostic(
+    program: &ProgramSpec,
+    path: &str,
+    engine_version: Option<&str>,
+    retired: &RetiredFastPathRules,
+) -> CompileDiagnostic {
+    let current = fast_path_metadata(program);
+    let stored = fast_path_metadata_under(program, retired.rules);
+    let rules = program
+        .derived
+        .iter()
+        .filter(|derived| {
+            derived_fast_blockers(derived, retired.rules)
+                != derived_fast_blockers(derived, FAST_PATH_RULES)
+        })
+        .map(|derived| format!("`{}`", derived.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let compiler = engine_version.map_or_else(
+        || "an earlier engine, which did not record its version".to_string(),
+        |version| format!("engine {version}"),
+    );
+    CompileDiagnostic {
+        code: STALE_FAST_PATH_DIAGNOSTIC,
+        path: path.to_string(),
+        message: format!(
+            "metadata.fast_path was computed by {compiler} ({} blockers, compatible: {}). Since then {}, so this engine lists {} blockers (compatible: {}) and no longer lists the retired blocker for {rules}. The stored metadata is kept unchanged so the artifact's bytes and digests stay stable; execution never reads it. Recompile with this engine to refresh it",
+            stored.blockers.len(),
+            stored.compatible,
+            retired.superseded_because,
+            current.blockers.len(),
+            current.compatible,
+        ),
+    }
+}
+
 fn collect_fast_blockers_from_semantics(
     derived_name: &str,
+    rules: FastPathRules,
     semantics: &DerivedSemanticsSpec,
     blockers: &mut Vec<String>,
 ) {
     match semantics {
         DerivedSemanticsSpec::Scalar { expr } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, expr, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, expr, blockers);
         }
         DerivedSemanticsSpec::Judgment { expr } => {
-            collect_fast_blockers_from_judgment_expr(derived_name, expr, blockers);
+            collect_fast_blockers_from_judgment_expr(derived_name, rules, expr, blockers);
         }
     }
 }
 
 fn collect_fast_blockers_from_scalar_expr(
     derived_name: &str,
+    rules: FastPathRules,
     expr: &ScalarExprSpec,
     blockers: &mut Vec<String>,
 ) {
@@ -1234,23 +1351,23 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Derived { .. } => {}
         ScalarExprSpec::CountRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, index, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Max { items }
         | ScalarExprSpec::Min { items } => {
             for item in items {
-                collect_fast_blockers_from_scalar_expr(derived_name, item, blockers);
+                collect_fast_blockers_from_scalar_expr(derived_name, rules, item, blockers);
             }
         }
         ScalarExprSpec::Sub { left, right }
         | ScalarExprSpec::Mul { left, right }
         | ScalarExprSpec::Div { left, right } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, left, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, right, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, left, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, right, blockers);
         }
         ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, value, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, value, blockers);
         }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {
             blockers.push(format!(
@@ -1261,32 +1378,36 @@ fn collect_fast_blockers_from_scalar_expr(
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support date_add_days; explain mode and the generic dense path do"
             ));
-            collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, days, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, date, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, days, blockers);
         }
         ScalarExprSpec::DateAddMonths { date, months } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support date_add_months; explain mode and the generic dense path do"
             ));
-            collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, months, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, date, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, months, blockers);
         }
         ScalarExprSpec::DateAddYears { date, years } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support date_add_years; explain mode and the generic dense path do"
             ));
-            collect_fast_blockers_from_scalar_expr(derived_name, date, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, years, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, date, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, years, blockers);
         }
         ScalarExprSpec::DaysBetween { from, to } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not yet support days_between; explain mode and the generic dense path do"
             ));
-            collect_fast_blockers_from_scalar_expr(derived_name, from, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, to, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, from, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, to, blockers);
         }
         ScalarExprSpec::SumRelated { value, .. } => {
-            if matches!(value, RelatedValueRefSpec::Derived { .. }) {
+            // Fast mode runs relation aggregations on the explain interpreter,
+            // so nothing inside one blocks it.
+            if rules.sum_related_over_derived
+                && matches!(value, RelatedValueRefSpec::Derived { .. })
+            {
                 blockers.push(format!(
                     "{derived_name}: fast mode does not yet support sum_related over related derived values"
                 ));
@@ -1297,23 +1418,23 @@ fn collect_fast_blockers_from_scalar_expr(
             then_expr,
             else_expr,
         } => {
-            collect_fast_blockers_from_judgment_expr(derived_name, condition, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, then_expr, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, else_expr, blockers);
+            collect_fast_blockers_from_judgment_expr(derived_name, rules, condition, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, then_expr, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, else_expr, blockers);
         }
         ScalarExprSpec::NoMatch { subject, patterns } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, subject, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, subject, blockers);
             for pattern in patterns {
-                collect_fast_blockers_from_scalar_expr(derived_name, pattern, blockers);
+                collect_fast_blockers_from_scalar_expr(derived_name, rules, pattern, blockers);
             }
         }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
             blockers.push(format!(
                 "{derived_name}: bulk fast mode does not support over-periods reductions; use the dense lifetime execution surface"
             ));
-            collect_fast_blockers_from_scalar_expr(derived_name, value, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, value, blockers);
             if let Some(n) = n {
-                collect_fast_blockers_from_scalar_expr(derived_name, n, blockers);
+                collect_fast_blockers_from_scalar_expr(derived_name, rules, n, blockers);
             }
         }
     }
@@ -1321,24 +1442,25 @@ fn collect_fast_blockers_from_scalar_expr(
 
 fn collect_fast_blockers_from_judgment_expr(
     derived_name: &str,
+    rules: FastPathRules,
     expr: &JudgmentExprSpec,
     blockers: &mut Vec<String>,
 ) {
     match expr {
         JudgmentExprSpec::Comparison { left, right, .. } => {
-            collect_fast_blockers_from_scalar_expr(derived_name, left, blockers);
-            collect_fast_blockers_from_scalar_expr(derived_name, right, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, left, blockers);
+            collect_fast_blockers_from_scalar_expr(derived_name, rules, right, blockers);
         }
         JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
-                collect_fast_blockers_from_judgment_expr(derived_name, item, blockers);
+                collect_fast_blockers_from_judgment_expr(derived_name, rules, item, blockers);
             }
         }
         JudgmentExprSpec::Not { item } => {
-            collect_fast_blockers_from_judgment_expr(derived_name, item, blockers);
+            collect_fast_blockers_from_judgment_expr(derived_name, rules, item, blockers);
         }
     }
 }

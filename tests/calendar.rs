@@ -49,6 +49,7 @@ fn request(
 ) -> ExecutionRequest {
     let period = period();
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -241,6 +242,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Family]
   - name: shifted_date
     kind: derived
     entity: Person
@@ -296,6 +298,7 @@ rules:
             ..Default::default()
         };
         let response = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: ExecutionMode::Explain,
             program: artifact.program.clone(),
             dataset,
@@ -362,6 +365,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Family]
   - name: shifted_date
     kind: derived
     entity: Person
@@ -396,6 +400,7 @@ rules:
     };
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         let error = execute_request(ExecutionRequest {
+            relation_binding: Default::default(),
             mode: mode.clone(),
             program: artifact.program.clone(),
             dataset: DatasetSpec {

@@ -12,17 +12,26 @@
 //!
 //! Every program here runs through the path the PyO3 extension uses:
 //! `CompiledProgramArtifact::compile`, then `DenseCompiledProgram::from_artifact`.
+//! A program mandatory relation typing refuses never reaches that path, so its
+//! refusal is checked in explain, the artifact compiler, and the dense
+//! compiler, which checks typing itself even on a raw program
+//! (`from_program`). Explain's evaluator (`Engine::new`) takes a raw program
+//! as given, so it is still checked on the refused shapes.
 
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use axiom_rules_engine::api::{ExecutionRequest, OutputValue, execute_request};
+use axiom_rules_engine::api::{ApiError, ExecutionRequest, OutputValue, execute_request};
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
     DenseRelationBatchSpec,
 };
-use axiom_rules_engine::spec::{JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec};
+use axiom_rules_engine::engine::Engine;
+use axiom_rules_engine::relation_typing::{RelationTypingCode, RelationTypingReport};
+use axiom_rules_engine::spec::{
+    DatasetSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, ScalarValueSpec,
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
@@ -370,6 +379,84 @@ fn assert_dense_matches_explain_for(
         .unwrap_or_else(|error| panic!("{label}: dense declined the program: {error}"));
     assert_eq!(actual, expected, "{label}: dense and explain differ");
     expected
+}
+
+/// Explain refuses `program` for relation typing before evaluating it, and the
+/// artifact compiler the dense path starts from refuses it with the same
+/// violations. Returns them as `(code, relation, citing)`.
+fn typing_refusal(program: &Value) -> Vec<(RelationTypingCode, String, String)> {
+    let violations = |report: &RelationTypingReport| {
+        report
+            .violations
+            .iter()
+            .map(|violation| {
+                (
+                    violation.code,
+                    violation.relation.clone(),
+                    violation.citing.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let request: ExecutionRequest = serde_json::from_value(json!({
+        "mode": "explain",
+        "program": program,
+        "dataset": { "inputs": [], "relations": [] },
+        "queries": [],
+    }))
+    .expect("request JSON parses");
+    let explained = match execute_request(request) {
+        Err(ApiError::RelationTyping(report)) => violations(&report),
+        other => panic!("explain must refuse the program for typing, got {other:?}"),
+    };
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    match CompiledProgramArtifact::compile(spec) {
+        Err(CompileError::RelationTyping { report, .. }) => {
+            assert_eq!(violations(&report), explained, "{report}");
+        }
+        other => panic!("the artifact compiler must refuse the program, got {other:?}"),
+    }
+    explained
+}
+
+/// Explain's evaluator (`Engine::new`) on `program` as given, without the
+/// checks a request passes (typing, input spells, the dependency graph):
+/// every household's outputs, or the first error.
+fn raw_explain(program: &Value, outputs: &[&str]) -> Answer {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    let model = spec.to_program().expect("the program converts");
+    let dataset: DatasetSpec =
+        serde_json::from_value(dataset(HOUSEHOLDS, program)).expect("dataset parses");
+    let dataset = dataset
+        .to_dataset_for_program(&model)
+        .expect("the dataset binds");
+    let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+    let period = period.to_model().expect("period converts");
+    let mut engine = Engine::new(&model, &dataset);
+    HOUSEHOLDS
+        .iter()
+        .map(|household| {
+            outputs
+                .iter()
+                .map(|output| {
+                    engine
+                        .evaluate_scalar(output, household.id, &period)
+                        .map(|value| Cell::Number(value.as_decimal().expect("a numeric output")))
+                        .map_err(|error| error.to_string())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The dense compiler's own verdict on `program` as given, without the checks
+/// an artifact passes.
+fn compile_dense_unchecked(program: &Value) -> Result<DenseCompiledProgram, DenseCompileError> {
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program JSON parses");
+    DenseCompiledProgram::from_program(
+        &spec.to_program().expect("the program converts"),
+        Some("Household"),
+    )
 }
 
 fn numbers(values: &[i64]) -> Vec<Vec<Cell>> {
@@ -778,12 +865,6 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
             vec![1, 0, 1],
         ),
         (
-            "the source read the other way round",
-            with_filter(vec![base_relation("member")], reversed_member),
-            "member",
-            vec![0, 0, 0],
-        ),
-        (
             "a sibling derived relation over the same source",
             with_filter(
                 vec![
@@ -810,6 +891,28 @@ fn dense_declines_a_derived_relation_testing_another_relations_membership() {
             ),
             other => panic!("{label}: dense must decline, got {other:?}"),
         }
+    }
+
+    // Read the other way round, the source's own test asks whether a
+    // household id is in `member`'s person slot and a person id in its
+    // household slot, so typing refuses the program before explain evaluates
+    // it or dense compiles it. Given the raw program, explain's evaluator
+    // still filters every member out.
+    let reversed = with_filter(vec![base_relation("member")], reversed_member);
+    let mismatch = (
+        RelationTypingCode::MembershipSlotEntityMismatch,
+        "member".to_string(),
+        "filtered".to_string(),
+    );
+    assert_eq!(
+        typing_refusal(&reversed),
+        [mismatch.clone(), mismatch],
+        "one mismatch per slot"
+    );
+    assert_eq!(raw_explain(&reversed, &["n"]), Ok(numbers(&[0, 0, 0])));
+    match compile_dense_unchecked(&reversed) {
+        Err(DenseCompileError::RelationTyping(_)) => {}
+        other => panic!("dense must refuse the reversed test, got {other:?}"),
     }
 
     // Without resident tuples explain counts nobody; dense counted all three.
@@ -908,10 +1011,25 @@ const LINKS: &[(&str, &str)] = &[
 ];
 const LINK_ROOTS: &[(&str, &str)] = &[("h1", "5"), ("h2", "0"), ("h3", "7"), ("h4", "2")];
 
-/// `count` and `sum` of `x` over `relation` for each root household, in
-/// explain (one query per root) and in dense (a one-row batch per root), or
-/// dense's compile error.
-fn link_answers(program: &Value, relation: &str) -> (Answer, Result<Answer, DenseCompileError>) {
+/// Whether `link_answers` runs the program through the checked entry points
+/// (an explain request and the artifact path) or as given (explain's
+/// evaluator, which skips the typing check, and
+/// `DenseCompiledProgram::from_program`, which checks it itself).
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    Checked,
+    Raw,
+}
+
+/// `count` over `relation` read with `slots[0]`, and `sum` of `x` read with
+/// `slots[1]`, for each root household, in explain (one query per root) and
+/// in dense (a one-row batch per root), or dense's compile error.
+fn link_answers(
+    program: &Value,
+    relation: &str,
+    slots: [(usize, usize); 2],
+    entry: Entry,
+) -> (Answer, Result<Answer, DenseCompileError>) {
     let x = |id: &str| {
         LINK_ROOTS
             .iter()
@@ -930,26 +1048,29 @@ fn link_answers(program: &Value, relation: &str) -> (Answer, Result<Answer, Dens
     };
     let mut program = program.clone();
     program["derived"] = json!([
-        rule("n", "Household", "integer", over("count_related", (0, 1))),
-        rule("s", "Household", "decimal", over("sum_related", (1, 0))),
+        rule("n", "Household", "integer", over("count_related", slots[0])),
+        rule("s", "Household", "decimal", over("sum_related", slots[1])),
     ]);
+    let dataset = json!({
+        "inputs": LINK_ROOTS.iter().map(|(id, x)| json!({
+            "name": "x", "entity": "Household", "entity_id": id, "interval": interval(),
+            "value": { "kind": "decimal", "value": x },
+        })).collect::<Vec<_>>(),
+        "relations": LINKS.iter().map(|(from, to)| json!({
+            "name": "link", "tuple": [from, to], "interval": interval(),
+        })).collect::<Vec<_>>(),
+    });
     let request: ExecutionRequest = serde_json::from_value(json!({
         "mode": "explain",
         "program": program,
-        "dataset": {
-            "inputs": LINK_ROOTS.iter().map(|(id, x)| json!({
-                "name": "x", "entity": "Household", "entity_id": id, "interval": interval(),
-                "value": { "kind": "decimal", "value": x },
-            })).collect::<Vec<_>>(),
-            "relations": LINKS.iter().map(|(from, to)| json!({
-                "name": "link", "tuple": [from, to], "interval": interval(),
-            })).collect::<Vec<_>>(),
-        },
+        "dataset": dataset,
         "queries": LINK_ROOTS.iter().map(|(id, _)| json!({
             "entity_id": id, "period": period(), "outputs": ["n", "s"],
         })).collect::<Vec<_>>(),
     }))
     .expect("request parses");
+    let spec: ProgramSpec = serde_json::from_value(program.clone()).expect("program parses");
+    let model = spec.to_program().expect("the program converts");
     let cells = |n: Decimal, s: Decimal| vec![Cell::Number(n), Cell::Number(s)];
     let number = |value: &OutputValue| match value {
         OutputValue::Scalar {
@@ -962,16 +1083,41 @@ fn link_answers(program: &Value, relation: &str) -> (Answer, Result<Answer, Dens
         } => Decimal::from_str(value).expect("decimal"),
         other => panic!("unexpected output {other:?}"),
     };
-    let explained = execute_request(request)
-        .map(|response| {
-            response
-                .results
+    let explained = match entry {
+        Entry::Checked => execute_request(request)
+            .map(|response| {
+                response
+                    .results
+                    .iter()
+                    .map(|result| cells(number(&result.outputs["n"]), number(&result.outputs["s"])))
+                    .collect()
+            })
+            .map_err(|error| error.to_string()),
+        Entry::Raw => {
+            let dataset: DatasetSpec = serde_json::from_value(dataset).expect("dataset parses");
+            let dataset = dataset
+                .to_dataset_for_program(&model)
+                .expect("the dataset binds");
+            let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
+            let period = period.to_model().expect("period converts");
+            let mut engine = Engine::new(&model, &dataset);
+            let mut value = |output: &str, root: &str| {
+                engine
+                    .evaluate_scalar(output, root, &period)
+                    .map_err(|error| error.to_string())
+                    .map(|value| value.as_decimal().expect("a numeric output"))
+            };
+            LINK_ROOTS
                 .iter()
-                .map(|result| cells(number(&result.outputs["n"]), number(&result.outputs["s"])))
+                .map(|(root, _)| Ok(cells(value("n", root)?, value("s", root)?)))
                 .collect()
-        })
-        .map_err(|error| error.to_string());
-    let dense = compile_dense(&program).map(|compiled| {
+        }
+    };
+    let compiled = match entry {
+        Entry::Checked => compile_dense(&program),
+        Entry::Raw => DenseCompiledProgram::from_program(&model, Some("Household")),
+    };
+    let dense = compiled.map(|compiled| {
         let period: PeriodSpec = serde_json::from_value(period()).expect("period parses");
         let outputs = ["n".to_string(), "s".to_string()];
         LINK_ROOTS
@@ -1024,15 +1170,21 @@ fn link_answers(program: &Value, relation: &str) -> (Answer, Result<Answer, Dens
     (explained, dense)
 }
 
-/// Up a chain of derived relations each link is read with its own slots:
-/// `d1` reads `link` (1, 0), `d2` reads `d1` (0, 1) and `d3` reads `d2`
-/// (1, 0). A membership test in `d3`'s predicate holds for every candidate
-/// only for an ancestor tested with the slots its child reads it with, which
-/// dense checks link by link: `link` read (0, 1) is not one, and keeping every
-/// tuple would answer differently from explain.
+/// Up a chain of derived relations every link is read with the chain's one
+/// direction: `d1` reads `link`, `d2` reads `d1` and `d3` reads `d2`, all with
+/// the same slots. A membership test in `d3`'s predicate holds for every
+/// candidate only for an ancestor tested with those slots, which dense checks
+/// link by link: `link` read the other way round is not one, and keeping every
+/// tuple would answer differently from explain. Both directions are checked.
+///
+/// A chain whose links alternate direction is refused before any mode runs:
+/// explain reads a derived source with the source's own derivation slots, not
+/// the ones its child names, so the child's slots would be ignored. Given that
+/// raw program, explain's evaluator still answers, and the dense compiler
+/// refuses it for its typing.
 #[test]
 fn dense_membership_of_an_ancestor_checks_each_links_slots() {
-    let test = |relation: &str, current: usize, related: usize| json!({ "kind": "relation_member", "relation": relation, "current_slot": current, "related_slot": related });
+    let test = |relation: &str, (current, related): (usize, usize)| json!({ "kind": "relation_member", "relation": relation, "current_slot": current, "related_slot": related });
     let x_above = |bound: &str| {
         compare(
             json!({ "kind": "input", "name": "x" }),
@@ -1054,32 +1206,105 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
             },
         })
     };
-    let chain = |d3: Value| {
+    let chain = |slots: [(usize, usize); 3], d3: Value| {
         json!({
             "relations": [
                 { "name": "link", "arity": 2, "slot_entities": ["Household", "Household"] },
-                link("d1", "link", (1, 0), and(vec![test("link", 1, 0), x_above("0")])),
-                link("d2", "d1", (0, 1), and(vec![test("d1", 0, 1), test("link", 1, 0), x_above("3")])),
-                link("d3", "d2", (1, 0), d3),
+                link("d1", "link", slots[0], and(vec![test("link", slots[0]), x_above("0")])),
+                link("d2", "d1", slots[1], and(vec![test("d1", slots[1]), test("link", slots[0]), x_above("3")])),
+                link("d3", "d2", slots[2], d3),
             ],
             "derived": [],
         })
     };
+    for direction in [(1, 0), (0, 1)] {
+        let reverse = (direction.1, direction.0);
+        let chain = |d3: Value| chain([direction; 3], d3);
+        for (label, predicate) in [
+            ("its source", and(vec![test("d2", direction), x_above("1")])),
+            (
+                "its source's source",
+                and(vec![test("d1", direction), x_above("1")]),
+            ),
+            (
+                "the base relation",
+                or(vec![not(test("link", direction)), x_above("6")]),
+            ),
+            (
+                "every ancestor, in an `if` condition",
+                compare(
+                    if_then_else(
+                        and(vec![
+                            test("d2", direction),
+                            test("d1", direction),
+                            test("link", direction),
+                        ]),
+                        json!({ "kind": "input", "name": "x" }),
+                        decimal("0"),
+                    ),
+                    "gt",
+                    decimal("1"),
+                ),
+            ),
+        ] {
+            let label = format!("{direction:?}: {label}");
+            let (explained, dense) =
+                link_answers(&chain(predicate), "d3", [direction; 2], Entry::Checked);
+            let dense = dense.unwrap_or_else(|error| panic!("{label}: dense declined: {error}"));
+            assert_eq!(dense, explained, "{label}");
+            assert!(explained.is_ok(), "{label}: {explained:?}");
+        }
+
+        let (off_chain, dense) = link_answers(
+            &chain(test("link", reverse)),
+            "d3",
+            [direction; 2],
+            Entry::Checked,
+        );
+        let (keep_all, _) =
+            link_answers(&chain(constant(true)), "d3", [direction; 2], Entry::Checked);
+        assert!(off_chain.is_ok(), "{direction:?}: {off_chain:?}");
+        assert_ne!(
+            off_chain, keep_all,
+            "{direction:?}: the off-chain test filters in explain"
+        );
+        match dense {
+            Err(DenseCompileError::Unsupported(message)) => {
+                assert!(
+                    message.contains(&format!(
+                        "`relation_member` of `link` (slots {}, {})",
+                        reverse.0, reverse.1
+                    )),
+                    "{direction:?}: {message}"
+                )
+            }
+            other => panic!("{direction:?}: dense must decline the off-chain test, got {other:?}"),
+        }
+    }
+
+    // `d1` reads `link` (1, 0), `d2` reads `d1` (0, 1) and `d3` reads `d2`
+    // (1, 0); `n` counts and `s` sums `d3` each way round.
+    let alternating = |d3: Value| chain([(1, 0), (0, 1), (1, 0)], d3);
+    let aggregates = [(0, 1), (1, 0)];
     for (label, predicate) in [
-        ("its source", and(vec![test("d2", 1, 0), x_above("1")])),
+        ("its source", and(vec![test("d2", (1, 0)), x_above("1")])),
         (
             "its source's source",
-            and(vec![test("d1", 0, 1), x_above("1")]),
+            and(vec![test("d1", (0, 1)), x_above("1")]),
         ),
         (
             "the base relation",
-            or(vec![not(test("link", 1, 0)), x_above("6")]),
+            or(vec![not(test("link", (1, 0))), x_above("6")]),
         ),
         (
             "every ancestor, in an `if` condition",
             compare(
                 if_then_else(
-                    and(vec![test("d2", 1, 0), test("d1", 0, 1), test("link", 1, 0)]),
+                    and(vec![
+                        test("d2", (1, 0)),
+                        test("d1", (0, 1)),
+                        test("link", (1, 0)),
+                    ]),
                     json!({ "kind": "input", "name": "x" }),
                     decimal("0"),
                 ),
@@ -1088,24 +1313,65 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
             ),
         ),
     ] {
-        let (explained, dense) = link_answers(&chain(predicate), "d3");
-        let dense = dense.unwrap_or_else(|error| panic!("{label}: dense declined: {error}"));
-        assert_eq!(dense, explained, "{label}");
+        let label = format!("alternating, raw: {label}");
+        let (explained, dense) =
+            link_answers(&alternating(predicate), "d3", aggregates, Entry::Raw);
+        assert!(
+            matches!(dense, Err(DenseCompileError::RelationTyping(_))),
+            "{label}: dense must refuse the ill-typed raw chain"
+        );
         assert!(explained.is_ok(), "{label}: {explained:?}");
     }
+    let (off_chain, dense) = link_answers(
+        &alternating(test("link", (0, 1))),
+        "d3",
+        aggregates,
+        Entry::Raw,
+    );
+    let (keep_all, _) = link_answers(&alternating(constant(true)), "d3", aggregates, Entry::Raw);
+    assert_ne!(
+        off_chain, keep_all,
+        "alternating, raw: the off-chain test filters in explain"
+    );
+    assert!(
+        matches!(dense, Err(DenseCompileError::RelationTyping(_))),
+        "alternating, raw: dense must refuse the off-chain test"
+    );
 
-    let (off_chain, dense) = link_answers(&chain(test("link", 0, 1)), "d3");
-    let (keep_all, _) = link_answers(&chain(constant(true)), "d3");
-    assert_ne!(off_chain, keep_all, "the off-chain test filters in explain");
-    match dense {
-        Err(DenseCompileError::Unsupported(message)) => {
-            assert!(
-                message.contains("`relation_member` of `link` (slots 0, 1)"),
-                "{message}"
-            )
-        }
-        other => panic!("dense must decline the off-chain test, got {other:?}"),
-    }
+    let mut alternating = alternating(and(vec![test("d2", (1, 0)), x_above("1")]));
+    alternating["derived"] = json!([rule(
+        "n",
+        "Household",
+        "integer",
+        json!({ "kind": "count_related", "relation": "d3", "current_slot": 1, "related_slot": 0 }),
+    )]);
+    // Each link's source and each membership test of an ancestor names slots
+    // other than the ones that ancestor's derivation traverses with.
+    assert_eq!(
+        typing_refusal(&alternating),
+        [
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d1".to_string(),
+                "d2".to_string(),
+            ),
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d2".to_string(),
+                "d2".to_string(),
+            ),
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d2".to_string(),
+                "d3".to_string(),
+            ),
+            (
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                "d3".to_string(),
+                "d3".to_string(),
+            ),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,8 +1383,7 @@ fn dense_membership_of_an_ancestor_checks_each_links_slots() {
 /// predicate reads `is_flagged`, whose `relation_member` names `flagged`, and
 /// only `n`, which counts `member`, is queried. Compiling and loading an
 /// artifact both refuse it the same way, so the dense path never compiles it.
-/// (`DenseCompiledProgram::from_program` takes a lowered program as given,
-/// as `Engine::new` does.)
+/// (`Engine::new` takes a lowered program as given.)
 #[test]
 fn dense_artifact_path_refuses_an_unused_relation_routed_cycle_as_explain_does() {
     let program = program(

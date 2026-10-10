@@ -8,13 +8,17 @@ use crate::compile::CompiledProgramArtifact;
 use crate::engine::{Engine, EvalError};
 use crate::model::{DerivedSemantics, JudgmentOutcome};
 use crate::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, JudgmentExprSpec,
-    JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec, ScalarExprSpec,
-    ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    JudgmentExprSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec,
+    ScalarExprSpec, ScalarValueSpec,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionRequest {
+    /// How to handle known relation tuple entity-kind mismatches.
+    #[serde(default)]
+    pub relation_binding: RelationBinding,
     pub mode: ExecutionMode,
     pub program: ProgramSpec,
     pub dataset: DatasetSpec,
@@ -22,7 +26,11 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledExecutionRequest {
+    /// How to handle known relation tuple entity-kind mismatches.
+    #[serde(default)]
+    pub relation_binding: RelationBinding,
     pub mode: ExecutionMode,
     pub dataset: DatasetSpec,
     pub queries: Vec<ExecutionQuery>,
@@ -42,12 +50,25 @@ pub struct CompiledExecutionRequest {
 /// One rule pin: `rule` is the derived rule's name, `value` the literal it
 /// evaluates to for this request. Judgment rules are not pinnable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RulePin {
     pub rule: String,
     pub value: ScalarValueSpec,
 }
 
+/// Relation tuple validation at the wire-dataset boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RelationBinding {
+    #[default]
+    Strict,
+    /// Retain mismatched tuples without reordering; results may be incomplete.
+    Lenient,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Explain,
@@ -55,6 +76,7 @@ pub enum ExecutionMode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionQuery {
     pub entity_id: String,
     pub period: PeriodSpec,
@@ -73,19 +95,26 @@ pub struct ExecutionQuery {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionResponse {
     pub metadata: ExecutionMetadata,
     pub results: Vec<QueryResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionMetadata {
+    /// Echo of the binding policy used at the wire-dataset boundary.
+    /// Absent for historical responses and lower-level execution without binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_binding: Option<RelationBinding>,
     pub requested_mode: ExecutionMode,
     pub actual_mode: ExecutionMode,
     pub fallback_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct QueryResult {
     pub entity_id: String,
     pub period: PeriodSpec,
@@ -99,6 +128,7 @@ pub struct QueryResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputValue {
     Scalar {
@@ -119,6 +149,7 @@ pub enum OutputValue {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DerivedTraceNode {
     Scalar {
@@ -188,12 +219,14 @@ pub enum DerivedTraceNode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NotEvaluatedDependency {
     pub dependency: String,
     pub reason: NotEvaluatedReason,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NotEvaluatedReason {
     ShortCircuit,
@@ -201,6 +234,7 @@ pub enum NotEvaluatedReason {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TraceParameterRead {
     /// Public parameter identity (durable `id` when present, otherwise name).
     pub parameter: String,
@@ -226,6 +260,8 @@ pub enum ApiError {
     Eval(#[from] EvalError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    #[error("relation entity typing failed:\n{0}")]
+    RelationTyping(crate::relation_typing::RelationTypingReport),
     #[error(
         "assessment_date {assessment_date} is before the query period start {period_start}; a determination cannot be assessed before the period it covers begins (see docs/bitemporal.md)"
     )]
@@ -271,7 +307,20 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
         .map_err(|error| ApiError::InvalidProgram(Box::new(error)))?;
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
-    let dataset = request.dataset.to_dataset_for_program(&program)?;
+    // A request can carry a raw program that never went through the compiler
+    // or the artifact loader, so it faces the same mandatory relation typing.
+    crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
+    let query_entities = query_entity_kinds(&program, &request.queries);
+    let relation_binding = request.relation_binding;
+    let outcome = request.dataset.to_dataset_for_queries_with_options(
+        &program,
+        &query_entities,
+        DatasetBindingOptions {
+            strict_relation_entities: relation_binding == RelationBinding::Strict,
+        },
+    )?;
+    crate::spec::emit_dataset_binding_diagnostics(&outcome.diagnostics);
+    let dataset = outcome.dataset;
     crate::engine::validate_input_spells(&dataset)?;
 
     match requested_mode {
@@ -280,6 +329,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             &dataset,
             request.queries,
             ExecutionMetadata {
+                relation_binding: Some(relation_binding),
                 requested_mode: ExecutionMode::Explain,
                 actual_mode: ExecutionMode::Explain,
                 fallback_reason: None,
@@ -309,6 +359,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             match crate::bulk::try_execute(&program, fast_dataset, &request.queries)? {
                 crate::bulk::FastPathResult::Executed(response) => {
                     Ok(response.with_metadata(ExecutionMetadata {
+                        relation_binding: Some(relation_binding),
                         requested_mode: ExecutionMode::Fast,
                         actual_mode: ExecutionMode::Fast,
                         fallback_reason: None,
@@ -319,6 +370,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                     fast_dataset,
                     request.queries,
                     ExecutionMetadata {
+                        relation_binding: Some(relation_binding),
                         requested_mode: ExecutionMode::Fast,
                         actual_mode: ExecutionMode::Explain,
                         fallback_reason: Some(reason),
@@ -329,6 +381,30 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     }
 }
 
+/// Each query evaluates its output rules on its `entity_id`, so that id has
+/// each rule's entity kind. Entity-free (`Scalar`) rules and parameters say
+/// nothing about the id.
+fn query_entity_kinds(
+    program: &crate::model::Program,
+    queries: &[ExecutionQuery],
+) -> Vec<(String, String)> {
+    let mut kinds = std::collections::BTreeSet::new();
+    for query in queries {
+        for output in &query.outputs {
+            let Some(derived) = program
+                .resolve_derived_name(output)
+                .and_then(|name| program.derived.get(&name))
+            else {
+                continue;
+            };
+            if derived.entity != crate::model::SCALAR_ENTITY {
+                kinds.insert((query.entity_id.clone(), derived.entity.clone()));
+            }
+        }
+    }
+    kinds.into_iter().collect()
+}
+
 pub fn execute_compiled_request(
     artifact: CompiledProgramArtifact,
     request: CompiledExecutionRequest,
@@ -336,6 +412,7 @@ pub fn execute_compiled_request(
     let mut program = artifact.program;
     apply_pins(&mut program, &request.pins)?;
     execute_request(ExecutionRequest {
+        relation_binding: request.relation_binding,
         mode: request.mode,
         program,
         dataset: request.dataset,

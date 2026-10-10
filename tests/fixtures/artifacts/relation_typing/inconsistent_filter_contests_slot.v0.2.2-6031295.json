@@ -1,0 +1,324 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "s",
+        "arity": 2
+      },
+      {
+        "name": "r",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ]
+      },
+      {
+        "name": "bad_seed",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ],
+        "derivation": {
+          "source_relation": "r",
+          "current_slot": 1,
+          "related_slot": 0,
+          "slot_entities": [
+            "Person",
+            "Household"
+          ],
+          "predicate": {
+            "kind": "comparison",
+            "left": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "bridge",
+        "arity": 2,
+        "derivation": {
+          "source_relation": "bad_seed",
+          "current_slot": 0,
+          "related_slot": 1,
+          "entity": "UnitF",
+          "predicate": {
+            "kind": "comparison",
+            "left": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        }
+      }
+    ],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "o_ok",
+        "entity": "Organization",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "eligible"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "eligible"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "person_count",
+        "entity": "Person",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "s",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "derived",
+            "name": "o_ok"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "s",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "derived",
+                "name": "o_ok"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "unit_count",
+        "entity": "UnitF",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "s",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "derived",
+            "name": "o_ok"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "s",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "derived",
+                "name": "o_ok"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "o_ok",
+      "person_count",
+      "unit_count"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "eligible",
+        "canonical_request_name": "eligible",
+        "request_names": [
+          "eligible"
+        ]
+      }
+    ]
+  }
+}

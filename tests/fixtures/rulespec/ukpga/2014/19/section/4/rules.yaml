@@ -19,6 +19,11 @@ module:
     `count_where` aggregator can count them without needing the deployed
     DSL to evaluate date comparisons inside an aggregation predicate.
 rules:
+  - name: qualifying_year_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [QualifyingYear, Person]
   - name: state_pension_minimum_qy_count
     kind: parameter
     dtype: Integer

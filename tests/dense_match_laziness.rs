@@ -289,6 +289,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: person_by_status
     kind: derived
     entity: Person
@@ -870,6 +871,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: person_by_status
     kind: derived
     entity: Person
@@ -1538,6 +1540,7 @@ fn explain(
     outputs: &[&str],
 ) -> Result<Vec<HashMap<String, OutputValue>>, String> {
     execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,

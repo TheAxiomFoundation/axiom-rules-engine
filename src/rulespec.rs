@@ -36,8 +36,19 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 pub enum RuleSpecError {
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// A module reached through the import walk failed to deserialize. Names
+    /// the module the YAML belongs to, which may be an import several levels
+    /// below the root a caller asked to load: line and column refer to it.
+    #[error("RuleSpec module `{target}`: yaml parse error: {error}")]
+    ModuleYaml {
+        target: String,
+        error: serde_yaml::Error,
+    },
     #[error("RuleSpec requires exact `format: rulespec/v1`")]
     MissingDiscriminator,
+    /// A module reached through the import walk lacks the discriminator.
+    #[error("RuleSpec module `{target}` requires exact `format: rulespec/v1`")]
+    ModuleMissingDiscriminator { target: String },
     #[error(
         "RuleSpec module `{path}` declares removed top-level `extends`; use `imports` for atomic dependencies and axiom-compose for program composition"
     )]
@@ -252,6 +263,22 @@ pub enum RuleSpecError {
         name: String,
         existing: Vec<String>,
         new: Vec<String>,
+    },
+    #[error(
+        "`{citing}` aggregates relation `{relation}` from entity `{entity}`, but every slot of the relation ({slot_entities:?}) holds `{entity}`, so the aggregation direction is ambiguous. Wrap the relation in a `derived_relation` whose explicit `current_slot` and `related_slot` say which side the rule aggregates from"
+    )]
+    AmbiguousRelationDirection {
+        relation: String,
+        citing: String,
+        entity: String,
+        slot_entities: Vec<String>,
+    },
+    #[error(
+        "derived relation `{relation}` omits `current_slot` or `related_slot`, and the slots its source would default to both hold the same kind ({slot_entities:?}), so its direction cannot be read from the kinds. State `current_slot` and `related_slot` explicitly"
+    )]
+    AmbiguousDerivedRelationSlots {
+        relation: String,
+        slot_entities: Vec<String>,
     },
     #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
@@ -804,6 +831,33 @@ fn reject_atomic_metadata_declarations(source: &str, path: &str) -> Result<(), R
     Ok(())
 }
 
+#[cfg(feature = "fs")]
+fn validate_composed_dependency_metadata(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let Some(module) = value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("module".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+    let field = |name: &str| module.get(serde_yaml::Value::String(name.to_string()));
+    if field("id").is_some() {
+        return Err(RuleSpecError::ModuleIdUnsupported {
+            path: path.to_string(),
+        });
+    }
+    if let Some(kind) = field("kind")
+        && kind.as_str() != Some("composition")
+    {
+        return Err(RuleSpecError::InvalidComposedProgram {
+            path: path.to_string(),
+            message: "imported module.kind must be exactly `composition` when present".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
     let value: serde_yaml::Value = serde_yaml::from_str(source)?;
     validate_recursive_corpus_value(&value, path)
@@ -963,8 +1017,9 @@ pub fn load_rulespec_file_with_options(
 ///
 /// Unlike an atomic module, the root document is deliberately originless and
 /// may live outside the RuleSpec checkout. It must be an exact composition
-/// document and every dependency directive must already be a canonical atomic
-/// target resolved exclusively through `roots`.
+/// document and every dependency directive must already be a canonical module
+/// target resolved exclusively through `roots`. Dependencies may themselves
+/// be compositions; only this composed-program surface admits them.
 #[cfg(feature = "fs")]
 pub fn load_composed_rulespec_file(
     path: impl AsRef<Path>,
@@ -1007,7 +1062,12 @@ pub fn load_composed_rulespec_file_with_options(
 
     for import in &document.imports {
         let target = canonical_composed_dependency(path, import, "import")?;
-        let imported = load_rulespec_document_from_source(&target, &module_source, &mut context)?;
+        let imported = load_rulespec_document_from_source(
+            &target,
+            &module_source,
+            &mut context,
+            ModuleSurface::Composed,
+        )?;
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
@@ -1043,7 +1103,12 @@ pub fn load_rulespec_with_source_with_options(
 ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let root_target = validate_module_target(root_target)?;
     let mut context = SourceLoadContext::default();
-    let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
+    let document = load_rulespec_document_from_source(
+        &root_target,
+        source,
+        &mut context,
+        ModuleSurface::Atomic,
+    )?;
     document.to_program_spec_with_options(options)
 }
 
@@ -1059,10 +1124,18 @@ struct SourceLoadContext {
     loaded: HashSet<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ModuleSurface {
+    Atomic,
+    #[cfg(feature = "fs")]
+    Composed,
+}
+
 fn load_rulespec_document_from_source(
     target: &str,
     source: &dyn ModuleSource,
     context: &mut SourceLoadContext,
+    surface: ModuleSurface,
 ) -> Result<RulesDocument, RuleSpecError> {
     if context.stack.iter().any(|loading| loading == target) {
         return Err(RuleSpecError::ImportCycle {
@@ -1077,22 +1150,45 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    // Parse once up front so a syntax error names this module and keeps its
+    // position, instead of surfacing as a missing discriminator.
+    if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        return Err(RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        });
+    }
     if !looks_like_rulespec_yaml(&text) {
-        return Err(RuleSpecError::MissingDiscriminator);
+        return Err(RuleSpecError::ModuleMissingDiscriminator {
+            target: target.to_string(),
+        });
     }
     reject_removed_extends(&text, target)?;
     reject_removed_schema_discriminator(&text, target)?;
-    reject_atomic_metadata_declarations(&text, target)?;
+    match surface {
+        ModuleSurface::Atomic => reject_atomic_metadata_declarations(&text, target)?,
+        #[cfg(feature = "fs")]
+        ModuleSurface::Composed => validate_composed_dependency_metadata(&text, target)?,
+    }
     validate_recursive_corpus_contract(&text, target)?;
     context.stack.push(target.to_string());
-    let mut document: RulesDocument = serde_yaml::from_str(&text)?;
-    document.validate_atomic_module_metadata(target)?;
+    let mut document: RulesDocument =
+        serde_yaml::from_str(&text).map_err(|error| RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        })?;
+    match surface {
+        ModuleSurface::Atomic => document.validate_atomic_module_metadata(target)?,
+        #[cfg(feature = "fs")]
+        ModuleSurface::Composed => document.validate_module_metadata(target)?,
+    }
     document.assign_origin_target(Some(target.to_string()));
     let mut combined = RulesDocument::default();
 
     for import in &document.imports {
         let import_target = resolve_import_target(target, import)?;
-        let imported = load_rulespec_document_from_source(&import_target, source, context)?;
+        let imported =
+            load_rulespec_document_from_source(&import_target, source, context, surface)?;
         combined = merge_rules_documents(combined, imported);
     }
 
@@ -2063,7 +2159,39 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
-        crate::relation_direction::resolve(&mut program);
+        let defaulted_slots = self
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.kind, Some(RuleKind::DerivedRelation)))
+            .filter(|rule| {
+                rule.derived_relation.as_ref().is_some_and(|derived| {
+                    derived.current_slot.is_none() || derived.related_slot.is_none()
+                })
+            })
+            .map(|rule| rule.canonical_relation_id())
+            .collect::<HashSet<_>>();
+        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
+            match error {
+                crate::relation_direction::DirectionError::Aggregate {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousRelationDirection {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                },
+                crate::relation_direction::DirectionError::DerivedSlots {
+                    relation,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                    relation,
+                    slot_entities,
+                },
+            }
+        })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();

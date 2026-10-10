@@ -63,7 +63,8 @@
           "type": "array"
         },
         "fast_path": {
-          "$ref": "#/$defs/FastPathMetadata"
+          "$ref": "#/$defs/FastPathMetadata",
+          "description": "Advisory: the compiling engine's static scan for constructs bulk fast\nmode declines or cannot answer, one blocker per occurrence. Execution\nnever reads it. Fast mode decides per request and reports\nany fallback in the response's `metadata.fallback_reason`. A later\nengine whose fast mode has since gained a listed construct still loads\nthe artifact and keeps this value unchanged, with a\n`stale_fast_path_metadata` diagnostic."
         },
         "input_catalog": {
           "default": [],
@@ -375,15 +376,18 @@
       ],
       "properties": {
         "blockers": {
+          "description": "One `<rule>: <reason>` entry per occurrence of a construct bulk fast\nmode declines or cannot answer, in rule order, each rule's formula\nbefore its versions. It is a static scan: a construct only a dead\nbranch reaches never forces a fallback at runtime; nothing inside a\nrelation aggregation is listed, because fast mode evaluates those on\nthe explain interpreter; and date-valued literals, inputs and parameter\nvalues, which bulk fast mode also declines, are not listed.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "compatible": {
+          "description": "True exactly when `blockers` is empty.",
           "type": "boolean"
         },
         "strategy": {
+          "description": "Always `generic_bulk`.",
           "type": "string"
         }
       },
