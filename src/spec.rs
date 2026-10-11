@@ -2544,41 +2544,35 @@ mod expression_size_tests {
     }
 
     /// The count says how many nodes `to_model` builds, `exactly_one`
-    /// expansions included, on generated expressions. Expressions it counts
-    /// past a small cap are not converted, so a wrong count cannot make this
-    /// test build a huge tree.
+    /// expansions included, on generated expressions. The expressions come
+    /// from fixed seeds and the largest converts to 815,713 nodes (pinned
+    /// below by what conversion built, not by the count), so whatever the
+    /// count says, this test builds nothing larger.
     #[test]
     fn the_count_is_the_number_of_nodes_conversion_builds() {
-        const CAP: u64 = 200_000;
-        let (mut checked, mut largest, mut skipped) = (0, 0, 0);
+        let (mut checked, mut largest) = (0, 0);
         for seed in 0..4_000_u64 {
             let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
             let size = 1 + usize::try_from(seed % 9).expect("small size");
             let (counted, built) = if seed % 2 == 0 {
                 let expr = judgment(&mut rng, size);
-                let counted = expr.runtime_size();
-                if counted > CAP {
-                    skipped += 1;
-                    continue;
-                }
-                (counted, judgment_nodes(&expr.to_model().expect("converts")))
+                (
+                    expr.runtime_size(),
+                    judgment_nodes(&expr.to_model().expect("converts")),
+                )
             } else {
                 let expr = scalar(&mut rng, size);
-                let counted = expr.runtime_size();
-                if counted > CAP {
-                    skipped += 1;
-                    continue;
-                }
-                (counted, scalar_nodes(&expr.to_model().expect("converts")))
+                (
+                    expr.runtime_size(),
+                    scalar_nodes(&expr.to_model().expect("converts")),
+                )
             };
             assert_eq!(counted, built, "seed {seed}");
             checked += 1;
             largest = largest.max(built);
         }
-        assert!(
-            checked > 3_500 && largest > 1_000,
-            "{checked} checked, the largest {largest} nodes, {skipped} skipped"
-        );
+        assert_eq!(checked, 4_000);
+        assert_eq!(largest, 815_713, "the generator changed");
     }
 
     /// The count saturates instead of overflowing, so an expression that

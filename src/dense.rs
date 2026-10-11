@@ -527,9 +527,11 @@ enum Else<E> {
     /// `then` branch, the last arm's value, evaluated for no rows, so it has
     /// the arms' dtype whichever rows are live. The plan reads the arm there
     /// rather than holding a second copy of it, and when no row took the arm,
-    /// its column is already that value. So compiling and evaluating stay
-    /// linear in the expression; a copy per `match`, each evaluated again for
-    /// no rows, doubled a chain of them nested in last arms (#241).
+    /// its column is already that value. So compiling stays linear in the
+    /// expression, and in one evaluation pass a node is evaluated once plus
+    /// at most once per fallback above it: a chain of `n` of them nested in
+    /// last arms costs on the order of `n²` visits. A copy per `match`, each
+    /// evaluated again for no rows, cost on the order of `2ⁿ` (#241).
     NoMatch {
         subject: E,
         labels: MatchLabels,

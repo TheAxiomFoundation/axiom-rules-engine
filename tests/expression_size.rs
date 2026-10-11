@@ -12,14 +12,17 @@
 //! the last arm, so neither builds more than the expression.
 //!
 //! Every case here runs in a child process. The test reads the child's
-//! resident memory every 10 ms and kills it, and fails, once it passes
-//! `CAP_MB`, if it runs past `TIMEOUT`, or if its memory cannot be read. So a
-//! regression fails these tests rather than growing without limit.
+//! resident memory, sleeping 10 ms between reads, and kills the child, and
+//! fails, once it passes `CAP_MB`, if it runs past `TIMEOUT`, or if its memory
+//! cannot be read within `READ_TIMEOUT`. So a regression fails these tests
+//! rather than growing without limit. Between two readings the child can grow
+//! for 10 ms plus however long the read takes, at most `READ_TIMEOUT`.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
@@ -39,7 +42,8 @@ const CAP_MB: u64 = 1024;
 const TIMEOUT: Duration = Duration::from_secs(180);
 const CASE: &str = "AXIOM_EXPRESSION_SIZE_CASE";
 
-/// How long one read of a child's memory may take.
+/// How long one read of a child's memory may take, from starting `ps` to
+/// having all its output.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run `case` in a child copy of this test binary, kill it if it grows past
@@ -48,43 +52,66 @@ fn in_capped_child(case: &str) {
     run_capped("child_case", case);
 }
 
-/// The resident memory of process `pid`, in KB, as `ps` reports it. An error
-/// if `ps` cannot be run, fails, takes longer than `READ_TIMEOUT`, or prints
-/// anything but a number.
+/// Read `pipe` to its end on a thread of its own, so a caller can wait for it
+/// with a deadline.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            let _ = sender.send(text);
+        });
+    }
+    receiver
+}
+
+/// The resident memory of process `pid`, in KB, as `ps` reports it.
 fn resident_kb(pid: u32) -> Result<u64, String> {
-    let mut ps = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
+    read_size("ps", &["-o", "rss=", "-p", &pid.to_string()])
+}
+
+/// The number `program` prints. An error if it cannot be run, fails, prints
+/// anything but a number, or has not both exited and closed its output within
+/// `READ_TIMEOUT` of starting: a process it leaves holding its output open
+/// cannot hold the read past the deadline either.
+fn read_size(program: &str, args: &[&str]) -> Result<u64, String> {
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let mut reader = Command::new(program)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("cannot run ps: {error}"))?;
-    let started = Instant::now();
+        .map_err(|error| format!("cannot run {program}: {error}"))?;
+    let stdout = drain(reader.stdout.take());
+    let stderr = drain(reader.stderr.take());
+    let late = || format!("{program} did not answer within {READ_TIMEOUT:?}");
     let status = loop {
-        if let Some(status) = ps.try_wait().map_err(|error| format!("ps: {error}"))? {
+        if let Some(status) = reader
+            .try_wait()
+            .map_err(|error| format!("{program}: {error}"))?
+        {
             break status;
         }
-        if started.elapsed() > READ_TIMEOUT {
-            let _ = ps.kill();
-            let _ = ps.wait();
-            return Err(format!("ps did not answer within {READ_TIMEOUT:?}"));
+        if Instant::now() >= deadline {
+            stop(&mut reader);
+            return Err(late());
         }
         std::thread::sleep(Duration::from_millis(1));
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = ps.stdout.take() {
-        let _ = out.read_to_string(&mut stdout);
-    }
-    if let Some(mut err) = ps.stderr.take() {
-        let _ = err.read_to_string(&mut stderr);
-    }
+    let stdout = stdout
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| late())?;
     if !status.success() {
-        return Err(format!("ps exited with {status}: {}", stderr.trim()));
+        let stderr = stderr
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_default();
+        return Err(format!("{program} exited with {status}: {}", stderr.trim()));
     }
     stdout
         .trim()
         .parse::<u64>()
-        .map_err(|_| format!("ps printed {:?}, not a size", stdout.trim()))
+        .map_err(|_| format!("{program} printed {:?}, not a size", stdout.trim()))
 }
 
 /// Run test `test` of this binary in a child with `case` in its environment,
@@ -102,13 +129,9 @@ fn stop(child: &mut Child) {
 
 /// [`run_capped`], reading the child's memory with `read`. A read that fails
 /// while the child is still running stops the child and fails the case: an
-/// unmeasured child is never left to grow.
+/// unmeasured child is never left to grow. The child's output goes through
+/// pipes this process drains, not a file, so nothing is written to disk.
 fn run_capped_reading(test: &str, case: &str, read: impl Fn(u32) -> Result<u64, String>) {
-    let log = std::env::temp_dir().join(format!(
-        "axiom-expression-size-{case}-{}.log",
-        std::process::id()
-    ));
-    let output = File::create(&log).expect("create child log");
     let mut child = Command::new(std::env::current_exe().expect("test binary"))
         .args([
             test,
@@ -118,10 +141,12 @@ fn run_capped_reading(test: &str, case: &str, read: impl Fn(u32) -> Result<u64, 
             "--test-threads=1",
         ])
         .env(CASE, case)
-        .stdout(output.try_clone().expect("clone log"))
-        .stderr(output)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn child");
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let started = Instant::now();
     let failure = loop {
         if let Some(status) = child.try_wait().expect("poll child") {
@@ -146,10 +171,14 @@ fn run_capped_reading(test: &str, case: &str, read: impl Fn(u32) -> Result<u64, 
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let text = std::fs::read_to_string(&log).unwrap_or_default();
-    let _ = std::fs::remove_file(&log);
     if let Some(failure) = failure {
-        panic!("case `{case}` {failure}:\n{text}");
+        // The child has exited, so its pipes close.
+        let output = |pipe: Receiver<String>| pipe.recv_timeout(READ_TIMEOUT).unwrap_or_default();
+        panic!(
+            "case `{case}` {failure}:\n{}{}",
+            output(stdout),
+            output(stderr)
+        );
     }
 }
 
@@ -594,22 +623,42 @@ fn dense_compiles_match_fallbacks_in_last_arms_once() {
     in_capped_child("dense_match_fallbacks_in_last_arms");
 }
 
-/// A child whose memory cannot be read is stopped and reported, not left to
-/// run unmeasured.
+/// Whether process `pid` still exists, as `ps` sees it.
+fn is_running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A child whose memory cannot be read is stopped, at once, and reported:
+/// not left to run unmeasured.
 #[test]
 fn a_child_whose_memory_cannot_be_read_is_stopped() {
     if std::env::var(CASE).as_deref() == Ok("unread") {
         std::thread::sleep(TIMEOUT);
         return;
     }
+    let child = AtomicU32::new(0);
     let started = Instant::now();
     let outcome = std::panic::catch_unwind(|| {
         run_capped_reading(
             "a_child_whose_memory_cannot_be_read_is_stopped",
             "unread",
-            |_| Err("no reading".to_string()),
+            |pid| {
+                child.store(pid, Ordering::SeqCst);
+                Err("no reading".to_string())
+            },
         );
     });
+    let pid = child.load(Ordering::SeqCst);
+    assert_ne!(pid, 0, "the child was never read");
+    if is_running(pid) {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        panic!("the unmeasured child {pid} was left running");
+    }
     let message = outcome
         .expect_err("the unmeasured child is stopped")
         .downcast::<String>()
@@ -624,6 +673,29 @@ fn a_child_whose_memory_cannot_be_read_is_stopped() {
         "stopped only after {:?}",
         started.elapsed()
     );
+}
+
+/// A read whose process exits but leaves its output open, here to a
+/// background `sleep`, or never exits, fails at `READ_TIMEOUT` instead of
+/// waiting for it.
+#[test]
+fn a_memory_read_that_does_not_finish_times_out() {
+    for script in ["sleep 30 & echo 1", "sleep 30"] {
+        let started = Instant::now();
+        let error = read_size("sh", &["-c", script]).expect_err("the read times out");
+        let took = started.elapsed();
+        assert!(
+            error.contains("did not answer within"),
+            "`{script}`: {error}"
+        );
+        assert!(
+            took >= READ_TIMEOUT && took < READ_TIMEOUT * 3,
+            "`{script}` took {took:?}"
+        );
+    }
+    assert_eq!(read_size("sh", &["-c", "echo 42"]), Ok(42));
+    assert!(read_size("sh", &["-c", "echo many"]).is_err());
+    assert!(read_size("sh", &["-c", "exit 3"]).is_err());
 }
 
 /// The cap works: a child that allocates past it is stopped and reported.

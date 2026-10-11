@@ -1567,9 +1567,12 @@ fn lit_bool_spec(b: bool) -> ScalarExprSpec {
 /// a `match` subject counts once per arm it is copied into, and an
 /// `exactly_one` counts as what it expands to. The one thing lowering builds
 /// and does not keep, the subject of a `match` with only `_`, which it lowers
-/// to check and then drops, adds to [`Self::dropped`]. Every count saturates;
-/// a shape the lowering refuses counts as nothing. It recurses as deep as the
-/// formula, which the parser bounds.
+/// to check and then drops, adds to [`Self::dropped`]. Every count saturates.
+/// The counts are exact for a formula that lowers. For one the lowering
+/// refuses they are not (a shape it refuses counts as nothing, the rest as
+/// if it lowered), so such a formula may be refused for its size before
+/// lowering reaches its error. It recurses as deep as the formula, which the
+/// parser bounds.
 struct LoweringSize<'a> {
     ctx: &'a LowerCtx,
     dropped: u64,
