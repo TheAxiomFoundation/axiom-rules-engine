@@ -376,6 +376,14 @@ release build compiles and evaluates a formula in every mode on a 1 MiB
 thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
 levels.
 
+A program can also arrive as JSON: a compiled artifact, or a request with an
+inline program. Its expressions never pass the parser, so they are checked
+against `spec::MAX_EXPRESSION_DEPTH` (131) instead, counting each expression
+node as a level, before anything walks them. Lowering adds at most two levels
+to a formula and a request pin adds one, so every compiled rule passes, pinned
+or not. A deeper expression is refused with ``the expression of derived rule
+`name` nests more than 131 levels deep``.
+
 A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one
 per level of an `if`, an `elif` branch or a `match` arm, so an artifact can

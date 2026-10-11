@@ -25,7 +25,12 @@
 //! * the formulas reported in #236 reload and answer, in-process and through
 //!   the CLI;
 //! * JSON nested past the loader's bound is an error;
-//! * a rule pinned many times is wrapped once, not once per pin.
+//! * a program read from JSON is held to `spec::MAX_EXPRESSION_DEPTH`, which
+//!   every compiled formula is within: every kind of expression at that bound
+//!   runs alike in explain, fast and dense, and one level past it is refused
+//!   wherever a program enters;
+//! * a rule pinned many times is wrapped once, not once per pin, and a request
+//!   answers, or fails, exactly as it did when each pin wrapped the last.
 //!
 //! A release build does all of it on a 1 MiB thread. CI runs these tests in
 //! a debug build, whose frames are several times larger, on the stacks named
@@ -49,6 +54,10 @@ use axiom_rules_engine::dense::{
 };
 use axiom_rules_engine::model::{Period, PeriodKind};
 use axiom_rules_engine::rulespec::{MAX_FORMULA_DEPTH, lower_rulespec_str};
+use axiom_rules_engine::spec::{
+    ComparisonOpSpec, DerivedSemanticsSpec, JudgmentExprSpec, MAX_EXPRESSION_DEPTH, ProgramSpec,
+    ScalarExprSpec, ScalarValueSpec,
+};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
@@ -822,4 +831,786 @@ fn a_rule_pinned_many_times_takes_its_last_pin_and_is_wrapped_once() {
         error.contains("`missing`") && !error.contains("also_missing"),
         "{error}"
     );
+}
+
+// --- Programs read from JSON -------------------------------------------------
+
+fn lit(value: Value) -> Value {
+    json!({"kind": "literal", "value": value})
+}
+
+fn int_lit(value: i64) -> Value {
+    lit(integer(value))
+}
+
+fn decimal_lit(value: &str) -> Value {
+    lit(json!({"kind": "decimal", "value": value}))
+}
+
+fn date_lit() -> Value {
+    lit(json!({"kind": "date", "value": "2026-01-01"}))
+}
+
+/// `0 == 0`, two levels deep.
+fn always() -> Value {
+    json!({"kind": "comparison", "left": int_lit(0), "op": "eq", "right": int_lit(0)})
+}
+
+/// Every kind of expression with an expression inside it, as JSON. A chain
+/// of one kind nests one level per link.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Ceil,
+    Floor,
+    Add,
+    Max,
+    Min,
+    Sub,
+    Mul,
+    Div,
+    If,
+    NoMatch,
+    DateAddDays,
+    DateAddMonths,
+    DateAddYears,
+    DaysBetween,
+    ParameterLookup,
+    OverPeriods,
+    CountWhere,
+    SumWhere,
+    Not,
+    And,
+    Or,
+    ExactlyOne,
+    Comparison,
+}
+
+const KINDS: [Kind; 23] = [
+    Kind::Ceil,
+    Kind::Floor,
+    Kind::Add,
+    Kind::Max,
+    Kind::Min,
+    Kind::Sub,
+    Kind::Mul,
+    Kind::Div,
+    Kind::If,
+    Kind::NoMatch,
+    Kind::DateAddDays,
+    Kind::DateAddMonths,
+    Kind::DateAddYears,
+    Kind::DaysBetween,
+    Kind::ParameterLookup,
+    Kind::OverPeriods,
+    Kind::CountWhere,
+    Kind::SumWhere,
+    Kind::Not,
+    Kind::And,
+    Kind::Or,
+    Kind::ExactlyOne,
+    Kind::Comparison,
+];
+
+/// An expression `depth` levels deep and its depth, built from `leaf` (of
+/// depth `leaf_depth`) by `wrap`, which also returns the new depth.
+fn chain_of(
+    depth: usize,
+    leaf: Value,
+    leaf_depth: usize,
+    wrap: impl Fn(Value, usize) -> (Value, usize),
+) -> Value {
+    let (mut expr, mut at) = (leaf, leaf_depth);
+    while at < depth {
+        (expr, at) = wrap(expr, at);
+    }
+    assert_eq!(
+        at, depth,
+        "a chain cannot be built exactly {depth} levels deep"
+    );
+    expr
+}
+
+/// One link around `inner` (depth `d`) next to a sibling of depth `sibling`.
+fn link(expr: Value, d: usize, sibling: usize) -> (Value, usize) {
+    (expr, 1 + d.max(sibling))
+}
+
+/// A program whose rule `deep` is an expression of `kind` exactly `depth`
+/// levels deep, as `MAX_EXPRESSION_DEPTH` counts them.
+fn deep_program(kind: Kind, depth: usize) -> Value {
+    let scalar_chain = |depth: usize, leaf: Value, wrap: &dyn Fn(Value) -> Value| {
+        chain_of(depth, leaf, 1, |inner, d| link(wrap(inner), d, 1))
+    };
+    let date_chain = |depth: usize, unit: &'static str, key: &'static str| {
+        scalar_chain(
+            depth,
+            date_lit(),
+            &|inner| json!({"kind": unit, "date": inner, key: int_lit(1)}),
+        )
+    };
+    let judgment_chain = |depth: usize, wrap: &dyn Fn(Value) -> Value| {
+        chain_of(depth, always(), 2, |inner, d| link(wrap(inner), d, 2))
+    };
+    let not_chain =
+        |depth: usize| judgment_chain(depth, &|inner| json!({"kind": "not", "item": inner}));
+    let relations = json!([{
+        "name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"],
+    }]);
+    let (semantics, dtype, expr) = match kind {
+        Kind::Ceil | Kind::Floor => {
+            let name = if matches!(kind, Kind::Ceil) {
+                "ceil"
+            } else {
+                "floor"
+            };
+            let expr = chain_of(depth, decimal_lit("1.5"), 1, |inner, d| {
+                (json!({"kind": name, "value": inner}), d + 1)
+            });
+            ("scalar", "decimal", expr)
+        }
+        Kind::Add | Kind::Max | Kind::Min => {
+            let name = match kind {
+                Kind::Add => "add",
+                Kind::Max => "max",
+                _ => "min",
+            };
+            let expr = scalar_chain(
+                depth,
+                int_lit(1),
+                &|inner| json!({"kind": name, "items": [inner, int_lit(1)]}),
+            );
+            ("scalar", "integer", expr)
+        }
+        Kind::Sub | Kind::Mul | Kind::Div => {
+            let name = match kind {
+                Kind::Sub => "sub",
+                Kind::Mul => "mul",
+                _ => "div",
+            };
+            let expr = scalar_chain(
+                depth,
+                int_lit(1),
+                &|inner| json!({"kind": name, "left": inner, "right": int_lit(1)}),
+            );
+            (
+                "scalar",
+                if matches!(kind, Kind::Div) {
+                    "decimal"
+                } else {
+                    "integer"
+                },
+                expr,
+            )
+        }
+        Kind::If => {
+            let expr = chain_of(depth, int_lit(1), 1, |inner, d| {
+                link(
+                    json!({"kind": "if", "condition": always(), "then_expr": inner, "else_expr": int_lit(0)}),
+                    d,
+                    2,
+                )
+            });
+            ("scalar", "integer", expr)
+        }
+        Kind::NoMatch => {
+            let expr = scalar_chain(
+                depth,
+                int_lit(1),
+                &|inner| json!({"kind": "no_match", "subject": inner, "patterns": [int_lit(1)]}),
+            );
+            ("scalar", "integer", expr)
+        }
+        Kind::DateAddDays => ("scalar", "date", date_chain(depth, "date_add_days", "days")),
+        Kind::DateAddMonths => (
+            "scalar",
+            "date",
+            date_chain(depth, "date_add_months", "months"),
+        ),
+        Kind::DateAddYears => (
+            "scalar",
+            "date",
+            date_chain(depth, "date_add_years", "years"),
+        ),
+        Kind::DaysBetween => {
+            let from = date_chain(depth - 1, "date_add_days", "days");
+            let expr = json!({"kind": "days_between", "from": from, "to": date_lit()});
+            ("scalar", "integer", expr)
+        }
+        Kind::ParameterLookup => {
+            let expr = chain_of(depth, int_lit(0), 1, |inner, d| {
+                (
+                    json!({"kind": "parameter_lookup", "parameter": "t", "index": inner}),
+                    d + 1,
+                )
+            });
+            ("scalar", "integer", expr)
+        }
+        Kind::OverPeriods => {
+            let expr = chain_of(depth, decimal_lit("1"), 1, |inner, d| {
+                (
+                    json!({"kind": "over_periods", "over": "sum", "value": inner}),
+                    d + 1,
+                )
+            });
+            ("scalar", "decimal", expr)
+        }
+        Kind::CountWhere | Kind::SumWhere => {
+            let mut expr = json!({
+                "kind": if matches!(kind, Kind::CountWhere) { "count_related" } else { "sum_related" },
+                "relation": "member_of_household", "current_slot": 1, "related_slot": 0,
+                "where": not_chain(depth - 1),
+            });
+            if matches!(kind, Kind::SumWhere) {
+                expr["value"] = json!({"kind": "input", "name": "age"});
+            }
+            (
+                "scalar",
+                if matches!(kind, Kind::CountWhere) {
+                    "integer"
+                } else {
+                    "decimal"
+                },
+                expr,
+            )
+        }
+        Kind::Not => ("judgment", "judgment", not_chain(depth)),
+        Kind::And | Kind::Or => {
+            let name = if matches!(kind, Kind::And) {
+                "and"
+            } else {
+                "or"
+            };
+            let expr = judgment_chain(
+                depth,
+                &|inner| json!({"kind": name, "items": [inner, always()]}),
+            );
+            ("judgment", "judgment", expr)
+        }
+        // One `exactly_one` over a deep operand, never a chain of them: the
+        // runtime program copies each operand once per operand, so nested
+        // `exactly_one` grows exponentially (issue 241). A chain 131 deep
+        // exhausted the machine's memory.
+        Kind::ExactlyOne => {
+            let never =
+                json!({"kind": "comparison", "left": int_lit(0), "op": "eq", "right": int_lit(1)});
+            let expr = json!({"kind": "exactly_one", "items": [not_chain(depth - 1), never]});
+            ("judgment", "judgment", expr)
+        }
+        Kind::Comparison => {
+            let left = scalar_chain(
+                depth - 1,
+                int_lit(1),
+                &|inner| json!({"kind": "add", "items": [inner, int_lit(1)]}),
+            );
+            let expr = json!({"kind": "comparison", "left": left, "op": "gt", "right": int_lit(0)});
+            ("judgment", "judgment", expr)
+        }
+    };
+    let mut program = json!({
+        "relations": relations,
+        "parameters": [{"name": "t", "unit": null, "indexed_by": "k", "versions": [
+            {"effective_from": "2026-01-01", "values": {"0": integer(0)}}]}],
+        "derived": [{
+            "name": "deep", "entity": "Household", "dtype": dtype, "unit": null,
+            "semantics": semantics, "expr": expr,
+        }],
+    });
+    if !matches!(kind, Kind::ParameterLookup) {
+        program["parameters"] = json!([]);
+    }
+    program
+}
+
+/// Two members of `h1`, for the kinds that count over a relation.
+fn members_dataset() -> Value {
+    let interval = json!({"start": "2026-01-01", "end": "2026-01-31"});
+    json!({
+        "inputs": [
+            {"name": "age", "entity": "Person", "entity_id": "p1", "interval": interval, "value": integer(30)},
+            {"name": "age", "entity": "Person", "entity_id": "p2", "interval": interval, "value": integer(40)},
+        ],
+        "relations": [
+            {"name": "member_of_household", "tuple": ["p1", "h1"], "interval": interval},
+            {"name": "member_of_household", "tuple": ["p2", "h1"], "interval": interval},
+        ],
+    })
+}
+
+/// `deep` in `mode`, read from JSON text as a host sends it: the answer, or
+/// the error, as text.
+fn run_program(mode: &str, program: &Value) -> Result<String, String> {
+    let request = json!({
+        "mode": mode, "program": program, "dataset": members_dataset(), "queries": queries(),
+    })
+    .to_string();
+    let request =
+        ExecutionRequest::from_json_str(&request).map_err(|error| format!("read: {error}"))?;
+    let response = execute_request(request).map_err(|error| error.to_string())?;
+    let (value, _) = answer(&response);
+    Ok(value.to_string())
+}
+
+/// Dense's answer for `deep` over a one-household batch with two members.
+fn run_dense(program: &Value) -> Result<String, String> {
+    let spec: ProgramSpec =
+        serde_json::from_value(program.clone()).map_err(|error| error.to_string())?;
+    let program = spec.to_program().map_err(|error| error.to_string())?;
+    let dense = DenseCompiledProgram::from_program(&program, Some("Household"))
+        .map_err(|error| error.to_string())?;
+    let batch = DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::new(),
+        relations: HashMap::from([(
+            axiom_rules_engine::dense::DenseRelationKey {
+                name: "member_of_household".to_string(),
+                current_slot: 1,
+                related_slot: 0,
+            },
+            axiom_rules_engine::dense::DenseRelationBatchSpec {
+                offsets: vec![0, 2],
+                inputs: HashMap::from([("age".to_string(), DenseColumn::Integer(vec![30, 40]))]),
+            },
+        )]),
+    };
+    let result = dense
+        .execute(&model_period(), batch, &["deep".to_string()])
+        .map_err(|error| error.to_string())?;
+    let value = match &result.outputs["deep"] {
+        DenseOutputValue::Judgment(values) => json!(
+            format!("{:?}", values[0])
+                .to_lowercase()
+                .replace("nothold", "not_hold")
+        ),
+        DenseOutputValue::Scalar(DenseColumn::Integer(values)) => canonical(&integer(values[0])),
+        DenseOutputValue::Scalar(DenseColumn::Decimal(values)) => {
+            json!(values[0].normalize().to_string())
+        }
+        DenseOutputValue::Scalar(DenseColumn::Date(values)) => {
+            json!({"kind": "date", "value": values[0].to_string()})
+        }
+        other => return Err(format!("unexpected dense column {other:?}")),
+    };
+    Ok(value.to_string())
+}
+
+fn assert_expression_too_deep(error: impl std::fmt::Display, context: &str) {
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!(
+            "nests more than {MAX_EXPRESSION_DEPTH} levels deep"
+        )),
+        "{context}: expected the expression depth error, got: {message}"
+    );
+}
+
+/// The expression bound sits just above what a formula compiles to: a formula
+/// at the formula bound lowers to at most two more levels, and a pin adds one.
+#[test]
+fn the_expression_bound_is_the_formula_bound_plus_lowering_and_a_pin() {
+    assert_eq!(MAX_EXPRESSION_DEPTH, MAX_FORMULA_DEPTH + 3);
+}
+
+/// At the expression bound, every kind of expression read from JSON runs in
+/// explain, fast and dense without exhausting the stack, and the modes agree:
+/// fast and dense either decline (an error) or give explain's answer.
+#[test]
+fn every_kind_of_expression_at_the_expression_bound_runs_alike_in_every_mode() {
+    for kind in KINDS {
+        on_stack(AT_BOUND_STACK, || {
+            let program = deep_program(kind, MAX_EXPRESSION_DEPTH);
+            let explain = run_program("explain", &program);
+            let fast = run_program("fast", &program);
+            assert_eq!(fast, explain, "{kind:?}: fast and explain disagree");
+            if let (Ok(dense), Ok(explain)) = (run_dense(&program), &explain) {
+                assert_eq!(&dense, explain, "{kind:?}: dense and explain disagree");
+            }
+            if let Err(error) = &explain {
+                assert!(
+                    !error.contains("levels deep"),
+                    "{kind:?}: refused at the bound: {error}"
+                );
+            }
+        });
+    }
+}
+
+/// One level past the expression bound, a program is refused wherever it
+/// enters: an inline request, an artifact, and conversion to the runtime
+/// program, which dense and every other path go through.
+#[test]
+fn every_kind_of_expression_one_level_past_the_bound_is_refused_wherever_it_enters() {
+    let base = CompiledProgramArtifact::from_rulespec_str(&rulespec("Integer", "1"))
+        .expect("the base artifact compiles");
+    for kind in KINDS {
+        on_stack(REFUSAL_STACK, || {
+            let program = deep_program(kind, MAX_EXPRESSION_DEPTH + 1);
+            let context = format!("{kind:?}");
+            assert_expression_too_deep(
+                run_program("explain", &program).expect_err("an inline request refuses it"),
+                &context,
+            );
+            let spec: ProgramSpec =
+                serde_json::from_value(program.clone()).expect("program deserializes");
+            assert_expression_too_deep(
+                spec.to_program().expect_err("to_program refuses it"),
+                &context,
+            );
+            let mut artifact = serde_json::to_value(&base).expect("artifact serializes");
+            artifact["program"]["derived"] = program["derived"].clone();
+            artifact["program"]["relations"] = program["relations"].clone();
+            assert_expression_too_deep(
+                CompiledProgramArtifact::from_json_str(&artifact.to_string())
+                    .expect_err("the artifact loader refuses it"),
+                &context,
+            );
+        });
+    }
+}
+
+/// As deep as the JSON reader admits, an expression is refused by the
+/// expression bound, on the same small stack: reading, checking and dropping
+/// it do not recurse past what the reader allows.
+#[test]
+fn an_expression_as_deep_as_the_json_reader_admits_is_refused() {
+    for kind in KINDS {
+        on_stack(REFUSAL_STACK, || {
+            // The deepest chain of this kind that a request can carry.
+            let mut depth = MAX_JSON_DEPTH;
+            let program = loop {
+                let program = deep_program(kind, depth);
+                let request = json!({"program": program});
+                if json_depth(&request) <= MAX_JSON_DEPTH {
+                    break program;
+                }
+                depth -= 1 + (json_depth(&request) - MAX_JSON_DEPTH) / 2;
+            };
+            assert!(
+                depth > 2 * MAX_EXPRESSION_DEPTH / 2,
+                "{kind:?}: only {depth} levels"
+            );
+            assert_expression_too_deep(
+                run_program("fast", &program).expect_err("refused"),
+                &format!("{kind:?} at {depth} levels"),
+            );
+        });
+    }
+}
+
+/// The program the review that found the gap sent: 299 `ceil`s around `1`.
+/// The debug CLI aborted with a stack overflow; it now exits with the error.
+#[test]
+fn the_cli_refuses_a_request_nested_past_the_expression_bound() {
+    let mut expr = int_lit(1);
+    for _ in 0..299 {
+        expr = json!({"kind": "ceil", "value": expr});
+    }
+    let request = json!({
+        "mode": "explain",
+        "program": {"derived": [{
+            "name": "deep", "entity": "Household", "dtype": "integer", "unit": null,
+            "semantics": "scalar", "expr": expr,
+        }]},
+        "dataset": {"inputs": [], "relations": []},
+        "queries": queries(),
+    })
+    .to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn axiom-rules-engine binary");
+    child
+        .stdin
+        .take()
+        .expect("stdin available")
+        .write_all(request.as_bytes())
+        .expect("request written");
+    let output = child.wait_with_output().expect("binary completes");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert_expression_too_deep(&stderr, "CLI");
+}
+
+/// A rule at the formula bound can still be pinned: the pin's `if` takes it
+/// one level deeper, within the expression bound.
+#[test]
+fn a_rule_at_the_formula_bound_can_be_pinned() {
+    on_stack(AT_BOUND_STACK, || {
+        let formula = format!("1{}", " + 1".repeat(MAX_FORMULA_DEPTH - 1));
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&rulespec("Integer", &formula))
+            .expect("a formula at the bound compiles");
+        for mode in ["explain", "fast"] {
+            let request: CompiledExecutionRequest = serde_json::from_value(json!({
+                "mode": mode,
+                "dataset": dataset(&[]),
+                "queries": queries(),
+                "pins": [{"rule": "deep", "value": integer(7)}],
+            }))
+            .expect("request deserializes");
+            let response = execute_compiled_request(artifact.clone(), request)
+                .unwrap_or_else(|error| panic!("{mode}: {error}"));
+            assert_eq!(answer(&response).0, canonical(&integer(7)), "{mode}");
+        }
+    });
+}
+
+// --- Pins, against the way they used to be applied ----------------------------
+
+/// The way pins used to be applied: each pin on a rule wrapped the expression
+/// the one before it had built, after the same checks. The error texts are
+/// `ApiError`'s.
+fn wrap_every_pin(
+    program: &mut ProgramSpec,
+    pins: &[(String, ScalarValueSpec)],
+) -> Result<(), String> {
+    for (rule, value) in pins {
+        let derived = program
+            .derived
+            .iter_mut()
+            .find(|derived| &derived.name == rule)
+            .ok_or_else(|| format!("pinned rule `{rule}` does not exist in the program"))?;
+        let judgment = matches!(derived.semantics, DerivedSemanticsSpec::Judgment { .. })
+            || derived
+                .versions
+                .iter()
+                .any(|version| matches!(version.semantics, DerivedSemanticsSpec::Judgment { .. }));
+        if judgment {
+            return Err(format!(
+                "rule `{rule}` is a judgment and cannot be pinned to a scalar value"
+            ));
+        }
+        let wrap = |original: ScalarExprSpec| DerivedSemanticsSpec::Scalar {
+            expr: ScalarExprSpec::If {
+                condition: Box::new(JudgmentExprSpec::Comparison {
+                    left: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Integer { value: 0 },
+                    }),
+                }),
+                then_expr: Box::new(ScalarExprSpec::Literal {
+                    value: value.clone(),
+                }),
+                else_expr: Box::new(original),
+            },
+        };
+        if let DerivedSemanticsSpec::Scalar { expr } = derived.semantics.clone() {
+            derived.semantics = wrap(expr);
+        }
+        for version in &mut derived.versions {
+            if let DerivedSemanticsSpec::Scalar { expr } = version.semantics.clone() {
+                version.semantics = wrap(expr);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A response with each `executed_expression` removed: the one thing the old
+/// and new ways of pinning are allowed to differ on, for a rule pinned twice.
+fn without_executed_expressions(mut value: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.remove("executed_expression");
+                fields.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut value);
+    value
+}
+
+/// On generated requests, applying only each rule's last pin gives the
+/// response, or the error, that wrapping every pin gave: the same values, the
+/// same trace apart from a multiply pinned rule's `executed_expression`, and
+/// the same error, from an unknown rule, a judgment rule, an invalid literal in
+/// any pin (a superseded one too), or an invalid assessment date, whichever
+/// the old way reported first.
+#[test]
+fn applying_the_last_pin_answers_and_fails_exactly_as_wrapping_every_pin_did() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: a
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: x + 1
+  - name: b
+    kind: derived
+    entity: Household
+    dtype: Decimal
+    period: Month
+    versions:
+      - effective_from: 2025-01-01
+        formula: x * 2
+      - effective_from: 2026-01-01
+        formula: a + x
+  - name: j
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: x > 0
+"#,
+    )
+    .expect("the artifact compiles");
+    let rules = ["a", "b", "j", "missing"];
+    let values = [
+        integer(7),
+        integer(-3),
+        json!({"kind": "decimal", "value": "1.5"}),
+        json!({"kind": "decimal", "value": "not a number"}),
+        json!({"kind": "decimal", "value": "also bad"}),
+        json!({"kind": "text", "value": "t"}),
+        json!({"kind": "bool", "value": true}),
+        json!({"kind": "date", "value": "2026-01-01"}),
+    ];
+    let (mut answered, mut failed, mut superseded_invalid) = (0, 0, 0);
+    for seed in 0..3_000_u64 {
+        let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut below = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from((state >> 33) % u64::try_from(bound).expect("bound")).expect("index")
+        };
+        let pins: Vec<(String, Value)> = (0..below(6))
+            .map(|_| {
+                let rule = rules[if below(5) == 0 { below(4) } else { below(2) }];
+                (rule.to_string(), values[below(values.len())].clone())
+            })
+            .collect();
+        let mode = if below(2) == 0 { "explain" } else { "fast" };
+        let mut query = queries();
+        query[0]["outputs"] = json!(["a", "b", "j"]);
+        if below(6) == 0 {
+            // Before the period starts: an invalid assessment date.
+            query[0]["assessment_date"] = json!("2025-12-31");
+        }
+        let request = json!({
+            "mode": mode,
+            "dataset": dataset(&[("x", integer(i64::try_from(below(5)).expect("small")))]),
+            "queries": query,
+            "pins": pins.iter().map(|(rule, value)| json!({"rule": rule, "value": value})).collect::<Vec<_>>(),
+        });
+        let context = format!("seed {seed}: {mode} with pins {pins:?}");
+
+        let typed_pins: Vec<(String, ScalarValueSpec)> = pins
+            .iter()
+            .map(|(rule, value)| {
+                (
+                    rule.clone(),
+                    serde_json::from_value(value.clone()).expect("pin value"),
+                )
+            })
+            .collect();
+        let mut wrapped = artifact.program.clone();
+        let old = wrap_every_pin(&mut wrapped, &typed_pins).and_then(|()| {
+            let inline: ExecutionRequest = serde_json::from_value(json!({
+                "mode": mode, "program": wrapped, "dataset": request["dataset"], "queries": request["queries"],
+            }))
+            .expect("request deserializes");
+            execute_request(inline).map_err(|error| error.to_string())
+        });
+        let new = execute_compiled_request(
+            artifact.clone(),
+            serde_json::from_value(request.clone()).expect("request deserializes"),
+        )
+        .map_err(|error| error.to_string());
+        match (old, new) {
+            (Ok(old), Ok(new)) => {
+                answered += 1;
+                assert_eq!(
+                    without_executed_expressions(serde_json::to_value(new).expect("serializes")),
+                    without_executed_expressions(serde_json::to_value(old).expect("serializes")),
+                    "{context}"
+                );
+            }
+            (Err(old), Err(new)) => {
+                failed += 1;
+                assert_eq!(new, old, "{context}");
+                let last_on_rule = |index: usize| {
+                    !pins[index + 1..]
+                        .iter()
+                        .any(|(rule, _)| rule == &pins[index].0)
+                };
+                if (0..pins.len()).any(|index| {
+                    !last_on_rule(index)
+                        && serde_json::from_value::<ScalarValueSpec>(pins[index].1.clone()).is_ok()
+                        && pins[index].1["value"]
+                            .as_str()
+                            .is_some_and(|value| value.contains("bad") || value.contains("number"))
+                }) {
+                    superseded_invalid += 1;
+                }
+            }
+            (old, new) => panic!("{context}: old {old:?}, new {new:?}"),
+        }
+    }
+    assert!(
+        answered > 300 && failed > 300 && superseded_invalid > 50,
+        "{answered} answered, {failed} failed, {superseded_invalid} with an invalid superseded literal"
+    );
+}
+
+/// A program too deep is refused before anything else walks it: a
+/// request's dependency graph check and an artifact's evaluation order both
+/// recurse through expressions, so the depth error comes first. At the
+/// bound, the same programs fail those checks instead.
+#[test]
+fn a_program_too_deep_is_refused_before_anything_else_walks_it() {
+    let chain_over = |leaf: Value, depth: usize| {
+        let mut expr = leaf;
+        for _ in 1..depth {
+            expr = json!({"kind": "ceil", "value": expr});
+        }
+        json!({"derived": [{
+            "name": "deep", "entity": "Household", "dtype": "decimal", "unit": null,
+            "semantics": "scalar", "expr": expr,
+        }]})
+    };
+    let base = CompiledProgramArtifact::from_rulespec_str(&rulespec("Integer", "1"))
+        .expect("the base artifact compiles");
+    on_stack(REFUSAL_STACK, || {
+        // A request whose rule reads a rule that does not exist.
+        let undefined = json!({"kind": "derived", "name": "nowhere"});
+        let at_bound = run_program(
+            "explain",
+            &chain_over(undefined.clone(), MAX_EXPRESSION_DEPTH),
+        )
+        .expect_err("an undefined rule");
+        assert!(at_bound.contains("nowhere"), "{at_bound}");
+        assert_expression_too_deep(
+            run_program("explain", &chain_over(undefined, MAX_EXPRESSION_DEPTH + 1))
+                .expect_err("too deep"),
+            "request",
+        );
+
+        // An artifact whose rule reads a rule that does not exist, which the
+        // loader's evaluation-order check reports.
+        let artifact = |depth: usize| {
+            let mut artifact = serde_json::to_value(&base).expect("artifact serializes");
+            artifact["program"]["derived"] =
+                chain_over(json!({"kind": "derived", "name": "nowhere"}), depth)["derived"].clone();
+            CompiledProgramArtifact::from_json_str(&artifact.to_string())
+                .expect_err("refused")
+                .to_string()
+        };
+        let at_bound = artifact(MAX_EXPRESSION_DEPTH);
+        assert!(at_bound.contains("nowhere"), "{at_bound}");
+        assert_expression_too_deep(artifact(MAX_EXPRESSION_DEPTH + 1), "artifact");
+    });
 }

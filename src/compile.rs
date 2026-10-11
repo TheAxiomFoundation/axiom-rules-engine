@@ -582,6 +582,9 @@ impl CompiledProgramArtifact {
                 path: path.to_string(),
                 error,
             })?;
+        // JSON can nest an expression deeper than any formula compiles to;
+        // refuse it before anything below walks the program.
+        artifact.program.check_expression_depth()?;
         artifact.check_format_version(path, options, catalog_absent, typing)
     }
 

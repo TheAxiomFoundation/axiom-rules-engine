@@ -2974,7 +2974,10 @@ mod depth_tests {
     /// stage walks. Lowering adds at most two levels to a formula's depth: a
     /// literal's value is an object inside its node, and a bare boolean
     /// lowers to a comparison of two literals. A `match` in particular adds
-    /// none, though it lowers to one `if` per arm.
+    /// none, though it lowers to one `if` per arm. So every compiled rule is
+    /// within `spec::MAX_EXPRESSION_DEPTH`, counted in expression nodes, with
+    /// a level to spare for a request pin; scalar formulas and judgments
+    /// (conditions, and a rule or relation predicate of its own) both.
     #[test]
     fn lowering_builds_a_tree_no_deeper_than_the_formula_plus_two_levels() {
         on_stack(|| {
@@ -3001,8 +3004,24 @@ mod depth_tests {
                     lowered_depth <= formula_depth + 2,
                     "seed {seed}: `{formula}` is {formula_depth} levels deep but lowers to {lowered_depth}"
                 );
+                assert!(
+                    !lowered.deeper_than(formula_depth + 2),
+                    "seed {seed}: `{formula}` lowers to more than {formula_depth} + 2 expression nodes"
+                );
                 deepest = deepest.max(formula_depth);
                 tight += usize::from(lowered_depth >= formula_depth);
+
+                let shape = generate_judgment(&mut rng, size);
+                let formula = render(&shape);
+                let parsed = parse_at(&formula, usize::MAX)
+                    .unwrap_or_else(|error| panic!("seed {seed}: `{formula}`: {error}"));
+                let lowered = lower_to_judgment(&parsed, &ctx)
+                    .unwrap_or_else(|error| panic!("seed {seed}: `{formula}`: {error}"));
+                assert!(
+                    !lowered.deeper_than(depth(&shape) + 2),
+                    "seed {seed}: judgment `{formula}` lowers to more than {} + 2 expression nodes",
+                    depth(&shape)
+                );
             }
             assert!(deepest > 30, "the generator reached only {deepest} levels");
             // The count is not slack either: lowering reaches the formula's

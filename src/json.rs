@@ -8,10 +8,14 @@
 //! loader refused, from a sum of 61 terms or an `elif` chain of 119 branches
 //! up.
 //!
-//! [`from_str`] reads JSON nested up to [`MAX_JSON_DEPTH`] levels. It measures
-//! the document's nesting first, in a loop, and only then parses it with
-//! serde_json's own limit off. The bound is still what keeps the parse on the
-//! stack; a document past it is an error, as it was at 128.
+//! [`from_str`] reads JSON nested up to [`MAX_JSON_DEPTH`] levels. It counts
+//! how deep the document's brackets nest first, in a loop, and only then
+//! parses it with serde_json's own limit off. The bound is still what keeps
+//! the parse on the stack; a document past it is an error, as it was at 128.
+//!
+//! JSON nested this deep can carry an expression deeper than any formula
+//! compiles to, so the program it holds is checked against
+//! [`crate::spec::MAX_EXPRESSION_DEPTH`] before anything walks it.
 
 use serde::de::{DeserializeOwned, Error as _};
 
@@ -38,11 +42,17 @@ pub(crate) fn from_str<T: DeserializeOwned>(source: &str) -> Result<T, serde_jso
     Ok(value)
 }
 
-/// Refuse `source` if its arrays and objects nest more than `max_depth` deep.
+/// Refuse `source` if its brackets nest more than `max_depth` deep.
 ///
-/// serde_json's parser nests only at a `[` or a `{` outside a string, and
-/// only while the document so far is valid; this counts the same brackets
-/// the same way, so the parser never nests deeper than the count allows.
+/// It counts every `[` and `{` outside a string, in the whole document.
+/// serde_json's parser nests only at such a bracket, and stops at the first
+/// error, so it never nests deeper than this count: the count bounds the
+/// parse. It is an upper bound, not the parser's own depth. A malformed
+/// document whose brackets nest past the bound after the point where
+/// serde_json would have stopped, such as `{} [[[...` with 513 `[`, is
+/// refused with this error rather than with serde_json's. Within serde_json's
+/// own 128 levels, counted this way, the reader returns exactly what
+/// `serde_json::from_str` does.
 fn check_nesting(source: &str, max_depth: usize) -> Result<(), serde_json::Error> {
     let mut depth = 0_usize;
     let mut in_string = false;
@@ -189,7 +199,11 @@ mod tests {
             let size = usize::try_from(seed % 40).expect("small size");
             let mut text =
                 serde_json::to_string(&generate(&mut rng, size)).expect("value serializes");
-            if seed % 4 == 0 && !text.is_empty() {
+            if seed % 5 == 1 {
+                // Trail it with brackets, still within 128 levels in all.
+                let levels = rng.below(128 - depth_of_text(&text));
+                text.push_str(&" [".repeat(levels));
+            } else if seed % 4 == 0 && !text.is_empty() {
                 // Damage it: cut it short, or drop one byte.
                 let at = rng.below(text.len());
                 if text.is_char_boundary(at) && text.is_char_boundary(at + 1) {
@@ -204,6 +218,37 @@ mod tests {
             let theirs = serde_json::from_str::<Value>(&text).map_err(|error| error.to_string());
             assert_eq!(ours, theirs, "seed {seed}: {text}");
         }
+    }
+
+    /// How deep a document's brackets nest, as `check_nesting` counts them.
+    fn depth_of_text(text: &str) -> usize {
+        (0..=MAX_JSON_DEPTH)
+            .find(|levels| check_nesting(text, *levels).is_ok())
+            .expect("within the bound")
+    }
+
+    /// A malformed document whose brackets nest past the bound after the
+    /// value is refused by the count, which bounds the parse rather than
+    /// matching it (see `check_nesting`).
+    #[test]
+    fn brackets_past_the_bound_after_the_value_are_counted() {
+        let text = format!("{{}} {}", "[".repeat(MAX_JSON_DEPTH + 1));
+        assert_eq!(
+            from_str::<Value>(&text)
+                .expect_err("past the bound")
+                .to_string(),
+            format!(
+                "JSON nests more than {MAX_JSON_DEPTH} levels deep at line 1 column {}",
+                3 + MAX_JSON_DEPTH + 1
+            )
+        );
+        // serde_json stops at the first trailing character.
+        assert!(
+            serde_json::from_str::<Value>(&text)
+                .expect_err("trailing characters")
+                .to_string()
+                .contains("trailing characters")
+        );
     }
 
     /// The bound: a document at it reads, one level past it is an error that
