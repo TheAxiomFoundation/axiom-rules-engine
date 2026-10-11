@@ -1,0 +1,517 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Child Benefit (Rates) Regulations 2006, reg 2 — weekly rate of child\nbenefit.\n\nTwo rates apply:\n  enhanced  £26.05 — eldest child in the household\n  standard  £17.25 — every other child\n\nreg 2(4)(a) disapplies the enhanced rate where the claimant is a\nvoluntary organisation; reg 2(4)(b) disapplies it where the claimant\nresides with a parent of the child (other than as a cohabiting partner).\nThe \"eldest in household\" test (reg 2(2)) cuts across partnered households\n— that legal determination is pre-applied by the caller on each Child\nrecord as `is_eldest_in_household`, as is `resides_with_parent`.\nCombined, `is_enhanced_eligible` on each Child reduces the three-way\ntest to a single boolean the filtered aggregator can count."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "child_of_claim",
+        "arity": 2,
+        "slot_entities": [
+          "Child",
+          "Claimant"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "cb_enhanced_rate_weekly",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "26.05"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "cb_standard_rate_weekly",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "17.25"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "claimant_can_enhance",
+        "entity": "Claimant",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2006/965 reg 2(4)(a)",
+        "source_url": "https://www.legislation.gov.uk/uksi/2006/965/regulation/2",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "not",
+          "item": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_voluntary_org"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_voluntary_org"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_children_total",
+        "entity": "Claimant",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2006/965 reg 2(1)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_claim",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": null
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_claim",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": null
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_children_eligible_for_enhanced",
+        "entity": "Claimant",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2006/965 reg 2(1)(a) with reg 2(4)(b)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_claim",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_enhanced_eligible"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_claim",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_enhanced_eligible"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_enhanced_rate",
+        "entity": "Claimant",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2006/965 reg 2(1)(a) gated by reg 2(4)(a)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "claimant_can_enhance"
+          },
+          "then_expr": {
+            "kind": "derived",
+            "name": "num_children_eligible_for_enhanced"
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "claimant_can_enhance"
+              },
+              "then_expr": {
+                "kind": "derived",
+                "name": "num_children_eligible_for_enhanced"
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_standard_rate",
+        "entity": "Claimant",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2006/965 reg 2(1)(b)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sub",
+          "left": {
+            "kind": "derived",
+            "name": "num_children_total"
+          },
+          "right": {
+            "kind": "derived",
+            "name": "num_enhanced_rate"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sub",
+              "left": {
+                "kind": "derived",
+                "name": "num_children_total"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "num_enhanced_rate"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "weekly_child_benefit",
+        "entity": "Claimant",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SI 2006/965 reg 2",
+        "source_url": "https://www.legislation.gov.uk/uksi/2006/965/regulation/2",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_enhanced_rate"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "cb_enhanced_rate_weekly",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_standard_rate"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "cb_standard_rate_weekly",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_enhanced_rate"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "cb_enhanced_rate_weekly",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_standard_rate"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "cb_standard_rate_weekly",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "claimant_can_enhance",
+      "num_children_eligible_for_enhanced",
+      "num_children_total",
+      "num_enhanced_rate",
+      "num_standard_rate",
+      "weekly_child_benefit"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "is_enhanced_eligible",
+        "canonical_request_name": "is_enhanced_eligible",
+        "request_names": [
+          "is_enhanced_eligible"
+        ]
+      },
+      {
+        "slot": "is_voluntary_org",
+        "canonical_request_name": "is_voluntary_org",
+        "request_names": [
+          "is_voluntary_org"
+        ]
+      }
+    ]
+  }
+}

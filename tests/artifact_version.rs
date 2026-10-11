@@ -47,6 +47,23 @@ rules:
         formula: "1"
 "#;
 
+/// The format-2 artifact main compiled for the same source: the format-3
+/// artifact without `engine_build`, `source_closure` and `program.interface`,
+/// stamped 2 (`tests/artifact_format.rs` checks that projection against
+/// artifacts main wrote).
+fn as_format_2(artifact: &CompiledProgramArtifact) -> serde_json::Value {
+    let mut value = serde_json::to_value(artifact).expect("artifact serialises");
+    let object = value.as_object_mut().expect("artifact is an object");
+    object.remove("engine_build");
+    object.remove("source_closure");
+    object.insert("artifact_format_version".to_string(), serde_json::json!(2));
+    value["program"]
+        .as_object_mut()
+        .expect("program is an object")
+        .remove("interface");
+    value
+}
+
 #[test]
 fn compile_stamps_format_and_engine_versions() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
@@ -164,7 +181,7 @@ fn artifact_file_round_trip_preserves_versions() {
 fn legacy_artifact_without_relation_slot_entities_still_loads() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(RELATION_ARGUMENT_RULESPEC)
         .expect("RuleSpec relation arguments compile");
-    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    let mut value = as_format_2(&artifact);
     let relation = value["program"]["relations"][0]
         .as_object_mut()
         .expect("relation is an object");
@@ -174,7 +191,8 @@ fn legacy_artifact_without_relation_slot_entities_still_loads() {
         "the new artifact must carry the field before this test makes it legacy-shaped"
     );
 
-    let loaded = CompiledProgramArtifact::from_json_str(
+    // A format-2 artifact loads through the compatibility loader.
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(
         &serde_json::to_string(&value).expect("legacy-shaped artifact serialises"),
     )
     .expect("an artifact without optional relation slot entities still loads");
@@ -191,14 +209,15 @@ fn legacy_artifact_without_relation_slot_entities_still_loads() {
 fn artifact_loader_retains_unknown_tolerated_relation_fields() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles");
-    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // Format-2 readers: the compatibility loader.
+    let mut value = as_format_2(&artifact);
     value["program"]["relations"] = serde_json::json!([{
         "name": "member_of_household",
         "arity": 2,
         "slot_entities": ["Person", "Household"]
     }]);
 
-    let loaded = CompiledProgramArtifact::from_json_str(
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(
         &serde_json::to_string(&value).expect("probe artifact serialises"),
     )
     .expect("format-2 readers tolerate the additive relation field");
@@ -311,16 +330,27 @@ fn direct_program_compile_rejects_invalid_carried_citation() {
 fn a_null_extends_is_not_unresolved_inheritance() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
-    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // Those artifacts are format 2, read through the compatibility loader.
+    let mut value = as_format_2(&artifact);
     value["program"]["extends"] = serde_json::Value::Null;
 
-    CompiledProgramArtifact::from_json_str(&value.to_string())
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect("a null extends carries no inheritance and must load");
 
     // A real inheritance reference is still refused.
     value["program"]["extends"] = serde_json::json!("us:policies/base");
-    let error = CompiledProgramArtifact::from_json_str(&value.to_string())
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect_err("a non-null extends must still be rejected");
+    assert!(
+        error.to_string().contains("compose before compilation"),
+        "unexpected error: {error}"
+    );
+
+    // Format 3 refuses the key outright, a null one included.
+    let mut format_3 = serde_json::to_value(&artifact).expect("artifact serialises");
+    format_3["program"]["extends"] = serde_json::Value::Null;
+    let error = CompiledProgramArtifact::from_json_str(&format_3.to_string())
+        .expect_err("format 3 has no extends");
     assert!(
         error.to_string().contains("compose before compilation"),
         "unexpected error: {error}"
@@ -339,23 +369,32 @@ fn an_absent_input_catalog_is_filled_but_an_empty_one_is_checked() {
         !expected.is_empty(),
         "this program must have inputs for the test to mean anything"
     );
-    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // Artifacts predating the catalog are format 2: the compatibility loader.
+    let mut value = as_format_2(&artifact);
 
     // Omitted entirely: readable, and the catalog is recomputed from the program.
     value["metadata"]
         .as_object_mut()
         .expect("metadata is an object")
         .remove("input_catalog");
-    let loaded = CompiledProgramArtifact::from_json_str(&value.to_string())
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect("an artifact predating the catalog still loads");
     assert_eq!(
         loaded.metadata.input_catalog, expected,
         "the filled catalog must match what the program actually declares"
     );
 
-    // Explicitly empty: a false claim, and still a mismatch.
+    // Explicitly empty: a false claim, and still a mismatch, in either format.
     value["metadata"]["input_catalog"] = serde_json::json!([]);
-    let error = CompiledProgramArtifact::from_json_str(&value.to_string())
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
+        .expect_err("an explicitly empty catalog must not be accepted");
+    assert!(
+        error.to_string().contains("metadata does not match"),
+        "unexpected error: {error}"
+    );
+    let mut format_3 = serde_json::to_value(&artifact).expect("artifact serialises");
+    format_3["metadata"]["input_catalog"] = serde_json::json!([]);
+    let error = CompiledProgramArtifact::from_json_str(&format_3.to_string())
         .expect_err("an explicitly empty catalog must not be accepted");
     assert!(
         error.to_string().contains("metadata does not match"),
@@ -372,7 +411,8 @@ fn an_absent_input_catalog_is_filled_but_an_empty_one_is_checked() {
 fn absent_catalog_fill_happens_after_duplicate_normalization() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
-    let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
+    // A format-2 artifact, read through the compatibility loader.
+    let mut value = as_format_2(&artifact);
     // Reshape to the v0.1-maintenance emission: null extends, no catalog, and
     // the same parameter declared twice with compatible (mergeable) versions.
     value["program"]["extends"] = serde_json::Value::Null;
@@ -391,7 +431,7 @@ fn absent_catalog_fill_happens_after_duplicate_normalization() {
     duplicate["versions"][0]["effective_to"] = serde_json::json!("2027-12-31");
     parameters.push(duplicate);
 
-    let loaded = CompiledProgramArtifact::from_json_str(&value.to_string())
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect("duplicates must normalize before the catalog fill runs to_program()");
     assert_eq!(
         loaded.program.parameters.len(),

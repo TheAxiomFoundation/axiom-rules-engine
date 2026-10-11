@@ -760,7 +760,8 @@ impl CompiledProgramArtifact {
         Ok(self)
     }
 
-    /// The format-2 checks the default loader ran before format 3, unchanged.
+    /// The format-2 checks the default loader ran before format 3,
+    /// unchanged.
     fn check_format_2(
         mut self,
         path: &str,
@@ -1010,6 +1011,56 @@ impl CompiledProgramArtifact {
         artifact.check_format_3(path, options, &stored_interface)
     }
 
+    /// The format-2 compatibility loader. It reads format 2 only, with every
+    /// format-2 dialect tolerance the default loader had before format 3: a
+    /// null `program.extends`, an absent `metadata.input_catalog` (filled
+    /// from the program after duplicate parameters are normalized), an
+    /// absent `engine_version`, `metadata.fast_path` computed under a retired
+    /// rule set (kept, with a `stale_fast_path_metadata` diagnostic), and the
+    /// relation typing gate with its pointer to `migrate artifact`. It
+    /// refuses a format-2 payload carrying `program.interface`,
+    /// `engine_build` or `source_closure`.
+    ///
+    /// The result is still format 2: `artifact_format_version` is 2 and
+    /// `interface`, `engine_build` and `source_closure` are `None`, so nothing
+    /// downstream can mistake it for a format-3 artifact. It serializes as
+    /// the format-2 loader's result did, except where a dialect is
+    /// normalized.
+    pub fn from_legacy_format_2_json_str(source: &str) -> Result<Self, CompileError> {
+        Self::from_legacy_format_2_json_str_with_options(source, CompileOptions::default())
+    }
+
+    pub fn from_legacy_format_2_json_str_with_options(
+        source: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        Self::from_format_2_source(source, "<memory>", options, RelationTypingGate::Enforce)
+    }
+
+    /// [`Self::from_legacy_format_2_json_str`] for a file.
+    #[cfg(feature = "fs")]
+    pub fn from_legacy_format_2_json_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
+        Self::from_legacy_format_2_json_file_with_options(path, CompileOptions::default())
+    }
+
+    #[cfg(feature = "fs")]
+    pub fn from_legacy_format_2_json_file_with_options(
+        path: impl AsRef<Path>,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        let path = path.as_ref();
+        let source = fs::read_to_string(path).map_err(|error| CompileError::ReadArtifactFile {
+            path: path.display().to_string(),
+            error,
+        })?;
+        Self::from_format_2_source(
+            &source,
+            &path.display().to_string(),
+            options,
+            RelationTypingGate::Enforce,
+        )
+    }
+
     /// Load a format-2 artefact without the mandatory relation typing gate,
     /// so the migration tool can type an artefact the loader would reject.
     /// Every other contract check still runs.
@@ -1042,6 +1093,7 @@ impl CompiledProgramArtifact {
                 found,
             });
         }
+        reject_format_3_additions(&value, path)?;
         validate_raw_artifact_contract(&value, path)?;
         // Absence, not emptiness. `#[serde(default)]` cannot tell an omitted
         // catalog from an explicit `[]`, and the two must not be treated alike:
@@ -1346,6 +1398,28 @@ fn validate_format_3_shape(value: &serde_json::Value, path: &str) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// A format-2 payload carrying one of format 3's additions is neither
+/// format, so the compatibility loader refuses it rather than drop the
+/// addition.
+fn reject_format_3_additions(value: &serde_json::Value, path: &str) -> Result<(), CompileError> {
+    let carried = ["engine_build", "source_closure"]
+        .into_iter()
+        .find(|key| value.get(key).is_some())
+        .or_else(|| {
+            value
+                .get("program")
+                .and_then(|program| program.get("interface"))
+                .map(|_| "program.interface")
+        });
+    match carried {
+        Some(key) => Err(invalid_artifact_contract(
+            path,
+            format!("a format-2 artifact cannot carry `{key}`, which only format 3 has"),
+        )),
+        None => Ok(()),
+    }
 }
 
 fn validate_raw_artifact_contract(

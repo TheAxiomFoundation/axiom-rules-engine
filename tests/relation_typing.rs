@@ -666,12 +666,24 @@ rules:
     assert_eq!(results[0], results[1], "explain and fast agree");
 }
 
+/// The format-2 artifact main compiled for the same program, as `migrate
+/// artifact` reads and writes it: format 3 without `engine_build`,
+/// `source_closure` and `program.interface`, stamped 2.
+fn format_2(artifact: &CompiledProgramArtifact) -> serde_json::Value {
+    let mut artifact = artifact.clone();
+    artifact.artifact_format_version = 2;
+    artifact.engine_build = None;
+    artifact.source_closure = None;
+    artifact.interface = None;
+    serde_json::to_value(&artifact).unwrap()
+}
+
 /// A pre-typing artifact: the typed SNAP program with its relation's
 /// `slot_entities` removed, as engines before relation typing wrote them.
 fn legacy_artifact_json(arguments: &str) -> String {
     let artifact =
         CompiledProgramArtifact::from_rulespec_str(&typed_snap_membership(arguments)).unwrap();
-    let mut value = serde_json::to_value(&artifact).unwrap();
+    let mut value = format_2(&artifact);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         relation.as_object_mut().unwrap().remove("slot_entities");
     }
@@ -680,9 +692,10 @@ fn legacy_artifact_json(arguments: &str) -> String {
 
 #[test]
 fn loading_a_pre_typing_artifact_names_the_migration() {
-    let error =
-        CompiledProgramArtifact::from_json_str(&legacy_artifact_json("[Person, Household]"))
-            .expect_err("an artifact executing an untyped relation must not load");
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_str(&legacy_artifact_json(
+        "[Person, Household]",
+    ))
+    .expect_err("an artifact executing an untyped relation must not load");
     assert!(
         matches!(error, CompileError::LegacyArtifactRelationTyping { .. }),
         "{error}"
@@ -730,7 +743,8 @@ fn migration_types_an_artifact_as_it_executes() {
     assert_eq!(migration.changes.len(), 1);
     assert_eq!(migration.changes[0].source, "override");
     let typed = serde_json::to_string(&migration.artifact).unwrap();
-    let reloaded = CompiledProgramArtifact::from_json_str(&typed).expect("migrated artifact loads");
+    let reloaded = CompiledProgramArtifact::from_legacy_format_2_json_str(&typed)
+        .expect("migrated artifact loads");
     assert_eq!(
         reloaded.program.relations[0].slot_entities,
         vec!["Person", "Household"]
@@ -741,7 +755,7 @@ fn migration_types_an_artifact_as_it_executes() {
             .unwrap();
     assert_eq!(
         serde_json::to_value(&reloaded).unwrap(),
-        serde_json::to_value(&original).unwrap()
+        format_2(&original)
     );
 }
 
@@ -773,7 +787,7 @@ rules:
         formula: count_where(member_of_household, member_is_elderly) > 0
 "#;
     let artifact = CompiledProgramArtifact::from_rulespec_str(source).unwrap();
-    let mut value = serde_json::to_value(&artifact).unwrap();
+    let mut value = format_2(&artifact);
     value["program"]["relations"][0]
         .as_object_mut()
         .unwrap()
@@ -837,10 +851,15 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
         child.wait_with_output().unwrap()
     };
 
+    // A pre-typing artifact is format 2: the default loader names it the
+    // older side before typing is reached.
     let refused = run_compiled(&legacy_path);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("migrate artifact"), "{stderr}");
+    assert!(stderr.contains("is older than this engine"), "{stderr}");
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_file(&legacy_path)
+        .expect_err("the compatibility loader refuses the untyped artifact");
+    assert!(error.to_string().contains("migrate artifact"), "{error}");
 
     let dry_run = engine()
         .args(["migrate", "artifact", "--artifact"])
@@ -875,13 +894,17 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
         "{}",
         String::from_utf8_lossy(&migrated.stderr)
     );
-    let ran = run_compiled(&typed_path);
-    assert!(
-        ran.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
-    let response: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    // `migrate artifact` writes format 2, which the compatibility loader
+    // reads and runs.
+    let typed = CompiledProgramArtifact::from_legacy_format_2_json_file(&typed_path)
+        .expect("the typed artifact loads");
+    assert_eq!(typed.artifact_format_version, 2);
+    let request: axiom_rules_engine::api::CompiledExecutionRequest =
+        serde_json::from_str(&request).unwrap();
+    let response = serde_json::to_value(
+        axiom_rules_engine::api::execute_compiled_request(typed, request).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         response["results"][0]["outputs"]["household_size"]["value"]["value"],
         1
@@ -1314,7 +1337,7 @@ rules:
         formula: count_where(extra_members, member_is_extra)
 "#;
     let fresh = CompiledProgramArtifact::from_rulespec_str(source).expect("typed source compiles");
-    let mut value = serde_json::to_value(&fresh).unwrap();
+    let mut value = format_2(&fresh);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         if relation["name"] == "extra_members" {
             relation.as_object_mut().unwrap().remove("slot_entities");
@@ -1330,10 +1353,10 @@ rules:
     );
     assert_eq!(
         serde_json::to_value(&migration.artifact).unwrap(),
-        serde_json::to_value(&fresh).unwrap()
+        format_2(&fresh)
     );
     // The fully typed artifact needs no change and is not a contradiction.
-    let typed = serde_json::to_string(&fresh).unwrap();
+    let typed = serde_json::to_string(&format_2(&fresh)).unwrap();
     let unchanged = migrate_artifact_relation_typing(&typed, "typed.json", &BTreeMap::new())
         .expect("a typed artifact migrates cleanly");
     assert!(unchanged.changes.is_empty());
@@ -1635,8 +1658,7 @@ fn migration_terminates_on_an_executed_zero_arity_relation() {
                               "current_slot": 0, "related_slot": 1}}]
     }))
     .unwrap();
-    let mut value =
-        serde_json::to_value(CompiledProgramArtifact::compile(program).unwrap()).unwrap();
+    let mut value = format_2(&CompiledProgramArtifact::compile(program).unwrap());
     let relation = value["program"]["relations"][0].as_object_mut().unwrap();
     relation.insert("arity".to_string(), serde_json::json!(0));
     relation.remove("slot_entities");
@@ -1660,7 +1682,7 @@ fn migration_terminates_on_an_executed_zero_arity_relation() {
 }
 
 fn without_kinds(artifact: &CompiledProgramArtifact, relations: &[&str]) -> String {
-    let mut value = serde_json::to_value(artifact).unwrap();
+    let mut value = format_2(artifact);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         if relations.contains(&relation["name"].as_str().unwrap()) {
             let relation = relation.as_object_mut().unwrap();
@@ -1687,7 +1709,7 @@ fn migration_combines_household_and_filtered_entity_uses() {
     assert_eq!(migration.changes[0].source, "inferred");
     assert_eq!(
         serde_json::to_value(&migration.artifact).unwrap(),
-        serde_json::to_value(&fresh).unwrap()
+        format_2(&fresh)
     );
 }
 
@@ -1716,7 +1738,8 @@ fn migration_applies_overrides_before_mapping_filtered_entities() {
         .expect("the overrides agree with execution once SnapUnit maps to Household");
     assert_eq!(migration.changes.len(), 2);
     let typed = serde_json::to_string(&migration.artifact).unwrap();
-    CompiledProgramArtifact::from_json_str(&typed).expect("the migrated artifact loads");
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&typed)
+        .expect("the migrated artifact loads");
 }
 
 /// A filter whose source kind is unknown (here an unused one over an untyped
@@ -1879,7 +1902,7 @@ fn migration_asks_when_an_unresolved_filter_shares_a_physical_name() {
     }))
     .unwrap();
     let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
-    let mut value = serde_json::to_value(&artifact).unwrap();
+    let mut value = format_2(&artifact);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         let name = relation["name"].as_str().unwrap().to_string();
         if name == "extra_members" || name == "ghost" {
@@ -1941,7 +1964,7 @@ fn an_unused_declaration_does_not_establish_a_physical_kind_for_migration() {
     }))
     .unwrap();
     let artifact = CompiledProgramArtifact::compile(program).expect("the typed program compiles");
-    let mut value = serde_json::to_value(&artifact).unwrap();
+    let mut value = format_2(&artifact);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         let name = relation["name"].as_str().unwrap().to_string();
         if name == "extra_members" || name == "ghost" {
@@ -1976,7 +1999,7 @@ fn edit_relations(
     artifact: &CompiledProgramArtifact,
     mut edit: impl FnMut(&str, &mut serde_json::Map<String, serde_json::Value>),
 ) -> String {
-    let mut value = serde_json::to_value(artifact).unwrap();
+    let mut value = format_2(artifact);
     for relation in value["program"]["relations"].as_array_mut().unwrap() {
         let name = relation["name"].as_str().unwrap().to_string();
         edit(&name, relation.as_object_mut().unwrap());

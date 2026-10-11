@@ -1,0 +1,1211 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Finance Act 2013 s.99 — Annual Tax on Enveloped Dwellings (ATED) amount\nchargeable.\n\nFor a chargeable period (1 April to 31 March) a chargeable person holding\na single-dwelling interest with taxable value above £500,000 pays the\nannual chargeable amount from the s.99(4) band table. If in charge on\nday 1 of the period the full annual amount is due; otherwise pro-rated\nby N/Y where N is days from the entry day (inclusive) to period end and\nY is days in the period (s.99(6)). Rates below are the 2024-25 figures;\nbands revalue every five years (next 1 April 2027)."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "days_in_period",
+        "entity": "DwellingInterest",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Year",
+        "source": "FA 2013 s.99(6) denominator Y",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "days_between",
+              "from": {
+                "kind": "period_start"
+              },
+              "to": {
+                "kind": "period_end"
+              }
+            },
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-07-17",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "days_between",
+                  "from": {
+                    "kind": "period_start"
+                  },
+                  "to": {
+                    "kind": "period_end"
+                  }
+                },
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "days_from_entry",
+        "entity": "DwellingInterest",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Year",
+        "source": "FA 2013 s.99(6) numerator N",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "days_between",
+              "from": {
+                "kind": "input",
+                "name": "entry_day"
+              },
+              "to": {
+                "kind": "period_end"
+              }
+            },
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-07-17",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "days_between",
+                  "from": {
+                    "kind": "input",
+                    "name": "entry_day"
+                  },
+                  "to": {
+                    "kind": "period_end"
+                  }
+                },
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "band_number",
+        "entity": "DwellingInterest",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Year",
+        "source": "FA 2013 s.99(4) band table",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "taxable_value"
+            },
+            "op": "gt",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 20000000
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 6
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "taxable_value"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 10000000
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 5
+              }
+            },
+            "else_expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "taxable_value"
+                },
+                "op": "gt",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 5000000
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 4
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "taxable_value"
+                  },
+                  "op": "gt",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 2000000
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 3
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "taxable_value"
+                    },
+                    "op": "gt",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 1000000
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 2
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "input",
+                        "name": "taxable_value"
+                      },
+                      "op": "gt",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 500000
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "taxable_value"
+                },
+                "op": "gt",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 20000000
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 6
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "taxable_value"
+                  },
+                  "op": "gt",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 10000000
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 5
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "taxable_value"
+                    },
+                    "op": "gt",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 5000000
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 4
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "input",
+                        "name": "taxable_value"
+                      },
+                      "op": "gt",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 2000000
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 3
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "input",
+                          "name": "taxable_value"
+                        },
+                        "op": "gt",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 1000000
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 2
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "input",
+                            "name": "taxable_value"
+                          },
+                          "op": "gt",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 500000
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 1
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 0
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "annual_chargeable_amount",
+        "entity": "DwellingInterest",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Year",
+        "source": "FA 2013 s.99(4) band table, 2024-25",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "band_number"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 6
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "287500"
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "band_number"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 5
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "143550"
+              }
+            },
+            "else_expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "derived",
+                  "name": "band_number"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 4
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "71500"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "band_number"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 3
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "30550"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "derived",
+                      "name": "band_number"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 2
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "9000"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "derived",
+                        "name": "band_number"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 1
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "4400"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "derived",
+                          "name": "band_number"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 0
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "0"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "no_match",
+                        "subject": {
+                          "kind": "derived",
+                          "name": "band_number"
+                        },
+                        "patterns": [
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 6
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 5
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 4
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 3
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 2
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 1
+                            }
+                          },
+                          {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 0
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "derived",
+                  "name": "band_number"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 6
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "287500"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "band_number"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 5
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "143550"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "derived",
+                      "name": "band_number"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 4
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "71500"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "derived",
+                        "name": "band_number"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 3
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "30550"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "derived",
+                          "name": "band_number"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 2
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "9000"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "derived",
+                            "name": "band_number"
+                          },
+                          "op": "eq",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 1
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "decimal",
+                            "value": "4400"
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "if",
+                          "condition": {
+                            "kind": "comparison",
+                            "left": {
+                              "kind": "derived",
+                              "name": "band_number"
+                            },
+                            "op": "eq",
+                            "right": {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 0
+                              }
+                            }
+                          },
+                          "then_expr": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "decimal",
+                              "value": "0"
+                            }
+                          },
+                          "else_expr": {
+                            "kind": "no_match",
+                            "subject": {
+                              "kind": "derived",
+                              "name": "band_number"
+                            },
+                            "patterns": [
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 6
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 5
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 4
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 3
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 2
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 1
+                                }
+                              },
+                              {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 0
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "pro_rata_amount",
+        "entity": "DwellingInterest",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Year",
+        "source": "FA 2013 s.99(6) relevant fraction N/Y",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "div",
+          "left": {
+            "kind": "mul",
+            "left": {
+              "kind": "derived",
+              "name": "annual_chargeable_amount"
+            },
+            "right": {
+              "kind": "derived",
+              "name": "days_from_entry"
+            }
+          },
+          "right": {
+            "kind": "derived",
+            "name": "days_in_period"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-07-17",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "div",
+              "left": {
+                "kind": "mul",
+                "left": {
+                  "kind": "derived",
+                  "name": "annual_chargeable_amount"
+                },
+                "right": {
+                  "kind": "derived",
+                  "name": "days_from_entry"
+                }
+              },
+              "right": {
+                "kind": "derived",
+                "name": "days_in_period"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "tax_chargeable",
+        "entity": "DwellingInterest",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Year",
+        "source": "FA 2013 s.99(2)-(3)",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2013/29/section/99",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "in_charge_on_first_day"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "derived",
+            "name": "annual_chargeable_amount"
+          },
+          "else_expr": {
+            "kind": "derived",
+            "name": "pro_rata_amount"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-07-17",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "in_charge_on_first_day"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "derived",
+                "name": "annual_chargeable_amount"
+              },
+              "else_expr": {
+                "kind": "derived",
+                "name": "pro_rata_amount"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "band_number",
+      "annual_chargeable_amount",
+      "days_from_entry",
+      "days_in_period",
+      "pro_rata_amount",
+      "tax_chargeable"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": false,
+      "blockers": [
+        "days_in_period: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_from_entry: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_from_entry: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_from_entry: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_from_entry: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do"
+      ]
+    },
+    "input_catalog": [
+      {
+        "slot": "entry_day",
+        "canonical_request_name": "entry_day",
+        "request_names": [
+          "entry_day"
+        ]
+      },
+      {
+        "slot": "in_charge_on_first_day",
+        "canonical_request_name": "in_charge_on_first_day",
+        "request_names": [
+          "in_charge_on_first_day"
+        ]
+      },
+      {
+        "slot": "taxable_value",
+        "canonical_request_name": "taxable_value",
+        "request_names": [
+          "taxable_value"
+        ]
+      }
+    ]
+  }
+}

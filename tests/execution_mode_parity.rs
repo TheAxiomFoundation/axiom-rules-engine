@@ -4209,8 +4209,9 @@ fn bump(counter: &Cell<u32>) {
 ///    fast mode never falls back with a construct-decline reason.
 /// 2. **Round trip.** A fresh artifact loads with no stale diagnostic and
 ///    re-serializes to the same bytes.
-/// 3. **Retired stamps load unchanged.** The same artifact stamped with what an
-///    engine before #201 wrote loads, keeps those bytes, and reports exactly
+/// 3. **Retired stamps load unchanged.** The same artifact as format 2,
+///    stamped with what an engine before #201 wrote, loads through the
+///    format-2 compatibility loader, keeps those bytes, and reports exactly
 ///    one `stale_fast_path_metadata` diagnostic when the stamp differs.
 /// 4. **Nothing else loads.** Flipping `compatible`, dropping a blocker or
 ///    adding one is rejected as a metadata mismatch.
@@ -4248,16 +4249,25 @@ fn check_fast_path_metadata(
         ));
     }
 
+    // A pre-#201 stamp is on a format-2 artifact, which the format-2
+    // compatibility loader reads.
+    let mut format_2 = artifact.clone();
+    format_2.artifact_format_version = 2;
+    format_2.engine_build = None;
+    format_2.source_closure = None;
+    format_2.interface = None;
     let legacy = pre_lazy_fast_path(&artifact.program);
     let retired = !legacy.blockers.is_empty();
-    let mut stamped = artifact.clone();
+    let mut stamped = format_2.clone();
     stamped.metadata.fast_path = legacy.clone();
     let stamped_source = serde_json::to_string(&stamped).expect("artifact serialises");
-    let loaded = CompiledProgramArtifact::from_json_str(&stamped_source).map_err(|error| {
-        fail(format!(
-            "the pre-#201 stamp {legacy:?} failed to load: {error}"
-        ))
-    })?;
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(&stamped_source).map_err(
+        |error| {
+            fail(format!(
+                "the pre-#201 stamp {legacy:?} failed to load: {error}"
+            ))
+        },
+    )?;
     if serde_json::to_string(&loaded).expect("serialises") != stamped_source {
         return Err(fail("loading changed a pre-#201 stamp".to_string()));
     }
@@ -4278,10 +4288,10 @@ fn check_fast_path_metadata(
         let mut extra = legacy.clone();
         extra.blockers.push(legacy.blockers[0].clone());
         for (name, corrupt) in [("flipped", flipped), ("dropped", dropped), ("extra", extra)] {
-            let mut corrupted = artifact.clone();
+            let mut corrupted = format_2.clone();
             corrupted.metadata.fast_path = corrupt;
             let json = serde_json::to_string(&corrupted).expect("artifact serialises");
-            match CompiledProgramArtifact::from_json_str(&json) {
+            match CompiledProgramArtifact::from_legacy_format_2_json_str(&json) {
                 Err(error) if error.to_string().contains("metadata does not match") => {}
                 other => {
                     return Err(fail(format!(

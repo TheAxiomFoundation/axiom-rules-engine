@@ -6,7 +6,9 @@
 //! then still carry it, and artifact loading requires stored metadata to match
 //! the embedded program, so the loader accepts `fast_path` computed under the
 //! retired rule set as well, keeps it byte for byte, and reports a
-//! `stale_fast_path_metadata` diagnostic.
+//! `stale_fast_path_metadata` diagnostic. Those artifacts are format 2, so
+//! since format 3 that tolerance lives in the format-2 compatibility loader;
+//! every format-3 artifact was compiled under the current rule set.
 //!
 //! `fixtures/artifacts/related_derived_sums.pre-lazy-fast-path.compiled.json`
 //! is the unmodified output of the engine at commit 6031295 (origin/main just
@@ -72,8 +74,24 @@ fn stored_fast_path(value: &serde_json::Value) -> FastPathMetadata {
     serde_json::from_value(value["metadata"]["fast_path"].clone()).expect("fast_path parses")
 }
 
+/// The format-2 compatibility loader.
 fn load(value: &serde_json::Value) -> Result<CompiledProgramArtifact, String> {
-    CompiledProgramArtifact::from_json_str(&value.to_string()).map_err(|error| error.to_string())
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+/// What a format-2 compile of the same source looks like on the wire.
+fn as_format_2(artifact: &CompiledProgramArtifact) -> serde_json::Value {
+    let mut value = serde_json::to_value(artifact).expect("artifact serialises");
+    let object = value.as_object_mut().expect("artifact is an object");
+    object.remove("engine_build");
+    object.remove("source_closure");
+    object.insert("artifact_format_version".to_string(), serde_json::json!(2));
+    value["program"]
+        .as_object_mut()
+        .expect("program is an object")
+        .remove("interface");
+    value
 }
 
 fn stale_diagnostics(artifact: &CompiledProgramArtifact) -> Vec<String> {
@@ -95,8 +113,18 @@ fn assert_rejected(value: &serde_json::Value, case: &str) {
 
 #[test]
 fn an_artifact_compiled_before_the_change_still_loads_unchanged() {
-    let loaded = CompiledProgramArtifact::from_json_str(PRE_CHANGE_ARTIFACT)
+    let refused = CompiledProgramArtifact::from_json_str(PRE_CHANGE_ARTIFACT)
+        .expect_err("the default loader reads format 3 only");
+    assert!(
+        refused
+            .to_string()
+            .contains("is older than this engine: it is artifact format 2"),
+        "{refused}"
+    );
+    let loaded = CompiledProgramArtifact::from_legacy_format_2_json_str(PRE_CHANGE_ARTIFACT)
         .expect("an artifact the previous engine compiled must still load");
+    assert_eq!(loaded.artifact_format_version, 2);
+    assert_eq!(loaded.interface, None);
 
     // The stored metadata is kept exactly: re-serializing reproduces the
     // published bytes, so digests over the artifact do not move.
@@ -175,13 +203,15 @@ fn a_fresh_compile_drops_only_the_retired_blocker() {
     // The fixture records the engine version that wrote it; this engine stamps
     // its own.
     expected["engine_version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
-    let mut actual = serde_json::to_value(&fresh).expect("fresh artifact serialises");
-    // The fixture predates the interface block, which execution never reads.
-    actual["program"]
-        .as_object_mut()
-        .expect("program is an object")
-        .remove("interface")
-        .expect("a fresh compile carries the interface");
+    // The fixture is format 2: compare what format 3 adds to format 2 aside,
+    // so `program` (without its interface) and `metadata` are compared whole.
+    assert!(
+        serde_json::to_value(&fresh).unwrap()["program"]
+            .get("interface")
+            .is_some(),
+        "a fresh compile carries the interface"
+    );
+    let actual = as_format_2(&fresh);
     assert_eq!(actual, expected);
 
     // A fresh artifact loads with no stale diagnostic and round-trips exactly.
@@ -262,13 +292,21 @@ rules:
 "#,
     )
     .expect("plain program compiles");
-    let mut plain = serde_json::to_value(&plain).expect("artifact serialises");
-    plain["metadata"]["fast_path"] = serde_json::json!({
+    let mut plain_format_3 = serde_json::to_value(&plain).expect("artifact serialises");
+    let mut plain = as_format_2(&plain);
+    let retired_fast_path = serde_json::json!({
         "strategy": "generic_bulk",
         "compatible": false,
         "blockers": [format!("doubled: {RETIRED_SUM_BLOCKER}")],
     });
+    plain["metadata"]["fast_path"] = retired_fast_path.clone();
     assert_rejected(&plain, "retired blocker on a program without the shape");
+
+    // Format 3 accepts no retired rule set at all.
+    plain_format_3["metadata"]["fast_path"] = retired_fast_path;
+    let error = CompiledProgramArtifact::from_json_str(&plain_format_3.to_string())
+        .expect_err("format 3 has no retired fast_path");
+    assert!(error.to_string().contains(MISMATCH), "{error}");
 }
 
 /// What a fresh compile no longer blocks, fast mode answers on its own path.
@@ -285,8 +323,9 @@ fn fast_mode_answers_the_shape_the_retired_blocker_named() {
         }
     );
 
-    // The same program as the previous engine stamped it still loads.
-    let mut legacy = serde_json::to_value(&artifact).expect("artifact serialises");
+    // The same program as the previous engine stamped it (format 2) still
+    // loads, through the compatibility loader.
+    let mut legacy = as_format_2(&artifact);
     legacy["metadata"]["fast_path"] = serde_json::json!({
         "strategy": "generic_bulk",
         "compatible": false,
