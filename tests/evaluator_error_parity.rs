@@ -1286,10 +1286,11 @@ fn generated_keys_are_read_identically_by_every_mode_and_match_the_reference() {
     // Invariants, over generated Decimal and f64 keys:
     // 1. A key is accepted exactly when it is an integer in the i64 range;
     //    an accepted key reads exactly that row (no truncation, no
-    //    saturation); a refused key is explain's error in every mode.
-    // 2. Explain, fast, dense decimal and dense f64 give the same outcome.
-    // Deterministic, seeded like the repo's other generated tests, so it adds
-    // no dependency.
+    //    saturation); a refused key is explain's error.
+    // 2. Every mode that can take the key gives the same outcome: explain,
+    //    fast, dense decimal and dense f64 for a Decimal key; the two dense
+    //    modes for an f64 key, which only dense columns can carry.
+    // Deterministic and seeded, so the same keys run everywhere.
     let artifact = compile(RATE_TABLE_RULESPEC);
     let dense = dense(&artifact, "Person");
     let edges = [
@@ -1308,37 +1309,52 @@ fn generated_keys_are_read_identically_by_every_mode_and_match_the_reference() {
         "-79228162514264337593543950335",
     ];
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut next = || {
+    // The generator's high bits: an LCG's low bits cycle with a short period
+    // (the lowest simply alternates), so `% 2` or `% 4` on the raw state would
+    // pick the same category every time.
+    let mut next = |bound: u64| {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
-        state
+        i64::try_from((state >> 33) % bound).expect("31 bits fit")
     };
     let mut decimal_keys = edges
         .iter()
         .map(|key| Decimal::from_str(key).expect("edge key"))
         .collect::<Vec<_>>();
     for _ in 0..200 {
-        // Small magnitudes, scale 0-3, so roughly a quarter are integral and
-        // many of those hit a table row.
-        let mantissa = i64::try_from(next() % 10_000).expect("small") - 5_000;
-        let scale = u32::try_from(next() % 4).expect("small scale");
-        decimal_keys.push(Decimal::new(mantissa, scale));
+        // Whole numbers around the table's rows -1..=3, in four spellings.
+        let whole = next(12) - 6;
+        let scale = u32::try_from(next(3)).expect("small scale") + 1;
+        decimal_keys.push(match next(4) {
+            // An integer, scale 0.
+            0 => Decimal::from(whole),
+            // The same integer with trailing zeros (2.000): still integral.
+            1 => Decimal::new(whole * 10_i64.pow(scale), scale),
+            // One nonzero decimal digit: never integral.
+            2 => Decimal::new(whole * 10 + next(9) + 1, 1),
+            // Any small mantissa at any scale.
+            _ => Decimal::new(next(10_000) - 5_000, scale),
+        });
     }
-    let (mut accepted, mut refused) = (0, 0);
+    // How many keys were refused, read a table row, or named a missing row.
+    let (mut refused, mut read, mut missing) = (0, 0, 0);
     for key in decimal_keys {
         let expected: Outcome = match reference_key(key) {
             None => {
                 refused += 1;
                 Err(KEY_ERROR.to_string())
             }
-            Some(row) => {
-                accepted += 1;
-                match table_rate(row) {
-                    Some(rate) => Ok(vec![rate.to_string()]),
-                    None => Err(missing_row_error(row)),
+            Some(row) => match table_rate(row) {
+                Some(rate) => {
+                    read += 1;
+                    Ok(vec![rate.to_string()])
                 }
-            }
+                None => {
+                    missing += 1;
+                    Err(missing_row_error(row))
+                }
+            },
         };
         let rows = [vec![("bracket", decimal(&key.to_string()))]];
         assert_eq!(
@@ -1360,8 +1376,8 @@ fn generated_keys_are_read_identically_by_every_mode_and_match_the_reference() {
         }
     }
     assert!(
-        accepted > 20 && refused > 20,
-        "{accepted} accepted, {refused} refused"
+        refused >= 20 && read >= 20 && missing >= 20,
+        "Decimal keys: {refused} refused, {read} read a row, {missing} named a missing row"
     );
 
     let mut float_keys = vec![
@@ -1387,17 +1403,30 @@ fn generated_keys_are_read_identically_by_every_mode_and_match_the_reference() {
         f64::NAN,
     ];
     for _ in 0..200 {
-        // Halves and whole numbers around the table's rows.
-        let whole = i32::try_from(next() % 12).expect("small") - 6;
-        let half = if next() % 2 == 0 { 0.0 } else { 0.5 };
-        float_keys.push(f64::from(whole) + half);
+        // Whole numbers around the table's rows, half of them with a
+        // fractional part.
+        let whole = f64::from(i32::try_from(next(12)).expect("small") - 6);
+        float_keys.push(match next(2) {
+            0 => whole,
+            _ => whole + [0.5, 0.25, 0.125][usize::try_from(next(3)).expect("index")],
+        });
     }
+    let (mut refused, mut read, mut missing) = (0, 0, 0);
     for key in float_keys {
         let expected: Outcome = match reference_float_key(key) {
-            None => Err(KEY_ERROR.to_string()),
+            None => {
+                refused += 1;
+                Err(KEY_ERROR.to_string())
+            }
             Some(row) => match table_rate(row) {
-                Some(rate) => Ok(vec![rate.to_string()]),
-                None => Err(missing_row_error(row)),
+                Some(rate) => {
+                    read += 1;
+                    Ok(vec![rate.to_string()])
+                }
+                None => {
+                    missing += 1;
+                    Err(missing_row_error(row))
+                }
             },
         };
         let batch = rate_batch(1, &[("bracket", DenseColumn::Float(vec![key]))]);
@@ -1408,4 +1437,8 @@ fn generated_keys_are_read_identically_by_every_mode_and_match_the_reference() {
             assert_eq!(outcome, expected, "dense {mode} f64 {key:e}");
         }
     }
+    assert!(
+        refused >= 20 && read >= 20 && missing >= 20,
+        "f64 keys: {refused} refused, {read} read a row, {missing} named a missing row"
+    );
 }
