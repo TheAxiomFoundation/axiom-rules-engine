@@ -326,8 +326,16 @@ fn execute_program(
     crate::compile::validate_dependency_graph(&request.program)
         .map_err(|error| ApiError::InvalidProgram(Box::new(error)))?;
     let requested_mode = request.mode.clone();
-    check_pin_literals(&request.program, pins)?;
-    let program = request.program.to_program()?;
+    // When each pin wrapped the one before it, converting a pinned rule's
+    // expression converted its pins' literals first, the latest first. Only a
+    // rule's last pin is in the program now, so every pin's literal is checked
+    // at that same point, and a request fails with the error it did before.
+    let program = request.program.to_program_with(|rule| {
+        pins.iter()
+            .rev()
+            .filter(|pin| pin.rule == rule)
+            .try_for_each(|pin| pin.value.check_literal())
+    })?;
     // A request can carry a raw program that never went through the compiler
     // or the artifact loader, so it faces the same mandatory relation typing.
     crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
@@ -431,6 +439,9 @@ pub fn execute_compiled_request(
     request: CompiledExecutionRequest,
 ) -> Result<ExecutionResponse, ApiError> {
     let mut program = artifact.program;
+    // An artifact built in Rust rather than loaded can hold any expression;
+    // refuse a too-deep one before pinning copies it.
+    program.check_expression_depth()?;
     apply_pins(&mut program, &request.pins)?;
     execute_program(
         ExecutionRequest {
@@ -466,7 +477,8 @@ pub fn execute_compiled_request(
 /// but a request with many pins on one rule built an expression as deep as
 /// the pins were many, from flat JSON, and overflowed the stack. Every pin
 /// still names a scalar rule the program has, checked here in request order,
-/// and every pin's literal is still checked, by [`check_pin_literals`].
+/// and every pin's literal is still checked, where the program is converted
+/// (see [`execute_program`]).
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
     let last_pin: HashMap<&str, usize> = pins
         .iter()
@@ -518,23 +530,6 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
             if let DerivedSemanticsSpec::Scalar { expr } = version.semantics.clone() {
                 version.semantics = pin_expr(expr);
             }
-        }
-    }
-    Ok(())
-}
-
-/// Check every pin's literal where the program is converted, in the order the
-/// conversion used to report them.
-///
-/// When each pin wrapped the one before it, `ProgramSpec::to_program`
-/// converted every pin's literal: rule by rule in program order, and within a
-/// rule the latest pin first. Only a rule's last pin is in the program now, so
-/// a superseded pin's literal is checked here instead, in that same order, and
-/// the error a request reports is the one it reported before.
-fn check_pin_literals(program: &ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
-    for derived in &program.derived {
-        for pin in pins.iter().rev().filter(|pin| pin.rule == derived.name) {
-            pin.value.check_literal()?;
         }
     }
     Ok(())

@@ -278,6 +278,9 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
+        // A program built in Rust can hold any expression; refuse a too-deep
+        // one before the metadata below walks it.
+        program.check_expression_depth()?;
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths

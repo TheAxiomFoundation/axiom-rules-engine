@@ -1409,6 +1409,35 @@ fn wrap_every_pin(
     Ok(())
 }
 
+/// Put an invalid decimal literal into every expression of `rule`.
+fn corrupt_rule(program: &mut ProgramSpec, rule: &str) {
+    let corrupt = |semantics: &mut DerivedSemanticsSpec| {
+        if let DerivedSemanticsSpec::Scalar { expr } = semantics {
+            let original = std::mem::replace(expr, ScalarExprSpec::PeriodStart);
+            *expr = ScalarExprSpec::Add {
+                items: vec![
+                    original,
+                    ScalarExprSpec::Literal {
+                        value: ScalarValueSpec::Decimal {
+                            value: "original bad".to_string(),
+                        },
+                    },
+                ],
+            };
+        }
+    };
+    let derived = program
+        .derived
+        .iter_mut()
+        .find(|derived| derived.name == rule)
+        .expect("the rule exists");
+    corrupt(&mut derived.semantics);
+    derived
+        .versions
+        .iter_mut()
+        .for_each(|version| corrupt(&mut version.semantics));
+}
+
 /// A response with each `executed_expression` removed: the one thing the old
 /// and new ways of pinning are allowed to differ on, for a rule pinned twice.
 fn without_executed_expressions(mut value: Value) -> Value {
@@ -1430,8 +1459,8 @@ fn without_executed_expressions(mut value: Value) -> Value {
 /// response, or the error, that wrapping every pin gave: the same values, the
 /// same trace apart from a multiply pinned rule's `executed_expression`, and
 /// the same error, from an unknown rule, a judgment rule, an invalid literal in
-/// any pin (a superseded one too), or an invalid assessment date, whichever
-/// the old way reported first.
+/// any pin (a superseded one too) or in the program itself, or an invalid
+/// assessment date, whichever the old way reported first.
 #[test]
 fn applying_the_last_pin_answers_and_fails_exactly_as_wrapping_every_pin_did() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(
@@ -1478,7 +1507,7 @@ rules:
         json!({"kind": "bool", "value": true}),
         json!({"kind": "date", "value": "2026-01-01"}),
     ];
-    let (mut answered, mut failed, mut superseded_invalid) = (0, 0, 0);
+    let (mut answered, mut failed, mut superseded_invalid, mut corrupted) = (0, 0, 0, 0);
     for seed in 0..3_000_u64 {
         let mut state = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut below = |bound: usize| {
@@ -1517,6 +1546,14 @@ rules:
                 )
             })
             .collect();
+        // Sometimes the program itself holds an invalid literal, in `a` or
+        // `b`, as an artifact built in Rust rather than loaded can.
+        let mut artifact = artifact.clone();
+        let corrupt = below(4);
+        if corrupt < 2 {
+            corrupt_rule(&mut artifact.program, ["a", "b"][corrupt]);
+            corrupted += 1;
+        }
         let mut wrapped = artifact.program.clone();
         let old = wrap_every_pin(&mut wrapped, &typed_pins).and_then(|()| {
             let inline: ExecutionRequest = serde_json::from_value(json!({
@@ -1561,15 +1598,16 @@ rules:
         }
     }
     assert!(
-        answered > 300 && failed > 300 && superseded_invalid > 50,
-        "{answered} answered, {failed} failed, {superseded_invalid} with an invalid superseded literal"
+        answered > 300 && failed > 300 && superseded_invalid > 50 && corrupted > 500,
+        "{answered} answered, {failed} failed, {superseded_invalid} with an invalid superseded literal, {corrupted} with an invalid program"
     );
 }
 
 /// A program too deep is refused before anything else walks it: a
-/// request's dependency graph check and an artifact's evaluation order both
-/// recurse through expressions, so the depth error comes first. At the
-/// bound, the same programs fail those checks instead.
+/// request's dependency graph check, an artifact's evaluation order, the
+/// metadata `compile` builds and the copy a pin makes all recurse through
+/// expressions, so the depth error comes first. At the bound, the same
+/// programs fail those checks instead.
 #[test]
 fn a_program_too_deep_is_refused_before_anything_else_walks_it() {
     let chain_over = |leaf: Value, depth: usize| {
@@ -1612,5 +1650,39 @@ fn a_program_too_deep_is_refused_before_anything_else_walks_it() {
         let at_bound = artifact(MAX_EXPRESSION_DEPTH);
         assert!(at_bound.contains("nowhere"), "{at_bound}");
         assert_expression_too_deep(artifact(MAX_EXPRESSION_DEPTH + 1), "artifact");
+
+        // A program compiled in Rust: its metadata walks the expressions.
+        let compiled = |depth: usize| {
+            let spec: ProgramSpec = serde_json::from_value(chain_over(
+                json!({"kind": "derived", "name": "nowhere"}),
+                depth,
+            ))
+            .expect("program deserializes");
+            CompiledProgramArtifact::compile(spec)
+                .expect_err("refused")
+                .to_string()
+        };
+        let at_bound = compiled(MAX_EXPRESSION_DEPTH);
+        assert!(at_bound.contains("nowhere"), "{at_bound}");
+        assert_expression_too_deep(compiled(MAX_EXPRESSION_DEPTH + 1), "compile");
+
+        // An artifact built in Rust, pinned: pinning copies the expression,
+        // and an unknown pinned rule is reported before conversion.
+        let pinned = |depth: usize| {
+            let mut artifact = base.clone();
+            artifact.program = serde_json::from_value(chain_over(int_lit(1), depth))
+                .expect("program deserializes");
+            let request: CompiledExecutionRequest = serde_json::from_value(json!({
+                "mode": "explain", "dataset": dataset(&[]), "queries": queries(),
+                "pins": [{"rule": "deep", "value": integer(7)}, {"rule": "nowhere", "value": integer(1)}],
+            }))
+            .expect("request deserializes");
+            execute_compiled_request(artifact, request)
+                .expect_err("refused")
+                .to_string()
+        };
+        let at_bound = pinned(MAX_EXPRESSION_DEPTH);
+        assert!(at_bound.contains("pinned rule `nowhere`"), "{at_bound}");
+        assert_expression_too_deep(pinned(MAX_EXPRESSION_DEPTH + 1), "pinned artifact");
     });
 }

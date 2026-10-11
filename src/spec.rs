@@ -253,6 +253,15 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        self.to_program_with(|_| Ok(()))
+    }
+
+    /// [`Self::to_program`], calling `check_rule` with each derived rule's
+    /// name just before that rule's expressions are converted.
+    pub(crate) fn to_program_with(
+        &self,
+        mut check_rule: impl FnMut(&str) -> Result<(), SpecError>,
+    ) -> Result<Program, SpecError> {
         self.check_expression_depth()?;
         let mut program = Program::default();
 
@@ -274,7 +283,7 @@ impl ProgramSpec {
         // the compile-time validation the contract requires, enforced on every
         // `to_program` so a malformed artifact cannot execute either.
         for derived in &self.derived {
-            let mut model = derived.to_model()?;
+            let mut model = derived.to_model(&mut check_rule)?;
             model.rounding = derived.resolve_rounding(&program)?;
             program.add_derived(model)?;
         }
@@ -824,13 +833,17 @@ pub struct DerivedSpec {
 }
 
 impl DerivedSpec {
-    fn to_model(&self) -> Result<Derived, SpecError> {
+    fn to_model(
+        &self,
+        check_rule: &mut impl FnMut(&str) -> Result<(), SpecError>,
+    ) -> Result<Derived, SpecError> {
         validate_effective_ranges(
             &self.name,
             self.versions
                 .iter()
                 .map(|version| (version.effective_from, version.effective_to)),
         )?;
+        check_rule(&self.name)?;
         Ok(Derived {
             id: self.id.clone(),
             name: self.name.clone(),
