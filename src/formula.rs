@@ -1559,150 +1559,182 @@ fn lit_bool_spec(b: bool) -> ScalarExprSpec {
     }
 }
 
-/// How many runtime expression nodes `e` lowers to in scalar position: what
-/// [`lower_to_scalar`] builds, counted as `ScalarExprSpec::runtime_size`
-/// counts it, so a `match` subject counts once per arm it is copied into and
-/// an `exactly_one` counts as what it expands to. It mirrors the lowering
-/// without building anything, so a formula whose lowering would be huge is
-/// refused before it is built (see [`check_lowered_size`]). Saturating; a
-/// shape the lowering refuses counts as nothing. It recurses as deep as the
+/// Counts what lowering a formula builds, counted as
+/// `ScalarExprSpec::runtime_size` counts it, without building anything, so a
+/// formula whose lowering would be huge is refused before it is built (see
+/// [`check_lowered_size`]). [`Self::scalar`] and [`Self::judgment`] return the
+/// size of the expression [`lower_to_scalar`] and [`lower_to_judgment`] build:
+/// a `match` subject counts once per arm it is copied into, and an
+/// `exactly_one` counts as what it expands to. The one thing lowering builds
+/// and does not keep, the subject of a `match` with only `_`, which it lowers
+/// to check and then drops, adds to [`Self::dropped`]. Every count saturates;
+/// a shape the lowering refuses counts as nothing. It recurses as deep as the
 /// formula, which the parser bounds.
-fn scalar_runtime_size(e: &Expr, ctx: &LowerCtx) -> u64 {
-    let sum = |items: &[Expr]| {
-        items.iter().fold(0u64, |total, item| {
-            total.saturating_add(scalar_runtime_size(item, ctx))
-        })
-    };
-    let one_plus = |size: u64| 1u64.saturating_add(size);
-    match e {
-        Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitBool(_) | Expr::LitStr(_) => 1,
-        Expr::Var(name) => match name.as_str() {
-            "period_start" | "period_end" => 1,
-            // A parameter reads its index-0 value: a lookup and its literal.
-            _ if ctx.scalars.contains(name) => 2,
-            _ => 1,
-        },
-        Expr::Index { index, .. } => one_plus(scalar_runtime_size(index, ctx)),
-        Expr::BinOp { left, right, .. } => {
-            one_plus(scalar_runtime_size(left, ctx).saturating_add(scalar_runtime_size(right, ctx)))
-        }
-        // `0 - operand`.
-        Expr::UnaryOp { operand, .. } => 2u64.saturating_add(scalar_runtime_size(operand, ctx)),
-        Expr::Call { func, args } => match func.as_str() {
-            "max"
-            | "min"
-            | "ceil"
-            | "floor"
-            | "days_between"
-            | "date_add_days"
-            | "date_add_months"
-            | "date_add_years"
-            | "sum_over_periods"
-            | "max_over_periods"
-            | "count_over_periods"
-            | "sum_top_n_over_periods" => one_plus(sum(args)),
-            "len" | "sum" => 1,
-            // The related-entity count or sum, and its `where` clause: a rule
-            // that holds, or an input compared with `true`.
-            "count_where" | "sum_where" => {
-                let predicate = args.last().and_then(|predicate| match predicate {
-                    Expr::Var(name) => Some(name),
-                    _ => None,
-                });
-                if predicate.is_some_and(|name| ctx.derived.contains(name)) {
-                    2
-                } else {
-                    4
+struct LoweringSize<'a> {
+    ctx: &'a LowerCtx,
+    dropped: u64,
+}
+
+impl<'a> LoweringSize<'a> {
+    fn new(ctx: &'a LowerCtx) -> Self {
+        Self { ctx, dropped: 0 }
+    }
+
+    /// The expression `e` lowers to in scalar position.
+    fn scalar(&mut self, e: &Expr) -> u64 {
+        let one_plus = |size: u64| 1u64.saturating_add(size);
+        match e {
+            Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitBool(_) | Expr::LitStr(_) => 1,
+            Expr::Var(name) => match name.as_str() {
+                "period_start" | "period_end" => 1,
+                // A parameter reads its index-0 value: a lookup and its literal.
+                _ if self.ctx.scalars.contains(name) => 2,
+                _ => 1,
+            },
+            Expr::Index { index, .. } => one_plus(self.scalar(index)),
+            Expr::BinOp { left, right, .. } => {
+                let left = self.scalar(left);
+                one_plus(left.saturating_add(self.scalar(right)))
+            }
+            // `0 - operand`.
+            Expr::UnaryOp { operand, .. } => 2u64.saturating_add(self.scalar(operand)),
+            Expr::Call { func, args } => match func.as_str() {
+                "max"
+                | "min"
+                | "ceil"
+                | "floor"
+                | "days_between"
+                | "date_add_days"
+                | "date_add_months"
+                | "date_add_years"
+                | "sum_over_periods"
+                | "max_over_periods"
+                | "count_over_periods"
+                | "sum_top_n_over_periods" => one_plus(self.scalars(args)),
+                "len" | "sum" => 1,
+                // The related-entity count or sum, and its `where` clause: a
+                // rule that holds, or an input compared with `true`.
+                "count_where" | "sum_where" => {
+                    let predicate = args.last().and_then(|predicate| match predicate {
+                        Expr::Var(name) => Some(name),
+                        _ => None,
+                    });
+                    if predicate.is_some_and(|name| self.ctx.derived.contains(name)) {
+                        2
+                    } else {
+                        4
+                    }
                 }
+                _ => 0,
+            },
+            Expr::Cond {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let condition = self.judgment(condition);
+                let then_expr = self.scalar(then_expr);
+                one_plus(
+                    condition
+                        .saturating_add(then_expr)
+                        .saturating_add(self.scalar(else_expr)),
+                )
+            }
+            // Each arm is an `if` comparing a copy of the subject with the
+            // arm's pattern. After the last arm comes the wildcard's result
+            // or, without one, the node holding one more copy of the subject
+            // and every pattern. With no arm and a wildcard, the subject is
+            // lowered and dropped.
+            Expr::Match {
+                subject,
+                cases,
+                default,
+            } => {
+                let subject = self.scalar(subject);
+                let fallback = match default {
+                    Some(default) => self.scalar(default),
+                    None => cases.iter().fold(one_plus(subject), |total, (pattern, _)| {
+                        total.saturating_add(self.scalar(pattern))
+                    }),
+                };
+                if cases.is_empty() {
+                    self.dropped = self.dropped.saturating_add(subject);
+                }
+                cases.iter().fold(fallback, |total, (pattern, result)| {
+                    let pattern = self.scalar(pattern);
+                    total
+                        .saturating_add(2)
+                        .saturating_add(subject)
+                        .saturating_add(pattern)
+                        .saturating_add(self.scalar(result))
+                })
+            }
+            Expr::FieldAccess { .. } => 0,
+        }
+    }
+
+    fn scalars(&mut self, items: &[Expr]) -> u64 {
+        items
+            .iter()
+            .fold(0u64, |total, item| total.saturating_add(self.scalar(item)))
+    }
+
+    /// The expression `e` lowers to in judgment position.
+    fn judgment(&mut self, e: &Expr) -> u64 {
+        let one_plus = |size: u64| 1u64.saturating_add(size);
+        match e {
+            // `literal == true`.
+            Expr::LitBool(_) => 3,
+            Expr::Var(name)
+                if self.ctx.derived.contains(name)
+                    || self.ctx.relation_predicates.contains(name) =>
+            {
+                1
+            }
+            // `input == true`.
+            Expr::Var(_) => 3,
+            Expr::BinOp { op, left, right } => match op {
+                BinOpKind::And | BinOpKind::Or => {
+                    let left = self.judgment(left);
+                    one_plus(left.saturating_add(self.judgment(right)))
+                }
+                _ => {
+                    let left = self.scalar(left);
+                    one_plus(left.saturating_add(self.scalar(right)))
+                }
+            },
+            Expr::UnaryOp { operand, .. } => one_plus(self.judgment(operand)),
+            Expr::Call { func, args } if func == "exactly_one" => {
+                let operands = args
+                    .iter()
+                    .fold(0u64, |total, arg| total.saturating_add(self.judgment(arg)));
+                crate::spec::exactly_one_runtime_size(
+                    u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    operands,
+                )
             }
             _ => 0,
-        },
-        Expr::Cond {
-            condition,
-            then_expr,
-            else_expr,
-        } => one_plus(
-            judgment_runtime_size(condition, ctx)
-                .saturating_add(scalar_runtime_size(then_expr, ctx))
-                .saturating_add(scalar_runtime_size(else_expr, ctx)),
-        ),
-        // Each arm is an `if` comparing a copy of the subject with the arm's
-        // pattern. After the last arm comes the wildcard's result or, without
-        // one, the node holding one more copy of the subject and every
-        // pattern.
-        Expr::Match {
-            subject,
-            cases,
-            default,
-        } => {
-            let subject = scalar_runtime_size(subject, ctx);
-            let patterns = cases.iter().fold(0u64, |total, (pattern, _)| {
-                total.saturating_add(scalar_runtime_size(pattern, ctx))
-            });
-            let fallback = match default {
-                Some(default) => scalar_runtime_size(default, ctx),
-                None => one_plus(subject.saturating_add(patterns)),
-            };
-            cases.iter().fold(fallback, |total, (pattern, result)| {
-                total
-                    .saturating_add(2)
-                    .saturating_add(subject)
-                    .saturating_add(scalar_runtime_size(pattern, ctx))
-                    .saturating_add(scalar_runtime_size(result, ctx))
-            })
         }
-        Expr::FieldAccess { .. } => 0,
     }
 }
 
-/// How many runtime expression nodes `e` lowers to in judgment position: what
-/// [`lower_to_judgment`] builds (see [`scalar_runtime_size`]).
-fn judgment_runtime_size(e: &Expr, ctx: &LowerCtx) -> u64 {
-    let one_plus = |size: u64| 1u64.saturating_add(size);
-    match e {
-        // `literal == true`.
-        Expr::LitBool(_) => 3,
-        Expr::Var(name) if ctx.derived.contains(name) || ctx.relation_predicates.contains(name) => {
-            1
-        }
-        // `input == true`.
-        Expr::Var(_) => 3,
-        Expr::BinOp { op, left, right } => match op {
-            BinOpKind::And | BinOpKind::Or => one_plus(
-                judgment_runtime_size(left, ctx).saturating_add(judgment_runtime_size(right, ctx)),
-            ),
-            _ => one_plus(
-                scalar_runtime_size(left, ctx).saturating_add(scalar_runtime_size(right, ctx)),
-            ),
-        },
-        Expr::UnaryOp { operand, .. } => one_plus(judgment_runtime_size(operand, ctx)),
-        Expr::Call { func, args } if func == "exactly_one" => {
-            crate::spec::exactly_one_runtime_size(
-                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                args.iter().fold(0u64, |total, arg| {
-                    total.saturating_add(judgment_runtime_size(arg, ctx))
-                }),
-            )
-        }
-        _ => 0,
-    }
-}
-
-/// Refuse the formula of `name`, in judgment position or not, if it lowers to
-/// more than [`crate::spec::MAX_EXPRESSION_SIZE`] runtime nodes. Checked before
-/// lowering, which would otherwise build the whole tree first.
+/// Refuse the formula of `name`, in judgment position or not, if lowering it
+/// would build more than [`crate::spec::MAX_EXPRESSION_SIZE`] runtime nodes,
+/// those it drops included. Checked before lowering, which would otherwise
+/// build them first.
 fn check_lowered_size(
     expr: &Expr,
     ctx: &LowerCtx,
     judgment: bool,
     name: &str,
 ) -> Result<(), FormulaError> {
-    let size = if judgment {
-        judgment_runtime_size(expr, ctx)
+    let mut size = LoweringSize::new(ctx);
+    let kept = if judgment {
+        size.judgment(expr)
     } else {
-        scalar_runtime_size(expr, ctx)
+        size.scalar(expr)
     };
-    if size > crate::spec::MAX_EXPRESSION_SIZE {
+    if kept.saturating_add(size.dropped) > crate::spec::MAX_EXPRESSION_SIZE {
         return Err(FormulaError::lower(format!(
             "the formula of `{name}` expands to more than {} expression nodes; split it into named rules",
             crate::spec::MAX_EXPRESSION_SIZE
@@ -2055,11 +2087,18 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             if cases.is_empty() && default.is_none() {
                 return Err(FormulaError::lower("empty match".to_string()));
             }
-            let subj_scalar = lower_to_scalar(subject, ctx)?;
+            // A copy of the subject for each arm's comparison, and one for the
+            // fallback of a match without `_`. The last copy taken is the
+            // subject itself, so lowering builds no copy it does not keep. A
+            // match with only `_` takes none: its subject is lowered to check
+            // it and dropped (see `LoweringSize`).
+            let subject = lower_to_scalar(subject, ctx)?;
+            let mut copies =
+                std::iter::repeat_n(subject, cases.len() + usize::from(default.is_none()));
             let mut expr = match default {
                 Some(default) => lower_to_scalar(default, ctx)?,
                 None => ScalarExprSpec::NoMatch {
-                    subject: Box::new(subj_scalar.clone()),
+                    subject: Box::new(copies.next().expect("a copy for the fallback")),
                     patterns: cases
                         .iter()
                         .map(|(pattern, _)| lower_to_scalar(pattern, ctx))
@@ -2069,7 +2108,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             for (pat, res) in cases.iter().rev() {
                 expr = ScalarExprSpec::If {
                     condition: Box::new(JudgmentExprSpec::Comparison {
-                        left: Box::new(subj_scalar.clone()),
+                        left: Box::new(copies.next().expect("a copy for each arm")),
                         op: ComparisonOpSpec::Eq,
                         right: Box::new(lower_to_scalar(pat, ctx)?),
                     }),
@@ -3188,15 +3227,111 @@ mod depth_tests {
         });
     }
 
+    /// `shape` with the arms of some of its `match`es removed, leaving only
+    /// `_`, so the lowering drops their subjects.
+    fn without_some_arms(shape: Shape, rng: &mut Rng) -> Shape {
+        let inner = |shape: Box<Shape>, rng: &mut Rng| Box::new(without_some_arms(*shape, rng));
+        match shape {
+            Shape::Int(_) | Shape::Var(_) | Shape::Bool(_) => shape,
+            Shape::Unary(op, operand) => Shape::Unary(op, inner(operand, rng)),
+            Shape::Binary(op, left, right) => {
+                let left = inner(left, rng);
+                Shape::Binary(op, left, inner(right, rng))
+            }
+            Shape::Call(func, args) => Shape::Call(
+                func,
+                args.into_iter()
+                    .map(|arg| without_some_arms(arg, rng))
+                    .collect(),
+            ),
+            Shape::Index(target, index) => {
+                let target = inner(target, rng);
+                Shape::Index(target, inner(index, rng))
+            }
+            Shape::Field(object, field) => Shape::Field(inner(object, rng), field),
+            Shape::Group(group) => Shape::Group(inner(group, rng)),
+            Shape::Cond(branches, else_expr) => {
+                let branches = branches
+                    .into_iter()
+                    .map(|(condition, then_expr)| {
+                        let condition = without_some_arms(condition, rng);
+                        (condition, without_some_arms(then_expr, rng))
+                    })
+                    .collect();
+                Shape::Cond(branches, inner(else_expr, rng))
+            }
+            Shape::Match(subject, arms, default) => {
+                let subject = inner(subject, rng);
+                let arms: Vec<_> = arms
+                    .into_iter()
+                    .map(|(pattern, result)| (pattern, without_some_arms(result, rng)))
+                    .collect();
+                let default = default.map(|default| inner(default, rng));
+                let arms = if default.is_some() && rng.below(3) == 0 {
+                    Vec::new()
+                } else {
+                    arms
+                };
+                Shape::Match(subject, arms, default)
+            }
+        }
+    }
+
+    /// The nodes lowering `e` builds and drops, found without
+    /// `LoweringSize`: the subject of each `match` with only `_`, sized by
+    /// lowering it. Every subexpression of the formulas it is used on is
+    /// lowered once (their patterns are literals) and as an expression.
+    fn dropped_by_lowering(e: &Expr, ctx: &LowerCtx) -> u64 {
+        let children: Vec<&Expr> = match e {
+            Expr::LitInt(_)
+            | Expr::LitFloat(_)
+            | Expr::LitStr(_)
+            | Expr::LitBool(_)
+            | Expr::Var(_) => Vec::new(),
+            Expr::BinOp { left, right, .. } => vec![left, right],
+            Expr::UnaryOp { operand, .. } => vec![operand],
+            Expr::Call { args, .. } => args.iter().collect(),
+            Expr::FieldAccess { obj, .. } => vec![obj],
+            Expr::Index { target, index } => vec![target, index],
+            Expr::Cond {
+                condition,
+                then_expr,
+                else_expr,
+            } => vec![condition, then_expr, else_expr],
+            Expr::Match {
+                subject,
+                cases,
+                default,
+            } => std::iter::once(subject.as_ref())
+                .chain(cases.iter().flat_map(|(pattern, result)| [pattern, result]))
+                .chain(default.as_deref())
+                .collect(),
+        };
+        let own = match e {
+            Expr::Match {
+                subject,
+                cases,
+                default: Some(_),
+            } if cases.is_empty() => lower_to_scalar(subject, ctx)
+                .expect("a dropped subject lowers")
+                .runtime_size(),
+            _ => 0,
+        };
+        children
+            .into_iter()
+            .fold(own, |total, child| total + dropped_by_lowering(child, ctx))
+    }
+
     /// The pre-flight count is the lowered formula's runtime size, so the
-    /// size bound refuses exactly the formulas whose lowering would pass it.
-    /// On generated formulas, with `exactly_one` and `match` subjects that
-    /// are themselves `match`es, in contexts that make a name a parameter, a
-    /// rule or a relation predicate. A formula counted past a small cap is not
-    /// lowered, so a wrong count cannot make this test build a huge tree.
+    /// size bound refuses exactly the formulas whose lowering would pass it,
+    /// and what it counts as dropped is what lowering drops. On generated
+    /// formulas, with `exactly_one`, `match` subjects that are themselves
+    /// `match`es and `match`es with only `_`, in contexts that make a name a
+    /// parameter, a rule or a relation predicate. The formulas come from
+    /// fixed seeds, and the largest lowers to under 100,000 nodes, so no
+    /// count, right or wrong, can make this test build a large tree.
     #[test]
     fn the_lowering_count_is_the_lowered_runtime_size() {
-        const CAP: u64 = 200_000;
         let names = |set: &[&str]| {
             set.iter()
                 .map(|name| name.to_string())
@@ -3230,6 +3365,12 @@ mod depth_tests {
             ("sum_top_n_over_periods(a, 2)", false),
             ("match a: 1 => b 2 => c _ => 0", false),
             ("match a + 1: 1 => b 2 => c", false),
+            ("match a + b: _ => c", false),
+            (
+                "match (match a + b: _ => c): 1 => (match c: _ => 1) 2 => a",
+                false,
+            ),
+            ("(match (match a: 1 => 2 _ => 3): _ => b) > 1 or p", true),
             (
                 "match (match a: 1 => 2 _ => 3): 2 => b 3 => (match c: 1 => 1 _ => 0) _ => 0",
                 false,
@@ -3253,6 +3394,9 @@ mod depth_tests {
             let shape = if judgment {
                 let mut shape = generate_judgment(&mut rng, size);
                 if rng.below(2) == 0 {
+                    shape = without_some_arms(shape, &mut rng);
+                }
+                if rng.below(2) == 0 {
                     let count = 2 + rng.below(3);
                     let mut items = vec![shape];
                     for _ in 1..count {
@@ -3263,10 +3407,14 @@ mod depth_tests {
                 }
                 shape
             } else {
-                let shape = generate_scalar(&mut rng, size);
+                let mut shape = generate_scalar(&mut rng, size);
+                if rng.below(2) == 0 {
+                    shape = without_some_arms(shape, &mut rng);
+                }
                 if rng.below(3) == 0 {
-                    // A `match` whose subject is the generated formula.
-                    let arms = (0..1 + rng.below(4))
+                    // A `match` whose subject is the generated formula; with
+                    // no arms, one that drops it.
+                    let arms = (0..rng.below(5))
                         .map(|arm| (i64::try_from(arm).expect("small"), Shape::Var("c")))
                         .collect();
                     Shape::Match(
@@ -3280,7 +3428,7 @@ mod depth_tests {
             };
             cases.push((render(&shape), judgment));
         }
-        let (mut checked, mut largest, mut skipped) = (0usize, 0u64, 0usize);
+        let (mut checked, mut largest, mut dropping) = (0usize, 0u64, 0usize);
         let mut fixed_lowered = vec![false; fixed.len()];
         for (index, (formula, judgment)) in cases.iter().enumerate() {
             // Each fixed formula in every context; a generated one in one.
@@ -3299,15 +3447,12 @@ mod depth_tests {
                 };
                 let parsed = parse_at(formula, MAX_FORMULA_DEPTH)
                     .unwrap_or_else(|error| panic!("`{formula}`: {error}"));
+                let mut count = LoweringSize::new(&ctx);
                 let counted = if *judgment {
-                    judgment_runtime_size(&parsed, &ctx)
+                    count.judgment(&parsed)
                 } else {
-                    scalar_runtime_size(&parsed, &ctx)
+                    count.scalar(&parsed)
                 };
-                if counted > CAP {
-                    skipped += 1;
-                    continue;
-                }
                 let lowered = if *judgment {
                     lower_to_judgment(&parsed, &ctx).map(|expr| expr.runtime_size())
                 } else {
@@ -3315,8 +3460,14 @@ mod depth_tests {
                 };
                 if let Ok(size) = lowered {
                     assert_eq!(counted, size, "`{formula}` in context {context}");
+                    assert_eq!(
+                        count.dropped,
+                        dropped_by_lowering(&parsed, &ctx),
+                        "`{formula}` in context {context}: dropped"
+                    );
                     checked += 1;
                     largest = largest.max(size);
+                    dropping += usize::from(count.dropped > 0);
                     if index < fixed.len() {
                         fixed_lowered[index] = true;
                     }
@@ -3327,8 +3478,54 @@ mod depth_tests {
             assert!(lowered, "`{}` lowers in no context", fixed[index].0);
         }
         assert!(
-            checked > 2_500 && largest > 1_000,
-            "{checked} checked, the largest {largest} nodes, {skipped} skipped"
+            checked > 2_500 && largest > 1_000 && largest < 100_000 && dropping > 300,
+            "{checked} checked, the largest {largest} nodes, {dropping} dropping a subject"
+        );
+    }
+
+    /// A `match` with only `_` lowers its subject and drops it, so the
+    /// subject counts toward the size bound: exactly, and before anything is
+    /// built. `max` of `n` names is `n + 1` nodes, and the wildcard's `0` one.
+    /// The review's formula, whose subject is forty `match`es each the subject
+    /// of the next, keeps one node and drops `10 × 2^40 − 9`; only counted
+    /// here, never lowered.
+    #[test]
+    fn a_dropped_subject_counts_toward_the_size_bound() {
+        let ctx = LowerCtx {
+            scalars: HashSet::new(),
+            derived: HashSet::new(),
+            relation_predicates: HashSet::new(),
+            relations: std::cell::RefCell::new(HashSet::new()),
+        };
+        let max = crate::spec::MAX_EXPRESSION_SIZE;
+        let dropping_max_of = |names: u64| {
+            let names = usize::try_from(names).expect("fits");
+            format!("match max({}): _ => 0", vec!["x"; names].join(", "))
+        };
+        let parsed = parse_at(&dropping_max_of(max - 2), MAX_FORMULA_DEPTH).expect("parses");
+        let mut size = LoweringSize::new(&ctx);
+        assert_eq!((size.scalar(&parsed), size.dropped), (1, max - 1));
+        assert!(check_lowered_size(&parsed, &ctx, false, "f").is_ok());
+        let parsed = parse_at(&dropping_max_of(max - 1), MAX_FORMULA_DEPTH).expect("parses");
+        assert!(check_lowered_size(&parsed, &ctx, false, "f").is_err());
+
+        let mut subject = "x".to_string();
+        for _ in 0..40 {
+            subject = format!("(match {subject}: 0 => 0 1 => 0 _ => 0)");
+        }
+        let parsed =
+            parse_at(&format!("match {subject}: _ => 0"), MAX_FORMULA_DEPTH).expect("parses");
+        let mut size = LoweringSize::new(&ctx);
+        assert_eq!(size.scalar(&parsed), 1);
+        // `S(k + 1) = 2 S(k) + 9` from `S(0) = 1`: two arms each copy it.
+        assert_eq!(size.dropped, 10 * (1 << 40) - 9);
+        assert_eq!(
+            check_lowered_size(&parsed, &ctx, false, "f")
+                .expect_err("refused")
+                .to_string(),
+            format!(
+                "formula lower error: the formula of `f` expands to more than {max} expression nodes; split it into named rules"
+            )
         );
     }
 

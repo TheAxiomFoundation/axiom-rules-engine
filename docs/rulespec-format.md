@@ -391,9 +391,15 @@ every arm, and evaluating `exactly_one` of `n` arguments copies each argument
 `n` times. Nested, either grows exponentially, so a short formula could
 otherwise exhaust memory. The lowering counts a formula's nodes before it
 builds them and refuses one past the bound with ``the formula of `name`
-expands to more than 100000 expression nodes; split it into named rules``. A
-program read from JSON is counted the same way, with the depth check. The
-largest rule in the RuleSpec corpora on 2026-10-11 has 462 nodes.
+expands to more than 100000 expression nodes; split it into named rules``.
+The count includes the subject of a `match` whose only arm is `_`: lowering
+builds that subject to check it, then drops it. A program read from JSON is
+counted the same way, with the depth check. The largest rule in the RuleSpec
+corpora on 2026-10-11 has 462 nodes.
+
+Dense execution reads the column of a `match` fallback (no `_`) from the
+last arm itself rather than from a copy of it, so a `match` compiles to at
+most one dense node per lowered node (#241).
 
 A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one

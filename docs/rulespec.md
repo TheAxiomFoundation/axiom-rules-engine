@@ -659,7 +659,8 @@ arguments becomes `1 + n²` nodes plus `n` copies of the arguments. Nesting one
 `exactly_one` inside another multiplies those copies, so a rule's expression is
 limited to 100,000 nodes once expanded (see
 [nesting depth and size](rulespec-format.md#nesting-depth-and-size)). That
-admits up to 158 arguments that are bare inputs, or 315 that are rule references.
+admits up to 158 arguments that are bare inputs (`1 + 4n²` nodes) or 223 that
+are rule references (`1 + 2n²`).
 
 ## Currency rounding
 

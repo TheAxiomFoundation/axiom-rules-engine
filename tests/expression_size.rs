@@ -6,18 +6,30 @@
 //! operand `n` times, so nesting either grows the program exponentially within
 //! every depth bound. A chain of `exactly_one` 131 levels deep once grew a test
 //! process to 79 GB in two minutes. The formula lowering and the conversion
-//! now count nodes before building them and refuse past the bound.
+//! now count nodes before building them and refuse past the bound. The
+//! lowering's count includes the subject of a `match` with only `_`, which it
+//! builds and drops, and dense compiles a `match` fallback without a copy of
+//! the last arm, so neither builds more than the expression.
 //!
-//! Every case here runs in a child process that the test kills, and fails, if
-//! it grows past `CAP_MB` or runs past `TIMEOUT`. A regression fails these
-//! tests; it cannot exhaust the machine running them.
+//! Every case here runs in a child process. The test reads the child's
+//! resident memory every 10 ms and kills it, and fails, once it passes
+//! `CAP_MB`, if it runs past `TIMEOUT`, or if its memory cannot be read. So a
+//! regression fails these tests rather than growing without limit.
 
+use std::collections::HashMap;
 use std::fs::File;
-use std::process::{Command, Stdio};
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
 use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::dense::{
+    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseExecutionResult, DenseOutputValue,
+    DenseRelationBatchSpec, DenseRelationKey,
+};
+use axiom_rules_engine::depth::count_visits;
+use axiom_rules_engine::model::{Period, PeriodKind};
 use axiom_rules_engine::spec::{MAX_EXPRESSION_SIZE, ProgramSpec};
 use serde_json::{Value, json};
 
@@ -27,16 +39,71 @@ const CAP_MB: u64 = 1024;
 const TIMEOUT: Duration = Duration::from_secs(180);
 const CASE: &str = "AXIOM_EXPRESSION_SIZE_CASE";
 
+/// How long one read of a child's memory may take.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Run `case` in a child copy of this test binary, kill it if it grows past
 /// `CAP_MB` or `TIMEOUT`, and fail unless it passes.
 fn in_capped_child(case: &str) {
     run_capped("child_case", case);
 }
 
+/// The resident memory of process `pid`, in KB, as `ps` reports it. An error
+/// if `ps` cannot be run, fails, takes longer than `READ_TIMEOUT`, or prints
+/// anything but a number.
+fn resident_kb(pid: u32) -> Result<u64, String> {
+    let mut ps = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run ps: {error}"))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = ps.try_wait().map_err(|error| format!("ps: {error}"))? {
+            break status;
+        }
+        if started.elapsed() > READ_TIMEOUT {
+            let _ = ps.kill();
+            let _ = ps.wait();
+            return Err(format!("ps did not answer within {READ_TIMEOUT:?}"));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = ps.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    if let Some(mut err) = ps.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+    if !status.success() {
+        return Err(format!("ps exited with {status}: {}", stderr.trim()));
+    }
+    stdout
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("ps printed {:?}, not a size", stdout.trim()))
+}
+
 /// Run test `test` of this binary in a child with `case` in its environment,
 /// polling its resident memory; kill it and panic if it grows past `CAP_MB`
 /// or runs past `TIMEOUT`, and panic if it fails.
 fn run_capped(test: &str, case: &str) {
+    run_capped_reading(test, case, resident_kb);
+}
+
+/// Kill `child` and wait for it to exit.
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// [`run_capped`], reading the child's memory with `read`. A read that fails
+/// while the child is still running stops the child and fails the case: an
+/// unmeasured child is never left to grow.
+fn run_capped_reading(test: &str, case: &str, read: impl Fn(u32) -> Result<u64, String>) {
     let log = std::env::temp_dir().join(format!(
         "axiom-expression-size-{case}-{}.log",
         std::process::id()
@@ -60,22 +127,21 @@ fn run_capped(test: &str, case: &str) {
         if let Some(status) = child.try_wait().expect("poll child") {
             break (!status.success()).then(|| format!("exited with {status}"));
         }
-        let rss_kb = Command::new("ps")
-            .args(["-o", "rss=", "-p", &child.id().to_string()])
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(0);
+        let rss_kb = match read(child.id()) {
+            Ok(rss_kb) => rss_kb,
+            // `ps` finds no process once the child has exited.
+            Err(_) if child.try_wait().is_ok_and(|status| status.is_some()) => continue,
+            Err(error) => {
+                stop(&mut child);
+                break Some(format!("could not have its memory read: {error}"));
+            }
+        };
         if rss_kb > CAP_MB * 1024 {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             break Some(format!("grew past {CAP_MB} MB ({rss_kb} KB)"));
         }
         if started.elapsed() > TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             break Some(format!("ran past {TIMEOUT:?}"));
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -98,6 +164,8 @@ fn child_case() {
         "formula_match_subjects_nested" => formula_match_subjects_nested(),
         "formula_at_the_size_bound" => formula_at_the_size_bound(),
         "exactly_one_at_the_size_bound" => exactly_one_at_the_size_bound(),
+        "formula_match_with_only_a_wildcard" => formula_match_with_only_a_wildcard(),
+        "dense_match_fallbacks_in_last_arms" => dense_match_fallbacks_in_last_arms(),
         other => panic!("unknown case {other}"),
     }
 }
@@ -289,6 +357,208 @@ fn exactly_one_at_the_size_bound() {
     );
 }
 
+/// `match S: _ => 0`, where `S` is forty `match`es each the subject of the
+/// next, with two arms and `_`: `S` would lower to about 10 × 2^40 nodes, which
+/// the wildcard then drops. Lowering builds the subject to check it, so it
+/// counts it, and refuses the formula before building anything.
+fn formula_match_with_only_a_wildcard() {
+    let mut subject = "x".to_string();
+    for _ in 0..40 {
+        subject = format!("(match {subject}: 0 => 0 1 => 0 _ => 0)");
+    }
+    assert_refused_by_lowering(
+        CompiledProgramArtifact::from_rulespec_str(&rulespec(
+            "Integer",
+            &format!("match {subject}: _ => 0"),
+        ))
+        .expect_err("refused"),
+    );
+}
+
+/// `match x: 0 => (match x: 0 => (... 1))`, 40 deep and without `_`, for a
+/// household and for each of its members, and over a household's lifetime
+/// with a sum over the years innermost.
+const FALLBACKS_IN_LAST_ARMS: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "NESTED"
+  - name: member_deep
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: "NESTED"
+  - name: members_deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(member_of_household.member_deep)
+  - name: lifetime_deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: 2020-01-01
+        formula: "LIFETIME"
+"#;
+
+/// Each `match` without `_` ends in a fallback that fails the rows reaching
+/// it, and whose column is its last arm's value. Forty of them, each the last
+/// arm of the one before, are 281 runtime nodes; dense once compiled a copy of
+/// the last arm for each fallback, about 2^40 nodes, and evaluated each copy
+/// again. It now compiles each node once, here and in a household's sum over
+/// its members (where it inlines the members' rule), evaluates each node at
+/// most once per fallback above it plus once, and answers as explain does. The same
+/// holds in each of dense's three evaluators: a rule's rows, related rows,
+/// and a lifetime.
+fn dense_match_fallbacks_in_last_arms() {
+    let nest = |innermost: &str| {
+        let mut nested = innermost.to_string();
+        for _ in 0..40 {
+            nested = format!("match x: 0 => ({nested})");
+        }
+        nested
+    };
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        &FALLBACKS_IN_LAST_ARMS
+            .replace("NESTED", &nest("1"))
+            .replace("LIFETIME", &nest("sum_over_periods(e)")),
+    )
+    .expect("the module compiles");
+    let (dense, visits) = count_visits(|| {
+        DenseCompiledProgram::from_artifact(&artifact, Some("Household")).expect("dense compiles")
+    });
+    // `deep`, the member rule inlined into `members_deep`, and
+    // `lifetime_deep`: each at most its 281 runtime nodes.
+    assert!(visits <= 3 * 281, "dense compiled {visits} nodes");
+
+    let period = Period {
+        kind: PeriodKind::Month,
+        start: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).expect("date"),
+        end: chrono::NaiveDate::from_ymd_opt(2026, 1, 31).expect("date"),
+    };
+    // Two households, the first with two members.
+    let batch = |household_x: [i64; 2], member_x: [i64; 3]| DenseBatchSpec {
+        row_count: 2,
+        inputs: HashMap::from([
+            ("x".to_string(), DenseColumn::Integer(household_x.to_vec())),
+            ("e".to_string(), DenseColumn::Integer(vec![5, 7])),
+        ]),
+        relations: HashMap::from([(
+            DenseRelationKey {
+                name: "member_of_household".to_string(),
+                current_slot: 1,
+                related_slot: 0,
+            },
+            DenseRelationBatchSpec {
+                offsets: vec![0, 2, 3],
+                inputs: HashMap::from([("x".to_string(), DenseColumn::Integer(member_x.to_vec()))]),
+            },
+        )]),
+    };
+    let outputs = ["deep".to_string(), "members_deep".to_string()];
+    let (result, visits) =
+        count_visits(|| dense.execute(&period, batch([0, 0], [0, 0, 0]), &outputs));
+    let result = result.expect("every row reaches the innermost arm");
+    // Each fallback evaluates its last arm once more, for no rows, and any
+    // fallback inside it reuses that: so each of the 281 nodes is evaluated
+    // at most once, and once more for each of the 40 fallbacks above it.
+    assert!(visits <= 281 * 41, "dense evaluated {visits} nodes");
+    let integers = |result: &DenseExecutionResult, name: &str| match &result.outputs[name] {
+        DenseOutputValue::Scalar(DenseColumn::Integer(values)) => values.clone(),
+        DenseOutputValue::Scalar(DenseColumn::Decimal(values)) => values
+            .iter()
+            .map(|value| i64::try_from(*value).expect("integral"))
+            .collect(),
+        other => panic!("{name}: {other:?}"),
+    };
+    assert_eq!(integers(&result, "deep"), vec![1, 1]);
+    assert_eq!(integers(&result, "members_deep"), vec![2, 1]);
+
+    // Over two years, `e` summed innermost: 5 and 7 each year.
+    let year = |year: i32| Period {
+        kind: PeriodKind::TaxYear,
+        start: chrono::NaiveDate::from_ymd_opt(year, 1, 1).expect("date"),
+        end: chrono::NaiveDate::from_ymd_opt(year, 12, 31).expect("date"),
+    };
+    let years = [year(2024), year(2025)];
+    let lifetime = ["lifetime_deep".to_string()];
+    let (result, visits) = count_visits(|| {
+        dense.execute_lifetime(
+            &years,
+            vec![batch([0, 0], [0, 0, 0]), batch([0, 0], [0, 0, 0])],
+            &lifetime,
+        )
+    });
+    let result = result.expect("every year reaches the innermost arm");
+    assert!(
+        visits <= 281 * 41,
+        "dense evaluated {visits} nodes over a lifetime"
+    );
+    assert_eq!(integers(&result, "lifetime_deep"), vec![10, 14]);
+    let lifetime_error = dense
+        .execute_lifetime(
+            &years,
+            vec![batch([0, 1], [0, 0, 0]), batch([0, 1], [0, 0, 0])],
+            &lifetime,
+        )
+        .expect_err("dense fails the uncovered household's lifetime")
+        .to_string();
+    assert!(
+        lifetime_error.contains("`lifetime_deep` covers `x` = 1"),
+        "{lifetime_error}"
+    );
+
+    // A row no arm covers fails with explain's error, at a household and at
+    // a member.
+    let program = serde_json::to_value(&artifact.program).expect("program serializes");
+    let explained = answer(
+        "explain",
+        &program,
+        ("x", json!({"kind": "integer", "value": 1})),
+    )
+    .expect_err("explain fails the uncovered household");
+    let dense_error = dense
+        .execute(&period, batch([1, 0], [0, 0, 0]), &["deep".to_string()])
+        .expect_err("dense fails the uncovered household")
+        .to_string();
+    assert!(
+        explained.contains(&dense_error),
+        "dense: {dense_error}\nexplain: {explained}"
+    );
+    assert!(
+        dense_error.contains("`deep` covers `x` = 1"),
+        "{dense_error}"
+    );
+    let member_error = dense
+        .execute(
+            &period,
+            batch([0, 0], [0, 1, 0]),
+            &["members_deep".to_string()],
+        )
+        .expect_err("dense fails the household of the uncovered member")
+        .to_string();
+    assert!(
+        member_error.contains("`member_deep` covers `x` = 1"),
+        "{member_error}"
+    );
+}
+
 #[test]
 fn a_formula_of_nested_exactly_one_is_refused() {
     in_capped_child("formula_exactly_one_40_deep");
@@ -312,6 +582,48 @@ fn a_formula_at_the_size_bound_answers_and_one_node_past_it_is_refused() {
 #[test]
 fn exactly_one_at_the_size_bound_answers_and_one_operand_more_is_refused() {
     in_capped_child("exactly_one_at_the_size_bound");
+}
+
+#[test]
+fn a_match_with_only_a_wildcard_is_refused_for_the_subject_it_would_drop() {
+    in_capped_child("formula_match_with_only_a_wildcard");
+}
+
+#[test]
+fn dense_compiles_match_fallbacks_in_last_arms_once() {
+    in_capped_child("dense_match_fallbacks_in_last_arms");
+}
+
+/// A child whose memory cannot be read is stopped and reported, not left to
+/// run unmeasured.
+#[test]
+fn a_child_whose_memory_cannot_be_read_is_stopped() {
+    if std::env::var(CASE).as_deref() == Ok("unread") {
+        std::thread::sleep(TIMEOUT);
+        return;
+    }
+    let started = Instant::now();
+    let outcome = std::panic::catch_unwind(|| {
+        run_capped_reading(
+            "a_child_whose_memory_cannot_be_read_is_stopped",
+            "unread",
+            |_| Err("no reading".to_string()),
+        );
+    });
+    let message = outcome
+        .expect_err("the unmeasured child is stopped")
+        .downcast::<String>()
+        .map(|message| *message)
+        .unwrap_or_default();
+    assert!(
+        message.contains("could not have its memory read: no reading"),
+        "{message}"
+    );
+    assert!(
+        started.elapsed() < TIMEOUT / 2,
+        "stopped only after {:?}",
+        started.elapsed()
+    );
 }
 
 /// The cap works: a child that allocates past it is stopped and reported.
