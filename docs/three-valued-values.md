@@ -812,7 +812,7 @@ cases.
 | Step | State |
 |---|---|
 | Design note | Approved by the fourth independent review (2026-10-10), after rejections in rounds 1–3. Reviews and responses are kept outside the repository. |
-| PR 1, origination and judgments | Not started |
+| PR 1, origination and judgments | In review: the explain interpreter (`src/engine.rs`) and the model types (`src/model.rs`), behind the hidden engine option; tested by `tests/three_valued.rs` |
 | PR 2, scalars and aggregates | Not started |
 | PR 3, relations | Not started |
 | PR 4, outputs and schema | Not started |
