@@ -527,14 +527,134 @@ const METADATA_FIELDS: &[&str] = &[
     "status",
 ];
 
+/// The deepest a RuleSpec formula may nest, in levels.
+///
+/// Every stage after parsing walks a formula's expression tree recursively:
+/// lowering, conversion to the runtime program, each evaluator and the dense
+/// compiler. A formula nested a few thousand levels deep, such as `((((1))))`
+/// or `----1`, overflowed the stack. That aborts the process: it is not a
+/// panic, so no host can catch it, and in wasm it is a trap. The parser
+/// refuses a formula deeper than this before it builds a tree that deep, so
+/// no later stage recurses further.
+///
+/// A formula's depth counts the levels of the tree lowering builds from it;
+/// lowering adds at most two more. Each operator, call, index, field access
+/// and `if` is a level, so a flat chain like `a + b + c` nests: it is
+/// `(a + b) + c`. An `elif` or a `match` arm is a level too, because lowering
+/// nests one `if` per branch. The parser also counts the expressions it is
+/// inside while it parses, so parentheses, which build no level, cannot nest
+/// past the bound either.
+///
+/// The bound equals the depth at which the evaluators defer a rule reference
+/// in a release build ([`crate::depth`]). A chain of rules defers there, but
+/// a formula cannot defer inside itself, so the bound caps what one formula
+/// adds to a stack. Stack use is linear in depth. Measured in a release build
+/// over the ways of nesting in `tests/formula_depth.rs`, a formula at the
+/// bound took at most 0.4 MiB to parse, lower, compile and evaluate in
+/// explain and fast, and 0.6 MiB in dense, so every mode fits a 1 MiB thread.
+/// A debug build took up to 5.8 MiB.
+///
+/// The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76 levels:
+/// a generated tariff rule whose `elif` chain branches on the country of
+/// origin. A formula that needs more than the bound splits into named rules:
+/// a reference to a rule is one level, however deep that rule is, and a chain
+/// of rules can be any length.
+pub const MAX_FORMULA_DEPTH: usize = 128;
+
+/// A parsed expression and its depth (see [`MAX_FORMULA_DEPTH`]).
+struct Parsed {
+    expr: Expr,
+    depth: usize,
+}
+
+impl Parsed {
+    fn leaf(expr: Expr) -> Self {
+        Self { expr, depth: 1 }
+    }
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Expressions the parser is inside on its current path (see
+    /// [`MAX_FORMULA_DEPTH`]).
+    nesting: usize,
+    /// The deepest a formula may nest: [`MAX_FORMULA_DEPTH`], or another
+    /// bound in the unit tests.
+    max_depth: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            nesting: 0,
+            max_depth: MAX_FORMULA_DEPTH,
+        }
+    }
+
+    /// A parser that bounds formulas at `max_depth` levels instead.
+    #[cfg(test)]
+    fn with_max_depth(tokens: Vec<Token>, max_depth: usize) -> Self {
+        Self {
+            max_depth,
+            ..Self::new(tokens)
+        }
+    }
+
+    fn too_deep(&self, at: &Token) -> FormulaError {
+        FormulaError::parse(
+            at.line,
+            at.col,
+            format!(
+                "formula nests more than {} levels deep; split it into named rules",
+                self.max_depth
+            ),
+        )
+    }
+
+    /// `depth`, if it is within the bound; otherwise the depth error, located
+    /// at `at`.
+    fn within_bound(&self, depth: usize, at: &Token) -> Result<usize, FormulaError> {
+        if depth > self.max_depth {
+            return Err(self.too_deep(at));
+        }
+        Ok(depth)
+    }
+
+    /// Parse with `parse` one expression deeper than the caller, refusing to
+    /// nest past the bound before recursing.
+    fn nested(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<Parsed, FormulaError>,
+    ) -> Result<Parsed, FormulaError> {
+        if self.nesting >= self.max_depth {
+            return Err(self.too_deep(self.peek(0)));
+        }
+        self.nesting += 1;
+        let parsed = parse(self);
+        self.nesting -= 1;
+        parsed
+    }
+
+    /// `left op right`, if it is within the bound.
+    fn binary(
+        &self,
+        op: BinOpKind,
+        left: Parsed,
+        right: Parsed,
+        at: &Token,
+    ) -> Result<Parsed, FormulaError> {
+        let depth = self.within_bound(1 + left.depth.max(right.depth), at)?;
+        Ok(Parsed {
+            expr: Expr::BinOp {
+                op,
+                left: Box::new(left.expr),
+                right: Box::new(right.expr),
+            },
+            depth,
+        })
     }
 
     fn peek(&self, offset: usize) -> &Token {
@@ -779,33 +899,49 @@ impl Parser {
         }
     }
 
+    /// Parse a whole expression: a formula, or one dated value of a
+    /// declaration.
     fn parse_expr(&mut self) -> Result<Expr, FormulaError> {
-        // Let-bindings: IDENT ASSIGN value body
-        if self.peek(0).ty == TokType::Ident && self.peek(1).ty == TokType::Assign {
-            // Let-bindings aren't lowered by our engine yet. Inline the value
-            // at the use site manually; until then, this is an error if hit.
-            let tok = self.peek(0).clone();
-            return Err(FormulaError::parse(
-                tok.line,
-                tok.col,
-                "let-bindings are not supported in RuleSpec formulas yet".to_string(),
-            ));
-        }
-        if self.at(&[TokType::Match]) {
-            return self.parse_match();
-        }
-        if self.at(&[TokType::If]) {
-            return self.parse_cond();
-        }
-        self.parse_or()
+        Ok(self.parse_nested_expr()?.expr)
     }
 
-    fn parse_match(&mut self) -> Result<Expr, FormulaError> {
-        self.consume(TokType::Match)?;
+    /// Parse an expression inside the one being parsed: a parenthesized
+    /// group, an argument, an index or a branch.
+    fn parse_nested_expr(&mut self) -> Result<Parsed, FormulaError> {
+        self.nested(|parser| {
+            // Let-bindings: IDENT ASSIGN value body
+            if parser.peek(0).ty == TokType::Ident && parser.peek(1).ty == TokType::Assign {
+                // Let-bindings aren't lowered by our engine yet. Inline the value
+                // at the use site manually; until then, this is an error if hit.
+                let tok = parser.peek(0).clone();
+                return Err(FormulaError::parse(
+                    tok.line,
+                    tok.col,
+                    "let-bindings are not supported in RuleSpec formulas yet".to_string(),
+                ));
+            }
+            if parser.at(&[TokType::Match]) {
+                return parser.parse_match();
+            }
+            if parser.at(&[TokType::If]) {
+                return parser.parse_cond();
+            }
+            parser.parse_or()
+        })
+    }
+
+    fn parse_match(&mut self) -> Result<Parsed, FormulaError> {
+        let keyword = self.consume(TokType::Match)?;
         let subject = self.parse_or()?;
         self.consume(TokType::Colon)?;
         let mut cases = Vec::new();
-        let mut default = None;
+        let mut default: Option<Parsed> = None;
+        // Lowering nests one `if` per arm, each comparing the subject with
+        // the arm's pattern: arm `i` (from 1) puts its result `i` levels down
+        // and its comparison one level further. `lowered` is the deepest of
+        // those so far.
+        let mut lowered = 0;
+        let mut result_depth = 0;
         while matches!(
             self.peek(0).ty,
             TokType::Int
@@ -824,89 +960,95 @@ impl Parser {
                     "a match wildcard arm must be final",
                 ));
             }
+            let arm = self.peek(0).clone();
             let pat = self.parse_primary()?;
             self.consume(TokType::Arrow)?;
-            let res = self.parse_expr()?;
-            if matches!(&pat, Expr::Var(name) if name == "_") {
-                default = Some(Box::new(res));
+            let res = self.parse_nested_expr()?;
+            result_depth = result_depth.max(res.depth);
+            if matches!(&pat.expr, Expr::Var(name) if name == "_") {
+                default = Some(res);
             } else {
-                cases.push((pat, res));
+                let level = cases.len() + 1;
+                lowered = lowered.max(level + res.depth.max(1 + subject.depth.max(pat.depth)));
+                self.within_bound(lowered, &arm)?;
+                cases.push((pat.expr, res.expr));
             }
         }
-        Ok(Expr::Match {
-            subject: Box::new(subject),
-            cases,
-            default,
+        // After the last arm comes the wildcard's result. Without a wildcard
+        // it is the node that reports an uncovered subject, which holds the
+        // subject and the patterns no deeper than the last arm's comparison.
+        let fallback = default.as_ref().map_or(0, |default| default.depth);
+        // A match with no arms lowers to its wildcard's result alone, but the
+        // tree parsed here still holds the subject and that result one level
+        // down.
+        let parsed = 1 + subject.depth.max(result_depth);
+        let depth = self.within_bound(lowered.max(cases.len() + fallback).max(parsed), &keyword)?;
+        Ok(Parsed {
+            expr: Expr::Match {
+                subject: Box::new(subject.expr),
+                cases,
+                default: default.map(|default| Box::new(default.expr)),
+            },
+            depth,
         })
     }
 
-    fn parse_cond(&mut self) -> Result<Expr, FormulaError> {
-        self.consume(TokType::If)?;
-        let cond = self.parse_or()?;
+    fn parse_cond(&mut self) -> Result<Parsed, FormulaError> {
+        // `if c1: t1 elif c2: t2 else: e` is `if c1: t1 else: (if c2: t2
+        // else: e)`, so branch `i` (from 1) sits `i` levels down. The chain
+        // is read in a loop and nested afterwards, so its length costs no
+        // stack.
+        let mut keyword = self.consume(TokType::If)?;
+        let mut branches = Vec::new();
+        let mut depth = 0;
+        loop {
+            let condition = self.parse_or()?;
+            self.consume(TokType::Colon)?;
+            let then_expr = self.parse_nested_expr()?;
+            let level = branches.len() + 1;
+            depth = depth.max(level + condition.depth.max(then_expr.depth));
+            self.within_bound(depth, &keyword)?;
+            branches.push((condition.expr, then_expr.expr));
+            match self.match_one(&[TokType::Elif]) {
+                Some(elif) => keyword = elif,
+                None => break,
+            }
+        }
+        let else_keyword = self.consume(TokType::Else)?;
         self.consume(TokType::Colon)?;
-        let then_expr = self.parse_expr()?;
-        let else_expr = if self.match_one(&[TokType::Elif]).is_some() {
-            let elif_cond = self.parse_or()?;
-            self.consume(TokType::Colon)?;
-            let elif_then = self.parse_expr()?;
-            self.parse_elif_chain(elif_cond, elif_then)?
-        } else {
-            self.consume(TokType::Else)?;
-            self.consume(TokType::Colon)?;
-            self.parse_expr()?
-        };
-        Ok(Expr::Cond {
-            condition: Box::new(cond),
-            then_expr: Box::new(then_expr),
-            else_expr: Box::new(else_expr),
-        })
+        let else_expr = self.parse_nested_expr()?;
+        let depth =
+            self.within_bound(depth.max(branches.len() + else_expr.depth), &else_keyword)?;
+        let mut expr = else_expr.expr;
+        for (condition, then_expr) in branches.into_iter().rev() {
+            expr = Expr::Cond {
+                condition: Box::new(condition),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(expr),
+            };
+        }
+        Ok(Parsed { expr, depth })
     }
 
-    fn parse_elif_chain(&mut self, cond: Expr, then_expr: Expr) -> Result<Expr, FormulaError> {
-        let else_expr = if self.match_one(&[TokType::Elif]).is_some() {
-            let next_cond = self.parse_or()?;
-            self.consume(TokType::Colon)?;
-            let next_then = self.parse_expr()?;
-            self.parse_elif_chain(next_cond, next_then)?
-        } else {
-            self.consume(TokType::Else)?;
-            self.consume(TokType::Colon)?;
-            self.parse_expr()?
-        };
-        Ok(Expr::Cond {
-            condition: Box::new(cond),
-            then_expr: Box::new(then_expr),
-            else_expr: Box::new(else_expr),
-        })
-    }
-
-    fn parse_or(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_or(&mut self) -> Result<Parsed, FormulaError> {
         let mut left = self.parse_and()?;
-        while self.match_one(&[TokType::Or]).is_some() {
+        while let Some(or) = self.match_one(&[TokType::Or]) {
             let right = self.parse_and()?;
-            left = Expr::BinOp {
-                op: BinOpKind::Or,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = self.binary(BinOpKind::Or, left, right, &or)?;
         }
         Ok(left)
     }
 
-    fn parse_and(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_and(&mut self) -> Result<Parsed, FormulaError> {
         let mut left = self.parse_cmp()?;
-        while self.match_one(&[TokType::And]).is_some() {
+        while let Some(and) = self.match_one(&[TokType::And]) {
             let right = self.parse_cmp()?;
-            left = Expr::BinOp {
-                op: BinOpKind::And,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = self.binary(BinOpKind::And, left, right, &and)?;
         }
         Ok(left)
     }
 
-    fn parse_cmp(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_cmp(&mut self) -> Result<Parsed, FormulaError> {
         let left = self.parse_add()?;
         let op = match self.peek(0).ty {
             TokType::Lt => Some(BinOpKind::Lt),
@@ -918,18 +1060,15 @@ impl Parser {
             _ => None,
         };
         if let Some(op) = op {
+            let at = self.peek(0).clone();
             self.pos += 1;
             let right = self.parse_add()?;
-            return Ok(Expr::BinOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+            return self.binary(op, left, right, &at);
         }
         Ok(left)
     }
 
-    fn parse_add(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_add(&mut self) -> Result<Parsed, FormulaError> {
         let mut left = self.parse_mul()?;
         loop {
             let op = match self.peek(0).ty {
@@ -937,18 +1076,15 @@ impl Parser {
                 TokType::Minus => BinOpKind::Sub,
                 _ => break,
             };
+            let at = self.peek(0).clone();
             self.pos += 1;
             let right = self.parse_mul()?;
-            left = Expr::BinOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = self.binary(op, left, right, &at)?;
         }
         Ok(left)
     }
 
-    fn parse_mul(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_mul(&mut self) -> Result<Parsed, FormulaError> {
         let mut left = self.parse_unary()?;
         loop {
             let op = match self.peek(0).ty {
@@ -956,41 +1092,43 @@ impl Parser {
                 TokType::Slash => BinOpKind::Div,
                 _ => break,
             };
+            let at = self.peek(0).clone();
             self.pos += 1;
             let right = self.parse_unary()?;
-            left = Expr::BinOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = self.binary(op, left, right, &at)?;
         }
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, FormulaError> {
-        if self.match_one(&[TokType::Minus]).is_some() {
-            let operand = self.parse_unary()?;
-            return Ok(Expr::UnaryOp {
-                op: UnaryOpKind::Neg,
-                operand: Box::new(operand),
-            });
+    fn parse_unary(&mut self) -> Result<Parsed, FormulaError> {
+        if let Some(minus) = self.match_one(&[TokType::Minus]) {
+            return self.parse_operand(UnaryOpKind::Neg, &minus);
         }
-        if self.match_one(&[TokType::Not]).is_some() {
-            let operand = self.parse_unary()?;
-            return Ok(Expr::UnaryOp {
-                op: UnaryOpKind::Not,
-                operand: Box::new(operand),
-            });
+        if let Some(not) = self.match_one(&[TokType::Not]) {
+            return self.parse_operand(UnaryOpKind::Not, &not);
         }
         self.parse_postfix()
     }
 
-    fn parse_postfix(&mut self) -> Result<Expr, FormulaError> {
+    /// The operand of prefix operator `op`, which was read at `at`.
+    fn parse_operand(&mut self, op: UnaryOpKind, at: &Token) -> Result<Parsed, FormulaError> {
+        let operand = self.nested(Self::parse_unary)?;
+        let depth = self.within_bound(1 + operand.depth, at)?;
+        Ok(Parsed {
+            expr: Expr::UnaryOp {
+                op,
+                operand: Box::new(operand.expr),
+            },
+            depth,
+        })
+    }
+
+    fn parse_postfix(&mut self) -> Result<Parsed, FormulaError> {
         let mut expr = self.parse_primary()?;
         loop {
             if self.at(&[TokType::LParen]) {
                 // Call — expr must be a Var
-                let func = match &expr {
+                let func = match &expr.expr {
                     Expr::Var(name) => name.clone(),
                     _ => {
                         let tok = self.peek(0).clone();
@@ -1001,30 +1139,44 @@ impl Parser {
                         ));
                     }
                 };
-                self.consume(TokType::LParen)?;
+                let open = self.consume(TokType::LParen)?;
                 let mut args = Vec::new();
+                let mut depth = 0;
                 if !self.at(&[TokType::RParen]) {
-                    args.push(self.parse_expr()?);
-                    while self.match_one(&[TokType::Comma]).is_some() {
-                        args.push(self.parse_expr()?);
+                    loop {
+                        let arg = self.parse_nested_expr()?;
+                        depth = depth.max(arg.depth);
+                        args.push(arg.expr);
+                        if self.match_one(&[TokType::Comma]).is_none() {
+                            break;
+                        }
                     }
                 }
                 self.consume(TokType::RParen)?;
-                expr = Expr::Call { func, args };
+                expr = Parsed {
+                    expr: Expr::Call { func, args },
+                    depth: self.within_bound(1 + depth, &open)?,
+                };
             } else if self.at(&[TokType::Dot]) {
-                self.consume(TokType::Dot)?;
+                let dot = self.consume(TokType::Dot)?;
                 let field = self.consume(TokType::Ident)?.value;
-                expr = Expr::FieldAccess {
-                    obj: Box::new(expr),
-                    field,
+                expr = Parsed {
+                    depth: self.within_bound(1 + expr.depth, &dot)?,
+                    expr: Expr::FieldAccess {
+                        obj: Box::new(expr.expr),
+                        field,
+                    },
                 };
             } else if self.at(&[TokType::LBracket]) {
-                self.consume(TokType::LBracket)?;
-                let index = self.parse_expr()?;
+                let open = self.consume(TokType::LBracket)?;
+                let index = self.parse_nested_expr()?;
                 self.consume(TokType::RBracket)?;
-                expr = Expr::Index {
-                    target: Box::new(expr),
-                    index: Box::new(index),
+                expr = Parsed {
+                    depth: self.within_bound(1 + expr.depth.max(index.depth), &open)?,
+                    expr: Expr::Index {
+                        target: Box::new(expr.expr),
+                        index: Box::new(index.expr),
+                    },
                 };
             } else {
                 break;
@@ -1033,7 +1185,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, FormulaError> {
+    fn parse_primary(&mut self) -> Result<Parsed, FormulaError> {
         let tok = self.peek(0).clone();
         match tok.ty {
             TokType::Int => {
@@ -1045,33 +1197,33 @@ impl Parser {
                         .map_err(|e: std::num::ParseIntError| {
                             FormulaError::parse(tok.line, tok.col, e.to_string())
                         })?;
-                Ok(Expr::LitInt(v))
+                Ok(Parsed::leaf(Expr::LitInt(v)))
             }
             TokType::Float => {
                 self.pos += 1;
                 let v = Decimal::from_str(&tok.value.replace('_', ""))
                     .map_err(|e| FormulaError::parse(tok.line, tok.col, e.to_string()))?;
-                Ok(Expr::LitFloat(v))
+                Ok(Parsed::leaf(Expr::LitFloat(v)))
             }
             TokType::String => {
                 self.pos += 1;
-                Ok(Expr::LitStr(tok.value))
+                Ok(Parsed::leaf(Expr::LitStr(tok.value)))
             }
             TokType::True => {
                 self.pos += 1;
-                Ok(Expr::LitBool(true))
+                Ok(Parsed::leaf(Expr::LitBool(true)))
             }
             TokType::False => {
                 self.pos += 1;
-                Ok(Expr::LitBool(false))
+                Ok(Parsed::leaf(Expr::LitBool(false)))
             }
             TokType::Ident | TokType::Path => {
                 self.pos += 1;
-                Ok(Expr::Var(tok.value))
+                Ok(Parsed::leaf(Expr::Var(tok.value)))
             }
             TokType::LParen => {
                 self.consume(TokType::LParen)?;
-                let e = self.parse_expr()?;
+                let e = self.parse_nested_expr()?;
                 self.consume(TokType::RParen)?;
                 Ok(e)
             }
@@ -2036,4 +2188,847 @@ pub(crate) fn lower_judgment_formula(
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     lower_to_judgment(&expr, &ctx)
+}
+
+#[cfg(test)]
+mod depth_tests {
+    //! The parser's bound on formula depth (see [`MAX_FORMULA_DEPTH`]).
+    //!
+    //! The parser counts a formula's depth while it builds the tree: from the
+    //! inside out, and arm by arm through a `match` or an `elif` chain. These
+    //! tests check that count against an independent one. A generated formula
+    //! has a shape, its depth is defined on that shape from the outside in,
+    //! and the parser must accept the formula at exactly the bounds the
+    //! definition allows and build the same tree at every bound that accepts
+    //! it. They also check the depth against what the bound is for: the tree
+    //! lowering builds is never more than two levels deeper.
+
+    use super::*;
+
+    /// Room for a debug build to parse to the bound; release needs far less
+    /// (`tests/formula_depth.rs` measures the release stack).
+    const STACK: usize = 16 * 1024 * 1024;
+
+    fn on_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(STACK)
+                .spawn_scoped(scope, f)
+                .expect("spawn test thread")
+                .join()
+                .expect("test thread")
+        })
+    }
+
+    fn parse_at(formula: &str, max_depth: usize) -> Result<Expr, FormulaError> {
+        let tokens = Lexer::new(formula).tokenise()?;
+        let mut parser = Parser::with_max_depth(tokens, max_depth);
+        let expr = parser.parse_expr()?;
+        assert_eq!(parser.nesting, 0, "the parser left `{formula}` nested");
+        assert_eq!(
+            parser.peek(0).ty,
+            TokType::Eof,
+            "the parser stopped early in `{formula}`"
+        );
+        Ok(expr)
+    }
+
+    fn too_deep(result: &Result<Expr, FormulaError>, max_depth: usize) -> bool {
+        matches!(
+            result,
+            Err(FormulaError::Parse { message, .. })
+                if *message == format!(
+                    "formula nests more than {max_depth} levels deep; split it into named rules"
+                )
+        )
+    }
+
+    /// The smallest bound that accepts `formula`.
+    fn needed(formula: &str) -> usize {
+        (1..=4 * MAX_FORMULA_DEPTH)
+            .find(|bound| parse_at(formula, *bound).is_ok())
+            .unwrap_or_else(|| panic!("no bound accepts `{formula}`"))
+    }
+
+    /// A generated formula as it is written: parentheses and `elif` chains
+    /// are part of the shape.
+    #[derive(Clone, Debug)]
+    enum Shape {
+        Int(i64),
+        Var(&'static str),
+        Bool(bool),
+        Unary(UnaryOpKind, Box<Shape>),
+        Binary(BinOpKind, Box<Shape>, Box<Shape>),
+        Call(&'static str, Vec<Shape>),
+        Index(Box<Shape>, Box<Shape>),
+        Field(Box<Shape>, &'static str),
+        Group(Box<Shape>),
+        /// `if c: t elif c: t else: e`
+        Cond(Vec<(Shape, Shape)>, Box<Shape>),
+        /// `match s: p => r p => r _ => d`
+        Match(Box<Shape>, Vec<(i64, Shape)>, Option<Box<Shape>>),
+    }
+
+    /// How tightly a shape binds: the grammar rule that parses it.
+    fn binding(shape: &Shape) -> u8 {
+        match shape {
+            Shape::Cond(..) | Shape::Match(..) => 0,
+            Shape::Binary(op, ..) => binary_binding(op),
+            Shape::Unary(..) => 6,
+            Shape::Call(..) | Shape::Index(..) | Shape::Field(..) => 7,
+            Shape::Int(_) | Shape::Var(_) | Shape::Bool(_) | Shape::Group(_) => 8,
+        }
+    }
+
+    fn binary_binding(op: &BinOpKind) -> u8 {
+        match op {
+            BinOpKind::Or => 1,
+            BinOpKind::And => 2,
+            BinOpKind::Lt
+            | BinOpKind::Gt
+            | BinOpKind::Le
+            | BinOpKind::Ge
+            | BinOpKind::Eq
+            | BinOpKind::Ne => 3,
+            BinOpKind::Add | BinOpKind::Sub => 4,
+            BinOpKind::Mul | BinOpKind::Div => 5,
+        }
+    }
+
+    /// `shape`, in parentheses unless it binds at least as tightly as `binding`.
+    fn at_least(shape: Shape, required: u8) -> Shape {
+        if binding(&shape) >= required {
+            shape
+        } else {
+            Shape::Group(Box::new(shape))
+        }
+    }
+
+    /// `left op right` with the parentheses the grammar needs. `or`, `and`,
+    /// `+ -` and `* /` chain to the left; a comparison does not chain.
+    fn binary(op: BinOpKind, left: Shape, right: Shape) -> Shape {
+        let level = binary_binding(&op);
+        let chains = level != 3;
+        Shape::Binary(
+            op,
+            Box::new(at_least(left, if chains { level } else { level + 1 })),
+            Box::new(at_least(right, level + 1)),
+        )
+    }
+
+    fn symbol(op: &BinOpKind) -> &'static str {
+        match op {
+            BinOpKind::Add => "+",
+            BinOpKind::Sub => "-",
+            BinOpKind::Mul => "*",
+            BinOpKind::Div => "/",
+            BinOpKind::Lt => "<",
+            BinOpKind::Gt => ">",
+            BinOpKind::Le => "<=",
+            BinOpKind::Ge => ">=",
+            BinOpKind::Eq => "==",
+            BinOpKind::Ne => "!=",
+            BinOpKind::And => "and",
+            BinOpKind::Or => "or",
+        }
+    }
+
+    fn render(shape: &Shape) -> String {
+        match shape {
+            Shape::Int(value) => value.to_string(),
+            Shape::Var(name) => name.to_string(),
+            Shape::Bool(value) => value.to_string(),
+            Shape::Unary(UnaryOpKind::Neg, operand) => format!("-{}", render(operand)),
+            Shape::Unary(UnaryOpKind::Not, operand) => format!("not {}", render(operand)),
+            Shape::Binary(op, left, right) => {
+                format!("{} {} {}", render(left), symbol(op), render(right))
+            }
+            Shape::Call(name, args) => format!(
+                "{name}({})",
+                args.iter().map(render).collect::<Vec<_>>().join(", ")
+            ),
+            Shape::Index(target, index) => format!("{}[{}]", render(target), render(index)),
+            Shape::Field(object, field) => format!("{}.{field}", render(object)),
+            Shape::Group(inner) => format!("({})", render(inner)),
+            Shape::Cond(branches, else_expr) => {
+                let mut text = String::new();
+                for (index, (condition, then_expr)) in branches.iter().enumerate() {
+                    let keyword = if index == 0 { "if" } else { " elif" };
+                    text.push_str(&format!(
+                        "{keyword} {}: {}",
+                        render(condition),
+                        render(then_expr)
+                    ));
+                }
+                text.push_str(&format!(" else: {}", render(else_expr)));
+                text
+            }
+            Shape::Match(subject, arms, default) => {
+                let mut text = format!("match {}:", render(subject));
+                for (pattern, result) in arms {
+                    text.push_str(&format!(" {pattern} => {}", render(result)));
+                }
+                if let Some(default) = default {
+                    text.push_str(&format!(" _ => {}", render(default)));
+                }
+                text
+            }
+        }
+    }
+
+    /// The tree the parser builds for `shape`.
+    fn tree(shape: &Shape) -> Expr {
+        match shape {
+            Shape::Int(value) => Expr::LitInt(*value),
+            Shape::Var(name) => Expr::Var(name.to_string()),
+            Shape::Bool(value) => Expr::LitBool(*value),
+            Shape::Unary(op, operand) => Expr::UnaryOp {
+                op: op.clone(),
+                operand: Box::new(tree(operand)),
+            },
+            Shape::Binary(op, left, right) => Expr::BinOp {
+                op: op.clone(),
+                left: Box::new(tree(left)),
+                right: Box::new(tree(right)),
+            },
+            Shape::Call(name, args) => Expr::Call {
+                func: name.to_string(),
+                args: args.iter().map(tree).collect(),
+            },
+            Shape::Index(target, index) => Expr::Index {
+                target: Box::new(tree(target)),
+                index: Box::new(tree(index)),
+            },
+            Shape::Field(object, field) => Expr::FieldAccess {
+                obj: Box::new(tree(object)),
+                field: field.to_string(),
+            },
+            Shape::Group(inner) => tree(inner),
+            Shape::Cond(branches, else_expr) => {
+                branches
+                    .iter()
+                    .rev()
+                    .fold(tree(else_expr), |else_expr, (condition, then_expr)| {
+                        Expr::Cond {
+                            condition: Box::new(tree(condition)),
+                            then_expr: Box::new(tree(then_expr)),
+                            else_expr: Box::new(else_expr),
+                        }
+                    })
+            }
+            Shape::Match(subject, arms, default) => Expr::Match {
+                subject: Box::new(tree(subject)),
+                cases: arms
+                    .iter()
+                    .map(|(pattern, result)| (Expr::LitInt(*pattern), tree(result)))
+                    .collect(),
+                default: default.as_ref().map(|default| Box::new(tree(default))),
+            },
+        }
+    }
+
+    /// The depth of `shape`, from the outside in: the definition the parser's
+    /// running count must agree with.
+    fn depth(shape: &Shape) -> usize {
+        match shape {
+            Shape::Int(_) | Shape::Var(_) | Shape::Bool(_) => 1,
+            Shape::Unary(_, operand) => 1 + depth(operand),
+            Shape::Binary(_, left, right) => 1 + depth(left).max(depth(right)),
+            Shape::Call(_, args) => 1 + args.iter().map(depth).max().unwrap_or(0),
+            Shape::Index(target, index) => 1 + depth(target).max(depth(index)),
+            Shape::Field(object, _) => 1 + depth(object),
+            Shape::Group(inner) => depth(inner),
+            // Each branch is an `if` whose `else` is the rest of the chain.
+            Shape::Cond(branches, else_expr) => branches
+                .iter()
+                .rev()
+                .fold(depth(else_expr), |rest, (condition, then_expr)| {
+                    1 + depth(condition).max(depth(then_expr)).max(rest)
+                }),
+            Shape::Match(subject, arms, default) => {
+                let subject = depth(subject);
+                // Lowering: each arm is an `if` comparing the subject with a
+                // one-level pattern, whose `else` is the rest of the arms.
+                // The arms end in the wildcard's result or, without one, in a
+                // node holding the subject and the patterns.
+                let comparison = 1 + subject.max(1);
+                let end = match default {
+                    Some(default) => depth(default),
+                    None if arms.is_empty() => 1 + subject,
+                    None => comparison,
+                };
+                let lowered = arms.iter().rev().fold(end, |rest, (_, result)| {
+                    1 + comparison.max(depth(result)).max(rest)
+                });
+                // The parsed tree: the subject, patterns and results sit one
+                // level below the match.
+                let children = arms
+                    .iter()
+                    .map(|(_, result)| depth(result).max(1))
+                    .chain(default.iter().map(|default| depth(default)))
+                    .max()
+                    .unwrap_or(0);
+                lowered.max(1 + subject.max(children))
+            }
+        }
+    }
+
+    /// The most expressions the parser is inside at once while parsing
+    /// `shape`, itself inside `open`: an operand of a prefix operator, a
+    /// parenthesized group, an argument, an index, a branch's result and a
+    /// match arm's result each open one.
+    fn nesting(shape: &Shape, open: usize) -> usize {
+        match shape {
+            Shape::Int(_) | Shape::Var(_) | Shape::Bool(_) => open,
+            Shape::Unary(_, operand) => nesting(operand, open + 1),
+            Shape::Binary(_, left, right) => nesting(left, open).max(nesting(right, open)),
+            Shape::Call(_, args) => args
+                .iter()
+                .map(|arg| nesting(arg, open + 1))
+                .max()
+                .unwrap_or(open),
+            Shape::Index(target, index) => nesting(target, open).max(nesting(index, open + 1)),
+            Shape::Field(object, _) => nesting(object, open),
+            Shape::Group(inner) => nesting(inner, open + 1),
+            Shape::Cond(branches, else_expr) => branches
+                .iter()
+                .map(|(condition, then_expr)| {
+                    nesting(condition, open).max(nesting(then_expr, open + 1))
+                })
+                .max()
+                .unwrap_or(open)
+                .max(nesting(else_expr, open + 1)),
+            Shape::Match(subject, arms, default) => arms
+                .iter()
+                .map(|(_, result)| nesting(result, open + 1))
+                .chain(default.iter().map(|default| nesting(default, open + 1)))
+                .max()
+                .unwrap_or(open)
+                .max(nesting(subject, open)),
+        }
+    }
+
+    /// The bound `shape` needs: its depth, or the parser's nesting if
+    /// parentheses make that greater. A whole formula is itself one
+    /// expression the parser is inside.
+    fn bound_needed(shape: &Shape) -> usize {
+        depth(shape).max(nesting(shape, 1))
+    }
+
+    /// A deterministic generator, as in `tests/execution.rs`: no random
+    /// dependency, and a failing seed reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from((self.0 >> 33) % u64::try_from(bound).expect("bound fits"))
+                .expect("value fits")
+        }
+
+        fn pick<T: Clone>(&mut self, choices: &[T]) -> T {
+            choices[self.below(choices.len())].clone()
+        }
+    }
+
+    fn leaf(rng: &mut Rng) -> Shape {
+        match rng.below(3) {
+            0 => Shape::Int(i64::try_from(rng.below(10)).expect("small literal")),
+            1 => Shape::Var(rng.pick(&["a", "b", "c"])),
+            _ => Shape::Bool(rng.below(2) == 0),
+        }
+    }
+
+    const BINARY_OPS: [BinOpKind; 12] = [
+        BinOpKind::Add,
+        BinOpKind::Sub,
+        BinOpKind::Mul,
+        BinOpKind::Div,
+        BinOpKind::Lt,
+        BinOpKind::Gt,
+        BinOpKind::Le,
+        BinOpKind::Ge,
+        BinOpKind::Eq,
+        BinOpKind::Ne,
+        BinOpKind::And,
+        BinOpKind::Or,
+    ];
+
+    /// Something a `.field` or `[index]` can follow as written.
+    fn postfix_target(shape: Shape) -> Shape {
+        match shape {
+            Shape::Var(_) | Shape::Call(..) | Shape::Index(..) | Shape::Field(..) => shape,
+            Shape::Group(_) => shape,
+            other => Shape::Group(Box::new(other)),
+        }
+    }
+
+    /// Any formula the grammar accepts, about `size` levels deep at most
+    /// along its deepest spine.
+    fn generate(rng: &mut Rng, size: usize) -> Shape {
+        if size == 0 {
+            return leaf(rng);
+        }
+        let smaller = |rng: &mut Rng| {
+            let size = rng.below(size);
+            generate(rng, size / 2)
+        };
+        match rng.below(13) {
+            0 => leaf(rng),
+            1 | 2 => Shape::Unary(
+                rng.pick(&[UnaryOpKind::Neg, UnaryOpKind::Not]),
+                Box::new(at_least(generate(rng, size - 1), 6)),
+            ),
+            3 => {
+                let op = rng.pick(&BINARY_OPS);
+                binary(op, generate(rng, size - 1), smaller(rng))
+            }
+            4 => {
+                let op = rng.pick(&BINARY_OPS);
+                binary(op, smaller(rng), generate(rng, size - 1))
+            }
+            // A flat chain, which nests to the left without the parser
+            // recursing.
+            5 => {
+                let links = 1 + rng.below(size);
+                let ops = rng.pick(&[
+                    [BinOpKind::Add, BinOpKind::Sub],
+                    [BinOpKind::Mul, BinOpKind::Div],
+                    [BinOpKind::And, BinOpKind::And],
+                    [BinOpKind::Or, BinOpKind::Or],
+                ]);
+                let mut chain = generate(rng, size - links);
+                for _ in 0..links {
+                    let op = rng.pick(&ops);
+                    chain = binary(op, chain, smaller(rng));
+                }
+                chain
+            }
+            6 => {
+                let args = rng.below(4);
+                let mut shapes = Vec::new();
+                for arg in 0..args {
+                    shapes.push(if arg == 0 {
+                        generate(rng, size - 1)
+                    } else {
+                        smaller(rng)
+                    });
+                }
+                Shape::Call(rng.pick(&["max", "min", "f"]), shapes)
+            }
+            7 => Shape::Index(
+                Box::new(postfix_target(generate(rng, size - 1))),
+                Box::new(smaller(rng)),
+            ),
+            8 => Shape::Index(
+                Box::new(postfix_target(smaller(rng))),
+                Box::new(generate(rng, size - 1)),
+            ),
+            9 => Shape::Field(
+                Box::new(postfix_target(generate(rng, size - 1))),
+                rng.pick(&["x", "y"]),
+            ),
+            10 => Shape::Group(Box::new(generate(rng, size - 1))),
+            11 => {
+                let count = 1 + rng.below(size);
+                let mut branches = Vec::new();
+                for _ in 0..count {
+                    branches.push((at_least(smaller(rng), 1), smaller(rng)));
+                }
+                Shape::Cond(branches, Box::new(generate(rng, size - count)))
+            }
+            _ => {
+                let count = rng.below(size + 1);
+                let subject = at_least(smaller(rng), 1);
+                let mut arms = Vec::new();
+                for pattern in 0..count {
+                    // In parentheses, so an arm's `match` cannot take the
+                    // arms that follow it.
+                    arms.push((
+                        i64::try_from(pattern).expect("small pattern"),
+                        at_least(smaller(rng), 1),
+                    ));
+                }
+                let default =
+                    (rng.below(2) == 0).then(|| Box::new(at_least(generate(rng, size - count), 1)));
+                Shape::Match(Box::new(subject), arms, default)
+            }
+        }
+    }
+
+    /// The parser accepts a generated formula at exactly the bounds its shape
+    /// allows, refuses it with the depth error below them, and builds the
+    /// same tree whatever bound accepts it.
+    #[test]
+    fn the_parser_accepts_exactly_the_formulas_within_the_bound() {
+        on_stack(|| {
+            let mut deepest = 0;
+            for seed in 0..4_000_u64 {
+                let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                let size = 1 + usize::try_from(seed % 28).expect("small size");
+                let shape = generate(&mut rng, size);
+                let formula = render(&shape);
+                let expected = format!("{:?}", tree(&shape));
+                let need = bound_needed(&shape);
+                deepest = deepest.max(need);
+                let context = format!("seed {seed}: `{formula}` needs {need}");
+
+                let parsed = parse_at(&formula, need)
+                    .unwrap_or_else(|error| panic!("{context}: refused at its bound: {error}"));
+                assert_eq!(format!("{parsed:?}"), expected, "{context}: tree");
+                assert!(
+                    too_deep(&parse_at(&formula, need - 1), need - 1) || need == 1,
+                    "{context}: accepted one level below its bound"
+                );
+                // Any other bound: accepted with the same tree, or refused.
+                let bound = 1 + rng.below(need + 4);
+                let result = parse_at(&formula, bound);
+                if bound >= need {
+                    let parsed = result
+                        .unwrap_or_else(|error| panic!("{context}: refused at {bound}: {error}"));
+                    assert_eq!(
+                        format!("{parsed:?}"),
+                        expected,
+                        "{context}: tree at {bound}"
+                    );
+                } else {
+                    assert!(too_deep(&result, bound), "{context}: accepted at {bound}");
+                }
+            }
+            assert!(
+                deepest > 40,
+                "the generator reached only {deepest} levels; it no longer exercises deep formulas"
+            );
+        });
+    }
+
+    /// A scalar formula lowering accepts: arithmetic, `max`/`min`, `if` and
+    /// `match`, over inputs.
+    fn generate_scalar(rng: &mut Rng, size: usize) -> Shape {
+        if size == 0 {
+            return match rng.below(2) {
+                0 => Shape::Int(i64::try_from(rng.below(10)).expect("small literal")),
+                _ => Shape::Var(rng.pick(&["a", "b", "c"])),
+            };
+        }
+        let smaller = |rng: &mut Rng| {
+            let size = rng.below(size);
+            generate_scalar(rng, size / 2)
+        };
+        const ARITHMETIC: [BinOpKind; 4] = [
+            BinOpKind::Add,
+            BinOpKind::Sub,
+            BinOpKind::Mul,
+            BinOpKind::Div,
+        ];
+        match rng.below(8) {
+            0 => Shape::Unary(
+                UnaryOpKind::Neg,
+                Box::new(at_least(generate_scalar(rng, size - 1), 6)),
+            ),
+            1 => {
+                let op = rng.pick(&ARITHMETIC);
+                binary(op, generate_scalar(rng, size - 1), smaller(rng))
+            }
+            2 => {
+                let links = 1 + rng.below(size);
+                let mut chain = generate_scalar(rng, size - links);
+                for _ in 0..links {
+                    let op = rng.pick(&[BinOpKind::Add, BinOpKind::Sub]);
+                    chain = binary(op, chain, smaller(rng));
+                }
+                chain
+            }
+            3 => Shape::Call(
+                rng.pick(&["max", "min"]),
+                vec![generate_scalar(rng, size - 1), smaller(rng)],
+            ),
+            4 => Shape::Group(Box::new(generate_scalar(rng, size - 1))),
+            5 | 6 => {
+                let count = 1 + rng.below(size);
+                let mut branches = Vec::new();
+                for _ in 0..count {
+                    let part = rng.below(size) / 2;
+                    let condition = generate_judgment(rng, part);
+                    branches.push((at_least(condition, 1), smaller(rng)));
+                }
+                Shape::Cond(branches, Box::new(generate_scalar(rng, size - count)))
+            }
+            _ => {
+                let count = 1 + rng.below(size);
+                let subject = at_least(smaller(rng), 1);
+                let mut arms = Vec::new();
+                for pattern in 0..count {
+                    arms.push((
+                        i64::try_from(pattern).expect("small pattern"),
+                        at_least(smaller(rng), 1),
+                    ));
+                }
+                let default = (rng.below(2) == 0)
+                    .then(|| Box::new(at_least(generate_scalar(rng, size - count), 1)));
+                Shape::Match(Box::new(subject), arms, default)
+            }
+        }
+    }
+
+    /// A judgment lowering accepts: comparisons, `and`, `or`, `not`, and
+    /// bare booleans and inputs.
+    fn generate_judgment(rng: &mut Rng, size: usize) -> Shape {
+        if size == 0 {
+            return match rng.below(2) {
+                0 => Shape::Bool(rng.below(2) == 0),
+                _ => Shape::Var(rng.pick(&["p", "q"])),
+            };
+        }
+        match rng.below(4) {
+            0 => Shape::Unary(
+                UnaryOpKind::Not,
+                Box::new(at_least(generate_judgment(rng, size - 1), 6)),
+            ),
+            1 => {
+                let op = rng.pick(&[BinOpKind::Lt, BinOpKind::Ge, BinOpKind::Eq, BinOpKind::Ne]);
+                let part = rng.below(size) / 2;
+                let right = generate_scalar(rng, part);
+                binary(op, generate_scalar(rng, size - 1), right)
+            }
+            _ => {
+                let links = 1 + rng.below(size);
+                let op = rng.pick(&[BinOpKind::And, BinOpKind::Or]);
+                let mut chain = generate_judgment(rng, size - links);
+                for _ in 0..links {
+                    let part = rng.below(size) / 2;
+                    let right = generate_judgment(rng, part);
+                    chain = binary(op.clone(), chain, right);
+                }
+                chain
+            }
+        }
+    }
+
+    /// How deep a serialized expression nests, in objects: one per node of
+    /// the lowered tree, plus one for a literal's value.
+    fn object_depth(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => {
+                1 + fields.values().map(object_depth).max().unwrap_or(0)
+            }
+            serde_json::Value::Array(items) => items.iter().map(object_depth).max().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The bound is on the tree lowering builds, which is what every later
+    /// stage walks. Lowering adds at most two levels to a formula's depth: a
+    /// literal's value is an object inside its node, and a bare boolean
+    /// lowers to a comparison of two literals. A `match` in particular adds
+    /// none, though it lowers to one `if` per arm.
+    #[test]
+    fn lowering_builds_a_tree_no_deeper_than_the_formula_plus_two_levels() {
+        on_stack(|| {
+            let ctx = LowerCtx {
+                scalars: HashSet::new(),
+                derived: HashSet::new(),
+                relation_predicates: HashSet::new(),
+                relations: std::cell::RefCell::new(HashSet::new()),
+            };
+            let (mut deepest, mut tight) = (0, 0);
+            for seed in 0..3_000_u64 {
+                let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                let size = 1 + usize::try_from(seed % 24).expect("small size");
+                let shape = generate_scalar(&mut rng, size);
+                let formula = render(&shape);
+                let parsed = parse_at(&formula, usize::MAX)
+                    .unwrap_or_else(|error| panic!("seed {seed}: `{formula}`: {error}"));
+                let lowered = lower_to_scalar(&parsed, &ctx)
+                    .unwrap_or_else(|error| panic!("seed {seed}: `{formula}`: {error}"));
+                let lowered_depth =
+                    object_depth(&serde_json::to_value(&lowered).expect("expression serializes"));
+                let formula_depth = depth(&shape);
+                assert!(
+                    lowered_depth <= formula_depth + 2,
+                    "seed {seed}: `{formula}` is {formula_depth} levels deep but lowers to {lowered_depth}"
+                );
+                deepest = deepest.max(formula_depth);
+                tight += usize::from(lowered_depth >= formula_depth);
+            }
+            assert!(deepest > 30, "the generator reached only {deepest} levels");
+            // The count is not slack either: lowering reaches the formula's
+            // depth for most formulas.
+            assert!(
+                tight > 2_000,
+                "only {tight} of 3,000 formulas lower as deep as counted"
+            );
+        });
+    }
+
+    /// A `match` is as deep as the `elif` chain that does the same thing.
+    #[test]
+    fn a_match_is_as_deep_as_the_elif_chain_it_lowers_to() {
+        for arms in 1..=12 {
+            let mut matched = String::from("match x:");
+            let mut chained = String::new();
+            for arm in 1..=arms {
+                matched.push_str(&format!(" {arm} => a"));
+                chained.push_str(&format!(
+                    "{} x == {arm}: a",
+                    if arm == 1 { "if" } else { " elif" }
+                ));
+            }
+            matched.push_str(" _ => b");
+            chained.push_str(" else: b");
+            assert_eq!(needed(&matched), arms + 2, "`{matched}`");
+            assert_eq!(needed(&chained), arms + 2, "`{chained}`");
+        }
+    }
+
+    /// The error says how deep a formula may nest and what to do, and points
+    /// at the token that passes the bound.
+    #[test]
+    fn the_depth_error_points_at_the_level_past_the_bound() {
+        let located = |formula: &str| match parse_at(formula, 3) {
+            Err(FormulaError::Parse { line, col, message }) => (line, col, message),
+            other => panic!("`{formula}` at a bound of 3: {other:?}"),
+        };
+        let message =
+            "formula nests more than 3 levels deep; split it into named rules".to_string();
+        // The fourth group.
+        assert_eq!(located("((((1))))"), (1, 4, message.clone()));
+        // The third `+`, which would build the fourth level.
+        assert_eq!(located("1 + 1 + 1 + 1"), (1, 11, message.clone()));
+        // The second `elif`.
+        assert_eq!(
+            located("if a: 1 elif b: 2 elif c: 3 else: 4"),
+            (1, 19, message.clone())
+        );
+        // The second arm.
+        assert_eq!(located("match x: 1 => a 2 => b _ => c"), (1, 17, message));
+
+        // The default bound: a whole formula is one level, so the group that
+        // passes it is the `MAX_FORMULA_DEPTH`th.
+        let error = Parser::new(
+            Lexer::new(&format!("{}1", "(".repeat(MAX_FORMULA_DEPTH)))
+                .tokenise()
+                .expect("parentheses tokenise"),
+        )
+        .parse_expr()
+        .expect_err("past the bound");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "formula parse error at line 1, col {}: formula nests more than {MAX_FORMULA_DEPTH} levels deep; split it into named rules",
+                MAX_FORMULA_DEPTH + 1
+            )
+        );
+    }
+
+    /// Every way into the parser is bounded: a declaration's dated value, an
+    /// amendment's (parsed and discarded), the non-exhaustive `match` count,
+    /// and a relation predicate.
+    #[test]
+    fn every_entry_point_refuses_a_formula_past_the_bound() {
+        on_stack(|| {
+            let is_too_deep = |error: FormulaError| {
+                error.to_string().contains(&format!(
+                    "formula nests more than {MAX_FORMULA_DEPTH} levels deep"
+                ))
+            };
+            for levels in [MAX_FORMULA_DEPTH, 50_000] {
+                // `levels` prefix operators nest `levels + 1` deep; one fewer
+                // than the bound is the deepest formula accepted.
+                for (past, within) in [
+                    ("-".repeat(levels), "-".repeat(MAX_FORMULA_DEPTH - 1)),
+                    ("not ".repeat(levels), "not ".repeat(MAX_FORMULA_DEPTH - 1)),
+                    ("(".repeat(levels), "(".repeat(MAX_FORMULA_DEPTH - 1)),
+                    ("max(".repeat(levels), "max(".repeat(MAX_FORMULA_DEPTH - 1)),
+                ] {
+                    let close = |open: &str| {
+                        let closer = if open.contains('(') { ")" } else { "" };
+                        let count = open.matches(['-', '(']).count() + open.matches("not").count();
+                        format!("{open}x{}", closer.repeat(count))
+                    };
+                    let (past, within) = (close(&past), close(&within));
+
+                    let declaration =
+                        |formula: &str| format!("deep:\n  from 2026-01-01: {formula}");
+                    assert!(is_too_deep(
+                        parse_source(&declaration(&past)).expect_err("a declaration's value")
+                    ));
+                    parse_source(&declaration(&within)).expect("a declaration at the bound");
+
+                    let amendment =
+                        |formula: &str| format!("amend deep:\n  from 2026-01-01: {formula}");
+                    assert!(is_too_deep(
+                        parse_source(&amendment(&past)).expect_err("an amendment's value")
+                    ));
+                    parse_source(&amendment(&within)).expect("an amendment at the bound");
+
+                    assert!(is_too_deep(
+                        non_exhaustive_match_count(&past).expect_err("the match count")
+                    ));
+                    non_exhaustive_match_count(&within).expect("the match count at the bound");
+
+                    assert!(is_too_deep(
+                        lower_judgment_formula(&past, HashSet::new(), HashSet::new())
+                            .expect_err("a relation predicate")
+                    ));
+                }
+            }
+            lower_judgment_formula(
+                &format!("{}x", "not ".repeat(MAX_FORMULA_DEPTH - 1)),
+                HashSet::new(),
+                HashSet::new(),
+            )
+            .expect("a relation predicate at the bound");
+        });
+    }
+
+    /// Openers of every kind, mixed and nested far past the bound, are
+    /// refused; the same mix nests exactly one level per opener.
+    #[test]
+    fn mixed_nesting_is_one_level_per_opener() {
+        on_stack(|| {
+            const OPENERS: [(&str, &str); 6] = [
+                ("(", ")"),
+                ("-", ""),
+                ("not ", ""),
+                ("max(", ")"),
+                ("t[", "]"),
+                ("if c: ", " else: 0"),
+            ];
+            for seed in 0..200_u64 {
+                let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                let nest = |rng: &mut Rng, levels: usize| {
+                    let mut open = String::new();
+                    let mut close = String::new();
+                    let mut after_prefix = false;
+                    for _ in 0..levels {
+                        // A prefix operator's operand cannot be a bare `if`.
+                        let (opener, closer) = loop {
+                            let choice = rng.pick(&OPENERS);
+                            if !(after_prefix && choice.0.starts_with("if")) {
+                                break choice;
+                            }
+                        };
+                        after_prefix = closer.is_empty();
+                        open.push_str(opener);
+                        close.insert_str(0, closer);
+                    }
+                    format!("{open}1{close}")
+                };
+                let levels = rng.below(MAX_FORMULA_DEPTH);
+                let formula = nest(&mut rng, levels);
+                assert_eq!(needed(&formula), levels + 1, "seed {seed}: `{formula}`");
+
+                let far = MAX_FORMULA_DEPTH + rng.below(20_000);
+                let formula = nest(&mut rng, far);
+                assert!(
+                    too_deep(&parse_at(&formula, MAX_FORMULA_DEPTH), MAX_FORMULA_DEPTH),
+                    "seed {seed}: {far} mixed levels were not refused"
+                );
+            }
+        });
+    }
 }

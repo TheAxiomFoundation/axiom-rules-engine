@@ -165,4 +165,49 @@ assert.throws(
   "v1 artifacts are rejected by the v2 engine",
 );
 
+// A formula nested past the bound is an error with the core's message, not a
+// trap. Before the bound, each of these nested 1,000 levels deep overflowed
+// the wasm stack, and after a trap later calls on the same instance could
+// fail too.
+const DEEP_TARGET = "us:policies/test/deep";
+const deepModules = (formula) =>
+  JSON.stringify({
+    [DEEP_TARGET]: `
+format: rulespec/v1
+rules:
+  - name: deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: "${formula}"
+`,
+  });
+const nested = (levels) => [
+  `${"(".repeat(levels)}1${")".repeat(levels)}`,
+  `${"-".repeat(levels)}1`,
+  `1${" + 1".repeat(levels)}`,
+];
+let bound;
+for (const formula of nested(100_000)) {
+  assert.throws(
+    () => engine.compile(deepModules(formula), DEEP_TARGET),
+    (error) => {
+      bound = Number(/formula nests more than (\d+) levels deep/.exec(error.message)?.[1]);
+      return error instanceof Error && bound > 0;
+    },
+    "a formula nested past the bound is reported",
+  );
+}
+// At the bound each of those compiles on the wasm stack, and the instance
+// still answers after the refusals above.
+for (const formula of nested(bound - 1)) {
+  const deep = JSON.parse(engine.compile(deepModules(formula), DEEP_TARGET));
+  assert.ok(deep.program.derived.some((derived) => derived.name === "deep"));
+}
+assert.equal(engine.compile(modulesJson, STATE_TARGET), artifactJson);
+console.log(`formulas nest at most ${bound} levels`);
+
 console.log("smoke test passed");

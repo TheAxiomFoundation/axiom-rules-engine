@@ -245,7 +245,11 @@ times what recursion costs (each bounded there at three times, whatever the
 member count).
 
 Deferral happens only at rule references, so one rule's own expression
-nesting is still recursed through. Inlined dense expressions have no rule
+nesting is still recursed through. The formula parser bounds that nesting at
+`rulespec::MAX_FORMULA_DEPTH` (128) levels, the release threshold, and refuses
+a deeper formula as a compile error (see
+[the format reference](rulespec-format.md#nesting-depth)). A hand-built
+`Program` is not bounded this way. Inlined dense expressions have no rule
 references, which is why dense bounds them (see above). Dense computes a rule
 it has never computed even when no row reaches it (to fix the rule's dtype),
 so it defers that computation too: a deep chain behind an untaken branch, or

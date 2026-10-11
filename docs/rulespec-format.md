@@ -343,6 +343,43 @@ Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
 position — the two grammars meet only at comparisons.
 
+## Nesting depth
+
+A formula nests at most 128 levels (`rulespec::MAX_FORMULA_DEPTH`). A deeper
+one does not compile: `formula nests more than 128 levels deep; split it into
+named rules`. The bound covers a `derived_relation` predicate too.
+
+Depth is the depth of the tree a formula lowers to (see the next section):
+
+- Each operator, function call, table lookup and `if` adds a level. A flat
+  chain nests, because `a + b + c` is `(a + b) + c`: a sum of n terms is n
+  levels deep.
+- Each `elif` and each `match` arm adds a level, because a chain of branches
+  lowers to one nested `if` per branch. A `match` of n arms on a name, with
+  literal results, is n + 2 levels deep.
+- Parentheses add no level. The parser counts the expressions it is inside
+  as it reads, though, so parentheses cannot nest past the bound either.
+
+A reference to another rule is one level, however deep that rule is. A
+formula that needs more depth therefore splits into named rules: for a long
+`elif` chain, move its tail into a second rule and make that rule the first
+one's `else`. Chains of rules can be any length (see
+[execution semantics](execution-semantics.md#deep-programs)).
+
+The bound exists because every stage walks a formula's tree recursively.
+Before it, a formula nested a few thousand levels deep overflowed the stack,
+which aborts the process instead of returning an error. At the bound a
+release build compiles and evaluates a formula in every mode on a 1 MiB
+thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
+levels.
+
+A compiled artifact has a lower ceiling of its own today. Its JSON nests
+about two levels per level of a sum, a call or an `and`/`or` chain, and one
+per level of an `if`, an `elif` branch or a `match` arm, and the loader
+reads at most 128 levels of JSON. So a sum of 61 terms, or an `elif` chain
+of 119 branches, compiles to an artifact that does not load
+(axiom-rules-engine#236).
+
 ## The lowered expression vocabulary
 
 Lowering a module produces a program whose expressions are `kind:`-tagged
