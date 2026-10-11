@@ -346,7 +346,7 @@ Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
 position — the two grammars meet only at comparisons.
 
-## Nesting depth
+## Nesting depth and size
 
 A formula nests at most 128 levels (`rulespec::MAX_FORMULA_DEPTH`). A deeper
 one does not compile: `formula nests more than 128 levels deep; split it into
@@ -383,6 +383,23 @@ node as a level, before anything walks them. Lowering adds at most two levels
 to a formula and a request pin adds one, so every compiled rule passes, pinned
 or not. A deeper expression is refused with ``the expression of derived rule
 `name` nests more than 131 levels deep``.
+
+A rule's expression also has at most 100,000 nodes once it is ready to
+evaluate (`spec::MAX_EXPRESSION_SIZE`). Depth does not limit size, and two
+constructs copy part of a formula: lowering a `match` copies its subject into
+every arm, and evaluating `exactly_one` of `n` arguments copies each argument
+`n` times. Nested, either grows exponentially, so a short formula could
+otherwise exhaust memory. The lowering counts a formula's nodes before it
+builds them and refuses one past the bound with ``the formula of `name`
+expands to more than 100000 expression nodes; split it into named rules``.
+The count includes the subject of a `match` whose only arm is `_`: lowering
+builds that subject to check it, then drops it. A program read from JSON is
+counted the same way, with the depth check. The largest rule in the RuleSpec
+corpora on 2026-10-11 has 462 nodes.
+
+Dense execution reads the column of a `match` fallback (no `_`) from the
+last arm itself rather than from a copy of it, so a `match` compiles to at
+most one dense node per lowered node (#241).
 
 A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one

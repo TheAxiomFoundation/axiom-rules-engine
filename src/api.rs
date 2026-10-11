@@ -319,7 +319,7 @@ fn execute_program(
 ) -> Result<ExecutionResponse, ApiError> {
     // An inline program can come from JSON nested deeper than any formula
     // compiles to; refuse a too-deep expression before anything walks it.
-    request.program.check_expression_depth()?;
+    request.program.check_expressions()?;
     validate_assessment_dates(&request.queries)?;
     // Compiled artifacts are checked when loaded; a raw ProgramSpec is checked
     // here, before any evaluator recurses through its dependency graph.
@@ -441,7 +441,7 @@ pub fn execute_compiled_request(
     let mut program = artifact.program;
     // An artifact built in Rust rather than loaded can hold any expression;
     // refuse a too-deep one before pinning copies it.
-    program.check_expression_depth()?;
+    program.check_expressions()?;
     apply_pins(&mut program, &request.pins)?;
     execute_program(
         ExecutionRequest {

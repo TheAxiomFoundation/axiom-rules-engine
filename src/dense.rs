@@ -444,16 +444,7 @@ enum CompiledScalarExpr {
     If {
         condition: Box<CompiledJudgmentExpr>,
         then_expr: Box<CompiledScalarExpr>,
-        else_expr: Box<CompiledScalarExpr>,
-    },
-    /// The fallback of a `match` without `_`: every row that reaches it fails
-    /// with explain's error naming the subject's value. `placeholder` is the
-    /// last arm's value, evaluated for no rows, so the column has the arms'
-    /// dtype whichever rows are live.
-    NoMatch {
-        subject: Box<CompiledScalarExpr>,
-        placeholder: Box<CompiledScalarExpr>,
-        labels: MatchLabels,
+        else_expr: Box<Else<CompiledScalarExpr>>,
     },
     /// Cross-period reduction, evaluated only by the lifetime executor. `value`
     /// is compiled as an ordinary per-period scalar (evaluated once per supplied
@@ -522,12 +513,27 @@ enum CompiledRelatedScalarExpr {
     If {
         condition: Box<CompiledRelatedJudgmentExpr>,
         then_expr: Box<CompiledRelatedScalarExpr>,
-        else_expr: Box<CompiledRelatedScalarExpr>,
+        else_expr: Box<Else<CompiledRelatedScalarExpr>>,
     },
-    /// Related-row form of [`CompiledScalarExpr::NoMatch`].
+}
+
+/// What an `if` gives the rows its condition does not hold for.
+#[derive(Clone, Debug)]
+enum Else<E> {
+    Expr(E),
+    /// The fallback of a `match` without `_`, which is always the `else` of
+    /// the `if` testing the last arm: every row that reaches it fails with
+    /// explain's error naming the subject's value. Its column is that `if`'s
+    /// `then` branch, the last arm's value, evaluated for no rows, so it has
+    /// the arms' dtype whichever rows are live. The plan reads the arm there
+    /// rather than holding a second copy of it, and when no row took the arm,
+    /// its column is already that value. So compiling stays linear in the
+    /// expression, and in one evaluation pass a node is evaluated once plus
+    /// at most once per fallback above it: a chain of `n` of them nested in
+    /// last arms costs on the order of `n²` visits. A copy per `match`, each
+    /// evaluated again for no rows, cost on the order of `2ⁿ` (#241).
     NoMatch {
-        subject: Box<CompiledRelatedScalarExpr>,
-        placeholder: Box<CompiledRelatedScalarExpr>,
+        subject: E,
         labels: MatchLabels,
     },
 }
@@ -1023,15 +1029,14 @@ impl DenseCompiledProgram {
             } => {
                 self.judgment_reduces_over_periods(condition, reduces)
                     || self.scalar_reduces_over_periods(then_expr, reduces)
-                    || self.scalar_reduces_over_periods(else_expr, reduces)
-            }
-            CompiledScalarExpr::NoMatch {
-                subject,
-                placeholder,
-                ..
-            } => {
-                self.scalar_reduces_over_periods(subject, reduces)
-                    || self.scalar_reduces_over_periods(placeholder, reduces)
+                    || match else_expr.as_ref() {
+                        Else::Expr(else_expr) => {
+                            self.scalar_reduces_over_periods(else_expr, reduces)
+                        }
+                        Else::NoMatch { subject, .. } => {
+                            self.scalar_reduces_over_periods(subject, reduces)
+                        }
+                    }
             }
         }
     }
@@ -1651,12 +1656,11 @@ impl<'a> DenseCompiler<'a> {
                 condition: Box::new(self.compile_judgment_expr(derived_name, condition)?),
                 then_expr: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
                 else_expr: Box::new(match else_expr.as_ref() {
-                    ScalarExpr::NoMatch { subject, patterns } => CompiledScalarExpr::NoMatch {
-                        subject: Box::new(self.compile_scalar_expr(derived_name, subject)?),
-                        placeholder: Box::new(self.compile_scalar_expr(derived_name, then_expr)?),
+                    ScalarExpr::NoMatch { subject, patterns } => Else::NoMatch {
+                        subject: self.compile_scalar_expr(derived_name, subject)?,
                         labels: self.match_labels(derived_name, subject, patterns),
                     },
-                    else_expr => self.compile_scalar_expr(derived_name, else_expr)?,
+                    else_expr => Else::Expr(self.compile_scalar_expr(derived_name, else_expr)?),
                 }),
             }),
             ScalarExpr::NoMatch { .. } => {
@@ -1999,18 +2003,13 @@ impl<'a> DenseCompiler<'a> {
                 condition: Box::new(self.compile_related_predicate(relation_index, condition)?),
                 then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
                 else_expr: Box::new(match else_expr.as_ref() {
-                    ScalarExpr::NoMatch { subject, patterns } => {
-                        CompiledRelatedScalarExpr::NoMatch {
-                            subject: Box::new(
-                                self.compile_related_scalar(relation_index, subject)?,
-                            ),
-                            placeholder: Box::new(
-                                self.compile_related_scalar(relation_index, then_expr)?,
-                            ),
-                            labels: self.match_labels(&self.related_rule(), subject, patterns),
-                        }
+                    ScalarExpr::NoMatch { subject, patterns } => Else::NoMatch {
+                        subject: self.compile_related_scalar(relation_index, subject)?,
+                        labels: self.match_labels(&self.related_rule(), subject, patterns),
+                    },
+                    else_expr => {
+                        Else::Expr(self.compile_related_scalar(relation_index, else_expr)?)
                     }
-                    else_expr => self.compile_related_scalar(relation_index, else_expr)?,
                 }),
             }),
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
@@ -2165,22 +2164,15 @@ impl<'a> DenseCompiler<'a> {
                     then_expr,
                 )?),
                 else_expr: Box::new(match else_expr.as_ref() {
-                    ScalarExpr::NoMatch { subject, patterns } => CompiledScalarExpr::NoMatch {
-                        subject: Box::new(self.compile_current_scalar_expr(
-                            derived_name,
-                            entity,
-                            subject,
-                        )?),
-                        placeholder: Box::new(self.compile_current_scalar_expr(
-                            derived_name,
-                            entity,
-                            then_expr,
-                        )?),
+                    ScalarExpr::NoMatch { subject, patterns } => Else::NoMatch {
+                        subject: self.compile_current_scalar_expr(derived_name, entity, subject)?,
                         labels: self.match_labels(derived_name, subject, patterns),
                     },
-                    else_expr => {
-                        self.compile_current_scalar_expr(derived_name, entity, else_expr)?
-                    }
+                    else_expr => Else::Expr(self.compile_current_scalar_expr(
+                        derived_name,
+                        entity,
+                        else_expr,
+                    )?),
                 }),
             }),
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
@@ -3314,6 +3306,48 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         result
     }
 
+    /// A `match` fallback (see [`Else::NoMatch`]), counted as the one level
+    /// of the node it was. `arm` is the last arm's column when no row took
+    /// it.
+    fn eval_no_match(
+        &mut self,
+        subject: &CompiledScalarExpr,
+        last_arm: &CompiledScalarExpr,
+        arm: Option<DenseColumn>,
+        labels: &MatchLabels,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.no_match_node(subject, last_arm, arm, labels, mask);
+        self.depth -= 1;
+        result
+    }
+
+    /// `arm` is `last_arm`'s column when no row took it, which is its value
+    /// for no rows.
+    fn no_match_node(
+        &mut self,
+        subject: &CompiledScalarExpr,
+        last_arm: &CompiledScalarExpr,
+        arm: Option<DenseColumn>,
+        labels: &MatchLabels,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let placeholder = match arm {
+            Some(arm) => arm,
+            None => {
+                self.eval_scalar_expr(last_arm, &RowMask::none(mask.len()))?
+                    .0
+            }
+        };
+        let (subject, mut errors) = self.eval_scalar_expr(subject, mask)?;
+        for row in mask.without(&errors).rows() {
+            errors.record(row, labels.failure(&subject, row));
+        }
+        Ok((placeholder, errors))
+    }
+
     fn scalar_node(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         let len = self.batch.row_count;
         match expr {
@@ -3431,19 +3465,6 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 value,
                 predicate,
             } => self.eval_sum_related(*relation, value, predicate.as_ref(), mask),
-            CompiledScalarExpr::NoMatch {
-                subject,
-                placeholder,
-                labels,
-            } => {
-                let (placeholder, _) =
-                    self.eval_scalar_expr(placeholder, &RowMask::none(mask.len()))?;
-                let (subject, mut errors) = self.eval_scalar_expr(subject, mask)?;
-                for row in mask.without(&errors).rows() {
-                    errors.record(row, labels.failure(&subject, row));
-                }
-                Ok((placeholder, errors))
-            }
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -3455,7 +3476,13 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let then_rows = live.filter(|row| condition[row].is_holds());
                 let else_rows = live.difference(&then_rows);
                 let (then_values, then_errors) = self.eval_scalar_expr(then_expr, &then_rows)?;
-                let (else_values, else_errors) = self.eval_scalar_expr(else_expr, &else_rows)?;
+                let (else_values, else_errors) = match else_expr.as_ref() {
+                    Else::Expr(else_expr) => self.eval_scalar_expr(else_expr, &else_rows)?,
+                    Else::NoMatch { subject, labels } => {
+                        let arm = then_rows.is_empty().then(|| then_values.clone());
+                        self.eval_no_match(subject, then_expr, arm, labels, &else_rows)?
+                    }
+                };
                 let then_live = then_rows.without(&then_errors);
                 let else_live = else_rows.without(&else_errors);
                 errors.absorb(then_errors);
@@ -3939,19 +3966,6 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 to,
                 mask,
             ),
-            CompiledRelatedScalarExpr::NoMatch {
-                subject,
-                placeholder,
-                labels,
-            } => {
-                let (placeholder, _) =
-                    self.resolve_related_scalar(relation, placeholder, &RowMask::none(mask.len()))?;
-                let (subject, mut errors) = self.resolve_related_scalar(relation, subject, mask)?;
-                for related in mask.without(&errors).rows() {
-                    errors.record(related, labels.failure(&subject, related));
-                }
-                Ok((placeholder, errors))
-            }
             CompiledRelatedScalarExpr::If {
                 condition,
                 then_expr,
@@ -3964,8 +3978,30 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let else_rows = live.difference(&then_rows);
                 let (then_values, then_errors) =
                     self.resolve_related_scalar(relation, then_expr, &then_rows)?;
-                let (else_values, else_errors) =
-                    self.resolve_related_scalar(relation, else_expr, &else_rows)?;
+                let (else_values, else_errors) = match else_expr.as_ref() {
+                    Else::Expr(else_expr) => {
+                        self.resolve_related_scalar(relation, else_expr, &else_rows)?
+                    }
+                    // See `Else::NoMatch`.
+                    Else::NoMatch { subject, labels } => {
+                        let placeholder = if then_rows.is_empty() {
+                            then_values.clone()
+                        } else {
+                            self.resolve_related_scalar(
+                                relation,
+                                then_expr,
+                                &RowMask::none(else_rows.len()),
+                            )?
+                            .0
+                        };
+                        let (subject, mut errors) =
+                            self.resolve_related_scalar(relation, subject, &else_rows)?;
+                        for related in else_rows.without(&errors).rows() {
+                            errors.record(related, labels.failure(&subject, related));
+                        }
+                        (placeholder, errors)
+                    }
+                };
                 let then_live = then_rows.without(&then_errors);
                 let else_live = else_rows.without(&else_errors);
                 errors.absorb(then_errors);
@@ -4238,6 +4274,45 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         result
     }
 
+    /// A `match` fallback (see [`Else::NoMatch`]), counted as the one level
+    /// of the node it was. `arm` is the last arm's column when no row took
+    /// it.
+    fn eval_no_match(
+        &mut self,
+        subject: &CompiledScalarExpr,
+        last_arm: &CompiledScalarExpr,
+        arm: Option<DenseColumn>,
+        labels: &MatchLabels,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.no_match_node(subject, last_arm, arm, labels, mask);
+        self.depth -= 1;
+        result
+    }
+
+    /// `arm` is `last_arm`'s column when no row took it, which is its value
+    /// for no rows.
+    fn no_match_node(
+        &mut self,
+        subject: &CompiledScalarExpr,
+        last_arm: &CompiledScalarExpr,
+        arm: Option<DenseColumn>,
+        labels: &MatchLabels,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let placeholder = match arm {
+            Some(arm) => arm,
+            None => self.eval_scalar(last_arm, &RowMask::none(mask.len()))?.0,
+        };
+        let (subject, mut errors) = self.eval_scalar(subject, mask)?;
+        for row in mask.without(&errors).rows() {
+            errors.record(row, labels.failure(&subject, row));
+        }
+        Ok((placeholder, errors))
+    }
+
     fn scalar_node(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         let len = self.row_count;
         let ambiguous = |placeholder: DenseColumn, leaf: &str| {
@@ -4299,18 +4374,6 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             CompiledScalarExpr::Floor(value) => {
                 eval_unary::<N, _, _>(self, value, mask, |value| value.floor())
             }
-            CompiledScalarExpr::NoMatch {
-                subject,
-                placeholder,
-                labels,
-            } => {
-                let (placeholder, _) = self.eval_scalar(placeholder, &RowMask::none(mask.len()))?;
-                let (subject, mut errors) = self.eval_scalar(subject, mask)?;
-                for row in mask.without(&errors).rows() {
-                    errors.record(row, labels.failure(&subject, row));
-                }
-                Ok((placeholder, errors))
-            }
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -4321,7 +4384,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let then_rows = live.filter(|row| condition[row].is_holds());
                 let else_rows = live.difference(&then_rows);
                 let (then_values, then_errors) = self.eval_scalar(then_expr, &then_rows)?;
-                let (else_values, else_errors) = self.eval_scalar(else_expr, &else_rows)?;
+                let (else_values, else_errors) = match else_expr.as_ref() {
+                    Else::Expr(else_expr) => self.eval_scalar(else_expr, &else_rows)?,
+                    Else::NoMatch { subject, labels } => {
+                        let arm = then_rows.is_empty().then(|| then_values.clone());
+                        self.eval_no_match(subject, then_expr, arm, labels, &else_rows)?
+                    }
+                };
                 let then_live = then_rows.without(&then_errors);
                 let else_live = else_rows.without(&else_errors);
                 errors.absorb(then_errors);
@@ -4766,12 +4835,10 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
             then_expr,
             else_expr,
             ..
-        } => nested_over_periods_kind(then_expr).or_else(|| nested_over_periods_kind(else_expr)),
-        CompiledScalarExpr::NoMatch {
-            subject,
-            placeholder,
-            ..
-        } => nested_over_periods_kind(subject).or_else(|| nested_over_periods_kind(placeholder)),
+        } => nested_over_periods_kind(then_expr).or_else(|| match else_expr.as_ref() {
+            Else::Expr(else_expr) => nested_over_periods_kind(else_expr),
+            Else::NoMatch { subject, .. } => nested_over_periods_kind(subject),
+        }),
     }
 }
 
