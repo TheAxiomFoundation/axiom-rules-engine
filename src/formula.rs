@@ -2985,6 +2985,222 @@ mod depth_tests {
         });
     }
 
+    fn inputs_read(shape: &Shape, names: &mut std::collections::BTreeSet<&'static str>) {
+        match shape {
+            Shape::Int(_) | Shape::Bool(_) => {}
+            Shape::Var(name) => {
+                names.insert(name);
+            }
+            Shape::Unary(_, operand) | Shape::Group(operand) | Shape::Field(operand, _) => {
+                inputs_read(operand, names)
+            }
+            Shape::Binary(_, left, right) | Shape::Index(left, right) => {
+                inputs_read(left, names);
+                inputs_read(right, names);
+            }
+            Shape::Call(_, args) => args.iter().for_each(|arg| inputs_read(arg, names)),
+            Shape::Cond(branches, else_expr) => {
+                for (condition, then_expr) in branches {
+                    inputs_read(condition, names);
+                    inputs_read(then_expr, names);
+                }
+                inputs_read(else_expr, names);
+            }
+            Shape::Match(subject, arms, default) => {
+                inputs_read(subject, names);
+                arms.iter()
+                    .for_each(|(_, result)| inputs_read(result, names));
+                default
+                    .iter()
+                    .for_each(|default| inputs_read(default, names));
+            }
+        }
+    }
+
+    /// `shape` nested `levels` deeper, one way or several. A generated
+    /// formula is small, because a `match` lowers its subject once per arm;
+    /// this reaches the bound without growing the tree.
+    fn deepen(rng: &mut Rng, shape: Shape, levels: usize) -> Shape {
+        let literal = |value: usize| Shape::Int(i64::try_from(value).expect("small literal"));
+        match rng.below(6) {
+            0 => (0..levels).fold(shape, |sum, term| {
+                binary(BinOpKind::Add, sum, literal(term))
+            }),
+            1 if levels > 0 => Shape::Cond(
+                (0..levels)
+                    .map(|branch| {
+                        (
+                            binary(BinOpKind::Eq, Shape::Var("a"), literal(branch)),
+                            literal(branch),
+                        )
+                    })
+                    .collect(),
+                Box::new(shape),
+            ),
+            2 => Shape::Match(
+                Box::new(Shape::Var("a")),
+                (0..levels)
+                    .map(|arm| (i64::try_from(arm).expect("small pattern"), literal(arm)))
+                    .collect(),
+                Some(Box::new(at_least(shape, 1))),
+            ),
+            3 => (0..levels).fold(shape, |operand, _| {
+                Shape::Unary(UnaryOpKind::Neg, Box::new(at_least(operand, 6)))
+            }),
+            4 => (0..levels).fold(shape, |arg, _| Shape::Call("max", vec![arg, Shape::Int(0)])),
+            _ => (0..levels).fold(shape, |inner, _| match rng.below(4) {
+                0 => Shape::Unary(UnaryOpKind::Neg, Box::new(at_least(inner, 6))),
+                1 => Shape::Call("min", vec![Shape::Var("b"), inner]),
+                2 => Shape::Group(Box::new(inner)),
+                _ => binary(BinOpKind::Mul, Shape::Var("c"), inner),
+            }),
+        }
+    }
+
+    /// Compile and load agree (#236). A generated formula either compiles or
+    /// is refused as too deep, and it is refused exactly when its shape needs
+    /// more than the bound. One that compiles serializes to an artifact that
+    /// loads back unchanged, and the loaded artifact gives the same response
+    /// or the same error, read from JSON as a host sends it.
+    #[test]
+    fn a_formula_compiles_to_an_artifact_that_reloads_and_answers_the_same() {
+        use crate::api::{ExecutionRequest, execute_request};
+        use crate::compile::CompiledProgramArtifact;
+
+        on_stack(|| {
+            let (mut compiled, mut refused, mut deepest_json) = (0, 0, 0);
+            for seed in 0..600_u64 {
+                let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+                let size = 1 + usize::try_from(seed % 16).expect("small size");
+                let levels = rng.below(150);
+                let shape = generate_scalar(&mut rng, size);
+                let shape = deepen(&mut rng, shape, levels);
+                let formula = render(&shape);
+                let need = bound_needed(&shape);
+                let context = format!("seed {seed}: needs {need}: `{formula}`");
+                let source = format!(
+                    "format: rulespec/v1\nrules:\n  - name: out\n    kind: derived\n    entity: Household\n    dtype: Decimal\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"{formula}\"\n"
+                );
+                let artifact = match CompiledProgramArtifact::from_rulespec_str(&source) {
+                    Ok(artifact) => artifact,
+                    Err(error) => {
+                        assert!(
+                            need > MAX_FORMULA_DEPTH
+                                && error.to_string().contains("levels deep; split it"),
+                            "{context}: {error}"
+                        );
+                        refused += 1;
+                        continue;
+                    }
+                };
+                assert!(
+                    need <= MAX_FORMULA_DEPTH,
+                    "{context}: compiled past the bound"
+                );
+                compiled += 1;
+
+                let json = serde_json::to_string(&artifact).expect("artifact serializes");
+                deepest_json = deepest_json.max(object_depth_with_arrays(
+                    &serde_json::from_value(serde_json::to_value(&artifact).expect("value"))
+                        .expect("value"),
+                ));
+                let reloaded = CompiledProgramArtifact::from_json_str(&json)
+                    .unwrap_or_else(|error| panic!("{context}: does not reload: {error}"));
+                assert_eq!(
+                    serde_json::to_string(&reloaded).expect("artifact serializes"),
+                    json,
+                    "{context}: reloading changed the artifact"
+                );
+
+                let mut names = std::collections::BTreeSet::new();
+                inputs_read(&shape, &mut names);
+                let inputs: Vec<serde_json::Value> = names
+                    .iter()
+                    .map(|name| {
+                        let value = match *name {
+                            "p" => serde_json::json!({"kind": "bool", "value": true}),
+                            "q" => serde_json::json!({"kind": "bool", "value": false}),
+                            name => serde_json::json!({
+                                "kind": "integer",
+                                "value": 1 + i64::from(name.as_bytes()[0] - b'a'),
+                            }),
+                        };
+                        serde_json::json!({
+                            "name": name, "entity": "Household", "entity_id": "h1",
+                            "interval": {"start": "2026-01-01", "end": "2026-01-31"},
+                            "value": value,
+                        })
+                    })
+                    .collect();
+                let answer = |artifact: &CompiledProgramArtifact, mode: &str| {
+                    let request = serde_json::json!({
+                        "mode": mode,
+                        "program": artifact.program,
+                        "dataset": {"inputs": inputs, "relations": []},
+                        "queries": [{
+                            "entity_id": "h1",
+                            "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                            "outputs": ["out"],
+                        }],
+                    })
+                    .to_string();
+                    ExecutionRequest::from_json_str(&request)
+                        .map_err(|error| format!("request: {error}"))
+                        .and_then(|request| {
+                            execute_request(request).map_err(|error| error.to_string())
+                        })
+                        .map(|response| {
+                            serde_json::to_string(&response).expect("response serializes")
+                        })
+                };
+                for mode in ["explain", "fast"] {
+                    let first = answer(&artifact, mode);
+                    assert!(
+                        !first
+                            .as_ref()
+                            .is_err_and(|error| error.starts_with("request:")),
+                        "{context}: {first:?}"
+                    );
+                    assert_eq!(
+                        answer(&reloaded, mode),
+                        first,
+                        "{context}: the reloaded artifact answers differently in {mode}"
+                    );
+                }
+            }
+            assert!(
+                compiled > 300 && refused > 20,
+                "the generator compiled {compiled} formulas and had {refused} refused"
+            );
+            // Past serde_json's own 128 levels, which is what #236 was about.
+            assert!(
+                deepest_json > 200,
+                "the deepest artifact nested only {deepest_json} levels of JSON"
+            );
+        });
+    }
+
+    /// How deep a JSON value nests, in arrays and objects.
+    fn object_depth_with_arrays(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => {
+                1 + fields
+                    .values()
+                    .map(object_depth_with_arrays)
+                    .max()
+                    .unwrap_or(0)
+            }
+            serde_json::Value::Array(items) => {
+                1 + items
+                    .iter()
+                    .map(object_depth_with_arrays)
+                    .max()
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
     /// Openers of every kind, mixed and nested far past the bound, are
     /// refused; the same mix nests exactly one level per opener.
     #[test]

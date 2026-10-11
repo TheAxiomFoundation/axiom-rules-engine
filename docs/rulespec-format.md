@@ -373,12 +373,16 @@ release build compiles and evaluates a formula in every mode on a 1 MiB
 thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
 levels.
 
-A compiled artifact has a lower ceiling of its own today. Its JSON nests
+A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one
-per level of an `if`, an `elif` branch or a `match` arm, and the loader
-reads at most 128 levels of JSON. So a sum of 61 terms, or an `elif` chain
-of 119 branches, compiles to an artifact that does not load
-(axiom-rules-engine#236).
+per level of an `if`, an `elif` branch or a `match` arm, so an artifact can
+nest about 260 levels deep. The engine reads an artifact, and a request with
+an inline program, from JSON nested up to 512 levels
+(`compile::MAX_JSON_DEPTH`, four times the formula bound) and refuses a
+document nested deeper. serde_json alone stops at 128 levels, which used to
+refuse artifacts `compile` had just written: a sum of 61 terms, or an `elif`
+chain of 119 branches. A host that reads or writes an artifact with its own
+JSON library needs one that allows the same nesting.
 
 ## The lowered expression vocabulary
 

@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::json::MAX_JSON_DEPTH;
 use crate::spec::{
     DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
     ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
@@ -546,7 +547,7 @@ impl CompiledProgramArtifact {
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
         let value: serde_json::Value =
-            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+            crate::json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
                 error,
             })?;

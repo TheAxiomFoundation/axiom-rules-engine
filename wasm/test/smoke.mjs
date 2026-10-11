@@ -202,10 +202,26 @@ for (const formula of nested(100_000)) {
   );
 }
 // At the bound each of those compiles on the wasm stack, and the instance
-// still answers after the refusals above.
-for (const formula of nested(bound - 1)) {
-  const deep = JSON.parse(engine.compile(deepModules(formula), DEEP_TARGET));
-  assert.ok(deep.program.derived.some((derived) => derived.name === "deep"));
+// still answers after the refusals above. The artifact nests deeper than the
+// 128 levels of JSON `execute` used to read, and loads and evaluates.
+const deepRequest = JSON.stringify({
+  mode: "explain",
+  dataset: { inputs: [], relations: [] },
+  queries: [
+    {
+      entity_id: "household-1",
+      period: { period_kind: "month", ...interval },
+      outputs: [`${DEEP_TARGET}#deep`],
+    },
+  ],
+});
+const atBound = nested(bound - 1);
+const expected = [1, bound % 2 === 0 ? -1 : 1, bound];
+for (const [index, formula] of atBound.entries()) {
+  const deepArtifact = engine.compile(deepModules(formula), DEEP_TARGET);
+  const deepResponse = JSON.parse(engine.execute(deepArtifact, deepRequest));
+  const value = deepResponse.results[0].outputs[`${DEEP_TARGET}#deep`].value;
+  assert.equal(Number(value.value), expected[index], `formula ${index} at the bound`);
 }
 assert.equal(engine.compile(modulesJson, STATE_TARGET), artifactJson);
 console.log(`formulas nest at most ${bound} levels`);

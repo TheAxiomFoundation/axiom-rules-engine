@@ -8,6 +8,7 @@ pub mod dense;
 pub mod depth;
 pub mod engine;
 mod formula;
+mod json;
 mod lazy;
 pub mod migrate;
 pub mod model;

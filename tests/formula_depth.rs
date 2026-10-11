@@ -9,25 +9,37 @@
 //! parser now refuses a formula deeper than the bound before it builds a tree
 //! that deep, so no later stage recurses further than one bounded formula.
 //!
+//! Compile and load agree on that bound (#236). A formula within it compiles
+//! to an artifact nested deeper than the 128 levels of JSON serde_json reads
+//! by default, so the loader used to refuse artifacts `compile` had just
+//! written. It now reads JSON nested up to `compile::MAX_JSON_DEPTH` levels.
+//!
 //! These tests pin that:
 //!
 //! * every way of nesting a formula is a formula error far past the bound,
 //!   in a rule's formula and in a derived relation's predicate;
 //! * one level past the bound is refused, in every way of nesting;
-//! * at the bound, every way of nesting compiles and answers alike in
-//!   explain, fast and dense.
+//! * at the bound, every way of nesting compiles, serializes to an artifact
+//!   that loads back unchanged, and answers alike in explain, fast and dense,
+//!   before and after the reload;
+//! * the formulas reported in #236 reload and answer, in-process and through
+//!   the CLI;
+//! * JSON nested past the loader's bound is an error.
 //!
 //! A release build does all of it on a 1 MiB thread. CI runs these tests in
 //! a debug build, whose frames are several times larger, on the stacks named
 //! below; `cargo test --release --test formula_depth` checks the 1 MiB claim.
 //!
 //! The parser's own unit tests (`src/formula.rs`) check the depth it
-//! computes against an independent count on generated formulas.
+//! computes against an independent count on generated formulas, and that
+//! generated formulas reload and answer the same.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use axiom_rules_engine::api::{ExecutionRequest, ExecutionResponse, execute_request};
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompiledProgramArtifact, MAX_JSON_DEPTH};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue,
 };
@@ -314,11 +326,7 @@ fn model_period() -> Period {
     }
 }
 
-fn request(
-    mode: &str,
-    artifact: &CompiledProgramArtifact,
-    inputs: &[(&str, Value)],
-) -> ExecutionRequest {
+fn dataset(inputs: &[(&str, Value)]) -> Value {
     let inputs: Vec<Value> = inputs
         .iter()
         .map(|(name, value)| {
@@ -329,13 +337,83 @@ fn request(
             })
         })
         .collect();
-    serde_json::from_value(json!({
+    json!({"inputs": inputs, "relations": []})
+}
+
+fn queries() -> Value {
+    json!([{"entity_id": "h1", "period": period(), "outputs": ["deep"]}])
+}
+
+/// A request with the program inline, as JSON text.
+fn request_json(
+    mode: &str,
+    artifact: &CompiledProgramArtifact,
+    inputs: &[(&str, Value)],
+) -> String {
+    json!({
         "mode": mode,
         "program": artifact.program,
-        "dataset": {"inputs": inputs, "relations": []},
-        "queries": [{"entity_id": "h1", "period": period(), "outputs": ["deep"]}],
-    }))
-    .expect("request deserializes")
+        "dataset": dataset(inputs),
+        "queries": queries(),
+    })
+    .to_string()
+}
+
+/// The request read from JSON text, as a host sends it.
+fn request(
+    mode: &str,
+    artifact: &CompiledProgramArtifact,
+    inputs: &[(&str, Value)],
+) -> ExecutionRequest {
+    ExecutionRequest::from_json_str(&request_json(mode, artifact, inputs))
+        .expect("request deserializes")
+}
+
+/// How deep a JSON document nests, in arrays and objects.
+fn json_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        Value::Object(fields) => 1 + fields.values().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// `artifact` after a trip through its JSON, which must not change it.
+fn reloaded(artifact: &CompiledProgramArtifact, context: &str) -> CompiledProgramArtifact {
+    let json = serde_json::to_string(artifact).expect("artifact serializes");
+    let loaded = CompiledProgramArtifact::from_json_str(&json)
+        .unwrap_or_else(|error| panic!("{context}: the artifact does not reload: {error}"));
+    assert_eq!(
+        serde_json::to_string(&loaded).expect("artifact serializes"),
+        json,
+        "{context}: reloading changed the artifact"
+    );
+    loaded
+}
+
+/// `deep`'s answer in explain, fast and dense, which must agree with
+/// `expected`.
+fn assert_answers(
+    artifact: &CompiledProgramArtifact,
+    inputs: &[(&str, Value)],
+    expected: &Value,
+    context: &str,
+) {
+    let explain = execute_request(request("explain", artifact, inputs))
+        .unwrap_or_else(|error| panic!("{context}: explain: {error}"));
+    assert_eq!(&answer(&explain).0, expected, "{context}: explain");
+
+    let fast = execute_request(request("fast", artifact, inputs))
+        .unwrap_or_else(|error| panic!("{context}: fast: {error}"));
+    let (value, stayed_fast) = answer(&fast);
+    assert_eq!(&value, expected, "{context}: fast");
+    assert!(stayed_fast, "{context}: fast fell back to explain");
+
+    assert_eq!(
+        &dense_answer(artifact, inputs),
+        expected,
+        "{context}: dense"
+    );
 }
 
 /// The answer to `deep`, and whether a fast request stayed fast.
@@ -469,12 +547,15 @@ fn every_way_of_nesting_one_level_past_the_bound_is_refused() {
     });
 }
 
-/// At the bound, every way of nesting compiles and answers alike in explain,
-/// fast and dense.
+/// At the bound, every way of nesting compiles, serializes to an artifact
+/// that loads back unchanged, and answers alike in explain, fast and dense,
+/// before and after the reload. The artifact nests deeper than the 128 levels
+/// serde_json reads by default, and within half the loader's bound.
 #[test]
-fn every_way_of_nesting_at_the_bound_answers_in_every_mode() {
+fn every_way_of_nesting_at_the_bound_reloads_and_answers_in_every_mode() {
+    let mut deepest = 0;
     for shape in SHAPES {
-        on_stack(AT_BOUND_STACK, || {
+        deepest = deepest.max(on_stack(AT_BOUND_STACK, || {
             let depth = MAX_FORMULA_DEPTH;
             let source = rulespec(shape.dtype, &(shape.formula)(depth));
             let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
@@ -482,22 +563,176 @@ fn every_way_of_nesting_at_the_bound_answers_in_every_mode() {
             let inputs = (shape.inputs)(depth);
             let expected = canonical(&(shape.answer)(depth));
 
-            let explain = execute_request(request("explain", &artifact, &inputs))
-                .unwrap_or_else(|error| panic!("{}: explain: {error}", shape.name));
-            assert_eq!(answer(&explain).0, expected, "{}: explain", shape.name);
-
-            let fast = execute_request(request("fast", &artifact, &inputs))
-                .unwrap_or_else(|error| panic!("{}: fast: {error}", shape.name));
-            let (value, stayed_fast) = answer(&fast);
-            assert_eq!(value, expected, "{}: fast", shape.name);
-            assert!(stayed_fast, "{}: fast fell back to explain", shape.name);
-
-            assert_eq!(
-                dense_answer(&artifact, &inputs),
-                expected,
-                "{}: dense",
-                shape.name
+            assert_answers(&artifact, &inputs, &expected, shape.name);
+            let loaded = reloaded(&artifact, shape.name);
+            assert_answers(
+                &loaded,
+                &inputs,
+                &expected,
+                &format!("{}, reloaded", shape.name),
             );
-        });
+            json_depth(&serde_json::to_value(&artifact).expect("artifact serializes"))
+        }));
     }
+    assert!(
+        deepest > 2 * MAX_FORMULA_DEPTH && deepest <= MAX_JSON_DEPTH / 2 + 16,
+        "the deepest artifact at the bound nests {deepest} levels of JSON; the loader reads {MAX_JSON_DEPTH}"
+    );
+}
+
+/// The formulas reported in #236, at the sizes that first failed to load: a
+/// sum of 62 terms, an `and` chain of 61, a `match` of 119 arms, an `elif`
+/// chain of 119 branches and a minus nested 120 deep. Each compiled, and the
+/// loader then refused the artifact with `recursion limit exceeded`.
+#[test]
+fn the_formulas_reported_in_issue_236_reload_and_answer() {
+    on_stack(AT_BOUND_STACK, || {
+        let x = |value: i64| vec![("x", integer(value))];
+        let mut matched = String::from("match x:");
+        let mut chained = String::from("if x == 1: 1");
+        for arm in 1..=119 {
+            matched.push_str(&format!(" {arm} => {arm}"));
+            if arm > 1 {
+                chained.push_str(&format!(" elif x == {arm}: {arm}"));
+            }
+        }
+        matched.push_str(" _ => 0");
+        chained.push_str(" else: 0");
+        for (name, dtype, formula, inputs, expected) in [
+            (
+                "sum of 62 terms",
+                "Integer",
+                format!("x{}", " + x".repeat(61)),
+                x(2),
+                integer(124),
+            ),
+            (
+                "and chain of 61",
+                "Judgment",
+                format!("flag{}", " and flag".repeat(60)),
+                flag_input(0),
+                json!("holds"),
+            ),
+            (
+                "match of 119 arms",
+                "Integer",
+                matched,
+                x(119),
+                integer(119),
+            ),
+            (
+                "elif chain of 119",
+                "Integer",
+                chained,
+                x(119),
+                integer(119),
+            ),
+            (
+                "minus nested 120 deep",
+                "Integer",
+                format!("{}x", "-".repeat(120)),
+                x(7),
+                integer(7),
+            ),
+        ] {
+            let artifact = CompiledProgramArtifact::from_rulespec_str(&rulespec(dtype, &formula))
+                .unwrap_or_else(|error| panic!("{name}: compile: {error}"));
+            let loaded = reloaded(&artifact, name);
+            assert_answers(&loaded, &inputs, &canonical(&expected), name);
+        }
+    });
+}
+
+/// The same through the CLI, which is where #236 was reported: `run-compiled`
+/// loads an artifact file, and the bare command reads a request whose program
+/// is inline, as the Python client sends it.
+#[test]
+fn the_cli_loads_an_artifact_and_a_request_nested_past_128_levels() {
+    let artifact = on_stack(AT_BOUND_STACK, || {
+        CompiledProgramArtifact::from_rulespec_str(&rulespec(
+            "Integer",
+            &format!("x{}", " + x".repeat(61)),
+        ))
+        .expect("a sum of 62 terms compiles")
+    });
+    let artifact_json = serde_json::to_string(&artifact).expect("artifact serializes");
+    assert!(
+        json_depth(&serde_json::to_value(&artifact).expect("artifact serializes")) > 128,
+        "the artifact should nest past serde_json's default limit"
+    );
+    let inputs = [("x", integer(2))];
+    let directory = std::env::temp_dir().join(format!(
+        "axiom-rules-engine-formula-depth-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).expect("create temp directory");
+    let artifact_path = directory.join("sum62.compiled.json");
+    std::fs::write(&artifact_path, &artifact_json).expect("write artifact");
+
+    let run = |args: &[&str], stdin: String| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn axiom-rules-engine binary");
+        child
+            .stdin
+            .take()
+            .expect("stdin available")
+            .write_all(stdin.as_bytes())
+            .expect("request written");
+        let output = child.wait_with_output().expect("binary completes");
+        assert!(
+            output.status.success(),
+            "{args:?}: stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: ExecutionResponse =
+            serde_json::from_slice(&output.stdout).expect("response parses");
+        answer(&response).0
+    };
+    let compiled_request = json!({
+        "mode": "explain", "dataset": dataset(&inputs), "queries": queries(),
+    })
+    .to_string();
+    assert_eq!(
+        run(
+            &[
+                "run-compiled",
+                "--artifact",
+                artifact_path.to_str().expect("utf8 path")
+            ],
+            compiled_request
+        ),
+        canonical(&integer(124)),
+        "run-compiled"
+    );
+    assert_eq!(
+        run(&[], request_json("explain", &artifact, &inputs)),
+        canonical(&integer(124)),
+        "inline request"
+    );
+    std::fs::remove_dir_all(directory).ok();
+}
+
+/// JSON nested past the loader's bound is an error that says so, however
+/// deep it goes: the bound is what keeps reading it on the stack.
+#[test]
+fn json_nested_past_the_loaders_bound_is_an_error() {
+    on_stack(REFUSAL_STACK, || {
+        for levels in [MAX_JSON_DEPTH + 1, 1_000_000] {
+            let nested = format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+            let message = format!("JSON nests more than {MAX_JSON_DEPTH} levels deep");
+            let error = CompiledProgramArtifact::from_json_str(&nested)
+                .expect_err("an artifact nested past the bound is refused")
+                .to_string();
+            assert!(error.contains(&message), "artifact: {error}");
+            let error = ExecutionRequest::from_json_str(&nested)
+                .expect_err("a request nested past the bound is refused")
+                .to_string();
+            assert!(error.contains(&message), "request: {error}");
+        }
+    });
 }

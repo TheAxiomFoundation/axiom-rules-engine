@@ -25,6 +25,15 @@ pub struct ExecutionRequest {
     pub queries: Vec<ExecutionQuery>,
 }
 
+impl ExecutionRequest {
+    /// Read a request from JSON. Its inline program may nest as deep as a
+    /// compiled artifact's, up to [`crate::compile::MAX_JSON_DEPTH`] levels
+    /// of JSON, where `serde_json::from_str` stops at 128.
+    pub fn from_json_str(source: &str) -> Result<Self, serde_json::Error> {
+        crate::json::from_str(source)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledExecutionRequest {
