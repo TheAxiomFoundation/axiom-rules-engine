@@ -24,7 +24,8 @@
 //!   before and after the reload;
 //! * the formulas reported in #236 reload and answer, in-process and through
 //!   the CLI;
-//! * JSON nested past the loader's bound is an error.
+//! * JSON nested past the loader's bound is an error;
+//! * a rule pinned many times is wrapped once, not once per pin.
 //!
 //! A release build does all of it on a 1 MiB thread. CI runs these tests in
 //! a debug build, whose frames are several times larger, on the stacks named
@@ -38,7 +39,10 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use axiom_rules_engine::api::{ExecutionRequest, ExecutionResponse, execute_request};
+use axiom_rules_engine::api::{
+    CompiledExecutionRequest, ExecutionRequest, ExecutionResponse, execute_compiled_request,
+    execute_request,
+};
 use axiom_rules_engine::compile::{CompiledProgramArtifact, MAX_JSON_DEPTH};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue,
@@ -249,6 +253,16 @@ const SHAPES: &[Shape] = &[
         formula: |depth| format!("flag{}", " and flag".repeat(depth - 1)),
         inputs: flag_input,
         answer: |_| json!("holds"),
+    },
+    // `exactly_one(not not flag, not flag)`: a call around a deep argument.
+    // The runtime program expands it to an or of ands of nots, which adds
+    // levels and copies the argument once per argument.
+    Shape {
+        name: "exactly one of a deep argument",
+        dtype: "Judgment",
+        formula: |depth| format!("exactly_one({}flag, not flag)", "not ".repeat(depth - 2)),
+        inputs: flag_input,
+        answer: |depth| json!(if depth % 2 == 0 { "holds" } else { "not_holds" }),
     },
     Shape {
         name: "flat disjunction",
@@ -735,4 +749,77 @@ fn json_nested_past_the_loaders_bound_is_an_error() {
             assert!(error.contains(&message), "request: {error}");
         }
     });
+}
+
+/// A request's pins are the one other thing that deepens a tree: a pin wraps
+/// its rule's expression in an `if`. A rule pinned many times used to be
+/// wrapped once per pin, so a flat request with 100,000 pins on one rule
+/// built a 100,000-level tree and overflowed the stack. The rule takes its
+/// last pin, as the nested wraps always evaluated to, and is wrapped once.
+#[test]
+fn a_rule_pinned_many_times_takes_its_last_pin_and_is_wrapped_once() {
+    let artifact = || {
+        CompiledProgramArtifact::from_rulespec_str(&rulespec("Integer", "x + 1"))
+            .expect("the rule compiles")
+    };
+    let respond = |mode: &str, pins: &[i64]| {
+        let pins: Vec<Value> = pins
+            .iter()
+            .map(|value| json!({"rule": "deep", "value": integer(*value)}))
+            .collect();
+        let request: CompiledExecutionRequest = serde_json::from_value(json!({
+            "mode": mode,
+            "dataset": dataset(&[("x", integer(1))]),
+            "queries": queries(),
+            "pins": pins,
+        }))
+        .expect("request deserializes");
+        execute_compiled_request(artifact(), request)
+            .unwrap_or_else(|error| panic!("{mode} with {} pins: {error}", pins.len()))
+    };
+    on_stack(REFUSAL_STACK, || {
+        for mode in ["explain", "fast"] {
+            // However many pins precede it, the last one is the answer, and
+            // the whole response is the one the last pin alone gives.
+            let alone = serde_json::to_value(respond(mode, &[7])).expect("response serializes");
+            for earlier in [1, 2, 5, 100_000] {
+                let mut pins: Vec<i64> = (0..earlier).map(|pin| 1_000 + pin).collect();
+                pins.push(7);
+                let response = respond(mode, &pins);
+                assert_eq!(
+                    answer(&response).0,
+                    canonical(&integer(7)),
+                    "{mode}: {earlier} pins before the last"
+                );
+                assert_eq!(
+                    serde_json::to_value(response).expect("response serializes"),
+                    alone,
+                    "{mode}: {earlier} pins before the last change the response"
+                );
+            }
+        }
+    });
+
+    // Every pin is still checked, in order, a pin that a later one supersedes
+    // included: the first pin on an unknown rule is the error.
+    let request: CompiledExecutionRequest = serde_json::from_value(json!({
+        "mode": "explain",
+        "dataset": dataset(&[("x", integer(1))]),
+        "queries": queries(),
+        "pins": [
+            {"rule": "deep", "value": integer(1)},
+            {"rule": "deep", "value": integer(2)},
+            {"rule": "missing", "value": integer(3)},
+            {"rule": "also_missing", "value": integer(4)},
+            {"rule": "missing", "value": integer(5)},
+        ],
+    }))
+    .expect("request deserializes");
+    let error = execute_compiled_request(artifact(), request)
+        .expect_err("an unknown pinned rule is an error")
+        .to_string();
+    assert!(
+        error.contains("`missing`") && !error.contains("also_missing"),
+        "{error}"
+    );
 }

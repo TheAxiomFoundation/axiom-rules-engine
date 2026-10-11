@@ -89,7 +89,10 @@ only from a branch no row selects.
 A rule pin (`CompiledExecutionRequest.pins`) rewrites the pinned rule to
 `if 0 == 0 then <literal> else <original formula>`. Under the reference
 semantics the original formula is never evaluated, so a pinned rule never needs
-the inputs its original formula reads. This holds in every mode.
+the inputs its original formula reads. This holds in every mode. A rule pinned
+more than once takes its last pin and is rewritten once, so pins add one level
+to a rule's formula however many there are (see
+[nesting depth](rulespec-format.md#nesting-depth)).
 
 ## Fast mode contract
 

@@ -485,7 +485,8 @@ the rule's local name and a typed value, alongside the request's `mode`,
 }
 ```
 
-Pins accept scalar derived rules, not judgments or parameters. Parameters
+Pins accept scalar derived rules, not judgments or parameters. A rule named
+more than once takes its last pin. Parameters
 are law values defined in the program; change the program parameter to model
 a different law. Companion test `input` maps contain dataset facts, not
 implicit pins. Callers of the lower-level `DatasetSpec::to_dataset` or direct

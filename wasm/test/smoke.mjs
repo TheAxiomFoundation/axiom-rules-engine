@@ -226,4 +226,18 @@ for (const [index, formula] of atBound.entries()) {
 assert.equal(engine.compile(modulesJson, STATE_TARGET), artifactJson);
 console.log(`formulas nest at most ${bound} levels`);
 
+// A rule pinned many times takes its last pin and is wrapped once. Each pin
+// used to wrap the one before it, so many pins on one rule built a deep tree
+// from a flat request and trapped.
+const pinnedRequest = (pins) =>
+  JSON.stringify({
+    ...request,
+    pins: Array.from({ length: pins }, (_, pin) => ({
+      rule: "snap_regular_month_allotment",
+      value: { kind: "decimal", value: String(pin) },
+    })),
+  });
+const pinned = JSON.parse(engine.execute(artifactJson, pinnedRequest(100_000)));
+assert.equal(pinned.results[0].outputs[OUTPUT_ID].value.value, "99999");
+
 console.log("smoke test passed");

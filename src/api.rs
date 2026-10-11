@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub struct CompiledExecutionRequest {
     /// caller never has to edit an artifact. Naming a rule the program does
     /// not contain is an error, not a no-op: a pin that silently fails to
     /// bind would hand the caller baseline results labelled as a
-    /// counterfactual.
+    /// counterfactual. A rule named more than once takes its last pin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pins: Vec<RulePin>,
 }
@@ -445,8 +445,19 @@ pub fn execute_compiled_request(
 ///
 /// Runs on the program the engine is about to execute, so every execution
 /// mode sees the same pinned program.
+///
+/// A rule pinned more than once is wrapped once, with its last pin. Each pin
+/// used to wrap the one before it, so the last was already the one evaluated,
+/// but a request with many pins on one rule built an expression as deep as
+/// the pins were many, from flat JSON, and overflowed the stack. Every pin is
+/// still checked, in order.
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
-    for pin in pins {
+    let last_pin: HashMap<&str, usize> = pins
+        .iter()
+        .enumerate()
+        .map(|(index, pin)| (pin.rule.as_str(), index))
+        .collect();
+    for (index, pin) in pins.iter().enumerate() {
         let rule = program
             .derived
             .iter_mut()
@@ -463,6 +474,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
             return Err(ApiError::JudgmentRuleNotPinnable {
                 rule: pin.rule.clone(),
             });
+        }
+        if last_pin[pin.rule.as_str()] != index {
+            continue;
         }
         let pin_expr = |original: ScalarExprSpec| DerivedSemanticsSpec::Scalar {
             expr: ScalarExprSpec::If {
