@@ -169,7 +169,7 @@ pub struct RelationReads {
 }
 
 /// A key whose value may be null but must be written: absence is an error.
-fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

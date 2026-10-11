@@ -382,6 +382,26 @@ impl fmt::Display for RuleSpecDiagnosticReport {
 pub struct RuleSpecLoweringOutcome {
     pub program: ProgramSpec,
     pub diagnostics: Vec<RuleSpecDiagnostic>,
+    /// The module texts a loader read to lower `program`. Set by the loaders
+    /// below; `None` when a [`RulesDocument`] was lowered directly.
+    pub source: Option<RuleSpecSourceTexts>,
+}
+
+/// Every module text a loader read to lower a program, the root included,
+/// each with the SHA-256 of its exact text. A compiled artifact records it as
+/// its `source_closure`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuleSpecSourceTexts {
+    /// The root module's canonical target; `None` for an originless root (an
+    /// in-memory string or a composition file).
+    pub root: Option<String>,
+    /// `(target, sha256)` in the order the loader read them, with 64
+    /// lowercase hex digits per digest. The originless root has no target.
+    pub modules: Vec<(Option<String>, String)>,
+}
+
+fn text_sha256(text: &str) -> String {
+    crate::digest::hex(&crate::digest::sha256(text.as_bytes()))
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -989,7 +1009,12 @@ pub fn lower_rulespec_str_with_options(
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
     document.assign_origin_target(None);
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules: vec![(None, text_sha256(source))],
+    });
+    Ok(outcome)
 }
 
 #[cfg(feature = "fs")]
@@ -1071,7 +1096,19 @@ pub fn load_composed_rulespec_file_with_options(
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
-    combined.to_program_spec_with_options(options)
+    let mut outcome = combined.to_program_spec_with_options(options)?;
+    let mut modules = vec![(None, text_sha256(&source))];
+    modules.extend(
+        context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256)),
+    );
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules,
+    });
+    Ok(outcome)
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -1109,7 +1146,16 @@ pub fn load_rulespec_with_source_with_options(
         &mut context,
         ModuleSurface::Atomic,
     )?;
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: Some(root_target),
+        modules: context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256))
+            .collect(),
+    });
+    Ok(outcome)
 }
 
 fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
@@ -1122,6 +1168,8 @@ fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
 struct SourceLoadContext {
     stack: Vec<String>,
     loaded: HashSet<String>,
+    /// `(target, sha256)` of every module text read, in read order.
+    read: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1150,6 +1198,7 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    context.read.push((target.to_string(), text_sha256(&text)));
     // Parse once up front so a syntax error names this module and keeps its
     // position, instead of surfacing as a missing discriminator.
     if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
@@ -2203,6 +2252,7 @@ impl RulesDocument {
         Ok(RuleSpecLoweringOutcome {
             program,
             diagnostics,
+            source: None,
         })
     }
 

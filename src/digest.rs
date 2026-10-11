@@ -3,10 +3,6 @@
 //! the compiled artifact's source closure. Keeping it local avoids changing
 //! the default dependency surface.
 
-// Without `unit-derivation`, nothing reads the digest until the artifact's
-// source closure does.
-#![cfg_attr(not(feature = "unit-derivation"), allow(dead_code))]
-
 pub(crate) fn sha256(input: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,

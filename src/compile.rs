@@ -170,7 +170,13 @@ impl std::fmt::Display for CompileDiagnostic {
 #[derive(Clone, Debug)]
 pub struct CompiledProgramArtifact {
     pub artifact_format_version: u32,
+    /// The semantic version of the engine that compiled the artifact.
     pub engine_version: Option<String>,
+    /// The build of the engine that compiled the artifact.
+    pub engine_build: Option<EngineBuild>,
+    /// The RuleSpec module texts the program was lowered from; `None` for a
+    /// program compiled from a `ProgramSpec`.
+    pub source_closure: Option<SourceClosure>,
     pub program: ProgramSpec,
     /// The program's entity roster, input slots and relations
     /// ([`crate::interface`]), derived by every compile. Execution never
@@ -181,6 +187,121 @@ pub struct CompiledProgramArtifact {
     /// artifact contract. They are available to the invoking host and emitted
     /// by `compile_summary_lines`, while serialized artifact bytes stay stable.
     pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// Which build of the engine compiled an artifact, stamped by `build.rs`.
+/// Two builds with the same `engine_version` can differ here, and builds that
+/// differ here write artifacts that differ in this field alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct EngineBuild {
+    /// The commit the engine was built from (40 lowercase hex digits), or
+    /// null when the build could not know it.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub commit: Option<String>,
+    /// Whether the engine's `src/`, `build.rs`, `Cargo.toml` or `Cargo.lock`
+    /// differed from that commit; null when unknown, and always null when
+    /// `commit` is.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub dirty: Option<bool>,
+}
+
+const STAMPED_COMMIT: &str = env!("AXIOM_RULES_ENGINE_STAMPED_COMMIT");
+const STAMPED_DIRTY: &str = env!("AXIOM_RULES_ENGINE_STAMPED_DIRTY");
+
+impl EngineBuild {
+    /// This engine's build.
+    pub fn current() -> Self {
+        let commit = (!STAMPED_COMMIT.is_empty()).then(|| STAMPED_COMMIT.to_string());
+        let dirty = match STAMPED_DIRTY {
+            "true" if commit.is_some() => Some(true),
+            "false" if commit.is_some() => Some(false),
+            _ => None,
+        };
+        Self { commit, dirty }
+    }
+}
+
+/// `5d63e8f`, `5d63e8f (dirty)`, or `unknown`.
+impl std::fmt::Display for EngineBuild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.commit {
+            None => formatter.write_str("unknown"),
+            Some(commit) => {
+                formatter.write_str(commit.get(..7).unwrap_or(commit))?;
+                match self.dirty {
+                    Some(true) => formatter.write_str(" (dirty)"),
+                    Some(false) => Ok(()),
+                    None => formatter.write_str(" (dirty unknown)"),
+                }
+            }
+        }
+    }
+}
+
+/// Which RuleSpec text an artifact was compiled from: every module text the
+/// loader read to lower the program, the root included. It identifies module
+/// text and nothing else; a corpus provision index, which fills `source_url`
+/// fields after compilation, is not in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SourceClosure {
+    /// The root module's canonical target; null for an originless root (an
+    /// in-memory string, or a composition file).
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub root: Option<String>,
+    /// One entry per module text, sorted by target, an originless root first.
+    pub modules: Vec<SourceClosureModule>,
+    /// `sha256:` and the SHA-256 of `axiom-rules-engine/source-closure/v1\n`
+    /// followed by one `<target>\t<sha256>\n` line per module, in order
+    /// (an empty target for an originless root).
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SourceClosureModule {
+    /// The module's canonical target; null for an originless root.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub target: Option<String>,
+    /// The SHA-256 of the module's exact text, 64 lowercase hex digits.
+    pub sha256: String,
+}
+
+const SOURCE_CLOSURE_DOMAIN: &str = "axiom-rules-engine/source-closure/v1\n";
+
+impl SourceClosure {
+    fn from_texts(texts: crate::rulespec::RuleSpecSourceTexts) -> Self {
+        let mut modules = texts
+            .modules
+            .into_iter()
+            .map(|(target, sha256)| SourceClosureModule { target, sha256 })
+            .collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.target.cmp(&right.target));
+        let digest = source_closure_digest(&modules);
+        Self {
+            root: texts.root,
+            modules,
+            digest,
+        }
+    }
+}
+
+fn source_closure_digest(modules: &[SourceClosureModule]) -> String {
+    let mut preimage = SOURCE_CLOSURE_DOMAIN.as_bytes().to_vec();
+    for module in modules {
+        preimage.extend_from_slice(module.target.as_deref().unwrap_or("").as_bytes());
+        preimage.push(b'\t');
+        preimage.extend_from_slice(module.sha256.as_bytes());
+        preimage.push(b'\n');
+    }
+    format!(
+        "sha256:{}",
+        crate::digest::hex(&crate::digest::sha256(&preimage))
+    )
 }
 
 /// The serialized artifact. `program` repeats `ProgramSpec`'s fields in
@@ -195,6 +316,10 @@ struct ArtifactWire {
     artifact_format_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     engine_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_build: Option<EngineBuild>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_closure: Option<SourceClosure>,
     program: ArtifactProgramWire,
     metadata: CompiledProgramMetadata,
 }
@@ -230,6 +355,10 @@ struct ArtifactWireRef<'a> {
     artifact_format_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     engine_version: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_build: Option<&'a EngineBuild>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_closure: Option<&'a SourceClosure>,
     program: ArtifactProgramWireRef<'a>,
     metadata: &'a CompiledProgramMetadata,
 }
@@ -265,6 +394,8 @@ impl Serialize for CompiledProgramArtifact {
         ArtifactWireRef {
             artifact_format_version: self.artifact_format_version,
             engine_version: self.engine_version.as_ref(),
+            engine_build: self.engine_build.as_ref(),
+            source_closure: self.source_closure.as_ref(),
             program: ArtifactProgramWireRef::new(&self.program, self.interface.as_ref()),
             metadata: &self.metadata,
         }
@@ -278,6 +409,8 @@ impl<'de> Deserialize<'de> for CompiledProgramArtifact {
         Ok(Self {
             artifact_format_version: wire.artifact_format_version,
             engine_version: wire.engine_version,
+            engine_build: wire.engine_build,
+            source_closure: wire.source_closure,
             program: ProgramSpec {
                 module: wire.program.module,
                 units: wire.program.units,
@@ -363,7 +496,7 @@ impl CompiledProgramArtifact {
         program: ProgramSpec,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
-        Self::compile_at(program, "<program>", options)
+        Self::compile_at(program, "<program>", options, None)
     }
 
     fn compile_rulespec_outcome(
@@ -399,7 +532,8 @@ impl CompiledProgramArtifact {
             }
         }
 
-        let mut artifact = Self::compile_at(outcome.program, path, options)?;
+        let source_closure = outcome.source.map(SourceClosure::from_texts);
+        let mut artifact = Self::compile_at(outcome.program, path, options, source_closure)?;
         artifact.diagnostics.splice(0..0, rulespec_diagnostics);
         Ok(artifact)
     }
@@ -408,6 +542,7 @@ impl CompiledProgramArtifact {
         mut program: ProgramSpec,
         path: &str,
         options: CompileOptions,
+        source_closure: Option<SourceClosure>,
     ) -> Result<Self, CompileError> {
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
@@ -428,6 +563,8 @@ impl CompiledProgramArtifact {
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            engine_build: Some(EngineBuild::current()),
+            source_closure,
             program,
             interface: Some(interface),
             metadata,
@@ -2029,6 +2166,19 @@ pub fn compile_summary_lines(artifact: &CompiledProgramArtifact) -> BTreeMap<Str
     );
     if let Some(engine_version) = &artifact.engine_version {
         lines.insert("engine_version".to_string(), engine_version.clone());
+    }
+    if let Some(engine_build) = &artifact.engine_build {
+        lines.insert("engine_build".to_string(), engine_build.to_string());
+    }
+    if let Some(source_closure) = &artifact.source_closure {
+        lines.insert(
+            "source_closure_digest".to_string(),
+            source_closure.digest.clone(),
+        );
+        lines.insert(
+            "source_closure_modules".to_string(),
+            source_closure.modules.len().to_string(),
+        );
     }
     lines.insert(
         "derived_outputs".to_string(),
