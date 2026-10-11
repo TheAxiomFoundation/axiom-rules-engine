@@ -2659,6 +2659,7 @@ impl RuleDefinition {
                 name: self.name.clone(),
             })?;
         let predicate = crate::formula::lower_judgment_formula(
+            &self.name,
             formula,
             derived_names.clone(),
             relation_predicate_names.clone(),

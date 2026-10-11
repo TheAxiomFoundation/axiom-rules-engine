@@ -1424,6 +1424,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         })?;
         let lower_semantics =
             |expr: &Expr, dtype: &DTypeSpec| -> Result<DerivedSemanticsSpec, FormulaError> {
+                check_lowered_size(expr, &ctx, *dtype == DTypeSpec::Judgment, &v.path)?;
                 match dtype {
                     DTypeSpec::Judgment => Ok(DerivedSemanticsSpec::Judgment {
                         expr: lower_to_judgment(expr, &ctx)?,
@@ -1556,6 +1557,158 @@ fn lit_bool_spec(b: bool) -> ScalarExprSpec {
     ScalarExprSpec::Literal {
         value: ScalarValueSpec::Bool { value: b },
     }
+}
+
+/// How many runtime expression nodes `e` lowers to in scalar position: what
+/// [`lower_to_scalar`] builds, counted as `ScalarExprSpec::runtime_size`
+/// counts it, so a `match` subject counts once per arm it is copied into and
+/// an `exactly_one` counts as what it expands to. It mirrors the lowering
+/// without building anything, so a formula whose lowering would be huge is
+/// refused before it is built (see [`check_lowered_size`]). Saturating; a
+/// shape the lowering refuses counts as nothing. It recurses as deep as the
+/// formula, which the parser bounds.
+fn scalar_runtime_size(e: &Expr, ctx: &LowerCtx) -> u64 {
+    let sum = |items: &[Expr]| {
+        items.iter().fold(0u64, |total, item| {
+            total.saturating_add(scalar_runtime_size(item, ctx))
+        })
+    };
+    let one_plus = |size: u64| 1u64.saturating_add(size);
+    match e {
+        Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitBool(_) | Expr::LitStr(_) => 1,
+        Expr::Var(name) => match name.as_str() {
+            "period_start" | "period_end" => 1,
+            // A parameter reads its index-0 value: a lookup and its literal.
+            _ if ctx.scalars.contains(name) => 2,
+            _ => 1,
+        },
+        Expr::Index { index, .. } => one_plus(scalar_runtime_size(index, ctx)),
+        Expr::BinOp { left, right, .. } => {
+            one_plus(scalar_runtime_size(left, ctx).saturating_add(scalar_runtime_size(right, ctx)))
+        }
+        // `0 - operand`.
+        Expr::UnaryOp { operand, .. } => 2u64.saturating_add(scalar_runtime_size(operand, ctx)),
+        Expr::Call { func, args } => match func.as_str() {
+            "max"
+            | "min"
+            | "ceil"
+            | "floor"
+            | "days_between"
+            | "date_add_days"
+            | "date_add_months"
+            | "date_add_years"
+            | "sum_over_periods"
+            | "max_over_periods"
+            | "count_over_periods"
+            | "sum_top_n_over_periods" => one_plus(sum(args)),
+            "len" | "sum" => 1,
+            // The related-entity count or sum, and its `where` clause: a rule
+            // that holds, or an input compared with `true`.
+            "count_where" | "sum_where" => {
+                let predicate = args.last().and_then(|predicate| match predicate {
+                    Expr::Var(name) => Some(name),
+                    _ => None,
+                });
+                if predicate.is_some_and(|name| ctx.derived.contains(name)) {
+                    2
+                } else {
+                    4
+                }
+            }
+            _ => 0,
+        },
+        Expr::Cond {
+            condition,
+            then_expr,
+            else_expr,
+        } => one_plus(
+            judgment_runtime_size(condition, ctx)
+                .saturating_add(scalar_runtime_size(then_expr, ctx))
+                .saturating_add(scalar_runtime_size(else_expr, ctx)),
+        ),
+        // Each arm is an `if` comparing a copy of the subject with the arm's
+        // pattern. After the last arm comes the wildcard's result or, without
+        // one, the node holding one more copy of the subject and every
+        // pattern.
+        Expr::Match {
+            subject,
+            cases,
+            default,
+        } => {
+            let subject = scalar_runtime_size(subject, ctx);
+            let patterns = cases.iter().fold(0u64, |total, (pattern, _)| {
+                total.saturating_add(scalar_runtime_size(pattern, ctx))
+            });
+            let fallback = match default {
+                Some(default) => scalar_runtime_size(default, ctx),
+                None => one_plus(subject.saturating_add(patterns)),
+            };
+            cases.iter().fold(fallback, |total, (pattern, result)| {
+                total
+                    .saturating_add(2)
+                    .saturating_add(subject)
+                    .saturating_add(scalar_runtime_size(pattern, ctx))
+                    .saturating_add(scalar_runtime_size(result, ctx))
+            })
+        }
+        Expr::FieldAccess { .. } => 0,
+    }
+}
+
+/// How many runtime expression nodes `e` lowers to in judgment position: what
+/// [`lower_to_judgment`] builds (see [`scalar_runtime_size`]).
+fn judgment_runtime_size(e: &Expr, ctx: &LowerCtx) -> u64 {
+    let one_plus = |size: u64| 1u64.saturating_add(size);
+    match e {
+        // `literal == true`.
+        Expr::LitBool(_) => 3,
+        Expr::Var(name) if ctx.derived.contains(name) || ctx.relation_predicates.contains(name) => {
+            1
+        }
+        // `input == true`.
+        Expr::Var(_) => 3,
+        Expr::BinOp { op, left, right } => match op {
+            BinOpKind::And | BinOpKind::Or => one_plus(
+                judgment_runtime_size(left, ctx).saturating_add(judgment_runtime_size(right, ctx)),
+            ),
+            _ => one_plus(
+                scalar_runtime_size(left, ctx).saturating_add(scalar_runtime_size(right, ctx)),
+            ),
+        },
+        Expr::UnaryOp { operand, .. } => one_plus(judgment_runtime_size(operand, ctx)),
+        Expr::Call { func, args } if func == "exactly_one" => {
+            crate::spec::exactly_one_runtime_size(
+                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                args.iter().fold(0u64, |total, arg| {
+                    total.saturating_add(judgment_runtime_size(arg, ctx))
+                }),
+            )
+        }
+        _ => 0,
+    }
+}
+
+/// Refuse the formula of `name`, in judgment position or not, if it lowers to
+/// more than [`crate::spec::MAX_EXPRESSION_SIZE`] runtime nodes. Checked before
+/// lowering, which would otherwise build the whole tree first.
+fn check_lowered_size(
+    expr: &Expr,
+    ctx: &LowerCtx,
+    judgment: bool,
+    name: &str,
+) -> Result<(), FormulaError> {
+    let size = if judgment {
+        judgment_runtime_size(expr, ctx)
+    } else {
+        scalar_runtime_size(expr, ctx)
+    };
+    if size > crate::spec::MAX_EXPRESSION_SIZE {
+        return Err(FormulaError::lower(format!(
+            "the formula of `{name}` expands to more than {} expression nodes; split it into named rules",
+            crate::spec::MAX_EXPRESSION_SIZE
+        )));
+    }
+    Ok(())
 }
 
 fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaError> {
@@ -2192,6 +2345,7 @@ fn count_non_exhaustive_matches(expr: &Expr) -> usize {
 }
 
 pub(crate) fn lower_judgment_formula(
+    name: &str,
     formula: &str,
     derived_names: HashSet<String>,
     relation_predicates: HashSet<String>,
@@ -2213,6 +2367,7 @@ pub(crate) fn lower_judgment_formula(
         relation_predicates,
         relations: std::cell::RefCell::new(HashSet::new()),
     };
+    check_lowered_size(&expr, &ctx, true, name)?;
     lower_to_judgment(&expr, &ctx)
 }
 
@@ -3033,6 +3188,150 @@ mod depth_tests {
         });
     }
 
+    /// The pre-flight count is the lowered formula's runtime size, so the
+    /// size bound refuses exactly the formulas whose lowering would pass it.
+    /// On generated formulas, with `exactly_one` and `match` subjects that
+    /// are themselves `match`es, in contexts that make a name a parameter, a
+    /// rule or a relation predicate. A formula counted past a small cap is not
+    /// lowered, so a wrong count cannot make this test build a huge tree.
+    #[test]
+    fn the_lowering_count_is_the_lowered_runtime_size() {
+        const CAP: u64 = 200_000;
+        let names = |set: &[&str]| {
+            set.iter()
+                .map(|name| name.to_string())
+                .collect::<HashSet<_>>()
+        };
+        let contexts = [
+            (names(&[]), names(&[]), names(&[])),
+            (names(&["a", "t"]), names(&["b", "q"]), names(&["p"])),
+            (names(&["c"]), names(&["a"]), names(&["q"])),
+        ];
+        // Every lowering rule at least once.
+        let fixed = [
+            ("t[a + 1]", false),
+            ("period_start", false),
+            ("count_where(r, b) + count_where(r, z)", false),
+            (
+                "sum_where(r, f, b) + sum_where(r, f, z) + len(r) + sum(r.f)",
+                false,
+            ),
+            (
+                "ceil(a) + floor(b) + days_between(period_start, period_end)",
+                false,
+            ),
+            ("date_add_days(period_start, 1)", false),
+            ("date_add_months(period_start, a)", false),
+            ("date_add_years(period_start, -b)", false),
+            (
+                "sum_over_periods(a) + max_over_periods(b) + count_over_periods(c)",
+                false,
+            ),
+            ("sum_top_n_over_periods(a, 2)", false),
+            ("match a: 1 => b 2 => c _ => 0", false),
+            ("match a + 1: 1 => b 2 => c", false),
+            (
+                "match (match a: 1 => 2 _ => 3): 2 => b 3 => (match c: 1 => 1 _ => 0) _ => 0",
+                false,
+            ),
+            ("if p and not q: a else: b", false),
+            ("exactly_one(p, q, a > 1, b == 2)", true),
+            (
+                "exactly_one(exactly_one(p, q), exactly_one(q, p, true))",
+                true,
+            ),
+            ("true or p", true),
+        ];
+        let mut cases: Vec<(String, bool)> = fixed
+            .iter()
+            .map(|(formula, judgment)| (formula.to_string(), *judgment))
+            .collect();
+        for seed in 0..3_000_u64 {
+            let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            let size = 1 + usize::try_from(seed % 16).expect("small size");
+            let judgment = seed % 3 == 0;
+            let shape = if judgment {
+                let mut shape = generate_judgment(&mut rng, size);
+                if rng.below(2) == 0 {
+                    let count = 2 + rng.below(3);
+                    let mut items = vec![shape];
+                    for _ in 1..count {
+                        let item_size = rng.below(size);
+                        items.push(generate_judgment(&mut rng, item_size));
+                    }
+                    shape = Shape::Call("exactly_one", items);
+                }
+                shape
+            } else {
+                let shape = generate_scalar(&mut rng, size);
+                if rng.below(3) == 0 {
+                    // A `match` whose subject is the generated formula.
+                    let arms = (0..1 + rng.below(4))
+                        .map(|arm| (i64::try_from(arm).expect("small"), Shape::Var("c")))
+                        .collect();
+                    Shape::Match(
+                        Box::new(at_least(shape, 1)),
+                        arms,
+                        Some(Box::new(Shape::Int(0))),
+                    )
+                } else {
+                    shape
+                }
+            };
+            cases.push((render(&shape), judgment));
+        }
+        let (mut checked, mut largest, mut skipped) = (0usize, 0u64, 0usize);
+        let mut fixed_lowered = vec![false; fixed.len()];
+        for (index, (formula, judgment)) in cases.iter().enumerate() {
+            // Each fixed formula in every context; a generated one in one.
+            let in_contexts: Vec<usize> = if index < fixed.len() {
+                (0..contexts.len()).collect()
+            } else {
+                vec![index % contexts.len()]
+            };
+            for context in in_contexts {
+                let (scalars, derived, relation_predicates) = contexts[context].clone();
+                let ctx = LowerCtx {
+                    scalars,
+                    derived,
+                    relation_predicates,
+                    relations: std::cell::RefCell::new(HashSet::new()),
+                };
+                let parsed = parse_at(formula, MAX_FORMULA_DEPTH)
+                    .unwrap_or_else(|error| panic!("`{formula}`: {error}"));
+                let counted = if *judgment {
+                    judgment_runtime_size(&parsed, &ctx)
+                } else {
+                    scalar_runtime_size(&parsed, &ctx)
+                };
+                if counted > CAP {
+                    skipped += 1;
+                    continue;
+                }
+                let lowered = if *judgment {
+                    lower_to_judgment(&parsed, &ctx).map(|expr| expr.runtime_size())
+                } else {
+                    lower_to_scalar(&parsed, &ctx).map(|expr| expr.runtime_size())
+                };
+                if let Ok(size) = lowered {
+                    assert_eq!(counted, size, "`{formula}` in context {context}");
+                    checked += 1;
+                    largest = largest.max(size);
+                    if index < fixed.len() {
+                        fixed_lowered[index] = true;
+                    }
+                }
+            }
+        }
+        for (index, lowered) in fixed_lowered.iter().enumerate() {
+            assert!(lowered, "`{}` lowers in no context", fixed[index].0);
+        }
+        assert!(
+            checked > 2_500 && largest > 1_000,
+            "{checked} checked, the largest {largest} nodes, {skipped} skipped"
+        );
+    }
+
     /// A `match` is as deep as the `elif` chain that does the same thing.
     #[test]
     fn a_match_is_as_deep_as_the_elif_chain_it_lowers_to() {
@@ -3140,12 +3439,13 @@ mod depth_tests {
                     non_exhaustive_match_count(&within).expect("the match count at the bound");
 
                     assert!(is_too_deep(
-                        lower_judgment_formula(&past, HashSet::new(), HashSet::new())
+                        lower_judgment_formula("p", &past, HashSet::new(), HashSet::new())
                             .expect_err("a relation predicate")
                     ));
                 }
             }
             lower_judgment_formula(
+                "p",
                 &format!("{}x", "not ".repeat(MAX_FORMULA_DEPTH - 1)),
                 HashSet::new(),
                 HashSet::new(),
