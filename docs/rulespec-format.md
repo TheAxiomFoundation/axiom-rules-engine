@@ -139,7 +139,10 @@ chain; parenthesize whenever a formula's grouping matters to a reader):
 | 6 (tightest) | unary `-`, `not` | scalar / judgment |
 
 Literals: integers (`3`), decimals (`0.3`), booleans (`true` / `false`),
-and double- or single-quoted strings. `#` starts a comment that runs to the
+and double- or single-quoted strings. Inside a string, `\n`, `\r`, and `\t`
+stand for a newline, carriage return, and tab; a backslash before any other
+character, including `\\`, `\"`, `\'`, or a non-ASCII character such as
+`\é`, stands for that character. `#` starts a comment that runs to the
 end of the line. Date literals are not part of the expression grammar —
 dates come from inputs, parameters, the reserved `period_start` /
 `period_end` identifiers, or the version envelope.
@@ -218,8 +221,8 @@ rules:
 
 | Function | Arity | Meaning |
 |---|---|---|
-| `max(a, b, ...)` | any | largest argument |
-| `min(a, b, ...)` | any | smallest argument |
+| `max(a, b, ...)` | 1 or more | largest argument; `max()` is a compile error |
+| `min(a, b, ...)` | 1 or more | smallest argument; `min()` is a compile error |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
 | `days_between(from, to)` | 2 | day count between two dates |
