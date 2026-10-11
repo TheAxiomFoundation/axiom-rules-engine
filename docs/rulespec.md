@@ -708,6 +708,13 @@ formula semantics or execution results. The lowered `ProgramSpec` keeps the
 it through their JSON, so tooling can read it from a loaded module or artifact
 without re-parsing the YAML.
 
+`module.interpretations` carries structured readings of ambiguous,
+conflicting, or nonliteral source text. It is also preserved on
+`program.module` and in compiled artifacts without affecting output names,
+compilation, or results. The [format reference](rulespec-format.md#interpretations)
+documents its shape, status-dependent fields, load-time validation, and
+encoder responsibilities for verbatim corpus excerpts.
+
 ```yaml
 module:
   source_verification:

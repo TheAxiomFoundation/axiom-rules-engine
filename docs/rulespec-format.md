@@ -16,7 +16,7 @@ examples cannot drift from the grammar they document.
 ## Module shape
 
 A module is one YAML document: a `format` marker, an optional `module` block
-(proof requirements, source verification, summary — see
+(source verification, interpretations, summary — see
 [rulespec.md](rulespec.md)), and a `rules` list.
 
 ```yaml
@@ -57,6 +57,110 @@ Rule records share these fields:
 - `versions` — dated entries. Each version has `effective_from`, an optional
   inclusive `effective_to`, and either a `formula` (expression source) or,
   for indexed parameters, a `values` table.
+
+## Interpretations
+
+`module.interpretations` records each reading an encoding adopts when its
+source is ambiguous, contradicts itself, or is read other than literally.
+Encoders and reviewers require an entry for a conflict between provisions,
+including a conflict between operative text and a summary table; a departure
+from literal text, such as supplying a missing multiplier or restoring a
+dropped qualifier; and any question put to the publisher, whatever reading
+is encoded while awaiting the reply.
+
+The block is descriptive and inert: it never changes lowered output names,
+compilation, or execution results. The root module's entries survive lowering
+on `program.module` and round-trip through compiled-artifact JSON. The list
+defaults to empty and is omitted when empty.
+
+This complete example illustrates a ruled reading:
+
+```yaml
+format: rulespec/v1
+module:
+  interpretations:
+    - id: daily-twenty-per-cent
+      question: >-
+        Paragraph 59.1 deducts "20 per cent" of the weekly excess from a daily maximum.
+        Is that 20% a week, or 20% for each day (140% a week)?
+      texts:
+        - corpus_citation_path: uk-babergh/manual/council-tax-reduction-scheme-2026-2027/page-87
+          excerpt: "The prescribed daily percentage"
+      reading: 20% of the weekly excess income, applied once a week.
+      alternatives:
+        - reading: 20% of the weekly excess for each day, 140% a week.
+          effect: Support would end at about £25 a week of excess income.
+      basis: >-
+        The prescribed and default schemes deduct 2 6/7% a day against a daily maximum,
+        which is 20% a week; a 140% weekly taper does not fit the scheme's own UC table.
+      status: ruled
+      ruling:
+        by: Axiom Foundation
+        date: '2026-10-10'
+        record: https://github.com/TheAxiomFoundation/rulespec-uk/pull/449
+      affects:
+        - babergh_council_tax_reduction_weekly_taper_rate
+rules:
+  - name: babergh_council_tax_reduction_weekly_taper_rate
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2026-04-01'
+        formula: "0.2"
+```
+
+Each entry has these fields. Every mapping in an entry rejects unknown keys.
+
+| Field | Shape and meaning |
+|---|---|
+| `id` | Required string, unique within the module; matches `^[a-z0-9]+(-[a-z0-9]+)*$`. |
+| `question` | Required non-blank string; one question in plain words. |
+| `texts` | Required non-empty list of mappings with `corpus_citation_path` and non-blank `excerpt`; the provisions in tension, verbatim. |
+| `reading` | Required non-blank string describing the adopted reading. |
+| `alternatives` | Required non-empty list of mappings with non-blank `reading` and optional string `effect` describing what changes. |
+| `basis` | Required non-blank string explaining why this reading was adopted. |
+| `status` | Required lowercase enum: `open`, `ruled`, `confirmed`, or `contradicted`. |
+| `ruling` | Status-dependent mapping with required `by`, `date`, and `record`. |
+| `confirmation` | Status-dependent mapping with required `by`, `date`, and non-blank `excerpt`, plus optional `record`; quotes the publisher's confirming or contradicting words. |
+| `affects` | Required non-empty list of names defined by `rules[].name` in this document. |
+
+The engine requires or forbids the status-dependent mappings as follows:
+
+| Status | `ruling` | `confirmation` |
+|---|---|---|
+| `open` | Forbidden | Forbidden |
+| `ruled` | Required | Forbidden |
+| `confirmed` | Required | Required |
+| `contradicted` | Required | Required |
+
+At load time, the engine checks all required fields and types, the id pattern
+and uniqueness, non-empty lists, and the non-blank strings listed above.
+`ruling.by` and `confirmation.by` must also be non-blank. Each
+`texts[].corpus_citation_path` must pass the same canonical corpus citation
+path check as source verification. Dates must have exact `YYYY-MM-DD` shape
+and identify real calendar dates. `ruling.record`, and `confirmation.record`
+when present, must start with `https://`.
+
+`affects` resolves against this document's rule names before imports merge or
+runtime names are assigned. An imported name or a name listed only in
+`deferred_outputs` is insufficient. An error reports all unresolved names
+for the entry together. Compiled-artifact loading checks entry structure;
+the document-local resolution check occurs while loading RuleSpec, where the
+original document's rules are available.
+
+Public records name organisations in `ruling.by` and `confirmation.by`, never
+individuals. `confirmation.by` names the publisher. A ruling links a public
+PR, issue, or comment; omit people’s names, decision-queue ids, session ids,
+and local paths. These are authoring and review requirements: the engine
+checks non-blank organisation fields and the HTTPS prefix, rather than
+identifying organisations or checking public access.
+
+The encoder verifies each excerpt verbatim against corpus text at its
+citation; the engine does not retrieve or match corpus text. Interpretation
+excerpts do not count toward the encoder's complete-source coverage gate.
+The encoder treats `contradicted` as a blocking finding requiring repair of
+the adopted reading. Model-generated entries may be `open` only: a human
+ruling or publisher reply supplies `ruling` or `confirmation`.
 
 ## Data types
 

@@ -34,6 +34,69 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid id `{id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationId { path: String, id: String },
+    #[error("RuleSpec module `{path}` repeats interpretation id `{id}`")]
+    DuplicateInterpretationId { path: String, id: String },
+    #[error("RuleSpec module `{path}` interpretation `{id}` has blank `{field}`: {value:?}")]
+    BlankInterpretationField {
+        path: String,
+        id: String,
+        field: String,
+        value: String,
+    },
+    #[error("RuleSpec module `{path}` interpretation `{id}` requires non-empty `{field}`")]
+    EmptyInterpretationCollection {
+        path: String,
+        id: String,
+        field: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has noncanonical corpus citation path `{value}`"
+    )]
+    InvalidInterpretationCitationPath {
+        path: String,
+        id: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` date `{value}`; expected a real YYYY-MM-DD date"
+    )]
+    InvalidInterpretationDate {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` record `{value}`; expected https://"
+    )]
+    InvalidInterpretationRecord {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` with status {status:?} has `{field}` {requirement}"
+    )]
+    InvalidInterpretationStatusFields {
+        path: String,
+        id: String,
+        status: InterpretationStatus,
+        field: &'static str,
+        requirement: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` affects rules not defined in this document: {names:?}"
+    )]
+    UnresolvedInterpretationAffects {
+        path: String,
+        id: String,
+        names: Vec<String>,
+    },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -422,6 +485,12 @@ pub struct ModuleMetadata {
     pub encoding_provenance: Option<EncodingProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation: Vec<ValidationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::interpretations_json_schema")
+    )]
+    pub interpretations: Vec<Interpretation>,
 }
 
 impl ModuleMetadata {
@@ -429,7 +498,7 @@ impl ModuleMetadata {
     /// error reporting: the file path for filesystem loads, the canonical
     /// target for source-backed loads, or the module id / `<memory>` for
     /// in-memory strings.
-    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+    pub(crate) fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
         if let Some(verification) = self.source_verification.as_ref()
             && !is_canonical_corpus_citation_path(&verification.corpus_citation_path)
         {
@@ -447,6 +516,263 @@ impl ModuleMetadata {
             return Err(RuleSpecError::InvalidSourceSha256 {
                 path: path.to_string(),
                 value: sha.to_string(),
+            });
+        }
+        let mut ids = HashSet::new();
+        for interpretation in &self.interpretations {
+            interpretation.validate(path)?;
+            if !ids.insert(&interpretation.id) {
+                return Err(RuleSpecError::DuplicateInterpretationId {
+                    path: path.to_string(),
+                    id: interpretation.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An adopted reading of ambiguous, conflicting, or nonliteral source text.
+/// Descriptive only: the encoder verifies excerpts against the corpus.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Interpretation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub question: String,
+    pub texts: Vec<InterpretationText>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    pub alternatives: Vec<InterpretationAlternative>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub basis: String,
+    pub status: InterpretationStatus,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ruling: Option<InterpretationRuling>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confirmation: Option<InterpretationConfirmation>,
+    #[serde(deserialize_with = "deserialize_strict_string_list")]
+    pub affects: Vec<String>,
+}
+
+/// A verbatim provision in tension with another reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationText {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub corpus_citation_path: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+}
+
+/// Another reading and its optional effect on the result.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationAlternative {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effect: Option<String>,
+}
+
+/// An organisation's ruling, linked to its public record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationRuling {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub record: String,
+}
+
+/// The publisher organisation's words confirming or contradicting a reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationConfirmation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub record: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum InterpretationStatus {
+    Open,
+    Ruled,
+    Confirmed,
+    Contradicted,
+}
+
+impl Interpretation {
+    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+        if !self.id.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        }) {
+            return Err(RuleSpecError::InvalidInterpretationId {
+                path: path.to_string(),
+                id: self.id.clone(),
+            });
+        }
+        for (field, value) in [
+            ("question", &self.question),
+            ("reading", &self.reading),
+            ("basis", &self.basis),
+        ] {
+            self.validate_nonblank(path, field, value)?;
+        }
+        for (field, empty) in [
+            ("texts", self.texts.is_empty()),
+            ("alternatives", self.alternatives.is_empty()),
+            ("affects", self.affects.is_empty()),
+        ] {
+            if empty {
+                return Err(RuleSpecError::EmptyInterpretationCollection {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    field,
+                });
+            }
+        }
+        for (index, text) in self.texts.iter().enumerate() {
+            if !is_canonical_corpus_citation_path(&text.corpus_citation_path) {
+                return Err(RuleSpecError::InvalidInterpretationCitationPath {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    value: text.corpus_citation_path.clone(),
+                });
+            }
+            self.validate_nonblank(path, &format!("texts[{index}].excerpt"), &text.excerpt)?;
+        }
+        for (index, alternative) in self.alternatives.iter().enumerate() {
+            self.validate_nonblank(
+                path,
+                &format!("alternatives[{index}].reading"),
+                &alternative.reading,
+            )?;
+        }
+        for (field, present, required) in [
+            (
+                "ruling",
+                self.ruling.is_some(),
+                self.status != InterpretationStatus::Open,
+            ),
+            (
+                "confirmation",
+                self.confirmation.is_some(),
+                matches!(
+                    self.status,
+                    InterpretationStatus::Confirmed | InterpretationStatus::Contradicted
+                ),
+            ),
+        ] {
+            if present != required {
+                return Err(RuleSpecError::InvalidInterpretationStatusFields {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    status: self.status,
+                    field,
+                    requirement: if required { "required" } else { "forbidden" },
+                });
+            }
+        }
+        if let Some(ruling) = &self.ruling {
+            self.validate_nonblank(path, "ruling.by", &ruling.by)?;
+            self.validate_date(path, "ruling.date", &ruling.date)?;
+            self.validate_record(path, "ruling.record", &ruling.record)?;
+        }
+        if let Some(confirmation) = &self.confirmation {
+            self.validate_nonblank(path, "confirmation.by", &confirmation.by)?;
+            self.validate_nonblank(path, "confirmation.excerpt", &confirmation.excerpt)?;
+            self.validate_date(path, "confirmation.date", &confirmation.date)?;
+            if let Some(record) = &confirmation.record {
+                self.validate_record(path, "confirmation.record", record)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_nonblank(&self, path: &str, field: &str, value: &str) -> Result<(), RuleSpecError> {
+        if value.trim().is_empty() {
+            return Err(RuleSpecError::BlankInterpretationField {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field: field.to_string(),
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_date(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        let exact_shape = value.len() == 10
+            && value.bytes().enumerate().all(|(index, byte)| {
+                if index == 4 || index == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+        if !exact_shape || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
+            return Err(RuleSpecError::InvalidInterpretationDate {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_record(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        if !value.starts_with("https://") {
+            return Err(RuleSpecError::InvalidInterpretationRecord {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
             });
         }
         Ok(())
@@ -859,7 +1185,16 @@ fn validate_composed_dependency_metadata(source: &str, path: &str) -> Result<(),
 }
 
 fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
-    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    // Interpretations have a strict typed contract, validated below before
+    // import merging. Let that validator report citation failures with the
+    // entry id rather than the generic recursive corpus-path error.
+    if let Some(module) = value
+        .get_mut("module")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        module.remove(serde_yaml::Value::String("interpretations".to_string()));
+    }
     validate_recursive_corpus_value(&value, path)
 }
 
@@ -1988,10 +2323,29 @@ fn canonical_composed_dependency(
 
 impl RulesDocument {
     fn validate_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
-        match &self.module {
-            Some(module) => module.validate(path),
-            None => Ok(()),
+        if let Some(module) = &self.module {
+            module.validate(path)?;
+            // Resolve against this document before imports are merged or
+            // lowering assigns runtime names. Imported and deferred-only
+            // names are not definitions in this module.
+            let names: HashSet<&str> = self.rules.iter().map(|rule| rule.name.as_str()).collect();
+            for interpretation in &module.interpretations {
+                let unresolved: Vec<String> = interpretation
+                    .affects
+                    .iter()
+                    .filter(|name| !names.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                if !unresolved.is_empty() {
+                    return Err(RuleSpecError::UnresolvedInterpretationAffects {
+                        path: path.to_string(),
+                        id: interpretation.id.clone(),
+                        names: unresolved,
+                    });
+                }
+            }
         }
+        Ok(())
     }
 
     fn validate_atomic_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
@@ -4199,6 +4553,23 @@ where
             "expected string, got {other:?}"
         ))),
     }
+}
+
+// A supplied optional field must contain its declared type. Serde's default
+// handles absence; explicit null must not stand in for a forbidden block.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_strict_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_strict_string(deserializer).map(Some)
 }
 
 fn deserialize_strict_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>

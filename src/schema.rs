@@ -58,6 +58,7 @@ pub struct NamedSchema {
 /// `$id` prefix so the published schemas resolve as a coherent family.
 const ID_BASE: &str = "https://schemas.axiom-foundation.org/rules-engine";
 const CORPUS_CITATION_PATH_PATTERN: &str = "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$";
+const INTERPRETATION_ID_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 
 /// All published schemas, in a stable order. The golden-file test writes
 /// each `schema` to `schemas/<file_name>` and asserts the checked-in copy is
@@ -363,10 +364,17 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
                 if let Some(Value::Object(digest)) = properties.get_mut("source_sha256") {
                     digest.insert("pattern".to_string(), json!("^[0-9a-fA-F]{64}$"));
                 }
+                let interpretation = properties.contains_key("question")
+                    && properties.contains_key("reading")
+                    && properties.contains_key("affects");
                 if let Some(Value::Object(id)) = properties.get_mut("id") {
                     id.insert(
                         "pattern".to_string(),
-                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$"),
+                        if interpretation {
+                            json!(INTERPRETATION_ID_PATTERN)
+                        } else {
+                            json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$")
+                        },
                     );
                 }
                 if let Some(Value::Object(slot)) = properties.get_mut("slot") {
@@ -588,10 +596,119 @@ fn module_metadata_schema() -> Value {
             "summary": { "type": "string" },
             "status": { "type": "string" },
             "source_verification": nullable_object(source_verification_schema()),
+            "interpretations": interpretations_schema(),
             "encoding_provenance": nullable_object(encoding_provenance_schema()),
             "validation": nullable_array(validation_record_schema())
         }
     })
+}
+
+/// Typed, inert readings of ambiguous or conflicting source provisions.
+/// Identity uniqueness and references to this document's rule names require
+/// the engine's load-time validation; the schema enforces the local shape.
+fn interpretations_schema() -> Value {
+    json!({
+        "type": "array",
+        "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. IDs must be unique within the module, and affects must name rules defined in the same document. Corpus excerpt verification is the encoder's responsibility.",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "question", "texts", "reading", "alternatives", "basis", "status", "affects"],
+            "properties": {
+                "id": { "type": "string", "pattern": INTERPRETATION_ID_PATTERN },
+                "question": non_blank_string_schema(),
+                "texts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["corpus_citation_path", "excerpt"],
+                        "properties": {
+                            "corpus_citation_path": { "type": "string", "pattern": CORPUS_CITATION_PATH_PATTERN },
+                            "excerpt": non_blank_string_schema()
+                        }
+                    }
+                },
+                "reading": non_blank_string_schema(),
+                "alternatives": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["reading"],
+                        "properties": {
+                            "reading": non_blank_string_schema(),
+                            "effect": { "type": "string" }
+                        }
+                    }
+                },
+                "basis": non_blank_string_schema(),
+                "status": { "type": "string", "enum": ["open", "ruled", "confirmed", "contradicted"] },
+                "ruling": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["by", "date", "record"],
+                    "properties": {
+                        "by": non_blank_string_schema(),
+                        "date": date_schema(),
+                        "record": https_record_schema()
+                    }
+                },
+                "confirmation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["by", "date", "excerpt"],
+                    "properties": {
+                        "by": non_blank_string_schema(),
+                        "date": date_schema(),
+                        "excerpt": non_blank_string_schema(),
+                        "record": https_record_schema()
+                    }
+                },
+                "affects": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string" }
+                }
+            },
+            "oneOf": [
+                {
+                    "properties": { "status": { "const": "open" } },
+                    "not": { "anyOf": [{ "required": ["ruling"] }, { "required": ["confirmation"] }] }
+                },
+                {
+                    "properties": { "status": { "const": "ruled" } },
+                    "required": ["ruling"],
+                    "not": { "required": ["confirmation"] }
+                },
+                {
+                    "properties": { "status": { "enum": ["confirmed", "contradicted"] } },
+                    "required": ["ruling", "confirmation"]
+                }
+            ]
+        }
+    })
+}
+
+/// Apply the same strict metadata contract wherever `ModuleMetadata` is
+/// embedded in a derived schema, including compiled artifacts and requests.
+/// A field-level schema keeps serde's defaulted list optional while avoiding
+/// nullable `Option` schemas for blocks that reject supplied null values.
+#[cfg(feature = "schema")]
+pub fn interpretations_json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    interpretations_schema()
+        .try_into()
+        .expect("interpretations fragment is an object schema")
+}
+
+fn non_blank_string_schema() -> Value {
+    json!({ "type": "string", "pattern": "\\S" })
+}
+
+fn https_record_schema() -> Value {
+    json!({ "type": "string", "pattern": "^https://" })
 }
 
 /// `module.source_verification` — [`crate::rulespec::SourceVerification`].

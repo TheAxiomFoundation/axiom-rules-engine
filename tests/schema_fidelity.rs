@@ -223,3 +223,347 @@ fn schema_requires_exact_discriminator_and_rejects_removed_directives() {
         );
     }
 }
+
+fn interpretation_document(status: &str) -> Value {
+    let mut entry = serde_json::json!({
+        "id": "daily-twenty-per-cent",
+        "question": "Does the percentage apply once a week or each day?",
+        "texts": [{
+            "corpus_citation_path": "uk-babergh/manual/council-tax-reduction-scheme-2026-2027/page-87",
+            "excerpt": "The prescribed daily percentage"
+        }],
+        "reading": "Apply 20% of the weekly excess once a week.",
+        "alternatives": [{"reading": "Apply 20% of the weekly excess each day.", "effect": "Support ends sooner."}],
+        "basis": "The scheme's weekly table supplies the intended taper.",
+        "status": status,
+        "affects": ["p"]
+    });
+    if status != "open" {
+        entry["ruling"] = serde_json::json!({
+            "by": "Axiom Foundation",
+            "date": "2026-10-10",
+            "record": "https://github.com/TheAxiomFoundation/rulespec-uk/pull/449"
+        });
+    }
+    if matches!(status, "confirmed" | "contradicted") {
+        entry["confirmation"] = serde_json::json!({
+            "by": "Babergh District Council",
+            "date": "2026-10-20",
+            "excerpt": "The percentage applies once a week.",
+            "record": "https://example.org/publisher-reply"
+        });
+    }
+    serde_json::json!({
+        "format": "rulespec/v1",
+        "module": {"interpretations": [entry]},
+        "rules": [{"name": "p", "kind": "parameter", "formula": "1", "effective_from": "2020-01-01"}]
+    })
+}
+
+fn interpretation_validators() -> Vec<Validator> {
+    all_schemas()
+        .into_iter()
+        .filter(|named| {
+            matches!(
+                named.file_name,
+                "rulespec-module.v1.schema.json"
+                    | "compiled-artifact.v2.schema.json"
+                    | "execution-request.v1.schema.json"
+            )
+        })
+        .map(|named| {
+            jsonschema::draft7::options()
+                .should_validate_formats(true)
+                .build(&named.schema)
+                .expect("schema compiles with date format validation")
+        })
+        .collect()
+}
+
+fn interpretation_schema_surfaces(document: &Value) -> [Value; 3] {
+    let valid = interpretation_document("open");
+    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::from_rulespec_str(
+        &serde_yaml::to_string(&valid).unwrap(),
+    )
+    .expect("base module compiles");
+    let mut compiled = serde_json::to_value(artifact).unwrap();
+    compiled["program"]["module"] = document["module"].clone();
+    let request = serde_json::json!({
+        "mode": "explain",
+        "program": compiled["program"],
+        "dataset": {"inputs": [], "relations": []},
+        "queries": []
+    });
+    [document.clone(), compiled, request]
+}
+
+#[test]
+fn interpretations_validate_in_module_and_current_artifact_schemas() {
+    let validators = interpretation_validators();
+    assert_eq!(validators.len(), 3);
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        let document = interpretation_document(status);
+        let source = serde_yaml::to_string(&document).unwrap();
+        let artifact =
+            axiom_rules_engine::compile::CompiledProgramArtifact::from_rulespec_str(&source)
+                .expect("valid interpretations compile");
+        let compiled = serde_json::to_value(artifact).unwrap();
+        let request = serde_json::json!({
+            "mode": "explain",
+            "program": compiled["program"],
+            "dataset": {"inputs": [], "relations": []},
+            "queries": []
+        });
+        let surfaces = [document, compiled, request];
+        for (validator, surface) in validators.iter().zip(surfaces) {
+            let errors = validator
+                .iter_errors(&surface)
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>();
+            assert!(errors.is_empty(), "status {status}: {}", errors.join("\n"));
+        }
+    }
+}
+
+#[test]
+fn interpretation_schema_rejects_unknown_keys_missing_fields_and_wrong_types() {
+    let validators = interpretation_validators();
+    for status in ["open", "ruled", "confirmed"] {
+        let base = interpretation_document(status);
+        let mut object_paths = vec![
+            "/module/interpretations/0",
+            "/module/interpretations/0/texts/0",
+            "/module/interpretations/0/alternatives/0",
+        ];
+        if status != "open" {
+            object_paths.push("/module/interpretations/0/ruling");
+        }
+        if status == "confirmed" {
+            object_paths.push("/module/interpretations/0/confirmation");
+        }
+        for object_path in object_paths {
+            let mut unknown = base.clone();
+            unknown.pointer_mut(object_path).unwrap()["unknown"] = serde_json::json!("value");
+            assert!(!engine_deserializes(
+                &serde_yaml::to_string(&unknown).unwrap()
+            ));
+            for (validator, surface) in validators
+                .iter()
+                .zip(interpretation_schema_surfaces(&unknown))
+            {
+                assert!(
+                    !validator.is_valid(&surface),
+                    "unknown key at {object_path} must fail"
+                );
+            }
+        }
+        let entry = base
+            .pointer("/module/interpretations/0")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        for field in [
+            "id",
+            "question",
+            "texts",
+            "reading",
+            "alternatives",
+            "basis",
+            "status",
+            "affects",
+        ] {
+            assert!(entry.contains_key(field));
+            let mut missing = base.clone();
+            missing["module"]["interpretations"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(!engine_deserializes(
+                &serde_yaml::to_string(&missing).unwrap()
+            ));
+            for (validator, surface) in validators
+                .iter()
+                .zip(interpretation_schema_surfaces(&missing))
+            {
+                assert!(!validator.is_valid(&surface), "missing {field} must fail");
+            }
+        }
+    }
+    for field in [
+        "/module/interpretations/0/id",
+        "/module/interpretations/0/question",
+        "/module/interpretations/0/texts/0/corpus_citation_path",
+        "/module/interpretations/0/texts/0/excerpt",
+        "/module/interpretations/0/reading",
+        "/module/interpretations/0/alternatives/0/reading",
+        "/module/interpretations/0/alternatives/0/effect",
+        "/module/interpretations/0/basis",
+        "/module/interpretations/0/ruling/by",
+        "/module/interpretations/0/ruling/date",
+        "/module/interpretations/0/ruling/record",
+        "/module/interpretations/0/confirmation/by",
+        "/module/interpretations/0/confirmation/date",
+        "/module/interpretations/0/confirmation/excerpt",
+        "/module/interpretations/0/confirmation/record",
+        "/module/interpretations/0/affects/0",
+    ] {
+        let mut wrong_type = interpretation_document("confirmed");
+        *wrong_type.pointer_mut(field).unwrap() = serde_json::json!(42);
+        assert!(
+            !engine_deserializes(&serde_yaml::to_string(&wrong_type).unwrap()),
+            "non-string {field} must fail serde"
+        );
+        for (validator, surface) in validators
+            .iter()
+            .zip(interpretation_schema_surfaces(&wrong_type))
+        {
+            assert!(
+                !validator.is_valid(&surface),
+                "non-string {field} must fail schema"
+            );
+        }
+    }
+}
+
+#[test]
+fn interpretation_schemas_enforce_load_time_metadata_constraints() {
+    let validators = interpretation_validators();
+    let invalid_values = [
+        (
+            "/module/interpretations/0/id",
+            serde_json::json!("Daily_Percentage"),
+        ),
+        (
+            "/module/interpretations/0/question",
+            serde_json::json!(" \n\t"),
+        ),
+        ("/module/interpretations/0/reading", serde_json::json!("")),
+        ("/module/interpretations/0/basis", serde_json::json!("  ")),
+        ("/module/interpretations/0/texts", serde_json::json!([])),
+        (
+            "/module/interpretations/0/texts/0/excerpt",
+            serde_json::json!(" "),
+        ),
+        (
+            "/module/interpretations/0/texts/0/corpus_citation_path",
+            serde_json::json!("uk/manual"),
+        ),
+        (
+            "/module/interpretations/0/alternatives",
+            serde_json::json!([]),
+        ),
+        (
+            "/module/interpretations/0/alternatives/0/reading",
+            serde_json::json!(" "),
+        ),
+        ("/module/interpretations/0/affects", serde_json::json!([])),
+        (
+            "/module/interpretations/0/status",
+            serde_json::json!("uncertain"),
+        ),
+        (
+            "/module/interpretations/0/ruling/by",
+            serde_json::json!(" "),
+        ),
+        (
+            "/module/interpretations/0/ruling/date",
+            serde_json::json!("2026-2-01"),
+        ),
+        (
+            "/module/interpretations/0/ruling/date",
+            serde_json::json!("2026-02-29"),
+        ),
+        (
+            "/module/interpretations/0/ruling/record",
+            serde_json::json!("http://example.org/ruling"),
+        ),
+        (
+            "/module/interpretations/0/confirmation/by",
+            serde_json::json!(" "),
+        ),
+        (
+            "/module/interpretations/0/confirmation/date",
+            serde_json::json!("2026-04-31"),
+        ),
+        (
+            "/module/interpretations/0/confirmation/excerpt",
+            serde_json::json!(" "),
+        ),
+        (
+            "/module/interpretations/0/confirmation/record",
+            serde_json::json!("http://example.org/reply"),
+        ),
+    ];
+    for (field, value) in invalid_values {
+        let mut document = interpretation_document("confirmed");
+        *document.pointer_mut(field).unwrap() = value;
+        assert!(
+            axiom_rules_engine::rulespec::lower_rulespec_str(
+                &serde_yaml::to_string(&document).unwrap()
+            )
+            .is_err(),
+            "invalid {field} must fail load"
+        );
+        for (validator, surface) in validators
+            .iter()
+            .zip(interpretation_schema_surfaces(&document))
+        {
+            assert!(
+                !validator.is_valid(&surface),
+                "invalid {field} must fail schema"
+            );
+        }
+    }
+}
+
+#[test]
+fn interpretation_schemas_enforce_status_dependent_blocks_and_reject_nulls() {
+    let validators = interpretation_validators();
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        for field in ["ruling", "confirmation"] {
+            let mut document = interpretation_document(status);
+            let entry = document["module"]["interpretations"][0]
+                .as_object_mut()
+                .unwrap();
+            if entry.remove(field).is_none() {
+                let supplied = interpretation_document("confirmed");
+                entry.insert(
+                    field.to_string(),
+                    supplied["module"]["interpretations"][0][field].clone(),
+                );
+            }
+            for (validator, surface) in validators
+                .iter()
+                .zip(interpretation_schema_surfaces(&document))
+            {
+                assert!(
+                    !validator.is_valid(&surface),
+                    "status {status} with wrong {field} presence must fail"
+                );
+            }
+        }
+    }
+    for field in [
+        "/module/interpretations",
+        "/module/interpretations/0/ruling",
+        "/module/interpretations/0/confirmation",
+        "/module/interpretations/0/confirmation/record",
+        "/module/interpretations/0/alternatives/0/effect",
+    ] {
+        let mut document = interpretation_document("confirmed");
+        *document.pointer_mut(field).unwrap() = Value::Null;
+        assert!(
+            !engine_deserializes(&serde_yaml::to_string(&document).unwrap()),
+            "null {field} must fail serde"
+        );
+        for (validator, surface) in validators
+            .iter()
+            .zip(interpretation_schema_surfaces(&document))
+        {
+            assert!(
+                !validator.is_valid(&surface),
+                "null {field} must fail schema"
+            );
+        }
+    }
+}
