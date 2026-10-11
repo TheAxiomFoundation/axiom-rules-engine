@@ -242,12 +242,10 @@ impl DenseNum for f64 {
     fn try_to_i64_trunc(self) -> Option<i64> {
         // Reject non-finite and out-of-range values instead of saturating: the
         // strict n contract errors on a garbage n rather than silently reading
-        // it as 0 (NaN) or a clamped extreme.
-        let truncated = self.trunc();
-        if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
-            return None;
-        }
-        Some(truncated as i64)
+        // it as 0 (NaN) or a clamped extreme. Comparing against
+        // `i64::MAX as f64` let exactly 2^63 through, because that cast rounds
+        // up to 2^63; `f64_as_index` checks the half-open range instead.
+        f64_as_index(self.trunc())
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -4995,16 +4993,18 @@ fn index_at(column: &DenseColumn, row: usize) -> Option<i64> {
     match column {
         DenseColumn::Integer(values) => Some(values[row]),
         DenseColumn::Decimal(values) if values[row].fract().is_zero() => values[row].to_i64(),
-        DenseColumn::Float(values) => {
-            let value = values[row];
-            // 2^63 is exactly representable; `value < 2^63` keeps the cast
-            // exact rather than saturating.
-            (value.fract() == 0.0
-                && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value))
-            .then_some(value as i64)
-        }
+        DenseColumn::Float(values) => f64_as_index(values[row]),
         _ => None,
     }
+}
+
+/// An `f64` as an exact `i64`: `None` unless it is integral and in range.
+fn f64_as_index(value: f64) -> Option<i64> {
+    // 2^63 is exactly representable; `value < 2^63` keeps the cast exact
+    // rather than saturating, and NaN and the infinities fail both tests.
+    (value.fract() == 0.0
+        && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value))
+    .then_some(value as i64)
 }
 
 fn broadcast_scalar_literal<N: DenseNum>(value: &ScalarValue, length: usize) -> DenseColumn {

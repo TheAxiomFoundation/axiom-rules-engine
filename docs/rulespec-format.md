@@ -221,8 +221,8 @@ rules:
 
 | Function | Arity | Meaning |
 |---|---|---|
-| `max(a, b, ...)` | any | largest argument |
-| `min(a, b, ...)` | any | smallest argument |
+| `max(a, b, ...)` | 1 or more | largest argument; `max()` is a compile error |
+| `min(a, b, ...)` | 1 or more | smallest argument; `min()` is a compile error |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
 | `days_between(from, to)` | 2 | day count between two dates |
