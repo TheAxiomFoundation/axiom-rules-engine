@@ -51,7 +51,7 @@ rules:
 fn compile_stamps_format_and_engine_versions() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
         .expect("RuleSpec module compiles from YAML");
-    assert_eq!(ARTIFACT_FORMAT_VERSION, 2);
+    assert_eq!(ARTIFACT_FORMAT_VERSION, 3);
     assert_eq!(artifact.artifact_format_version, ARTIFACT_FORMAT_VERSION);
     assert_eq!(
         artifact.engine_version.as_deref(),
@@ -69,20 +69,20 @@ fn compile_stamps_format_and_engine_versions() {
 }
 
 #[test]
-fn v2_engine_rejects_a_v1_artifact() {
+fn the_engine_rejects_a_v1_artifact() {
     let artifact = CompiledProgramArtifact::from_rulespec_str(SIMPLE_RULESPEC)
-        .expect("RuleSpec module compiles to v2");
+        .expect("RuleSpec module compiles to format 3");
     let mut value = serde_json::to_value(&artifact).expect("artifact serialises");
     value["artifact_format_version"] = serde_json::json!(1);
     let v1_json = serde_json::to_string(&value).expect("v1-shaped JSON serialises");
 
     let error = CompiledProgramArtifact::from_json_str(&v1_json)
-        .expect_err("the v2 engine must reject a v1 artifact");
+        .expect_err("the format-3 engine must reject a v1 artifact");
     assert!(matches!(
         error,
         CompileError::UnsupportedArtifactFormatVersion {
             found: 1,
-            supported: 2,
+            supported: 3,
             ..
         }
     ));

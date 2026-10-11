@@ -61,7 +61,7 @@ pub enum CompileError {
         path: String,
         error: serde_json::Error,
     },
-    #[error("compiled artefact `{path}` violates the v2 contract: {message}")]
+    #[error("compiled artefact `{path}` violates the artifact contract: {message}")]
     InvalidArtifactContract { path: String, message: String },
     #[error("failed to load RuleSpec module `{path}`: {error}")]
     RuleSpec {
@@ -86,14 +86,25 @@ pub enum CompileError {
         path: String,
         report: crate::relation_typing::RelationTypingReport,
     },
+    /// The default loader reads [`ARTIFACT_FORMAT_VERSION`] only. The message
+    /// says which side is older and how to go on.
     #[error(
-        "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
+        "{}",
+        artifact_format_mismatch(.path, *.found, *.supported, .artifact_engine_version.as_deref())
     )]
     UnsupportedArtifactFormatVersion {
         path: String,
         found: u32,
         supported: u32,
+        /// The `engine_version` the artifact records, if any.
+        artifact_engine_version: Option<String>,
     },
+    /// The format-2 compatibility loader reads format 2 only.
+    #[error(
+        "compiled artefact `{path}` is artifact format {found}, and the format-2 compatibility loader reads format 2 only{}",
+        legacy_loader_hint(*.found)
+    )]
+    LegacyArtifactFormat { path: String, found: u32 },
     #[cfg(feature = "fs")]
     #[error("failed to read corpus provisions `{path}`: {error}")]
     ReadProvisionsFile { path: String, error: std::io::Error },
@@ -105,12 +116,70 @@ pub enum CompileError {
     },
 }
 
-/// Format version stamped into every artifact this engine compiles.
-/// Artifact v2 is the sole accepted contract. It adds executable
-/// `effective_to` bounds to parameter and derived versions. Missing, older,
-/// and newer versions are rejected at load so a v1 engine cannot silently
-/// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
+/// Format version stamped into every artifact this engine compiles, and the
+/// only one the default loader ([`CompiledProgramArtifact::from_json_str`])
+/// reads. Format 3 adds `program.interface`, `engine_build` and
+/// `source_closure` to format 2 (`docs/artifact-format.md`). Missing, older
+/// and newer versions are rejected, with a message that names the older
+/// side; format 2 loads only through the separately named compatibility
+/// loader and stays format 2 in memory.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+
+/// Older formats a separately named compatibility loader reads.
+pub const LEGACY_ARTIFACT_FORMATS: [u32; 1] = [LEGACY_FORMAT_2];
+
+const LEGACY_FORMAT_2: u32 = 2;
+
+/// The top-level keys of a format-3 artifact.
+const FORMAT_3_KEYS: [&str; 6] = [
+    "artifact_format_version",
+    "engine_version",
+    "engine_build",
+    "source_closure",
+    "program",
+    "metadata",
+];
+
+fn legacy_loader_hint(found: u32) -> &'static str {
+    if found == ARTIFACT_FORMAT_VERSION {
+        "; load it with the default loader"
+    } else {
+        ""
+    }
+}
+
+/// Which side of a format mismatch is older, and how to go on.
+fn artifact_format_mismatch(
+    path: &str,
+    found: u32,
+    supported: u32,
+    artifact_engine_version: Option<&str>,
+) -> String {
+    let engine = format!(
+        "{}, build {}",
+        env!("CARGO_PKG_VERSION"),
+        EngineBuild::current()
+    );
+    let written = artifact_engine_version.map_or_else(
+        || "written by an engine that did not record its version".to_string(),
+        |version| format!("written by engine {version}"),
+    );
+    if found > supported {
+        return format!(
+            "this engine ({engine}) is older than compiled artefact `{path}` (format {found}, {written}): it reads format {supported}; upgrade the engine"
+        );
+    }
+    let ways_forward = if LEGACY_ARTIFACT_FORMATS.contains(&found) {
+        format!(
+            "Recompile it with this engine, or run it unchanged through the format-{found} compatibility loader (CLI `--accept-artifact-format {found}`; Rust `CompiledProgramArtifact::from_legacy_format_2_json_str`; Python `accept_artifact_format={found}`; wasm `execute_legacy_format_2`)"
+        )
+    } else {
+        format!("Recompile it with this engine; no loader in this engine reads format {found}")
+    };
+    format!(
+        "compiled artefact `{path}` is older than this engine: it is artifact format {found} ({written}) and this engine ({engine}) reads format {supported}. {ways_forward}"
+    )
+}
 
 /// Whether an artefact load enforces mandatory relation entity typing. Only
 /// the migration tool defers it, to type an artefact the loader rejects.
@@ -221,6 +290,20 @@ impl EngineBuild {
         };
         Self { commit, dirty }
     }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(commit) = &self.commit
+            && !is_lower_hex(commit, 40)
+        {
+            return Err(format!(
+                "engine_build.commit `{commit}` is not 40 lowercase hex digits"
+            ));
+        }
+        if self.commit.is_none() && self.dirty.is_some() {
+            return Err("engine_build.dirty must be null when engine_build.commit is".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// `5d63e8f`, `5d63e8f (dirty)`, or `unknown`.
@@ -288,6 +371,55 @@ impl SourceClosure {
             digest,
         }
     }
+
+    /// The shape format 3 requires: canonical targets and digests, the root
+    /// among the modules, sorted unique targets, and a digest that is the
+    /// digest of the listed modules. It does not read any source.
+    fn validate(&self) -> Result<(), String> {
+        for module in &self.modules {
+            if let Some(target) = &module.target
+                && crate::rulespec::validate_module_target(target).is_err()
+            {
+                return Err(format!(
+                    "source_closure lists `{target}`, which is not a canonical module target"
+                ));
+            }
+            if !is_lower_hex(&module.sha256, 64) {
+                return Err(format!(
+                    "source_closure digest `{}` is not 64 lowercase hex digits",
+                    module.sha256
+                ));
+            }
+        }
+        if !self
+            .modules
+            .windows(2)
+            .all(|pair| pair[0].target < pair[1].target)
+        {
+            return Err(
+                "source_closure.modules must be sorted by target, without repeats".to_string(),
+            );
+        }
+        if !self.modules.iter().any(|module| module.target == self.root) {
+            return Err("source_closure.modules must list its root".to_string());
+        }
+        if self.root.is_some() && self.modules.iter().any(|module| module.target.is_none()) {
+            return Err(
+                "source_closure lists an originless module under a canonical root".to_string(),
+            );
+        }
+        if self.digest != source_closure_digest(&self.modules) {
+            return Err("source_closure.digest is not the digest of its modules".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn source_closure_digest(modules: &[SourceClosureModule]) -> String {
@@ -572,18 +704,74 @@ impl CompiledProgramArtifact {
         })
     }
 
-    fn check_format_version(
+    /// The format-3 checks, after the raw shape checks of `from_json_source`:
+    /// the identities' shapes, the program checks compilation runs, metadata
+    /// equal to what this engine computes, relation typing, and the stored
+    /// `program.interface` equal, as JSON, to what this engine derives.
+    fn check_format_3(
+        mut self,
+        path: &str,
+        options: CompileOptions,
+        stored_interface: &serde_json::Value,
+    ) -> Result<Self, CompileError> {
+        let engine_build = self
+            .engine_build
+            .as_ref()
+            .ok_or_else(|| invalid_artifact_contract(path, "format 3 requires `engine_build`"))?;
+        engine_build
+            .validate()
+            .map_err(|message| invalid_artifact_contract(path, message))?;
+        if let Some(source_closure) = &self.source_closure {
+            source_closure
+                .validate()
+                .map_err(|message| invalid_artifact_contract(path, message))?;
+        }
+        self.program.validate_provenance()?;
+        self.program.validate_rounding()?;
+        self.program.validate_effective_ranges()?;
+        self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
+        // A derived-metadata consistency check, as in format 2, without the
+        // retired fast-path rule sets: every format-3 artifact was compiled
+        // under this engine's analysis.
+        if self.metadata != compiled_metadata(&self.program)? {
+            return Err(invalid_artifact_contract(
+                path,
+                "metadata does not match the compiled program",
+            ));
+        }
+        let model = self.program.to_program()?;
+        crate::relation_typing::check_program(&model).map_err(|report| {
+            CompileError::RelationTyping {
+                path: path.to_string(),
+                report,
+            }
+        })?;
+        // Compared as JSON so a value that deserializes to the same thing
+        // but is written differently is refused too.
+        let interface = crate::interface::derive_from_model(&model);
+        let derived = serde_json::to_value(&interface).map_err(CompileError::SerializeArtifact)?;
+        if derived != *stored_interface {
+            return Err(invalid_artifact_contract(
+                path,
+                "program.interface does not match the interface this engine derives from the embedded program",
+            ));
+        }
+        self.interface = Some(interface);
+        Ok(self)
+    }
+
+    /// The format-2 checks the default loader ran before format 3, unchanged.
+    fn check_format_2(
         mut self,
         path: &str,
         options: CompileOptions,
         fill_absent_catalog: bool,
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
-        if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
-            return Err(CompileError::UnsupportedArtifactFormatVersion {
+        if self.artifact_format_version != LEGACY_FORMAT_2 {
+            return Err(CompileError::LegacyArtifactFormat {
                 path: path.to_string(),
                 found: self.artifact_format_version,
-                supported: ARTIFACT_FORMAT_VERSION,
             });
         }
         self.program.validate_provenance()?;
@@ -788,22 +976,48 @@ impl CompiledProgramArtifact {
         })
     }
 
+    /// The default loader: format 3 only. A missing version is a parse
+    /// error, as before format 3; any other version is refused with a
+    /// message naming the older side.
     fn from_json_source(
         source: &str,
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
-        Self::from_json_source_gated(source, path, options, RelationTypingGate::Enforce)
+        let value = parse_artifact_json(source, path)?;
+        let Some(found) = declared_format(&value) else {
+            return Err(deserialize_artifact::<Self>(value, path)
+                .err()
+                .unwrap_or_else(|| {
+                    invalid_artifact_contract(path, "artifact_format_version must be an integer")
+                }));
+        };
+        if found != ARTIFACT_FORMAT_VERSION {
+            return Err(CompileError::UnsupportedArtifactFormatVersion {
+                path: path.to_string(),
+                found,
+                supported: ARTIFACT_FORMAT_VERSION,
+                artifact_engine_version: value
+                    .get("engine_version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            });
+        }
+        validate_format_3_shape(&value, path)?;
+        validate_raw_artifact_contract(&value, path)?;
+        let stored_interface = value["program"]["interface"].clone();
+        let artifact: Self = deserialize_artifact(value, path)?;
+        artifact.check_format_3(path, options, &stored_interface)
     }
 
-    /// Load an artefact without the mandatory relation typing gate, so the
-    /// migration tool can type an artefact the loader would reject. Every
-    /// other contract check still runs.
+    /// Load a format-2 artefact without the mandatory relation typing gate,
+    /// so the migration tool can type an artefact the loader would reject.
+    /// Every other contract check still runs.
     pub(crate) fn from_json_str_for_relation_migration(
         source: &str,
         path: &str,
     ) -> Result<Self, CompileError> {
-        Self::from_json_source_gated(
+        Self::from_format_2_source(
             source,
             path,
             CompileOptions::default(),
@@ -811,27 +1025,21 @@ impl CompiledProgramArtifact {
         )
     }
 
-    fn from_json_source_gated(
+    /// Format 2, with every dialect tolerance the default loader had before
+    /// format 3.
+    fn from_format_2_source(
         source: &str,
         path: &str,
         options: CompileOptions,
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
-        let value: serde_json::Value =
-            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
-                path: path.to_string(),
-                error,
-            })?;
-        if let Some(found) = value
-            .get("artifact_format_version")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|version| u32::try_from(version).ok())
-            && found != ARTIFACT_FORMAT_VERSION
+        let value = parse_artifact_json(source, path)?;
+        if let Some(found) = declared_format(&value)
+            && found != LEGACY_FORMAT_2
         {
-            return Err(CompileError::UnsupportedArtifactFormatVersion {
+            return Err(CompileError::LegacyArtifactFormat {
                 path: path.to_string(),
                 found,
-                supported: ARTIFACT_FORMAT_VERSION,
             });
         }
         validate_raw_artifact_contract(&value, path)?;
@@ -840,7 +1048,7 @@ impl CompiledProgramArtifact {
         // an artifact that never carried the field is readable, while one
         // asserting an empty catalog over a program with inputs is making a
         // false claim the consistency check below has to catch. The fill
-        // itself happens inside `check_format_version`, AFTER duplicate
+        // itself happens inside `check_format_2`, AFTER duplicate
         // normalization: reconstructing the catalog needs `to_program()`,
         // which rejects the compatible duplicates normalization exists to
         // collapse (published us-tn-snap carries them).
@@ -848,12 +1056,8 @@ impl CompiledProgramArtifact {
             .get("metadata")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|metadata| !metadata.contains_key("input_catalog"));
-        let artifact: Self =
-            serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
-                path: path.to_string(),
-                error,
-            })?;
-        artifact.check_format_version(path, options, catalog_absent, typing)
+        let artifact: Self = deserialize_artifact(value, path)?;
+        artifact.check_format_2(path, options, catalog_absent, typing)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -1038,6 +1242,110 @@ pub(crate) fn canonical_request_name<'a>(slot: &str, request_names: &'a [String]
         .find(|request_name| request_name.as_str() == slot)
         .or_else(|| request_names.first())
         .expect("every discovered input slot has an owning request name")
+}
+
+fn parse_artifact_json(source: &str, path: &str) -> Result<serde_json::Value, CompileError> {
+    serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+        path: path.to_string(),
+        error,
+    })
+}
+
+fn deserialize_artifact<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    path: &str,
+) -> Result<T, CompileError> {
+    serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
+        path: path.to_string(),
+        error,
+    })
+}
+
+/// The artifact's declared format, when it is a `u32`.
+fn declared_format(value: &serde_json::Value) -> Option<u32> {
+    value
+        .get("artifact_format_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+}
+
+/// The keys format 3 closes or requires, checked on the raw JSON before it
+/// is read: a closed top-level key set; `engine_version`, `engine_build`,
+/// `program.interface` and `metadata.input_catalog` present; and
+/// `program.extends` refused outright, null included.
+fn validate_format_3_shape(value: &serde_json::Value, path: &str) -> Result<(), CompileError> {
+    let Some(artifact) = value.as_object() else {
+        return Err(invalid_artifact_contract(
+            path,
+            "an artifact is a JSON object",
+        ));
+    };
+    if let Some(key) = artifact
+        .keys()
+        .find(|key| !FORMAT_3_KEYS.contains(&key.as_str()))
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            format!(
+                "unknown top-level key `{key}`; format 3 has only {}",
+                FORMAT_3_KEYS
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    let object = |key: &str| artifact.get(key).and_then(serde_json::Value::as_object);
+    if !artifact
+        .get("engine_version")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `engine_version`, a string",
+        ));
+    }
+    if object("engine_build").is_none() {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `engine_build`, an object",
+        ));
+    }
+    if artifact.contains_key("source_closure") && object("source_closure").is_none() {
+        return Err(invalid_artifact_contract(
+            path,
+            "`source_closure` is an object when present",
+        ));
+    }
+    let Some(program) = object("program") else {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `program`",
+        ));
+    };
+    if program.contains_key("extends") {
+        return Err(invalid_artifact_contract(
+            path,
+            "program.extends was removed; compose before compilation",
+        ));
+    }
+    if !program
+        .get("interface")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `program.interface`, an object",
+        ));
+    }
+    if !object("metadata").is_some_and(|metadata| metadata.contains_key("input_catalog")) {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `metadata.input_catalog`",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_raw_artifact_contract(
