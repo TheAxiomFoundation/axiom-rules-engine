@@ -2127,7 +2127,7 @@ fn judgment_strategy() -> BoxedStrategy<GJ> {
     let comparison = (
         scalar_strategy(),
         op_strategy(),
-        prop_oneof![3 => (0i64..4).prop_map(GS::Int), 1 => scalar_strategy()],
+        prop_oneof![(0i64..4).prop_map(GS::Int), scalar_strategy()],
     )
         .prop_map(|(left, op, right)| GJ::Cmp(left, op, right));
     let leaf = prop_oneof![
