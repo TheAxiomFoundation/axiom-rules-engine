@@ -2853,3 +2853,242 @@ pub fn expect_dtype(derived: &Derived, expected: DType) -> Result<(), EvalError>
         )))
     }
 }
+
+/// Cases of `MissingFacts::Indeterminate` that only the engine's internals
+/// reach; `tests/three_valued.rs` has the rest.
+#[cfg(test)]
+mod three_valued_tests {
+    use super::*;
+    use crate::depth::with_suspend_depth;
+    use crate::model::{DerivedVersion, Interval};
+
+    fn period() -> Period {
+        Period::month(2026, 1)
+    }
+
+    fn rule(name: &str, dtype: DType, semantics: DerivedSemantics) -> Derived {
+        Derived {
+            id: None,
+            name: name.to_string(),
+            entity: "Case".to_string(),
+            dtype,
+            unit: None,
+            rounding: None,
+            source: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics,
+            versions: Vec::<DerivedVersion>::new(),
+        }
+    }
+
+    fn program(rules: Vec<Derived>) -> Program {
+        let mut program = Program::default();
+        for rule in rules {
+            program.add_derived(rule).expect("distinct rule names");
+        }
+        program
+    }
+
+    fn int(value: i64) -> ScalarExpr {
+        ScalarExpr::Literal(ScalarValue::Integer(value))
+    }
+
+    fn comparison(left: ScalarExpr, op: ComparisonOp, right: ScalarExpr) -> JudgmentExpr {
+        JudgmentExpr::Comparison { left, op, right }
+    }
+
+    fn three_valued<'a>(program: &'a Program, data: &'a DataSet) -> Engine<'a> {
+        Engine::with_options(
+            program,
+            data,
+            EvaluationOptions {
+                missing_facts: MissingFacts::Indeterminate,
+            },
+        )
+        .expect("the options are accepted")
+    }
+
+    /// The failure the driver records for a deferred rule is keyed by the
+    /// kind of value asked for as well as by rule, entity and period. The
+    /// program checks refuse a wrong-kind reference, so only an engine that
+    /// skips them can show the key matters: at threshold 1 the judgment
+    /// reference to the scalar rule `s` defers, fails and is recorded, and the
+    /// scalar reference to `s` later in the same drive still evaluates it.
+    #[test]
+    fn a_failed_wrong_kind_reference_does_not_fail_a_right_kind_one() {
+        let program = program(vec![
+            rule("s", DType::Integer, DerivedSemantics::Scalar(int(5))),
+            rule(
+                "root",
+                DType::Judgment,
+                DerivedSemantics::Judgment(JudgmentExpr::Or(vec![
+                    JudgmentExpr::And(vec![
+                        JudgmentExpr::Derived("s".to_string()),
+                        comparison(int(0), ComparisonOp::Eq, int(1)),
+                    ]),
+                    comparison(
+                        ScalarExpr::Derived("s".to_string()),
+                        ComparisonOp::Gt,
+                        int(0),
+                    ),
+                ])),
+            ),
+        ]);
+        let data = DataSet::default();
+
+        let refused = three_valued(&program, &data).judgment_determination("root", "c1", &period());
+        assert!(
+            matches!(&refused, Err(EvalError::ExpectedJudgment(name)) if name == "s"),
+            "the program checks refuse the wrong-kind reference: {refused:?}"
+        );
+
+        for threshold in [usize::MAX, 1, 2] {
+            with_suspend_depth(threshold, || {
+                let mut engine = three_valued(&program, &data);
+                engine.program_checks = false;
+                let result = engine.judgment_determination("root", "c1", &period());
+                assert!(
+                    matches!(result, Ok(Determined(JudgmentOutcome::Holds))),
+                    "threshold {threshold}: {result:?}"
+                );
+            });
+        }
+
+        // The record is what made the difference at threshold 1: drive the
+        // same evaluation by hand and look at it before the drive clears it.
+        with_suspend_depth(1, || {
+            let mut engine = three_valued(&program, &data);
+            engine.program_checks = false;
+            let result = engine.run_tasks(|engine| engine.judgment_rule("root", "c1", &period()));
+            assert!(matches!(result, Ok(Determined(JudgmentOutcome::Holds))));
+            let key = CacheKey {
+                derived: "s".to_string(),
+                entity_id: "c1".to_string(),
+                period: period(),
+            };
+            assert!(
+                matches!(
+                    engine.failed.get(&Deferred::Judgment(key.clone())),
+                    Some(EvalError::ExpectedJudgment(_))
+                ),
+                "the wrong-kind reference deferred and failed: {:?}",
+                engine.failed
+            );
+            assert!(!engine.failed.contains_key(&Deferred::Scalar(key)));
+            assert_eq!(
+                engine.cached_scalar("s", "c1", &period()),
+                Some(ScalarValue::Integer(5))
+            );
+        });
+    }
+
+    /// Two `match` failures with the same message, one raised in the
+    /// expression and one inside a rule whose name makes the messages
+    /// coincide, are chosen between by their fields, so the choice is the
+    /// same in either order before the error leaves any rule.
+    /// `tests/three_valued.rs` checks the same pair after it leaves one.
+    #[test]
+    fn equal_messages_are_chosen_between_by_their_fields_before_leaving_a_rule() {
+        let inner = "` covers `a";
+        let subject = "a` covers `x";
+        let program = program(vec![rule(
+            inner,
+            DType::Integer,
+            DerivedSemantics::Scalar(ScalarExpr::NoMatch {
+                subject: Box::new(ScalarExpr::Input("x".to_string())),
+                patterns: vec![int(2)],
+            }),
+        )]);
+        let mut data = DataSet::default();
+        for slot in ["x", subject] {
+            data.add_input(
+                slot,
+                "Case",
+                "c1",
+                Interval::covering(&period()),
+                ScalarValue::Integer(1),
+            );
+        }
+        let inline = comparison(
+            ScalarExpr::NoMatch {
+                subject: Box::new(ScalarExpr::Input(subject.to_string())),
+                patterns: vec![int(2)],
+            },
+            ComparisonOp::Gt,
+            int(0),
+        );
+        let referenced = comparison(
+            ScalarExpr::Derived(inner.to_string()),
+            ComparisonOp::Gt,
+            int(0),
+        );
+        let expressions = [
+            JudgmentExpr::And(vec![inline.clone(), referenced.clone()]),
+            JudgmentExpr::And(vec![referenced, inline]),
+        ]
+        .map(|condition| ScalarExpr::If {
+            condition: Box::new(condition),
+            then_expr: Box::new(int(1)),
+            else_expr: Box::new(int(0)),
+        });
+        let errors: Vec<EvalError> = expressions
+            .iter()
+            .map(|expr| {
+                three_valued(&program, &data)
+                    .eval_scalar_expr(expr, "c1", &period())
+                    .expect_err("both items fail and neither decides")
+            })
+            .collect();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages[0],
+            "no `match` arm in `` covers `a` covers `x` = 1 (arms: 2); add an arm for it or a final `_ =>` arm"
+        );
+        assert_eq!(format!("{:?}", errors[0]), format!("{:?}", errors[1]));
+        assert!(
+            matches!(&errors[0], EvalError::NoMatchingArm { rule, subject: chosen, .. }
+                if rule.is_empty() && chosen == subject),
+            "the error raised in the expression is the least: {:?}",
+            errors[0]
+        );
+    }
+
+    /// What the program checks pass is remembered per period; a run that
+    /// finds a defect remembers nothing.
+    #[test]
+    fn program_checks_remember_only_what_passed() {
+        let program = program(vec![
+            rule("a", DType::Integer, DerivedSemantics::Scalar(int(1))),
+            rule(
+                "b",
+                DType::Decimal,
+                DerivedSemantics::Scalar(ScalarExpr::Add(vec![
+                    ScalarExpr::Derived("a".to_string()),
+                    int(1),
+                ])),
+            ),
+            rule(
+                "bad",
+                DType::Decimal,
+                DerivedSemantics::Scalar(ScalarExpr::Add(vec![
+                    ScalarExpr::Derived("b".to_string()),
+                    ScalarExpr::Derived("missing_rule".to_string()),
+                ])),
+            ),
+        ]);
+        let data = DataSet::default();
+        let mut engine = three_valued(&program, &data);
+        let refused = engine.scalar_determination("bad", "c1", &period());
+        assert!(matches!(refused, Err(EvalError::UnknownDerived(_))));
+        assert!(engine.checked.is_empty());
+        assert!(matches!(
+            engine.scalar_determination("b", "c1", &period()),
+            Ok(Determined(_))
+        ));
+        let passed = &engine.checked[&period()];
+        assert_eq!(passed.len(), 2);
+        assert!(passed.contains(&Checked::Rule("a".to_string())));
+        assert!(passed.contains(&Checked::Rule("b".to_string())));
+    }
+}
