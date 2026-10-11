@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::prelude::ToPrimitive;
@@ -9,7 +10,7 @@ use thiserror::Error;
 /// Rules at this entity are row-constant.
 pub const SCALAR_ENTITY: &str = "Scalar";
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PeriodKind {
     Month,
     BenefitWeek,
@@ -17,7 +18,7 @@ pub enum PeriodKind {
     Custom(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Period {
     pub kind: PeriodKind,
     pub start: NaiveDate,
@@ -230,6 +231,128 @@ pub enum JudgmentOutcome {
 impl JudgmentOutcome {
     pub fn is_holds(self) -> bool {
         matches!(self, JudgmentOutcome::Holds)
+    }
+}
+
+/// What an evaluation does with a fact the dataset does not supply
+/// (`docs/three-valued-values.md`). `Error`, the default, is today's
+/// behaviour: a missing input fails the evaluation that reads it.
+/// `Indeterminate` makes the result that reads it unknown and names the fact.
+///
+/// Incomplete until the #215 series lands, and not yet reachable from a
+/// request: only [`crate::engine::Engine::with_options`] reads it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MissingFacts {
+    #[default]
+    Error,
+    Indeterminate,
+}
+
+/// A fact an evaluation reached and could not read.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Need {
+    /// An input cell no record covers.
+    Input {
+        name: String,
+        entity_id: String,
+        period: Period,
+    },
+}
+
+impl fmt::Display for Need {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Input {
+                name,
+                entity_id,
+                period,
+            } => write!(
+                f,
+                "input `{name}` for entity `{entity_id}` over {}..{}",
+                period.start, period.end
+            ),
+        }
+    }
+}
+
+/// The facts an unknown result needs. A set, so it does not depend on
+/// evaluation or dataset order, and never empty: it is built from one need
+/// and grows only by union.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Needs(BTreeSet<Need>);
+
+impl Needs {
+    pub fn one(need: Need) -> Self {
+        Self(BTreeSet::from([need]))
+    }
+
+    /// Add `other`'s needs to these.
+    pub fn extend(&mut self, other: Needs) {
+        self.0.extend(other.0);
+    }
+
+    /// The needs in their order.
+    pub fn iter(&self) -> impl Iterator<Item = &Need> {
+        self.0.iter()
+    }
+}
+
+impl fmt::Display for Needs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, need) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{need}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A value, or unknown with the facts that would decide it. This is the
+/// result of a scalar or judgment evaluation everywhere, inside the
+/// interpreter and out of it; only an evaluation under
+/// [`MissingFacts::Indeterminate`] is ever `Indeterminate`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Determination<T> {
+    Determined(T),
+    Indeterminate(Needs),
+}
+
+impl<T> Determination<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Determination<U> {
+        match self {
+            Self::Determined(value) => Determination::Determined(f(value)),
+            Self::Indeterminate(needs) => Determination::Indeterminate(needs),
+        }
+    }
+
+    /// Apply a fallible `f` to a determined value. `f` is not called for an
+    /// indeterminate one.
+    pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Determination<U>, E> {
+        Ok(match self {
+            Self::Determined(value) => Determination::Determined(f(value)?),
+            Self::Indeterminate(needs) => Determination::Indeterminate(needs),
+        })
+    }
+
+    /// Both values, when both are determined; otherwise indeterminate, with
+    /// the needs of both.
+    pub fn zip<U>(self, other: Determination<U>) -> Determination<(T, U)> {
+        match (self, other) {
+            (Self::Determined(left), Determination::Determined(right)) => {
+                Determination::Determined((left, right))
+            }
+            (Self::Indeterminate(mut needs), Determination::Indeterminate(more)) => {
+                needs.extend(more);
+                Determination::Indeterminate(needs)
+            }
+            (Self::Indeterminate(needs), Determination::Determined(_))
+            | (Self::Determined(_), Determination::Indeterminate(needs)) => {
+                Determination::Indeterminate(needs)
+            }
+        }
     }
 }
 
