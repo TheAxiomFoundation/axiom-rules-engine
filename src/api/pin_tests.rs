@@ -321,18 +321,19 @@ fn the_first_failing_pin_in_request_order_is_reported() {
     assert_eq!(first_error(&[]), Ok(()));
 }
 
-/// The audit's shape (2026-09-26, `apply-pins-linear-find`): pins on every
-/// one of `RULES` rules, then one unknown pin, which errors only after every
-/// other pin has been looked up. 20,000 pins took 2.2 s in a release build
-/// with a linear search per pin, and grows as pins * rules; one pass takes
-/// milliseconds even in a debug build. The bound leaves room for a loaded CI
-/// runner.
+/// The audit's shape (2026-09-26, `apply-pins-linear-find`), scaled up: pins
+/// on every rule, then one unknown pin, which errors only after every other
+/// pin has been looked up. A linear search per pin took 2.2 s at 20,000 pins
+/// in a release build and grows as pins * rules. At 20,000 a debug build of
+/// that search still fits in the bound (about 3 s for both runs below), so
+/// this runs 80,000, where it took 104 s for the first run alone; one pass
+/// takes under 0.1 s. The bound leaves room for a loaded CI runner.
 #[test]
-fn twenty_thousand_pins_apply_in_linear_time() {
-    const RULES: usize = 20_000;
+fn eighty_thousand_pins_apply_in_linear_time() {
+    const RULES: usize = 80_000;
     const BOUND: Duration = Duration::from_secs(5);
     let names = (0..RULES)
-        .map(|index| format!("rule_{index:05}"))
+        .map(|index| format!("rule_{index:06}"))
         .collect::<Vec<_>>();
     let program = ProgramSpec {
         derived: names.iter().map(|name| scalar(name, 0)).collect(),
@@ -350,6 +351,7 @@ fn twenty_thousand_pins_apply_in_linear_time() {
     let started = Instant::now();
     apply_pins(&mut all_pinned, &pins).expect("every rule pins");
     let elapsed = started.elapsed();
+    eprintln!("{RULES} pins: {elapsed:?}");
     assert!(elapsed < BOUND, "{RULES} pins took {elapsed:?}");
     assert!(
         all_pinned
@@ -363,6 +365,7 @@ fn twenty_thousand_pins_apply_in_linear_time() {
     let started = Instant::now();
     let error = apply_pins(&mut refused, &pins).expect_err("the last pin names no rule");
     let elapsed = started.elapsed();
+    eprintln!("{RULES} pins and a miss: {elapsed:?}");
     assert!(elapsed < BOUND, "{RULES} pins and a miss took {elapsed:?}");
     assert!(matches!(error, ApiError::UnknownPinnedRule { rule } if rule == MISSING));
 }

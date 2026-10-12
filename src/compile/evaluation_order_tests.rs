@@ -992,8 +992,9 @@ fn fan_out_order(aggregators: usize, predicates: usize) -> Vec<String> {
 }
 
 /// m = k = 4,000 took 5.9 s in a release build before relations became
-/// nodes, and grows as m * k. Linear now, it takes milliseconds even in a
-/// debug build; the bound leaves room for a loaded CI runner.
+/// nodes (the frozen reference takes about 37 s here in a debug build), and
+/// grows as m * k. Linear now, it takes milliseconds even in a debug build;
+/// the bound leaves room for a loaded CI runner.
 #[test]
 fn a_relation_fan_out_orders_in_linear_time() {
     const SIDE: usize = 4_000;
@@ -1002,6 +1003,7 @@ fn a_relation_fan_out_orders_in_linear_time() {
     let started = Instant::now();
     let order = evaluation_order(&program).expect("the fan-out is acyclic");
     let elapsed = started.elapsed();
+    eprintln!("fan-out m = k = {SIDE}: {elapsed:?}");
     assert_eq!(order, fan_out_order(SIDE, SIDE));
     assert!(
         elapsed < BOUND,
