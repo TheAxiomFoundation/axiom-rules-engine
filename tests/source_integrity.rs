@@ -2,12 +2,12 @@
 //! program (issues 237 and 238).
 //!
 //! RuleSpec lowers YAML by writing formula source text and parsing it. These
-//! tests pin the two places where that text could carry more than the field it
-//! came from: a line break in `module.title` or `module.status`, and a string
-//! literal that spans formula lines.
+//! tests pin metadata confinement, literal fidelity, and preservation of the
+//! declared rule set when arbitrary names and entities are validated before
+//! source synthesis.
 
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
-use axiom_rules_engine::rulespec::RuleSpecError;
+use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules_engine::spec::ScalarValueSpec;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
@@ -285,6 +285,108 @@ fn arbitrary_module_metadata_cannot_change_the_program() {
             },
         )
         .expect("module metadata must not affect the compiled program");
+}
+
+/// Valid identifiers keep the property exercising successful lowering as
+/// well as rejection of arbitrary Unicode and source-shaped values.
+fn source_identifier(allow_path: bool) -> BoxedStrategy<(String, bool)> {
+    let valid = if allow_path {
+        "rule_[A-Za-z0-9_]{0,12}(/[A-Za-z_][A-Za-z0-9_]{0,12})?"
+    } else {
+        "[ \\t\\r\\n\\x0C]{0,4}Entity_[A-Za-z0-9_]{0,12}[ \\t\\r\\n\\x0C]{0,4}"
+    };
+    prop_oneof![
+        2 => valid.prop_map(|value| (value, true)),
+        3 => metadata_string().prop_map(|value| (value, false)),
+    ]
+    .boxed()
+}
+
+/// For any metadata, rule name and entity, lowering either preserves exactly
+/// the declared rule or explicitly rejects an unsafe unquoted field. Exercise
+/// both the ordinary formula writer and the indexed-parameter stub writer.
+#[test]
+fn arbitrary_metadata_and_identifiers_preserve_the_declared_rule_set() {
+    runner(256, 246)
+        .run(
+            &(
+                source_identifier(true),
+                source_identifier(false),
+                metadata_string(),
+                metadata_string(),
+                metadata_string(),
+            ),
+            |((name, valid_name), (entity, valid_entity), title, status, summary)| {
+                for table in [false, true] {
+                    let mut input = module("7", "Integer");
+                    input["module"] = json!({"title": title, "status": status, "summary": summary});
+                    input["rules"][0]["name"] = json!(name);
+                    if table {
+                        input["rules"][0]["indexed_by"] = json!("bucket");
+                        input["rules"][0]["versions"][0]
+                            .as_object_mut()
+                            .expect("version fixture")
+                            .remove("formula");
+                    } else {
+                        input["rules"][0]["kind"] = json!("derived");
+                        input["rules"][0]["entity"] = json!(entity);
+                    }
+                    let mut yaml = serde_yaml::to_value(&input).expect("fixture YAML value");
+                    if table {
+                        // YAML table indices are integers, unlike JSON object keys.
+                        yaml["rules"][0]["versions"][0]["values"] =
+                            serde_yaml::to_value(std::collections::BTreeMap::from([(0_i64, 7)]))
+                                .expect("integer table fixture");
+                    }
+                    let lowered = lower_rulespec_str(
+                        &serde_yaml::to_string(&yaml).expect("serialize fixture YAML"),
+                    );
+                    if valid_name && (table || valid_entity) {
+                        prop_assert!(lowered.is_ok(), "valid fields failed: {lowered:?}");
+                    }
+                    match lowered {
+                        Ok(program) => {
+                            let names = program
+                                .parameters
+                                .iter()
+                                .map(|rule| rule.name.as_str())
+                                .chain(program.derived.iter().map(|rule| rule.name.as_str()))
+                                .chain(program.relations.iter().map(|rule| rule.name.as_str()))
+                                .collect::<Vec<_>>();
+                            prop_assert_eq!(names, vec![name.as_str()]);
+                            if !table && !entity.is_empty() {
+                                prop_assert_eq!(
+                                    program.derived[0].entity.as_str(),
+                                    entity.trim_matches(
+                                        |character: char| character.is_ascii_whitespace()
+                                    )
+                                );
+                            }
+                            let carried = program.module.expect("module metadata is carried");
+                            prop_assert_eq!(carried.title.as_deref(), Some(title.as_str()));
+                            prop_assert_eq!(carried.status.as_deref(), Some(status.as_str()));
+                            prop_assert_eq!(carried.summary.as_deref(), Some(summary.as_str()));
+                        }
+                        Err(RuleSpecError::InvalidFormulaField {
+                            name: rule,
+                            field,
+                            value,
+                            ..
+                        }) => {
+                            prop_assert_eq!(rule, name.clone());
+                            match field {
+                                "name" => prop_assert_eq!(value, name.clone()),
+                                "entity" if !table => prop_assert_eq!(value, entity.clone()),
+                                _ => return Err(TestCaseError::fail("unexpected invalid field")),
+                            }
+                        }
+                        Err(error) => return Err(TestCaseError::fail(error.to_string())),
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect("metadata and identifiers must preserve the declared rule set or fail explicitly");
 }
 
 #[derive(Clone, Debug)]

@@ -4410,3 +4410,45 @@ fn scalar_value_from_yaml<E: serde::de::Error>(
         ))),
     }
 }
+
+#[cfg(test)]
+mod source_integrity_properties {
+    use super::{ModuleMetadata, RulesDocument};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+    #[test]
+    fn single_line_title_and_status_keep_the_historical_header_bytes() {
+        let value = || {
+            proptest::collection::vec(
+                any::<char>().prop_filter("no line feed", |character| *character != '\n'),
+                0..64,
+            )
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+        };
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[247; 32]),
+        );
+        runner
+            .run(&(value(), value()), |(title, status)| {
+                let document = RulesDocument {
+                    module: Some(ModuleMetadata {
+                        title: Some(title.clone()),
+                        status: Some(status.clone()),
+                        ..ModuleMetadata::default()
+                    }),
+                    ..RulesDocument::default()
+                };
+                let mut actual = String::new();
+                document.write_header(&mut actual);
+                prop_assert_eq!(actual, format!("# title: {title}\n# status: {status}\n\n"));
+                Ok(())
+            })
+            .expect("a header value without a line feed must keep its exact bytes");
+    }
+}
