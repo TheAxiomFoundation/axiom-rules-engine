@@ -498,6 +498,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
     Ok(())
 }
 
+#[cfg(test)]
+mod pin_tests;
+
 fn execute_explain(
     program: &crate::model::Program,
     dataset: &crate::model::DataSet,

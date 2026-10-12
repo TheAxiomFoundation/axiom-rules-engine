@@ -1005,6 +1005,8 @@ pub(crate) fn validate_dependency_graph(program: &ProgramSpec) -> Result<(), Com
 
 #[cfg(test)]
 mod evaluation_order_reference;
+#[cfg(test)]
+mod evaluation_order_tests;
 
 fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> {
     let mut derived_names = HashSet::new();
@@ -1592,7 +1594,11 @@ fn relation_derivation_dependencies(
             continue;
         };
         let mut dependencies = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &mut HashSet::new());
+        collect_judgment_dependencies(
+            &derivation.predicate,
+            &mut dependencies,
+            &mut HashSet::new(),
+        );
         // The smallest name, so a predicate naming several unknown rules
         // always reports the same one.
         if let Some(dependency) = dependencies
