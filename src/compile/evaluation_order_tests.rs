@@ -13,7 +13,9 @@
 //!    listed, where a rule waits for each rule it reads and for each rule read
 //!    by the predicate of a derived relation it counts or sums over. When that
 //!    walk stalls before the rules run out, the error is `CyclicDependency`
-//!    naming exactly the rules it never reached.
+//!    naming exactly the rules it never reached. The waits come from the
+//!    frozen collectors, so this checks the ordering given the dependencies;
+//!    the differential covers how the new collectors find them.
 //! 3. **Position independence.** Reordering `program.derived` changes neither
 //!    an order nor a cycle report.
 //!
@@ -27,7 +29,7 @@
 //! The named tests below pin the audit's fan-out shape, in time and in
 //! outcome, and the edge cases of routing a wait through a relation node.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
@@ -37,10 +39,7 @@ use proptest::sample::select;
 use proptest::strategy::{Union, ValueTree};
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 
-use super::{
-    CompileError, derived_dependencies, evaluation_order, evaluation_order_reference,
-    relation_derivation_dependencies,
-};
+use super::{CompileError, evaluation_order, evaluation_order_reference};
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
     JudgmentExprSpec, OverPeriodsKindSpec, ProgramSpec, RelatedValueRefSpec,
@@ -666,11 +665,14 @@ fn program(profile: Profile) -> BoxedStrategy<ProgramSpec> {
         .boxed()
 }
 
+/// Zero is refused: the properties would pass without running.
 fn cases() -> u32 {
-    std::env::var("AXIOM_EVAL_ORDER_CASES")
+    let cases = std::env::var("AXIOM_EVAL_ORDER_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_CASES)
+        .unwrap_or(DEFAULT_CASES);
+    assert!(cases > 0, "AXIOM_EVAL_ORDER_CASES must be positive");
+    cases
 }
 
 fn runner(property: &str, profile: Profile, cases: u32) -> TestRunner {
@@ -719,33 +721,31 @@ struct Waits {
     all: BTreeSet<String>,
 }
 
-/// Each rule's waits. Only for programs that passed the name checks, which
-/// every program that orders or reports a rule cycle has.
+/// Each rule's waits, from the frozen collectors (`evaluation_order_reference`)
+/// rather than the ones this change rewrote, so a traversal regression there
+/// cannot hide by moving both sides. Only for programs that passed the name
+/// checks, as every program that orders or reports a rule cycle has.
 fn waits(program: &ProgramSpec) -> Vec<Waits> {
     let names = program
         .derived
         .iter()
         .map(|derived| derived.name.clone())
         .collect::<HashSet<_>>();
-    let predicate_rules = relation_derivation_dependencies(program, &names)
-        .expect("relation predicates read known rules");
+    let predicate_rules =
+        evaluation_order_reference::relation_derivation_dependencies(program, &names)
+            .expect("relation predicates read known rules");
+    let no_relations = HashMap::new();
     program
         .derived
         .iter()
-        .map(|derived| {
-            let (direct, relations) = derived_dependencies(derived);
-            let direct = direct.into_iter().collect::<BTreeSet<_>>();
-            let mut all = direct.clone();
-            for relation in &relations {
-                if let Some(rules) = predicate_rules.get(relation) {
-                    all.extend(rules.iter().cloned());
-                }
-            }
-            Waits {
-                rule: derived.name.clone(),
-                direct,
-                all,
-            }
+        .map(|derived| Waits {
+            rule: derived.name.clone(),
+            direct: evaluation_order_reference::derived_dependencies(derived, &no_relations)
+                .into_iter()
+                .collect(),
+            all: evaluation_order_reference::derived_dependencies(derived, &predicate_rules)
+                .into_iter()
+                .collect(),
         })
         .collect()
 }

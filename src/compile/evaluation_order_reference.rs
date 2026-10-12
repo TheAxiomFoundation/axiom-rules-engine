@@ -6,7 +6,10 @@
 //! return what this returns, errors included, for every program.
 //!
 //! Frozen: everything below the imports is the code as it stood, except that
-//! `evaluation_order` is `pub(super)`. It copies a derived relation's
+//! `evaluation_order`, `relation_derivation_dependencies` and
+//! `derived_dependencies` are `pub(super)`; the tests build the
+//! specification's waits from the latter two, so it does not share the
+//! collectors this change rewrote. It copies a derived relation's
 //! predicate rules into every rule that counts or sums over the relation, so
 //! it is quadratic in that fan-out; keep it out of timing tests. The helpers
 //! this change did not touch (`validate_relation_derivation_graph` and the
@@ -225,7 +228,7 @@ fn reject_relation_routed_cycles(
     })
 }
 
-fn relation_derivation_dependencies(
+pub(super) fn relation_derivation_dependencies(
     program: &ProgramSpec,
     derived_names: &HashSet<String>,
 ) -> Result<HashMap<String, HashSet<String>>, CompileError> {
@@ -253,7 +256,7 @@ fn relation_derivation_dependencies(
     Ok(dependencies_by_relation)
 }
 
-fn derived_dependencies(
+pub(super) fn derived_dependencies(
     derived: &crate::spec::DerivedSpec,
     relation_dependencies: &HashMap<String, HashSet<String>>,
 ) -> HashSet<String> {

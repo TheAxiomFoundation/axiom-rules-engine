@@ -184,6 +184,7 @@ fn apply_pins_matches_the_reference() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(4_000);
+    assert!(cases > 0, "AXIOM_PIN_CASES must be positive");
     let config = Config {
         cases,
         failure_persistence: None,
