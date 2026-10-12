@@ -7,7 +7,8 @@
 //! in request order, the first failing pin reports (an unknown rule or a
 //! judgment rule), a rule pinned twice is wrapped twice with the later pin
 //! outermost, and with duplicate rule names the first is pinned. The named
-//! tests pin those cases and the audit's 20,000-pin shape in time.
+//! tests pin those cases, and a scaled-up version of the audit's pin shape in
+//! time.
 
 use std::time::{Duration, Instant};
 
@@ -324,11 +325,12 @@ fn the_first_failing_pin_in_request_order_is_reported() {
 
 /// The audit's shape (2026-09-26, `apply-pins-linear-find`), scaled up: pins
 /// on every rule, then one unknown pin, which errors only after every other
-/// pin has been looked up. A linear search per pin took 2.2 s at 20,000 pins
-/// in a release build and grows as pins * rules. At 20,000 a debug build of
-/// that search still fits in the bound (about 3 s for both runs below), so
-/// this runs 80,000, where it took 104 s for the first run alone; one pass
-/// takes under 0.1 s. The bound leaves room for a loaded CI runner.
+/// pin has been looked up. The audit measured 2.2 s for 20,000 pins through
+/// the release CLI with a linear search per pin, which grows as pins * rules.
+/// With that search in the first timed call below, a debug build passed this
+/// test at 20,000 rules in 3.15 s, inside the bound; at 80,000 that call
+/// alone took 103.5 s, while one pass takes under 0.1 s. The bound leaves
+/// room for a loaded CI runner.
 #[test]
 fn eighty_thousand_pins_apply_in_linear_time() {
     const RULES: usize = 80_000;
