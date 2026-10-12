@@ -226,7 +226,7 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let mut request: ExecutionRequest = serde_json::from_str(&input)?;
+    let mut request = ExecutionRequest::from_json_str(&input)?;
     if let Some(policy) = relation_binding {
         request.relation_binding = policy;
     }

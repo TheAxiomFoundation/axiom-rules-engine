@@ -328,7 +328,7 @@
       "$ref": "#/$defs/ExecutionMode"
     },
     "pins": {
-      "description": "Caller-supplied rule pins: each named derived rule evaluates to the\ngiven literal for this request, on every date the rule exists. The\nengine rewrites the program before execution — the rule's semantics\nand every version's semantics become the literal, keeping effective\nranges — so all execution modes honour the pin identically and the\ncaller never has to edit an artifact. Naming a rule the program does\nnot contain is an error, not a no-op: a pin that silently fails to\nbind would hand the caller baseline results labelled as a\ncounterfactual.",
+      "description": "Caller-supplied rule pins: each named derived rule evaluates to the\ngiven literal for this request, on every date the rule exists. The\nengine rewrites the program before execution — the rule's semantics\nand every version's semantics become the literal, keeping effective\nranges — so all execution modes honour the pin identically and the\ncaller never has to edit an artifact. Naming a rule the program does\nnot contain is an error, not a no-op: a pin that silently fails to\nbind would hand the caller baseline results labelled as a\ncounterfactual. A rule named more than once takes its last pin.",
       "items": {
         "$ref": "#/$defs/RulePin"
       },

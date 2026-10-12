@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::json::MAX_JSON_DEPTH;
 use crate::spec::{
     DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
     ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
@@ -277,6 +278,9 @@ impl CompiledProgramArtifact {
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
+        // A program built in Rust can hold any expression; refuse a too-deep
+        // one before the metadata below walks it.
+        program.check_expression_depth()?;
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
@@ -546,7 +550,7 @@ impl CompiledProgramArtifact {
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
         let value: serde_json::Value =
-            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+            crate::json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
                 path: path.to_string(),
                 error,
             })?;
@@ -581,6 +585,9 @@ impl CompiledProgramArtifact {
                 path: path.to_string(),
                 error,
             })?;
+        // JSON can nest an expression deeper than any formula compiles to;
+        // refuse it before anything below walks the program.
+        artifact.program.check_expression_depth()?;
         artifact.check_format_version(path, options, catalog_absent, typing)
     }
 

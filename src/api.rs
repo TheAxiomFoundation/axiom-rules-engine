@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,15 @@ pub struct ExecutionRequest {
     pub queries: Vec<ExecutionQuery>,
 }
 
+impl ExecutionRequest {
+    /// Read a request from JSON. Its inline program may nest as deep as a
+    /// compiled artifact's, up to [`crate::compile::MAX_JSON_DEPTH`] levels
+    /// of JSON, where `serde_json::from_str` stops at 128.
+    pub fn from_json_str(source: &str) -> Result<Self, serde_json::Error> {
+        crate::json::from_str(source)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledExecutionRequest {
@@ -42,7 +51,7 @@ pub struct CompiledExecutionRequest {
     /// caller never has to edit an artifact. Naming a rule the program does
     /// not contain is an error, not a no-op: a pin that silently fails to
     /// bind would hand the caller baseline results labelled as a
-    /// counterfactual.
+    /// counterfactual. A rule named more than once takes its last pin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pins: Vec<RulePin>,
 }
@@ -300,13 +309,33 @@ fn validate_assessment_dates(queries: &[ExecutionQuery]) -> Result<(), ApiError>
 }
 
 pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, ApiError> {
+    execute_program(request, &[])
+}
+
+/// Execute `request`, whose program has had `pins` applied by [`apply_pins`].
+fn execute_program(
+    request: ExecutionRequest,
+    pins: &[RulePin],
+) -> Result<ExecutionResponse, ApiError> {
+    // An inline program can come from JSON nested deeper than any formula
+    // compiles to; refuse a too-deep expression before anything walks it.
+    request.program.check_expression_depth()?;
     validate_assessment_dates(&request.queries)?;
     // Compiled artifacts are checked when loaded; a raw ProgramSpec is checked
     // here, before any evaluator recurses through its dependency graph.
     crate::compile::validate_dependency_graph(&request.program)
         .map_err(|error| ApiError::InvalidProgram(Box::new(error)))?;
     let requested_mode = request.mode.clone();
-    let program = request.program.to_program()?;
+    // When each pin wrapped the one before it, converting a pinned rule's
+    // expression converted its pins' literals first, the latest first. Only a
+    // rule's last pin is in the program now, so every pin's literal is checked
+    // at that same point, and a request fails with the error it did before.
+    let program = request.program.to_program_with(|rule| {
+        pins.iter()
+            .rev()
+            .filter(|pin| pin.rule == rule)
+            .try_for_each(|pin| pin.value.check_literal())
+    })?;
     // A request can carry a raw program that never went through the compiler
     // or the artifact loader, so it faces the same mandatory relation typing.
     crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
@@ -410,14 +439,20 @@ pub fn execute_compiled_request(
     request: CompiledExecutionRequest,
 ) -> Result<ExecutionResponse, ApiError> {
     let mut program = artifact.program;
+    // An artifact built in Rust rather than loaded can hold any expression;
+    // refuse a too-deep one before pinning copies it.
+    program.check_expression_depth()?;
     apply_pins(&mut program, &request.pins)?;
-    execute_request(ExecutionRequest {
-        relation_binding: request.relation_binding,
-        mode: request.mode,
-        program,
-        dataset: request.dataset,
-        queries: request.queries,
-    })
+    execute_program(
+        ExecutionRequest {
+            relation_binding: request.relation_binding,
+            mode: request.mode,
+            program,
+            dataset: request.dataset,
+            queries: request.queries,
+        },
+        &request.pins,
+    )
 }
 
 /// Rewrite each pinned rule so it evaluates to the caller's literal.
@@ -436,8 +471,21 @@ pub fn execute_compiled_request(
 ///
 /// Runs on the program the engine is about to execute, so every execution
 /// mode sees the same pinned program.
+///
+/// A rule pinned more than once is wrapped once, with its last pin. Each pin
+/// used to wrap the one before it, so the last was already the one evaluated,
+/// but a request with many pins on one rule built an expression as deep as
+/// the pins were many, from flat JSON, and overflowed the stack. Every pin
+/// still names a scalar rule the program has, checked here in request order,
+/// and every pin's literal is still checked, where the program is converted
+/// (see [`execute_program`]).
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
-    for pin in pins {
+    let last_pin: HashMap<&str, usize> = pins
+        .iter()
+        .enumerate()
+        .map(|(index, pin)| (pin.rule.as_str(), index))
+        .collect();
+    for (index, pin) in pins.iter().enumerate() {
         let rule = program
             .derived
             .iter_mut()
@@ -454,6 +502,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
             return Err(ApiError::JudgmentRuleNotPinnable {
                 rule: pin.rule.clone(),
             });
+        }
+        if last_pin[pin.rule.as_str()] != index {
+            continue;
         }
         let pin_expr = |original: ScalarExprSpec| DerivedSemanticsSpec::Scalar {
             expr: ScalarExprSpec::If {

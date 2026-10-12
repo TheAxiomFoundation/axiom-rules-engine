@@ -346,6 +346,55 @@ Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
 position — the two grammars meet only at comparisons.
 
+## Nesting depth
+
+A formula nests at most 128 levels (`rulespec::MAX_FORMULA_DEPTH`). A deeper
+one does not compile: `formula nests more than 128 levels deep; split it into
+named rules`. The bound covers a `derived_relation` predicate too.
+
+Depth is the depth of the tree a formula lowers to (see the next section):
+
+- Each operator, function call, table lookup and `if` adds a level. A flat
+  chain nests, because `a + b + c` is `(a + b) + c`: a sum of n terms is n
+  levels deep.
+- Each `elif` and each `match` arm adds a level, because a chain of branches
+  lowers to one nested `if` per branch. A `match` of n arms on a name, with
+  literal results, is n + 2 levels deep.
+- Parentheses add no level. The parser counts the expressions it is inside
+  as it reads, though, so parentheses cannot nest past the bound either.
+
+A reference to another rule is one level, however deep that rule is. A
+formula that needs more depth therefore splits into named rules: for a long
+`elif` chain, move its tail into a second rule and make that rule the first
+one's `else`. Chains of rules can be any length (see
+[execution semantics](execution-semantics.md#deep-programs)).
+
+The bound exists because every stage walks a formula's tree recursively.
+Before it, a formula nested a few thousand levels deep overflowed the stack,
+which aborts the process instead of returning an error. At the bound a
+release build compiles and evaluates a formula in every mode on a 1 MiB
+thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
+levels.
+
+A program can also arrive as JSON: a compiled artifact, or a request with an
+inline program. Its expressions never pass the parser, so they are checked
+against `spec::MAX_EXPRESSION_DEPTH` (131) instead, counting each expression
+node as a level, before anything walks them. Lowering adds at most two levels
+to a formula and a request pin adds one, so every compiled rule passes, pinned
+or not. A deeper expression is refused with ``the expression of derived rule
+`name` nests more than 131 levels deep``.
+
+A compiled artifact carries any formula within the bound. Its JSON nests
+about two levels per level of a sum, a call or an `and`/`or` chain, and one
+per level of an `if`, an `elif` branch or a `match` arm, so an artifact can
+nest about 260 levels deep. The engine reads an artifact, and a request with
+an inline program, from JSON nested up to 512 levels
+(`compile::MAX_JSON_DEPTH`, four times the formula bound) and refuses a
+document nested deeper. serde_json alone stops at 128 levels, which used to
+refuse artifacts `compile` had just written: a sum of 61 terms, or an `elif`
+chain of 119 branches. A host that reads or writes an artifact with its own
+JSON library needs one that allows the same nesting.
+
 ## The lowered expression vocabulary
 
 Lowering a module produces a program whose expressions are `kind:`-tagged

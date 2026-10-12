@@ -198,4 +198,79 @@ assert.throws(
   "an unterminated escaped string is reported",
 );
 
+// A formula nested past the bound is an error with the core's message, not a
+// trap. Before the bound, each of these nested 1,000 levels deep overflowed
+// the wasm stack, and after a trap later calls on the same instance could
+// fail too.
+const DEEP_TARGET = "us:policies/test/deep";
+const deepModules = (formula) =>
+  JSON.stringify({
+    [DEEP_TARGET]: `
+format: rulespec/v1
+rules:
+  - name: deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: "${formula}"
+`,
+  });
+const nested = (levels) => [
+  `${"(".repeat(levels)}1${")".repeat(levels)}`,
+  `${"-".repeat(levels)}1`,
+  `1${" + 1".repeat(levels)}`,
+];
+let bound;
+for (const formula of nested(100_000)) {
+  assert.throws(
+    () => engine.compile(deepModules(formula), DEEP_TARGET),
+    (error) => {
+      bound = Number(/formula nests more than (\d+) levels deep/.exec(error.message)?.[1]);
+      return error instanceof Error && bound > 0;
+    },
+    "a formula nested past the bound is reported",
+  );
+}
+// At the bound each of those compiles on the wasm stack, and the instance
+// still answers after the refusals above. The artifact nests deeper than the
+// 128 levels of JSON `execute` used to read, and loads and evaluates.
+const deepRequest = JSON.stringify({
+  mode: "explain",
+  dataset: { inputs: [], relations: [] },
+  queries: [
+    {
+      entity_id: "household-1",
+      period: { period_kind: "month", ...interval },
+      outputs: [`${DEEP_TARGET}#deep`],
+    },
+  ],
+});
+const atBound = nested(bound - 1);
+const expected = [1, bound % 2 === 0 ? -1 : 1, bound];
+for (const [index, formula] of atBound.entries()) {
+  const deepArtifact = engine.compile(deepModules(formula), DEEP_TARGET);
+  const deepResponse = JSON.parse(engine.execute(deepArtifact, deepRequest));
+  const value = deepResponse.results[0].outputs[`${DEEP_TARGET}#deep`].value;
+  assert.equal(Number(value.value), expected[index], `formula ${index} at the bound`);
+}
+assert.equal(engine.compile(modulesJson, STATE_TARGET), artifactJson);
+console.log(`formulas nest at most ${bound} levels`);
+
+// A rule pinned many times takes its last pin and is wrapped once. Each pin
+// used to wrap the one before it, so many pins on one rule built a deep tree
+// from a flat request and trapped.
+const pinnedRequest = (pins) =>
+  JSON.stringify({
+    ...request,
+    pins: Array.from({ length: pins }, (_, pin) => ({
+      rule: "snap_regular_month_allotment",
+      value: { kind: "decimal", value: String(pin) },
+    })),
+  });
+const pinned = JSON.parse(engine.execute(artifactJson, pinnedRequest(100_000)));
+assert.equal(pinned.results[0].outputs[OUTPUT_ID].value.value, "99999");
+
 console.log("smoke test passed");
