@@ -737,7 +737,7 @@ fn compiled_artifact_loads_validate_interpretation_shape() {
     for (pointer, replacement, expected) in mutation_errors() {
         // Document-local membership has already been checked before lowering;
         // the compiled IR cannot reconstruct the original document boundary.
-        if matches!(expected, MutationError::Affects | MutationError::Citation) {
+        if matches!(expected, MutationError::Affects) {
             continue;
         }
         let mut mutated = artifact.clone();
@@ -750,6 +750,12 @@ fn compiled_artifact_loads_validate_interpretation_shape() {
             CompiledProgramArtifact::from_json_str(&serde_json::to_string(&mutated).unwrap())
                 .expect_err("malformed interpretation in an artifact is refused");
         match error {
+            CompileError::InvalidArtifactContract { path, message }
+                if matches!(expected, MutationError::Citation) =>
+            {
+                assert_eq!(path, "<memory>");
+                assert_eq!(message, "non-canonical corpus_citation_path `bad:path`");
+            }
             CompileError::Spec(SpecError::InvalidModuleMetadata(error)) => {
                 assert!(
                     is_expected_error(&error, &expected),

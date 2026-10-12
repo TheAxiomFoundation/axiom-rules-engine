@@ -22,7 +22,9 @@
 
 use axiom_rules_engine::schema::all_schemas;
 use jsonschema::Validator;
+use proptest::prelude::*;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 fn module_validator() -> Validator {
     let schema = all_schemas()
@@ -295,6 +297,130 @@ fn interpretation_schema_surfaces(document: &Value) -> [Value; 3] {
         "queries": []
     });
     [document.clone(), compiled, request]
+}
+
+static PUBLISHED_INTERPRETATION_VALIDATORS: LazyLock<[Validator; 3]> = LazyLock::new(|| {
+    [
+        include_str!("../schemas/rulespec-module.v1.schema.json"),
+        include_str!("../schemas/compiled-artifact.v2.schema.json"),
+        include_str!("../schemas/execution-request.v1.schema.json"),
+    ]
+    .map(|schema| {
+        jsonschema::draft7::options()
+            .should_validate_formats(true)
+            .build(&serde_json::from_str::<Value>(schema).expect("published schema is JSON"))
+            .expect("published schema compiles with date format validation")
+    })
+});
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn published_interpretation_schemas_agree_with_loader_for_generated_entries(
+        id in "[a-z0-9]{1,10}(-[a-z0-9]{1,8}){0,3}",
+        prose in "[A-Za-z][A-Za-z0-9 ]{0,40}",
+        status_index in 0usize..4,
+        year in 1900u16..2101,
+        month in 1u8..13,
+        day in 1u8..29,
+        mutation_index in 0usize..128,
+    ) {
+        let status = ["open", "ruled", "confirmed", "contradicted"][status_index];
+        let mut valid = interpretation_document(status);
+        let entry = &mut valid["module"]["interpretations"][0];
+        entry["id"] = serde_json::json!(id);
+        for field in ["question", "reading", "basis"] {
+            entry[field] = serde_json::json!(prose);
+        }
+        entry["texts"][0]["corpus_citation_path"] =
+            serde_json::json!(format!("uk/manual/scheme/{id}"));
+        entry["texts"][0]["excerpt"] = serde_json::json!(prose);
+        entry["alternatives"][0]["reading"] = serde_json::json!(prose);
+        for field in ["ruling", "confirmation"] {
+            if let Some(block) = entry.get_mut(field) {
+                block["by"] = serde_json::json!(prose);
+                block["date"] = serde_json::json!(format!("{year:04}-{month:02}-{day:02}"));
+                block["record"] = serde_json::json!(format!("https://example.org/{id}"));
+                if field == "confirmation" {
+                    block["excerpt"] = serde_json::json!(prose);
+                }
+            }
+        }
+
+        // Each candidate changes one field of this valid entry. Restrict
+        // nested-block mutations to blocks present for its generated status.
+        let root = "/module/interpretations/0";
+        let mut mutations = Vec::new();
+        for field in ["id", "question", "texts", "reading", "alternatives", "basis", "status", "affects"] {
+            mutations.push((format!("{root}/{field}"), None));
+        }
+        for field in ["texts", "alternatives", "affects"] {
+            mutations.push((format!("{root}/{field}"), Some(serde_json::json!([]))));
+        }
+        for field in ["question", "reading", "basis", "texts/0/excerpt", "alternatives/0/reading"] {
+            mutations.push((format!("{root}/{field}"), Some(serde_json::json!(" \n\t"))));
+        }
+        for field in ["unknown", "texts/0/unknown", "alternatives/0/unknown"] {
+            mutations.push((format!("{root}/{field}"), Some(serde_json::json!("extra"))));
+        }
+        mutations.push((format!("{root}/id"), Some(serde_json::json!("Invalid_ID"))));
+        mutations.push((format!("{root}/status"), Some(serde_json::json!("uncertain"))));
+        mutations.push((format!("{root}/texts/0/corpus_citation_path"), Some(serde_json::json!("uk/manual"))));
+        let supplied = interpretation_document("confirmed");
+        for field in ["ruling", "confirmation"] {
+            let block = entry.get(field);
+            let replacement = if block.is_some() {
+                None
+            } else {
+                Some(supplied["module"]["interpretations"][0][field].clone())
+            };
+            mutations.push((format!("{root}/{field}"), replacement));
+            if block.is_some() {
+                for (nested, replacement) in [
+                    ("date", "2026-2-01"),
+                    ("date", "2026-02-29"),
+                    ("record", "http://example.org/record"),
+                    ("by", " \n\t"),
+                    ("unknown", "extra"),
+                ] {
+                    mutations.push((format!("{root}/{field}/{nested}"), Some(serde_json::json!(replacement))));
+                }
+                if field == "confirmation" {
+                    mutations.push((format!("{root}/{field}/excerpt"), Some(serde_json::json!(" \n\t"))));
+                }
+            }
+        }
+        let (path, replacement) = &mutations[mutation_index % mutations.len()];
+        let mut invalid = valid.clone();
+        if let Some(replacement) = replacement {
+            if let Some(value) = invalid.pointer_mut(path) {
+                *value = replacement.clone();
+            } else {
+                let (parent, field) = path.rsplit_once('/').unwrap();
+                invalid.pointer_mut(parent).unwrap()[field] = replacement.clone();
+            }
+        } else {
+            let (parent, field) = path.rsplit_once('/').unwrap();
+            invalid.pointer_mut(parent).unwrap().as_object_mut().unwrap().remove(field);
+        }
+
+        for (document, expected) in [(&valid, true), (&invalid, false)] {
+            prop_assert_eq!(axiom_rules_engine::rulespec::lower_rulespec_str(
+                &serde_yaml::to_string(document).unwrap()
+            ).is_ok(), expected, "loader: status {}, mutation {}", status, path);
+            for (index, (validator, surface)) in PUBLISHED_INTERPRETATION_VALIDATORS
+                .iter().zip(interpretation_schema_surfaces(document)).enumerate()
+            {
+                prop_assert_eq!(validator.is_valid(&surface), expected,
+                    "published schema {}: status {}, mutation {}", index, status, path);
+            }
+        }
+    }
 }
 
 #[test]
