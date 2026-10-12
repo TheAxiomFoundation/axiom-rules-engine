@@ -658,7 +658,7 @@ fn execute_flat_tax(program: ProgramSpec, mode: &str) -> Vec<u8> {
         },
         "queries": [{
             "entity_id": "person-1",
-            "period": {"period_kind": "year", "start": "2025-01-01", "end": "2025-12-31"},
+            "period": {"period_kind": "tax_year", "start": "2025-01-01", "end": "2025-12-31"},
             "outputs": ["income_tax", "net_income", "high_income"]
         }]
     }))
@@ -789,6 +789,30 @@ fn compiled_artifact_loads_validate_interpretation_shape() {
     }
 }
 
+fn generated_rule_name(stem: &str) -> String {
+    format!("rule_{stem}")
+}
+
+#[test]
+fn generated_rule_names_keep_formula_keywords_as_safe_identifiers() {
+    let mut reserved = valid_entry("open");
+    reserved["affects"] = json!(["to"]);
+    assert!(matches!(
+        lower_rulespec_str(&yaml(&document_for_entry(reserved))),
+        Err(RuleSpecError::Formula(_))
+    ));
+
+    for keyword in [
+        "to", "entity", "amend", "from", "match", "if", "elif", "else", "and", "or", "not", "true",
+        "True", "false", "False",
+    ] {
+        let mut entry = valid_entry("open");
+        entry["affects"] = json!([generated_rule_name(keyword)]);
+        lower_rulespec_str(&yaml(&document_for_entry(entry)))
+            .unwrap_or_else(|error| panic!("generated name for {keyword:?} must load: {error}"));
+    }
+}
+
 fn valid_entries() -> impl Strategy<Value = Value> {
     (
         "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
@@ -803,7 +827,7 @@ fn valid_entries() -> impl Strategy<Value = Value> {
         .prop_map(|(id, status, year, month, day, rule, text, optional)| {
             let mut entry = valid_entry(["open", "ruled", "confirmed", "contradicted"][status]);
             entry["id"] = json!(id);
-            entry["affects"] = json!([rule]);
+            entry["affects"] = json!([generated_rule_name(&rule)]);
             entry["question"] = json!(format!("What is the reading of {text}?"));
             entry["reading"] = json!(format!("Adopted reading: {text}"));
             entry["basis"] = json!(format!("Basis: {text}"));
@@ -925,7 +949,26 @@ fn is_expected_error(error: &RuleSpecError, expected: &MutationError) -> bool {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn generated_interpretations_leave_execution_byte_identical(mut entry in valid_entries()) {
+        let baseline = lower_rulespec_str(FLAT_TAX).expect("existing fixture lowers");
+        let mut fixture: Value = serde_yaml::from_str(FLAT_TAX).unwrap();
+        entry["affects"] = json!(["income_tax", "tax_rate"]);
+        fixture["module"]["interpretations"] = json!([entry]);
+        let annotated = lower_rulespec_str(&yaml(&fixture)).expect("annotated fixture lowers");
+        for mode in ["explain", "fast"] {
+            prop_assert_eq!(
+                execute_flat_tax(baseline.clone(), mode),
+                execute_flat_tax(annotated.clone(), mode)
+            );
+        }
+    }
 
     #[test]
     fn valid_generated_interpretations_load_and_roundtrip(entry in valid_entries()) {

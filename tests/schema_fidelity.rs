@@ -313,12 +313,109 @@ static PUBLISHED_INTERPRETATION_VALIDATORS: LazyLock<[Validator; 3]> = LazyLock:
     })
 });
 
+static GENERATED_INTERPRETATION_VALIDATORS: LazyLock<Vec<Validator>> =
+    LazyLock::new(interpretation_validators);
+
+const INTERPRETATION_NONBLANK_FIELDS: [&str; 8] = [
+    "/module/interpretations/0/question",
+    "/module/interpretations/0/reading",
+    "/module/interpretations/0/basis",
+    "/module/interpretations/0/texts/0/excerpt",
+    "/module/interpretations/0/alternatives/0/reading",
+    "/module/interpretations/0/ruling/by",
+    "/module/interpretations/0/confirmation/by",
+    "/module/interpretations/0/confirmation/excerpt",
+];
+
+const UNICODE_WHITESPACE: [char; 25] = [
+    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{0085}', '\u{00a0}',
+    '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
+    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}',
+    '\u{3000}',
+];
+
+const NON_WHITESPACE_LOOKALIKES: [char; 8] = [
+    '\u{001c}', '\u{001d}', '\u{001e}', '\u{001f}', '\u{180e}', '\u{200b}', '\u{2060}', '\u{feff}',
+];
+
+fn assert_interpretation_nonblank_agrees_with_trim(text: &str, field: &str) {
+    let expected = !text.trim().is_empty();
+    let mut document = interpretation_document("confirmed");
+    *document.pointer_mut(field).unwrap() = serde_json::json!(text);
+    assert_eq!(
+        axiom_rules_engine::rulespec::lower_rulespec_str(
+            &serde_yaml::to_string(&document).unwrap()
+        )
+        .is_ok(),
+        expected,
+        "loader: {field}, text {text:?}"
+    );
+    let surfaces = interpretation_schema_surfaces(&document);
+    for (kind, validators) in [
+        ("generated", GENERATED_INTERPRETATION_VALIDATORS.as_slice()),
+        ("published", PUBLISHED_INTERPRETATION_VALIDATORS.as_slice()),
+    ] {
+        for (index, (validator, surface)) in validators.iter().zip(&surfaces).enumerate() {
+            assert_eq!(
+                validator.is_valid(surface),
+                expected,
+                "{kind} schema {index}: {field}, text {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn interpretation_unicode_next_line_is_blank() {
+    for field in INTERPRETATION_NONBLANK_FIELDS {
+        assert_interpretation_nonblank_agrees_with_trim("\u{0085}", field);
+    }
+}
+
+#[test]
+fn interpretation_unicode_byte_order_mark_is_nonblank() {
+    for field in INTERPRETATION_NONBLANK_FIELDS {
+        assert_interpretation_nonblank_agrees_with_trim("\u{feff}", field);
+    }
+}
+
+#[test]
+fn interpretation_unicode_whitespace_matches_trim() {
+    for character in UNICODE_WHITESPACE
+        .into_iter()
+        .chain(NON_WHITESPACE_LOOKALIKES)
+    {
+        let text = character.to_string();
+        for field in INTERPRETATION_NONBLANK_FIELDS {
+            assert_interpretation_nonblank_agrees_with_trim(&text, field);
+            assert_interpretation_nonblank_agrees_with_trim(&format!("{text}x{text}"), field);
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
+
+    #[test]
+    fn interpretation_unicode_whitespace_property_matches_trim(
+        whitespace in prop::collection::vec(prop::sample::select(UNICODE_WHITESPACE.to_vec()), 0..24),
+        content in prop::option::of(prop::sample::select(NON_WHITESPACE_LOOKALIKES.to_vec())),
+        field_index in 0usize..INTERPRETATION_NONBLANK_FIELDS.len(),
+    ) {
+        let mut text: String = whitespace.iter().collect();
+        if let Some(content) = content {
+            text.push(content);
+        }
+        text.extend(whitespace);
+        assert_interpretation_nonblank_agrees_with_trim(
+            &text,
+            INTERPRETATION_NONBLANK_FIELDS[field_index],
+        );
+    }
 
     #[test]
     fn published_interpretation_schemas_agree_with_loader_for_generated_entries(

@@ -73,40 +73,42 @@ compilation, or execution results. The root module's entries survive lowering
 on `program.module` and round-trip through compiled-artifact JSON. The list
 defaults to empty and is omitted when empty.
 
-This complete example illustrates a ruled reading:
+This complete synthetic example illustrates a ruled reading for the invented
+Lantern Supply Scheme in the fictional Lantern jurisdiction. Its excerpts,
+organisation, and record are invented for this example.
 
 ```yaml
 format: rulespec/v1
 module:
   interpretations:
-    - id: daily-twenty-per-cent
+    - id: weekly-review
       question: >-
-        Paragraph 59.1 deducts "20 per cent" of the weekly excess from a daily maximum.
-        Is that 20% a week, or 20% for each day (140% a week)?
+        Does the Lantern Supply Scheme require a review at each weekly boundary
+        or at each daily boundary?
       texts:
-        - corpus_citation_path: uk-babergh/manual/council-tax-reduction-scheme-2026-2027/page-87
-          excerpt: "The prescribed daily percentage"
-      reading: 20% of the weekly excess income, applied once a week.
+        - corpus_citation_path: zz-fictional-lantern/manual/lantern-supply-scheme/review-schedule
+          excerpt: "Review supplies at the start of each period."
+      reading: Review supplies at each weekly boundary.
       alternatives:
-        - reading: 20% of the weekly excess for each day, 140% a week.
-          effect: Support would end at about £25 a week of excess income.
+        - reading: Review supplies at each daily boundary.
+          effect: Reviews would occur more often.
       basis: >-
-        The prescribed and default schemes deduct 2 6/7% a day against a daily maximum,
-        which is 20% a week; a 140% weekly taper does not fit the scheme's own UC table.
+        The synthetic guide's review calendar describes a weekly review,
+        so its use of "period" is read as a week.
       status: ruled
       ruling:
-        by: Axiom Foundation
+        by: Fictional Lantern Scheme Office
         date: '2026-10-10'
-        record: https://github.com/TheAxiomFoundation/rulespec-uk/pull/449
+        record: https://example.org/fictional-lantern/weekly-review
       affects:
-        - babergh_council_tax_reduction_weekly_taper_rate
+        - lantern_weekly_review_required
 rules:
-  - name: babergh_council_tax_reduction_weekly_taper_rate
+  - name: lantern_weekly_review_required
     kind: parameter
-    dtype: Rate
+    dtype: Boolean
     versions:
       - effective_from: '2026-04-01'
-        formula: "0.2"
+        formula: "true"
 ```
 
 Each entry has these fields. Every mapping in an entry rejects unknown keys.

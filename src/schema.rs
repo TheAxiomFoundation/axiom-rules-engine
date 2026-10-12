@@ -704,7 +704,11 @@ pub fn interpretations_json_schema(_generator: &mut schemars::SchemaGenerator) -
 }
 
 fn non_blank_string_schema() -> Value {
-    json!({ "type": "string", "pattern": "\\S" })
+    // Match the Unicode White_Space definition used by the loader's str::trim.
+    json!({
+        "type": "string",
+        "pattern": r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+    })
 }
 
 fn https_record_schema() -> Value {
