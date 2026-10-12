@@ -403,7 +403,10 @@ proptest! {
     #[test]
     fn interpretation_unicode_whitespace_property_matches_trim(
         whitespace in prop::collection::vec(prop::sample::select(UNICODE_WHITESPACE.to_vec()), 0..24),
-        content in prop::option::of(prop::sample::select(NON_WHITESPACE_LOOKALIKES.to_vec())),
+        content in prop::option::of(prop_oneof![
+            prop::sample::select(NON_WHITESPACE_LOOKALIKES.to_vec()),
+            any::<char>(),
+        ]),
         field_index in 0usize..INTERPRETATION_NONBLANK_FIELDS.len(),
     ) {
         let mut text: String = whitespace.iter().collect();

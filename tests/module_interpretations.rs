@@ -663,7 +663,12 @@ fn execute_flat_tax(program: ProgramSpec, mode: &str) -> Vec<u8> {
         }]
     }))
     .expect("execution request deserializes");
+    let requested_mode = request.mode.clone();
     let response = execute_request(request).expect("existing flat-tax fixture executes");
+    assert_eq!(response.metadata.requested_mode, requested_mode);
+    assert_eq!(response.metadata.actual_mode, requested_mode);
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].outputs.len(), 3);
     serde_json::to_vec(&response).expect("response serializes")
 }
 
@@ -797,10 +802,17 @@ fn generated_rule_name(stem: &str) -> String {
 fn generated_rule_names_keep_formula_keywords_as_safe_identifiers() {
     let mut reserved = valid_entry("open");
     reserved["affects"] = json!(["to"]);
-    assert!(matches!(
-        lower_rulespec_str(&yaml(&document_for_entry(reserved))),
-        Err(RuleSpecError::Formula(_))
-    ));
+    lower_rulespec_str(&yaml(&document_for_entry(reserved)))
+        .expect_err("a reserved keyword is not a rule identifier");
+
+    // Valid names reach formula parsing even when a loader rejects keyword
+    // names before generating formula source.
+    let mut keyword_formula = document(vec![valid_entry("open")]);
+    keyword_formula["rules"][0]["versions"][0]["formula"] = json!("to");
+    let error = lower_rulespec_str(&yaml(&keyword_formula))
+        .expect_err("a reserved keyword is not a formula identifier");
+    assert!(matches!(&error, RuleSpecError::Formula(_)), "{error:?}");
+    assert!(error.to_string().contains("To (to)"), "{error}");
 
     for keyword in [
         "to", "entity", "amend", "from", "match", "if", "elif", "else", "and", "or", "not", "true",
