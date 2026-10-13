@@ -113,19 +113,7 @@ impl std::error::Error for RelationTypingReport {}
 /// from the slots its declared kinds say. Violations are sorted and unique,
 /// so the same program always reports the same text.
 pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
-    let slot_kinds = EffectiveSlotEntities::new(program);
-    let current_kinds = filtered_entity_current_kinds(program, &slot_kinds, None).0;
-    let mut checker = Checker {
-        program,
-        slot_kinds,
-        filtered: resolve_filtered_kinds(current_kinds.clone()),
-        filtered_names: alias_names(current_kinds),
-        namesakes: None,
-        base_semantics: true,
-        violations: BTreeSet::new(),
-        used_relations: BTreeSet::new(),
-        unchecked: Vec::new(),
-    };
+    let mut checker = Checker::for_typing(program);
     checker.filtered_entity_conflicts();
     checker.walk();
     if checker.violations.is_empty() {
@@ -143,17 +131,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
 /// is the evidence an artifact's execution gives; `check_program` also types
 /// the base semantics, which the dense compiler reads.
 pub fn executed_relations(program: &Program) -> BTreeSet<String> {
-    let mut checker = Checker {
-        program,
-        slot_kinds: EffectiveSlotEntities::new(program),
-        filtered: BTreeMap::new(),
-        filtered_names: BTreeSet::new(),
-        namesakes: None,
-        base_semantics: false,
-        violations: BTreeSet::new(),
-        used_relations: BTreeSet::new(),
-        unchecked: Vec::new(),
-    };
+    let mut checker = Checker::for_execution(program);
     checker.walk();
     checker.used_relations
 }
@@ -458,6 +436,34 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
+    /// A checker for [`check_program`]: it maps filtered entities to the
+    /// kinds of their ids and walks a versioned rule's base semantics too.
+    fn for_typing(program: &'a Program) -> Self {
+        let slot_kinds = EffectiveSlotEntities::new(program);
+        let current_kinds = filtered_entity_current_kinds(program, &slot_kinds, None).0;
+        Self {
+            filtered: resolve_filtered_kinds(current_kinds.clone()),
+            filtered_names: alias_names(current_kinds),
+            base_semantics: true,
+            ..Self::for_execution(program)
+        }
+    }
+
+    /// A checker for [`executed_relations`]: what explain executes only.
+    fn for_execution(program: &'a Program) -> Self {
+        Self {
+            program,
+            slot_kinds: EffectiveSlotEntities::new(program),
+            filtered: BTreeMap::new(),
+            filtered_names: BTreeSet::new(),
+            namesakes: None,
+            base_semantics: false,
+            violations: BTreeSet::new(),
+            used_relations: BTreeSet::new(),
+            unchecked: Vec::new(),
+        }
+    }
+
     /// Record that an executable node reads `relation`, queuing it for
     /// [`Self::derived_relations`] the first time.
     fn use_relation(&mut self, relation: &str) {
@@ -498,6 +504,12 @@ impl<'a> Checker<'a> {
     /// Visit every executed node of every derived rule, then the derived
     /// relations they reach.
     fn walk(&mut self) {
+        self.walk_rules();
+        self.derived_relations();
+    }
+
+    /// Visit every executed node of every derived rule.
+    fn walk_rules(&mut self) {
         let mut names = self.program.derived.keys().collect::<Vec<_>>();
         names.sort();
         for name in names {
@@ -522,7 +534,6 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        self.derived_relations();
     }
 
     /// The kind a rule's entity has as an id: a filtered entity's ids are
@@ -860,71 +871,77 @@ impl<'a> Checker<'a> {
         // a chain of n derived relations is checked in n steps rather than
         // rescanning every used relation once per link.
         while let Some(name) = self.unchecked.pop() {
-            let Some(schema) = self.program.relations.get(&name) else {
-                continue;
-            };
-            let Some(derivation) = schema.derivation.clone() else {
-                continue;
-            };
-            let schema_kinds = schema.slot_entities.clone();
-            self.use_relation(&derivation.source_relation);
-            let source_kinds = self.typed_slots(&derivation.source_relation, &name);
-            if let Some(source_kinds) = source_kinds.as_ref() {
-                for declared in [&derivation.slot_entities, &schema_kinds] {
-                    if declared.is_empty() || declared == source_kinds {
-                        continue;
-                    }
-                    self.push(
-                        RelationTypingCode::DerivedRelationSourceConflict,
-                        &name,
-                        &name,
-                        format!(
-                            "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
-                            format_kinds(declared),
-                            derivation.source_relation,
-                            format_kinds(source_kinds)
-                        ),
-                    );
+            self.derived_relation(name);
+        }
+    }
+
+    /// Check the source and predicate of one used relation, if it is
+    /// derived, using every relation they read.
+    fn derived_relation(&mut self, name: String) {
+        let Some(schema) = self.program.relations.get(&name) else {
+            return;
+        };
+        let Some(derivation) = schema.derivation.clone() else {
+            return;
+        };
+        let schema_kinds = schema.slot_entities.clone();
+        self.use_relation(&derivation.source_relation);
+        let source_kinds = self.typed_slots(&derivation.source_relation, &name);
+        if let Some(source_kinds) = source_kinds.as_ref() {
+            for declared in [&derivation.slot_entities, &schema_kinds] {
+                if declared.is_empty() || declared == source_kinds {
+                    continue;
                 }
-            }
-            // A derived source traverses its own source with its own
-            // slots, whatever slots reach it.
-            if let Some(source) = self
-                .program
-                .relations
-                .get(&derivation.source_relation)
-                .and_then(|schema| schema.derivation.as_ref())
-                && (source.current_slot, source.related_slot)
-                    != (derivation.current_slot, derivation.related_slot)
-            {
                 self.push(
-                    RelationTypingCode::DerivedRelationSlotsDiverge,
+                    RelationTypingCode::DerivedRelationSourceConflict,
                     &name,
                     &name,
                     format!(
-                        "derived relation `{name}` reads its derived source `{}` with slots ({}, {}), but that source traverses its own source with slots ({}, {}); a chain of derived relations must keep one direction",
+                        "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
+                        format_kinds(declared),
                         derivation.source_relation,
-                        derivation.current_slot,
-                        derivation.related_slot,
-                        source.current_slot,
-                        source.related_slot
+                        format_kinds(source_kinds)
                     ),
                 );
             }
-            self.predicate_rules(&name, &derivation);
-            let kinds = self.slot_kinds.get(&name);
-            let slot = |slot: usize| kinds.and_then(|kinds| kinds.get(slot)).map(String::as_str);
-            let current_kind = slot(derivation.current_slot).map(str::to_string);
-            let related_kind = slot(derivation.related_slot).map(str::to_string);
-            self.judgment(
-                &derivation.predicate,
-                Context {
-                    entity: related_kind.as_deref(),
-                    membership: Some((current_kind.as_deref(), related_kind.as_deref())),
-                    citing: &name,
-                },
+        }
+        // A derived source traverses its own source with its own
+        // slots, whatever slots reach it.
+        if let Some(source) = self
+            .program
+            .relations
+            .get(&derivation.source_relation)
+            .and_then(|schema| schema.derivation.as_ref())
+            && (source.current_slot, source.related_slot)
+                != (derivation.current_slot, derivation.related_slot)
+        {
+            self.push(
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                &name,
+                &name,
+                format!(
+                    "derived relation `{name}` reads its derived source `{}` with slots ({}, {}), but that source traverses its own source with slots ({}, {}); a chain of derived relations must keep one direction",
+                    derivation.source_relation,
+                    derivation.current_slot,
+                    derivation.related_slot,
+                    source.current_slot,
+                    source.related_slot
+                ),
             );
         }
+        self.predicate_rules(&name, &derivation);
+        let kinds = self.slot_kinds.get(&name);
+        let slot = |slot: usize| kinds.and_then(|kinds| kinds.get(slot)).map(String::as_str);
+        let current_kind = slot(derivation.current_slot).map(str::to_string);
+        let related_kind = slot(derivation.related_slot).map(str::to_string);
+        self.judgment(
+            &derivation.predicate,
+            Context {
+                entity: related_kind.as_deref(),
+                membership: Some((current_kind.as_deref(), related_kind.as_deref())),
+                citing: &name,
+            },
+        );
     }
 
     /// A derived relation's predicate runs each rule it reads on the current
@@ -1651,6 +1668,132 @@ pub(crate) mod chain_test_programs {
             })
     }
 
+    /// A relation a rule or predicate names: usually the program's, now
+    /// and then one it does not declare.
+    fn relation_named(index: usize, count: usize) -> String {
+        if index < count {
+            format!("r{index}")
+        } else {
+            "ghost".to_string()
+        }
+    }
+
+    /// [`program`] with rules that count, sum over, and test membership in
+    /// its relations, and derivation predicates that read rules, test
+    /// membership and count, so typing reaches derived relations through
+    /// every kind of use and checks them transitively.
+    pub(crate) fn program_with_rules() -> impl Strategy<Value = Program> {
+        let entity = prop::sample::select(vec![
+            "Household",
+            "Person",
+            "U0",
+            crate::model::SCALAR_ENTITY,
+        ]);
+        let rule = (
+            entity,
+            0_usize..12,
+            0_usize..3,
+            0_usize..3,
+            prop::option::of(0_usize..5),
+            0_usize..3,
+        );
+        let predicate = (
+            0_usize..12,
+            0_usize..12,
+            0_usize..3,
+            0_usize..3,
+            0_usize..5,
+            0_usize..4,
+        );
+        (program(), vec(rule, 0..6), vec(predicate, 0..10)).prop_map(
+            |(mut program, rules, predicates)| {
+                let count = program.relations.len();
+                let literal = |value| ScalarExpr::Literal(ScalarValue::Integer(value));
+                let rule_names = rules.len().max(1);
+                let rule_ref = move |index: usize| format!("x{}", index % rule_names);
+                for (index, (entity, relation, current_slot, related_slot, read, shape)) in
+                    rules.into_iter().enumerate()
+                {
+                    let relation = relation_named(relation, count);
+                    let where_clause =
+                        read.map(|read| Box::new(JudgmentExpr::Derived(rule_ref(read))));
+                    let expr = match shape {
+                        0 => ScalarExpr::CountRelated {
+                            relation,
+                            current_slot,
+                            related_slot,
+                            where_clause,
+                        },
+                        1 => ScalarExpr::SumRelated {
+                            relation,
+                            current_slot,
+                            related_slot,
+                            value: crate::model::RelatedValueRef::Derived(rule_ref(index + 1)),
+                            where_clause,
+                        },
+                        _ => ScalarExpr::If {
+                            condition: Box::new(JudgmentExpr::RelationMember {
+                                relation,
+                                current_slot,
+                                related_slot,
+                            }),
+                            then_expr: Box::new(literal(1)),
+                            else_expr: Box::new(literal(0)),
+                        },
+                    };
+                    let name = format!("x{index}");
+                    program.derived.insert(
+                        name.clone(),
+                        crate::model::Derived {
+                            id: None,
+                            name,
+                            entity: entity.to_string(),
+                            dtype: crate::model::DType::Integer,
+                            unit: None,
+                            rounding: None,
+                            source: None,
+                            source_url: None,
+                            corpus_citation_path: None,
+                            semantics: crate::model::DerivedSemantics::Scalar(expr),
+                            versions: Vec::new(),
+                        },
+                    );
+                }
+                for (target, other, current_slot, related_slot, read, shape) in predicates {
+                    let Some(derivation) = program
+                        .relations
+                        .get_mut(&format!("r{target}"))
+                        .and_then(|relation| relation.derivation.as_mut())
+                    else {
+                        continue;
+                    };
+                    let relation = relation_named(other, count);
+                    let member = JudgmentExpr::RelationMember {
+                        relation: relation.clone(),
+                        current_slot,
+                        related_slot,
+                    };
+                    derivation.predicate = match shape {
+                        0 => member,
+                        1 => JudgmentExpr::Derived(rule_ref(read)),
+                        2 => JudgmentExpr::Comparison {
+                            left: ScalarExpr::CountRelated {
+                                relation,
+                                current_slot,
+                                related_slot,
+                                where_clause: None,
+                            },
+                            op: ComparisonOp::Gte,
+                            right: literal(1),
+                        },
+                        _ => JudgmentExpr::And(vec![member, JudgmentExpr::Derived(rule_ref(read))]),
+                    };
+                }
+                program
+            },
+        )
+    }
+
     /// The recursive lookup [`EffectiveSlotEntities`] and the iterative
     /// [`effective_slot_entities`] replaced, kept as the reference.
     pub(crate) fn reference_effective_slot_entities(
@@ -1785,7 +1928,8 @@ mod chain_resolution_tests {
 
     #[test]
     fn slot_kind_table_matches_the_recursive_lookup() {
-        let (inherited, cyclic) = (Cell::new(0_usize), Cell::new(0_usize));
+        let (inherited, cyclic, unsettled) =
+            (Cell::new(0_usize), Cell::new(0_usize), Cell::new(0_usize));
         runner(4000)
             .run(&program(), |program| {
                 let table = EffectiveSlotEntities::new(&program);
@@ -1810,21 +1954,42 @@ mod chain_resolution_tests {
                         continue;
                     };
                     if derivation.slot_entities.is_empty() && schema.slot_entities.is_empty() {
-                        if expected.is_some() {
-                            inherited.set(inherited.get() + 1);
-                        } else if program.relations.contains_key(&derivation.source_relation) {
-                            cyclic.set(cyclic.get() + 1);
-                        }
+                        let counter = if expected.is_some() {
+                            &inherited
+                        } else if inherits_into_a_cycle(&program, &name) {
+                            &cyclic
+                        } else {
+                            &unsettled
+                        };
+                        counter.set(counter.get() + 1);
                     }
                 }
                 Ok(())
             })
             .unwrap();
         // The generator must reach kinds through derived relations that
-        // declare none, and chains that end in nothing or cycle.
-        let (inherited, cyclic) = (inherited.get(), cyclic.get());
+        // declare none, through chains that cycle, and through chains that
+        // end at a relation declaring nothing or none at all.
+        let (inherited, cyclic, unsettled) = (inherited.get(), cyclic.get(), unsettled.get());
         assert!(inherited > 2000, "only {inherited} inherited lookups");
-        assert!(cyclic > 1000, "only {cyclic} unsettled chains");
+        assert!(cyclic > 300, "only {cyclic} chains into a cycle");
+        assert!(unsettled > 1000, "only {unsettled} chains ending unsettled");
+    }
+
+    /// Whether following `relation`'s inherited kinds returns to a relation
+    /// it passed, as the reference lookup finds a cycle.
+    fn inherits_into_a_cycle(program: &Program, relation: &str) -> bool {
+        let mut visited = BTreeSet::new();
+        let mut current = relation;
+        loop {
+            if !visited.insert(current) {
+                return true;
+            }
+            match program.relations.get(current).map(own_slot_entities) {
+                Some(OwnSlotEntities::Inherited(source)) => current = source,
+                _ => return false,
+            }
+        }
     }
 
     #[test]
@@ -1885,7 +2050,26 @@ mod chain_resolution_tests {
         runner(6000)
             .run(&direct, |direct| {
                 let expected = reference_innermost_kinds(&direct);
-                cycles.set(cycles.get() + direct.len() - expected.len());
+                // Entities whose walk returns to an entity it passed, not
+                // those that merely reach an unsettled kind.
+                let cyclic = direct
+                    .keys()
+                    .filter(|entity| {
+                        let mut visited = BTreeSet::new();
+                        let mut kind = entity.as_str();
+                        while let Some(Some(next)) = direct.get(kind) {
+                            if next == kind {
+                                return false;
+                            }
+                            if !visited.insert(kind) {
+                                return true;
+                            }
+                            kind = next;
+                        }
+                        false
+                    })
+                    .count();
+                cycles.set(cycles.get() + cyclic);
                 deep.set(
                     deep.get()
                         + expected
@@ -1908,9 +2092,89 @@ mod chain_resolution_tests {
             .unwrap();
         let (cycles, deep) = (cycles.get(), deep.get());
         assert!(
-            cycles > 2000 && deep > 2000,
-            "{cycles} unmapped, {deep} deep"
+            cycles > 400 && deep > 1500,
+            "{cycles} in cycles, {deep} deep"
         );
+    }
+
+    /// The fixed-point loop the worklist replaced: rescan every used
+    /// relation for ones not yet checked until none is left.
+    fn check_used_relations_by_rescanning(checker: &mut Checker<'_>) {
+        let mut checked = BTreeSet::new();
+        loop {
+            let pending = checker
+                .used_relations
+                .iter()
+                .filter(|name| !checked.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                break;
+            }
+            for name in pending {
+                checked.insert(name.clone());
+                checker.derived_relation(name);
+            }
+        }
+        checker.unchecked.clear();
+    }
+
+    #[test]
+    fn the_worklist_checks_what_the_fixed_point_loop_checked() {
+        let (reached, violations) = (Cell::new(0_usize), Cell::new(0_usize));
+        runner(3000)
+            .run(&super::chain_test_programs::program_with_rules(), |program| {
+                for typing in [true, false] {
+                    let new = |program| {
+                        if typing {
+                            Checker::for_typing(program)
+                        } else {
+                            Checker::for_execution(program)
+                        }
+                    };
+                    let (mut worklist, mut rescanning) = (new(&program), new(&program));
+                    if typing {
+                        worklist.filtered_entity_conflicts();
+                        rescanning.filtered_entity_conflicts();
+                    }
+                    worklist.walk();
+                    rescanning.walk_rules();
+                    check_used_relations_by_rescanning(&mut rescanning);
+                    if worklist.used_relations != rescanning.used_relations
+                        || worklist.violations != rescanning.violations
+                    {
+                        return Err(TestCaseError::fail(format!(
+                            "typing {typing}: used {:?} != {:?}\nviolations {:#?}\n!= {:#?}\n{program:#?}",
+                            worklist.used_relations,
+                            rescanning.used_relations,
+                            worklist.violations,
+                            rescanning.violations
+                        )));
+                    }
+                    if typing {
+                        // Derived relations reached only through another
+                        // relation's source or predicate, not a rule.
+                        let mut direct = Checker::for_execution(&program);
+                        direct.walk_rules();
+                        reached.set(
+                            reached.get()
+                                + worklist
+                                    .used_relations
+                                    .difference(&direct.used_relations)
+                                    .count(),
+                        );
+                        violations.set(violations.get() + worklist.violations.len());
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        let (reached, violations) = (reached.get(), violations.get());
+        assert!(
+            reached > 1000,
+            "only {reached} relations reached transitively"
+        );
+        assert!(violations > 3000, "only {violations} violations");
     }
 
     #[test]

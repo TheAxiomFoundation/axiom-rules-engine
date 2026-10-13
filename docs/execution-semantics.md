@@ -212,15 +212,16 @@ use twice that. Expressions dense inlines are bounded separately (see above),
 and evaluating chains of derived relations is not covered here (#211).
 
 Typing and binding a chain of derived relations is linear in its length and
-recurses nowhere. A derived relation that declares no slot kinds has its
-source's, so typing (`relation_typing::check_program`, which compile, artifact
-load and `execute_request` run) and dataset binding resolve every relation's
-kinds once per program (`EffectiveSlotEntities`). A chain is followed only
-until it meets a relation already resolved. Filters of filters resolve the
-same way, and the used relations whose derivations typing checks form a
-worklist. A 50,000-link chain types and binds in milliseconds on a 2 MiB
-thread (`tests/relation_typing_chains.rs`), where looking each relation's
-kinds up down its own chain overflowed the stack.
+never recurses once per link. A derived relation that declares no slot kinds
+has its source's, so RuleSpec lowering (`relation_direction`), typing
+(`relation_typing::check_program`, which compile, artifact load and
+`execute_request` run) and dataset binding each resolve every relation's kinds
+once per program, through one walker (`relation_typing::follow_chains`). A
+chain is followed only until it meets a relation already resolved. Filters of filters resolve the same way,
+and the used relations whose derivations typing checks form a worklist. A
+50,000-link chain types and binds well within a second on a 2 MiB thread
+(`tests/relation_typing_chains.rs`), where looking each relation's kinds up
+down its own chain overflowed the stack.
 
 Deferral changes no result for an acyclic program, which every checked program
 is. Evaluating a rule for an entity and period is deterministic, so a retry
