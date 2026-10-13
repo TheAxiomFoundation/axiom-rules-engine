@@ -179,10 +179,17 @@ the same artifact.
 
 ### 3.3 Parameters in predicates
 
-Predicate lowering receives the module's parameter names, as rule lowering
-does. A predicate may then use `p[index]` and a bare scalar parameter. The
-survey in section 2 found no predicate that reads an input sharing a
-parameter's name, so no existing program changes meaning.
+Predicate lowering receives the same set of parameter names that rule
+lowering receives for the module. That set is:
+- the table parameters;
+- the scalar parameters;
+- the entity-free rules with literal values, which lowering turns into
+  parameters.
+
+A predicate may then use `p[index]` and a bare scalar parameter. The survey in
+section 2 found no predicate that reads an input sharing a parameter's name,
+so no existing program changes meaning. Dense already compiles a parameter
+lookup inside a predicate, so this needs no dense refusal.
 
 ### 3.4 Relation atoms
 
@@ -200,20 +207,32 @@ same-kind relation, which a bare membership test cannot do. Each `ti` must
 have `R`'s slot kind for slot `i`, and `R` must have declared slot kinds
 (`relation_atom_needs_typed_relation`, `relation_atom_kind_mismatch`).
 
-**Supplied tuples.** A request that supplies tuples under the name of a
-derived relation which the program reads through an atom, an `exists` domain
-or a path step is refused at binding (`supplied_tuples_for_derived_relation`).
-Decision d1265 keeps this refusal (`unit-derivation.md` section 15). Bare
-membership tests and aggregates keep today's behaviour, which adds such tuples
-to the members, so existing programs do not change.
+**Supplied tuples.** Decision d1265 keeps entry 5 of the ratified contract:
+a supplied tuple for a relation the program derives is refused
+(`unit-derivation.md` section 15). Today the engine instead adds such tuples
+to the members. In any program that uses a construct from this note, both of
+these change:
+- Request binding refuses tuples supplied under the name of any derived
+  relation (`supplied_tuples_for_derived_relation`).
+- The members resolver never adds a derived relation's own tuples. This also
+  covers Rust callers of `Engine::new`, which skips binding checks.
+
+Section 2's survey found no program that uses these constructs, so no existing
+program changes behaviour or bytes. Programs that use none of them keep
+today's union.
+
+**Lenient binding.** Lenient binding keeps tuples whose kinds do not match
+their slots, which a lookup then misses. Request binding refuses lenient
+binding for a program that uses an atom, `exists` or a path source
+(`lenient_binding_with_relation_roles`). #215 refuses it under its option for
+the same reason.
 
 **Cycles.** An atom naming the relation it appears in, or any relation that
 depends on it, closes a cycle. The existing cycle check refuses it, since
 atoms add edges to its graph, until #231 allows positive recursion.
 
 A bare relation name keeps today's meaning. Where its slots are fixed, `R` and
-the atom over `(anchor, candidate)` in those slots agree, on data that
-supplies no tuples under a derived relation's name (section 7).
+the atom over `(anchor, candidate)` in those slots agree (section 7).
 
 A call whose name is a relation is an atom. A relation whose name is also a
 built-in function name (`len`, `sum`, `max` and the others) cannot be used as
@@ -348,8 +367,10 @@ Under #215's `missing_facts: "indeterminate"`, each construct reduces to forms
 
 - **Atom on a base relation.** A listed tuple holds. An absent tuple does not
   hold if the relation is declared complete. Otherwise it is unknown, with a
-  completeness need naming the relation and the id of the atom's
-  lowest-numbered argument.
+  completeness need naming the relation and the id whose tuple list was read:
+  the atom's first argument (slot 0). Completeness is declared per relation,
+  so any need naming the relation is met by one declaration. The id only tells
+  the caller where the gap showed up.
 - **Atom on a derived relation.** The membership of `id(t_r)` for `id(t_c)`
   (#215 section 5.7). `in` holds, `out` does not hold, unknown is unknown
   with its needs, and failed fails.
@@ -357,10 +378,12 @@ Under #215's `missing_facts: "indeterminate"`, each construct reduces to forms
 **`exists`.**
 
 - **Value.** The strong Kleene `or` of #215 section 5.4 over the listed ids
-  `x` of the domain, of `membership(x) and body(x)`. When the domain's
-  relation is open, the `or` has one more item: unknown, with a completeness
-  need naming the relation and the id of the generator's lowest-numbered bound
-  argument. So `exists`:
+  `x` of the domain, of `membership(x) and body(x)`. When the domain is open,
+  the `or` has one more item: unknown, with the domain's open need. For a base
+  relation, that need names the relation and the id whose tuple list was read,
+  which is the generator's lowest-numbered bound argument. For a derived
+  relation, it is that relation's own open need, which #215 section 5.7 says
+  names a base relation. So `exists`:
   - holds if some id with membership `in` makes the body hold;
   - does not hold if the domain is not open and every listed id is `out` or
     makes the body not hold;
@@ -373,8 +396,11 @@ Under #215's `missing_facts: "indeterminate"`, each construct reduces to forms
 **Path source.** A candidate's reachability is the `or`, over the paths that
 reach it, of the `and` of each step's membership. Its membership is the `and`
 of that reachability with the predicate (#215 section 5.7). The relation is
-open when any step relation it reads is open. The need names that relation and
-the id the step was read from.
+open when any step it reads is open:
+- for a base step, the need names that relation and the id the step was read
+  from;
+- for a derived step, the need is that step's own open need, which names a
+  base relation.
 
 Each of these is the strong Kleene evaluation of a finite `and`/`or` formula
 over determined ids, which #215 section 7 shows sound.
@@ -382,13 +408,12 @@ over determined ids, which #215 section 7 shows sound.
 **Order of landing.**
 
 - #215's plan makes every relation read refuse under the option until its
-  third PR gives relations open-world semantics. The same holds here: under
-  the option, atoms, `exists` and path sources refuse by name until that PR
-  lands.
-- Qualified reads and term comparisons are not relation reads. They follow
-  #215's first PR (#251).
-- Whichever of this series and the matching #215 PR lands second lifts the
-  new expression kinds.
+  third PR gives relations open-world semantics.
+- A predicate runs only when a relation is read. So under the option, every
+  construct in this note refuses by name until that PR lands, and all of them
+  lift with it.
+- Whichever of this series and #215's third PR lands second lifts the new
+  expression kinds.
 
 ## 5. Execution paths
 
@@ -402,10 +427,17 @@ over determined ids, which #215 section 7 shows sound.
   `DenseCompileError::Unsupported`, naming the construct and #218.
 - **Trace.** A qualified read records its dependency at the term's id.
   - **Evaluated path.** Recorded as it is evaluated.
-  - **Skipped path** (`record_skipped_*`). A skipped read of `anchor` or
-    `candidate` is recorded at that term's id. Nothing is recorded for reads of
-    a variable inside an `exists` that is not evaluated, because no id is
-    bound; finding one would mean evaluating a relation on the skip path.
+  - **Skipped path** (`record_skipped_*`).
+    - A skipped read of `anchor` or `candidate` is recorded at that term's id.
+    - A skipped read of a variable bound by an enclosing `exists` that is being
+      evaluated is recorded at the id the variable is bound to.
+    - A skipped read of a variable bound by an `exists` that is not itself
+      evaluated is not recorded. No id is bound, and finding one would mean
+      evaluating a relation on the skip path.
+    - A wholly skipped `exists` records its body's `anchor` and `candidate`
+      reads once, whatever its domain holds. The written-out disjunction over
+      an empty domain would record nothing, so invariant 2 covers values and
+      needs, not traces.
   - **Early stop.** When `exists` stops early, each remaining id of its domain
     gets the skip records that the body's reads at that id would produce. This
     matches the trace of the written-out disjunction.
@@ -414,7 +446,9 @@ over determined ids, which #215 section 7 shows sound.
   (`Engine::drive` clears them), so a household predicate with an `exists`
   over co-residents and a derived atom inside costs about O(n³) for n
   co-residents per anchor, inside the #240/#245 bounds. #211's member cache
-  reduces this.
+  reduces this. An `exists` whose result depends only on the anchor, such as
+  section 8's guard, is evaluated again for every candidate. That is because
+  its resume key includes the candidate (3.6).
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails
   every membership that reads it. Encodings should put pair atoms before the
   value reads they guard, because `and` stops at the first `not_holds`.
@@ -450,7 +484,9 @@ over determined ids, which #215 section 7 shows sound.
   candidate, as now.
 - **`exists`.** A new resumable site, keyed as in 3.6.
 - **Paths.** Path candidates are generated inside the existing members site.
-- **Supplied tuples.** Request binding refuses them as in 3.4.
+- **Supplied tuples.** In a program that uses these constructs, request
+  binding refuses tuples supplied under a derived relation's name, and the
+  members resolver never adds them (3.4).
 
 **Compile.**
 
@@ -484,14 +520,30 @@ read through a term (3.2).
 
 **Capabilities.** `relation_roles`, listed once the series is complete.
 
-**Interface block (#155).** A derived relation's provenance there is
+**Interface block (#155, PR #250).** A derived relation's provenance there is
 `{kind: derived, rule, source_relation, reads: {inputs, rules, relations}}`.
-
-- Atoms and `exists` domains add their relations to `reads.relations`, as bare
+Its walkers in `src/interface.rs` match exhaustively, with no catch-all arm,
+so each new variant is a compile error there until it is handled:
+- `collect_judgment_relations` / `collect_scalar_relations` build
+  `reads.relations`. Atoms and `exists` domains add their relations, as bare
   membership tests do.
-- A path source adds a `source_path` form beside `source_relation`.
+- `Collector::judgment` / `Collector::scalar` build `reads.inputs` and
+  `reads.rules`, and each input's `entities` and `dtype`.
+  - `Routing` carries current-versus-related flow. A read through `anchor`
+    routes as current, and a read through `candidate` as related.
+  - Atoms' bound slots go through `Collector::lookup`, as membership tests do.
+- `derive_interface` looks up `source_relation` at the current slot. A path
+  source needs a lookup per step, and a `source_path` arm in
+  `RelationProvenance`, whose hand-written `Deserialize` checks exact keys per
+  kind.
+- Predicates that read parameters (3.3) add them to `reads`, if #155 does not
+  already list parameters.
 
-These changes ride the PRs that add the constructs.
+The loader re-derives the interface and refuses a mismatch, so the derivation
+is frozen for every program a format-3 engine can already load. The new
+constructs change only the interfaces of programs that older engines refuse
+anyway, so they need no format bump. These changes ride the PRs that add the
+constructs.
 
 **Artifact.**
 
@@ -520,8 +572,9 @@ and differential tests for them.
    three-valued option the expansion includes the extra unknown item for an
    open domain.
 3. **Atoms agree with bare tests.** Where a bare membership test's slots are
-   fixed, it equals the atom over `(anchor, candidate)` in those slots. This
-   holds on data that supplies no tuples under a derived relation's name.
+   fixed, it equals the atom over `(anchor, candidate)` in those slots. Under
+   #215 the two agree in value and in the relations their needs name; the ids
+   in those needs may differ (section 4).
 4. **Qualified reads agree with routing.** Where today's routing reads the
    same id, an unqualified read equals the qualified one.
 5. **Paths agree with `exists`.** A path source's members equal the members
@@ -529,8 +582,9 @@ and differential tests for them.
    candidate source that covers every id, which the language cannot express.
 6. **Monotone in tuples.** Take a predicate that reads relations only through
    atoms and `exists` domains on base relations, each under an even number of
-   `not`s. Adding tuples to those relations never removes a member. Nothing is
-   claimed for a predicate that:
+   `not`s. Adding tuples to those relations never removes a member, though
+   evaluation may then fail: a new domain id or candidate can read a missing
+   input. Nothing is claimed for a predicate that:
    - reads a derived relation;
    - reads a rule that aggregates;
    - compares a count;
@@ -564,41 +618,77 @@ With #215:
 This is a synthetic engine fixture, not a RuleSpec module. The pilot module in
 rulespec-us#1428 comes from the encoder. The fixture shows the constructs on
 the pilot's scope:
-
 - the meal group under (a)(3);
-- the required combinations of (b)(1)(i) and (b)(1)(ii);
-- the (b)(7) participation filter, kept apart from composition.
+- the required combinations of (b)(1)(i), (b)(1)(ii) and (b)(1)(iii);
+- the (b)(7) participation filter, kept apart from composition;
+- the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
-**The household is a closure.** (a)(3) puts a meal group together.
-(b)(1)(i) and (b)(1)(ii) require certain people to be "included in the same
-household", whether or not they eat together. Together these make the
-household the set of co-residents connected to the applicant through ties. A
-tie is either a shared meal group or a required combination.
+It must never return a wrong household silently, whether too small or too
+large.
 
-The chain can be any length, so this note cannot compute the household exactly
-for every case. #231's recursion can. Until then, the fixture computes chains
-of up to two ties exactly. When the household might reach further, it reads an
-input with no default: in two-valued mode a missing input fails evaluation
-loudly, and under #215 it is unknown. It never returns a smaller household
-silently.
+**The household is a closure.** (a)(3) puts a meal group together. (b)(1)
+requires certain people to be "included in the same household", whether or
+not they eat together. Together these make the household the set of
+co-residents connected to the applicant through ties. A tie is either a shared
+meal group or a (b)(1) combination.
+
+Every tie is symmetric:
+- the spouse and parent tests run in both directions;
+- a shared meal group is an equality.
+
+So the closures split a residence into disjoint households, one for each
+connected group of ties.
+
+The chain can be any length, so this note cannot compute every household.
+#231's recursion can. Until then the fixture computes the closure exactly in
+the common case, and in every other case it reads household ids that the
+caller supplies:
+
+- **Exact.** The fixture computes everyone within two ties of the applicant.
+  If nobody in that set has a tie to someone outside it, the set is closed
+  under ties and is the household.
+- **Supplied.** Otherwise the household is read from
+  `snap_household_unit`, an id per person with no default. Two people are in
+  one household exactly when their ids are equal. Ids are needed in two
+  cases:
+  - a tie leads out of the two-tie set, so the chain may be longer;
+  - some co-resident may fall under an exception. An exception can make a
+    household larger (a boarder included at the provider's request) or
+    smaller (a separate household under (b)(2)). Its ordering against (b)(1)
+    is one of the contested readings left to tier B.
+
+  In two-valued mode, a missing id fails evaluation and names the input.
+  Under #215 it is unknown.
+
+Comparing ids works for any number of applicants in a residence, because each
+closure is one household.
 
 ```yaml
-- name: required_combination          # 273.1(b)(1)(i)-(ii), between two people
+# Data relations. Each is a supplied pair fact with declared kinds.
+- {name: member_of_household, kind: data_relation,
+   data_relation: {arity: 2, arguments: [Person, Household]}}
+- {name: spouse_of, kind: data_relation,
+   data_relation: {arity: 2, arguments: [Person, Person]}}
+- {name: parent_of, kind: data_relation,                 # natural, adoptive or step
+   data_relation: {arity: 2, arguments: [Person, Person]}}
+- {name: under_parental_control_of, kind: data_relation, # (child, controller), (b)(1)(iii)
+   data_relation: {arity: 2, arguments: [Person, Person]}}
+
+- name: lives_with                    # section 3.7; includes the person themself
   kind: derived_relation
   derived_relation:
     arity: 2
     slot_entities: [Person, Person]
     current_slot: 0
     related_slot: 1
-    source_relation: lives_with       # section 3.7
+    source_path:
+      - {relation: member_of_household, from_slot: 0, to_slot: 1}
+      - {relation: member_of_household, from_slot: 1, to_slot: 0}
   versions:
     - effective_from: 2026-01-01
-      formula: >
-        spouse_of(anchor, candidate) or spouse_of(candidate, anchor)
-        or (parent_of(anchor, candidate) and candidate.age < 22)
-        or (parent_of(candidate, anchor) and anchor.age < 22)
+      formula: true
 
-- name: snap_tie                      # (a)(3) meal group, or a (b)(1) combination
+- name: snap_tie                      # (a)(3), or a (b)(1)(i)-(iii) combination
   kind: derived_relation
   derived_relation: {arity: 2, slot_entities: [Person, Person],
                      current_slot: 0, related_slot: 1, source_relation: lives_with}
@@ -606,9 +696,15 @@ silently.
     - effective_from: 2026-01-01
       formula: >
         candidate.meal_group == anchor.meal_group
-        or required_combination(anchor, candidate)
+        or spouse_of(anchor, candidate) or spouse_of(candidate, anchor)
+        or (parent_of(anchor, candidate) and candidate.age < 22)
+        or (parent_of(candidate, anchor) and anchor.age < 22)
+        or (under_parental_control_of(candidate, anchor)
+            and not parent_of(anchor, candidate) and candidate.age < 18)
+        or (under_parental_control_of(anchor, candidate)
+            and not parent_of(candidate, anchor) and anchor.age < 18)
 
-- name: snap_within_two_ties          # exact for chains of up to two ties
+- name: snap_within_two_ties
   kind: derived_relation
   derived_relation: {arity: 2, slot_entities: [Person, Person],
                      current_slot: 0, related_slot: 1, source_relation: lives_with}
@@ -619,6 +715,14 @@ silently.
         or snap_tie(anchor, candidate)
         or exists(snap_tie(anchor, p), snap_tie(p, candidate))
 
+- name: snap_exception_in_residence   # an exception may apply to some co-resident
+  kind: derived
+  entity: Person
+  dtype: Judgment
+  versions:
+    - effective_from: 2026-01-01
+      formula: count_where(lives_with, snap_household_exception_may_apply) > 0
+
 - name: snap_household_member         # composition, anchored on the applicant
   kind: derived_relation
   derived_relation: {arity: 2, slot_entities: [Person, Person],
@@ -626,12 +730,16 @@ silently.
   versions:
     - effective_from: 2026-01-01
       formula: >
-        snap_within_two_ties(anchor, candidate)
-        or (exists(snap_within_two_ties(anchor, p),
-                   exists(snap_tie(p, r), not snap_within_two_ties(anchor, r)))
-            and candidate.snap_member_through_longer_chain)
+        (snap_within_two_ties(anchor, candidate)
+         and not anchor.snap_exception_in_residence
+         and not exists(snap_within_two_ties(anchor, p),
+                        exists(snap_tie(p, r), not snap_within_two_ties(anchor, r))))
+        or ((anchor.snap_exception_in_residence
+             or exists(snap_within_two_ties(anchor, p),
+                       exists(snap_tie(p, r), not snap_within_two_ties(anchor, r))))
+            and candidate.snap_household_unit == anchor.snap_household_unit)
 
-- name: snap_participating_member     # (b)(7): composition stays as it is
+- name: snap_participating_member     # (b)(7); composition stays as it is
   kind: derived_relation
   derived_relation: {arity: 2, slot_entities: [Person, Person],
                      current_slot: 0, related_slot: 1,
@@ -641,37 +749,44 @@ silently.
       formula: not candidate.snap_ineligible_member_under_b7
 ```
 
-**The guard.** The second clause of `snap_household_member` asks whether
-anyone within two ties has a tie to someone outside that set. If nobody does,
-the set is closed under ties and is the exact household. Then `and` stops
-before the input, and no input is read. If someone does, every candidate not
-already admitted reads `snap_member_through_longer_chain`, which has no
-default. That input is keyed by the candidate alone, so it is exact only when
-one applicant per residence is evaluated. #231 removes the guard and the input.
+**Inputs.** All of these have no default.
+- `meal_group` and `age`.
+- `snap_household_exception_may_apply`. The person may be described by
+  (b)(2) (60 or older and unable to buy and prepare meals because of a
+  disability), (b)(3) or (b)(4) (a boarder or foster placement), (b)(5) or
+  (b)(6) (a roomer or live-in attendant), or (b)(7)(vi) (a resident of an
+  institution, or one of its listed exceptions).
+- `snap_household_unit`. The caller's household id, read only in the cases
+  above.
+- `snap_ineligible_member_under_b7`. The person is barred by (b)(7) "as a
+  member of any household".
 
-**Inputs.**
-
-- `parent_of` stands for a natural, adoptive or step-parent.
-- `meal_group` is the group a person customarily buys food and prepares meals
-  with.
-- `snap_ineligible_member_under_b7` (no default) says the person is one of
-  those (b)(7) bars "as a member of any household".
-
-The (b)(2)–(b)(6) and (b)(7)(vi) exceptions follow the guard pattern: a person
-who may fall under one reads an input with no default until those paragraphs
-are encoded. The pair atoms come before the value reads they guard, so a
-co-resident's missing age is read only for a parent-child pair.
+**Encoding notes.**
+- Pair atoms come before the value reads they guard. A co-resident's age is
+  read only for a parent-child or parental-control pair, and the unit id only
+  once the supplied case applies.
+- `lives_with` comes from the roster, so every evaluated person needs a
+  `member_of_household` record. A person living alone, (a)(1), is a residence
+  of one. A person with no record has no candidates, so the fixture's tests
+  supply every person's record.
+- The guard's two `exists` depend only on the anchor, but are evaluated again
+  for each candidate (section 5, cost). #231 removes the guard and the
+  supplied ids.
 
 **Hand-worked cases.** The fixture's tests check memberships against these
 households, each worked out by hand from the regulation's text:
 
 | Household | Expected result |
 |---|---|
+| A person living alone, (a)(1) | One member, the person |
 | A married couple who buy food separately | One household, by (b)(1)(i) |
 | Roommates who buy food separately | Each alone |
 | Applicant, their child under 22, and the child's other parent, who is not the applicant's spouse and buys food separately | All three are one household. (b)(1)(ii) ties the child to each parent; two ties. |
-| Applicant married to B; B buys and prepares food with roommate X; the applicant buys separately | All three are one household. A required tie, then a meal-group tie. |
-| Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. In two-valued mode, evaluating this household fails, naming the missing input, until the input is supplied for D. |
+| Applicant married to B; B buys and prepares food with roommate X; the applicant buys separately | All three are one household: a required tie, then a meal-group tie |
+| A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
+| Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
+| Two separate groups in one residence, each with a chain of three ties, with two applicants evaluated | Each applicant gets exactly their own group from the supplied ids |
+| The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
 ## 9. Plan
@@ -738,7 +853,7 @@ Each is sized for one build lane.
   keeps its key.
 - **Inputs stay untyped.** A kind check for inputs waits for RuleSpec input
   declarations to carry meaning.
-- **Atoms refuse supplied tuples for derived relations; bare tests do not.**
-  The new constructs keep d1265's refusal, and existing programs keep their
-  behaviour.
+- **The supplied-tuple refusal is scoped to programs that use these
+  constructs.** Such programs get d1265's refusal for every derived relation.
+  Existing programs keep their behaviour.
 - **Unqualified reads do not change,** so no existing artifact changes.
