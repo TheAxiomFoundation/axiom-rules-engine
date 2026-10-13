@@ -159,7 +159,7 @@ axiom-rules-engine capabilities
 ```json
 {
   "artifact_format_version": 2,
-  "capabilities": ["relation_entity_typing"],
+  "capabilities": ["relation_entity_typing", "related_min_max_only"],
   "engine_version": "0.2.2"
 }
 ```
@@ -171,6 +171,9 @@ Its `capabilities` list names contracts beyond the format version: an engine
 listing `relation_entity_typing` refuses a format-2 artifact that executes a
 relation with no declared slot kinds (`axiom-rules-engine migrate artifact`
 types one; see [docs/rulespec.md](docs/rulespec.md#migrating-compiled-artifacts)).
+An engine listing `related_min_max_only` loads a format-2 artifact that takes
+`min`, `max` or `only` over related entities; an engine without it refuses
+one on load (see [docs/rulespec.md](docs/rulespec.md#minimum-maximum-and-exactly-one-over-related-entities)).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
