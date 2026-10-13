@@ -2615,6 +2615,20 @@ pub fn compile_summary_lines(artifact: &CompiledProgramArtifact) -> BTreeMap<Str
             source_closure.modules.len().to_string(),
         );
     }
+    if let Some(interface) = &artifact.interface {
+        lines.insert(
+            "interface_entities".to_string(),
+            interface.entities.len().to_string(),
+        );
+        lines.insert(
+            "interface_inputs".to_string(),
+            interface.inputs.len().to_string(),
+        );
+        lines.insert(
+            "interface_relations".to_string(),
+            interface.relations.len().to_string(),
+        );
+    }
     lines.insert(
         "derived_outputs".to_string(),
         artifact.program.derived.len().to_string(),

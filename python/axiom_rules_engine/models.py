@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 ExecutionMode = Literal["explain", "fast"]
@@ -203,14 +203,25 @@ class CompiledProgramBody(Program):
 
 
 class CompiledProgram(BaseModel):
-    """A format-3 compiled artifact, as ``compile`` writes it."""
+    """A format-3 compiled artifact, as ``compile`` writes it. Its top-level
+    keys are a closed set, as the engine's loader requires."""
+
+    model_config = ConfigDict(extra="forbid")
 
     artifact_format_version: Literal[3]
     engine_version: str
     engine_build: EngineBuild
+    # Omitted, never null, for a program compiled without RuleSpec source.
     source_closure: SourceClosure | None = None
     program: CompiledProgramBody
     metadata: CompiledProgramMetadata
+
+    @field_validator("source_closure", mode="before")
+    @classmethod
+    def _source_closure_is_omitted_not_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("source_closure is omitted when there is none, never null")
+        return value
 
 
 class LegacyCompiledProgramV2(BaseModel):

@@ -734,3 +734,106 @@ fn format_2_is_never_read_as_format_3() {
         assert!(error.contains("reads format 2 only"), "{error}");
     }
 }
+
+/// `run-compiled` reads format 3. With `--accept-artifact-format 2` it also
+/// reads a format-2 artifact, unchanged, through the compatibility loader,
+/// says so on stderr and answers as the format-3 artifact of the same source
+/// does; without the flag it refuses one and names the artifact the older
+/// side. The flag takes only 2, and it changes nothing for a format-3
+/// artifact.
+#[test]
+fn run_compiled_reads_format_2_only_on_request() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir =
+        std::env::temp_dir().join(format!("axiom-artifact-format-cli-{}", std::process::id()));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    let artifact = compiled();
+    let format_3 = dir.join("format-3.json");
+    let format_2 = dir.join("format-2.json");
+    std::fs::write(&format_3, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
+    std::fs::write(
+        &format_2,
+        serde_json::to_string_pretty(&as_format_2(&artifact)).unwrap(),
+    )
+    .unwrap();
+    let interval = json!({"start": "2026-01-01", "end": "2026-01-31"});
+    let request = json!({
+        "mode": "explain",
+        "dataset": {
+            "inputs": [{"name": "earned_income", "entity": "Person", "entity_id": "p1",
+                        "interval": interval, "value": {"kind": "decimal", "value": "120"}}],
+            "relations": [{"name": "member_of_household", "tuple": ["p1", "h1"],
+                           "interval": interval}]
+        },
+        "queries": [{"entity_id": "h1",
+                     "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                     "outputs": ["household_income"]}]
+    })
+    .to_string();
+    let run = |artifact: &std::path::Path, flag: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+            .args(["run-compiled", "--artifact"])
+            .arg(artifact)
+            .args(flag)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A refusal can exit before reading stdin.
+        if let Err(error) = child.stdin.take().unwrap().write_all(request.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    const NOTICE: &str = "notice[legacy_artifact_format]";
+    const ACCEPT: [&str; 2] = ["--accept-artifact-format", "2"];
+
+    let (ok, current, stderr) = run(&format_3, &[]);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains(NOTICE), "{stderr}");
+    let response: Value = serde_json::from_str(&current).unwrap();
+    let income = response["results"][0]["outputs"]["household_income"]["value"]["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"));
+    assert_eq!(income.parse::<f64>().unwrap(), 120.0, "{response}");
+    let (ok, flagged, stderr) = run(&format_3, &ACCEPT);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains(NOTICE), "{stderr}");
+    assert_eq!(flagged, current);
+
+    let (ok, _, stderr) = run(&format_2, &[]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("is older than this engine: it is artifact format 2")
+            && stderr.contains("--accept-artifact-format 2"),
+        "{stderr}"
+    );
+    let (ok, legacy, stderr) = run(&format_2, &ACCEPT);
+    assert!(ok, "{stderr}");
+    assert!(stderr.contains(NOTICE), "{stderr}");
+    assert_eq!(legacy, current);
+
+    for (flag, refusal) in [
+        (&["--accept-artifact-format", "3"][..], "accepts only 2"),
+        (
+            &["--accept-artifact-format"][..],
+            "missing `--accept-artifact-format` value",
+        ),
+    ] {
+        let (ok, _, stderr) = run(&format_2, flag);
+        assert!(!ok, "{flag:?}");
+        assert!(stderr.contains(refusal), "{flag:?}: {stderr}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -54,6 +54,29 @@ fn capabilities_report_the_artifact_format_version() {
         serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION),
         "capabilities must report the version the loader enforces"
     );
+    assert_eq!(value["artifact_format_version"], serde_json::json!(3));
+}
+
+/// Format 3 adds the older formats the engine reads on request, the build
+/// identity it stamps, and the `artifact_interface` capability.
+#[test]
+fn capabilities_report_the_legacy_formats_build_and_interface() {
+    let out = engine().arg("capabilities").output().expect("run engine");
+    assert!(out.status.success(), "capabilities should exit 0");
+    let value: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("capabilities emits JSON");
+    assert_eq!(value["legacy_artifact_formats"], serde_json::json!([2]));
+    assert_eq!(
+        value["engine_build"],
+        serde_json::to_value(axiom_rules_engine::compile::EngineBuild::current()).unwrap()
+    );
+    assert!(
+        value["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("artifact_interface")),
+        "{value}"
+    );
 }
 
 #[test]

@@ -13,6 +13,7 @@ from axiom_rules_engine.client import DEFAULT_TIMEOUT_SECONDS, AxiomRulesEngine
 from axiom_rules_engine.models import (
     CompiledProgram,
     Dataset,
+    LegacyCompiledProgramV2,
     ExecutionQuery,
     ExecutionRequest,
     Period,
@@ -77,15 +78,37 @@ def test_compiled_program_rejects_missing_and_wrong_artifact_versions() -> None:
             "input_catalog": [],
         },
     }
-    with pytest.raises(ValidationError):
-        CompiledProgram.model_validate(legacy)
-    for wrong_version in [0, 1, 3]:
+    format_3 = {
+        **legacy,
+        "artifact_format_version": 3,
+        "engine_version": "0.2.2",
+        "engine_build": {"commit": None, "dirty": None},
+        "program": {
+            **legacy["program"],
+            "interface": {"entities": [], "inputs": [], "relations": []},
+        },
+    }
+    # ``CompiledProgram`` is format 3; the format-2 shape is
+    # ``LegacyCompiledProgramV2``.
+    for model, valid in [(CompiledProgram, format_3), (LegacyCompiledProgramV2, legacy)]:
+        with pytest.raises(ValidationError):
+            model.model_validate(
+                {key: value for key, value in valid.items() if key != "artifact_format_version"}
+            )
+    for wrong_version in [0, 1, 2, 4]:
         with pytest.raises(ValidationError):
             CompiledProgram.model_validate(
+                {**format_3, "artifact_format_version": wrong_version}
+            )
+    for wrong_version in [0, 1, 3]:
+        with pytest.raises(ValidationError):
+            LegacyCompiledProgramV2.model_validate(
                 {**legacy, "artifact_format_version": wrong_version}
             )
 
-    compiled = CompiledProgram.model_validate(
+    compiled = CompiledProgram.model_validate(format_3)
+    assert compiled.artifact_format_version == 3
+    legacy_compiled = LegacyCompiledProgramV2.model_validate(
         {**legacy, "artifact_format_version": 2}
     )
-    assert compiled.artifact_format_version == 2
+    assert legacy_compiled.artifact_format_version == 2

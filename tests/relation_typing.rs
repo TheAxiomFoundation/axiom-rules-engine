@@ -833,10 +833,17 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
                      "outputs": ["household_size"]}]
     })
     .to_string();
+    // `migrate artifact` reads and writes format 2, which `run-compiled`
+    // reads only with `--accept-artifact-format 2`.
     let run_compiled = |artifact: &std::path::Path| {
         use std::io::Write;
         let mut child = engine()
-            .args(["run-compiled", "--artifact"])
+            .args([
+                "run-compiled",
+                "--accept-artifact-format",
+                "2",
+                "--artifact",
+            ])
             .arg(artifact)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -851,15 +858,21 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
         child.wait_with_output().unwrap()
     };
 
-    // A pre-typing artifact is format 2: the default loader names it the
-    // older side before typing is reached.
+    // A pre-typing artifact is format 2: without the flag the default
+    // loader names it the older side before typing is reached.
+    let unflagged = engine()
+        .args(["run-compiled", "--artifact"])
+        .arg(&legacy_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!unflagged.status.success());
+    let stderr = String::from_utf8_lossy(&unflagged.stderr);
+    assert!(stderr.contains("is older than this engine"), "{stderr}");
     let refused = run_compiled(&legacy_path);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("is older than this engine"), "{stderr}");
-    let error = CompiledProgramArtifact::from_legacy_format_2_json_file(&legacy_path)
-        .expect_err("the compatibility loader refuses the untyped artifact");
-    assert!(error.to_string().contains("migrate artifact"), "{error}");
+    assert!(stderr.contains("migrate artifact"), "{stderr}");
 
     let dry_run = engine()
         .args(["migrate", "artifact", "--artifact"])
@@ -894,17 +907,17 @@ fn cli_refuses_a_legacy_artifact_and_migrates_it() {
         "{}",
         String::from_utf8_lossy(&migrated.stderr)
     );
-    // `migrate artifact` writes format 2, which the compatibility loader
-    // reads and runs.
     let typed = CompiledProgramArtifact::from_legacy_format_2_json_file(&typed_path)
         .expect("the typed artifact loads");
     assert_eq!(typed.artifact_format_version, 2);
-    let request: axiom_rules_engine::api::CompiledExecutionRequest =
-        serde_json::from_str(&request).unwrap();
-    let response = serde_json::to_value(
-        axiom_rules_engine::api::execute_compiled_request(typed, request).unwrap(),
-    )
-    .unwrap();
+    let ran = run_compiled(&typed_path);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ran.stderr).contains("notice[legacy_artifact_format]"));
+    let response: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
     assert_eq!(
         response["results"][0]["outputs"]["household_size"]["value"]["value"],
         1

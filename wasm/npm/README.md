@@ -45,7 +45,13 @@ rule's durable legal id.
 tuples plus queries — and returns outputs with an explain-mode trace whose
 every value cites the statute, regulation, or answer it came from.
 
-`engine_version()` and `artifact_format_version()` report what this build
+`execute` reads artifact format 3, the format `compile` writes, and refuses
+any other with a message that says which side is older.
+`execute_legacy_format_2(artifact_json, request_json)` runs a format-2
+artifact unchanged through the engine's format-2 compatibility loader.
+
+`engine_version()`, `engine_build()` (the commit and dirty flag `compile`
+stamps, as JSON) and `artifact_format_version()` report what this build
 compiles and accepts.
 
 ## Reference consumers

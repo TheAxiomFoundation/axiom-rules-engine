@@ -246,12 +246,21 @@ fn engine_build_is_stamped_from_the_build() {
     }
 }
 
-/// The compile summary reports both identities.
+/// The compile summary reports both identities, and the size of the
+/// interface block.
 #[test]
 fn the_compile_summary_reports_the_identities() {
     let artifact = CompiledProgramArtifact::from_rulespec_with_source(ROOT_TARGET, &modules())
         .expect("the module graph compiles");
     let lines = compile_summary_lines(&artifact);
+    let interface = artifact.interface.as_ref().expect("compile derives it");
+    for (key, count) in [
+        ("interface_entities", interface.entities.len()),
+        ("interface_inputs", interface.inputs.len()),
+        ("interface_relations", interface.relations.len()),
+    ] {
+        assert_eq!(lines.get(key), Some(&count.to_string()), "{key}");
+    }
     assert_eq!(
         lines.get("engine_build"),
         Some(&EngineBuild::current().to_string())
