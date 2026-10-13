@@ -60,8 +60,17 @@ relation and the path from the reference back to it, and says which condition
 the reference breaks.
 
 These conditions make each predicate monotone in the group's memberships.
-Adding members never removes one, so the least fixed point exists (Knaster–
-Tarski), and iteration from the empty relation reaches it.
+Checking each predicate's own references is enough. Every relation on a cycle
+is in the group, and no rule is. A path from one group relation back to
+another is therefore a chain of references that each predicate makes directly,
+and each of those references is positive. A predicate may also read a derived
+relation outside the group. That relation does not depend on the group, so it
+is fixed while the group is computed, whatever negations its own predicate
+holds. (Invariant 6 of `relation-roles.md` makes no claim about such reads;
+this argument needs none.)
+
+Adding members never removes one, so the least fixed point exists
+(Knaster–Tarski), and iteration from the empty relation reaches it.
 
 Relations outside the group are fixed while the group is computed. They may
 be read in any way, negated or aggregated. That is stratification: a
@@ -184,7 +193,8 @@ Synthetic engine fixtures. The pilot modules come from the encoder.
 - name: snap_household_member
   kind: derived_relation
   derived_relation:
-    arguments: [Person, Person]
+    arity: 2
+    slot_entities: [Person, Person]
     current_slot: 0
     related_slot: 1
     source_relation: lives_with
@@ -192,17 +202,20 @@ Synthetic engine fixtures. The pilot modules come from the encoder.
     - effective_from: 2026-01-01
       formula: >
         candidate == anchor
-        or candidate.meal_group == anchor.meal_group
-        or exists(snap_household_member(anchor, p),
-                  required_combination(p, candidate))
+        or exists(snap_household_member(anchor, p), snap_tie(p, candidate))
 ```
 
-The reference sits in an `exists` domain under no `not`, so it is positive.
-The tests cover a three-step chain the two-step form of `relation-roles.md`
-section 8 misses. The applicant lives with their child, who is under 22. The
-child's other parent is also in the home, with that parent's own child under
-22 from another relationship. Each person buys food separately. All four are
-one household.
+`snap_tie` is section 8 of `relation-roles.md`: a shared meal group or a
+(b)(1) required combination. The formula says a person is a member when they
+are the applicant, or are tied to a member. That is the closure, and the guard
+and its input in `relation-roles.md` are no longer needed. The reference sits
+in an `exists` domain under no `not`, so it is positive.
+
+The tests cover the cases `relation-roles.md` sends to its guard. In one, the
+applicant lives with their child, who is under 22. The child's other parent
+is also in the home, with that parent's own child under 22 from another
+relationship. Each person buys food separately. All four are one household,
+by three ties.
 
 (b)(1)(iii) refers to "a household member other than his or her parent",
 which is also positive in the household:
