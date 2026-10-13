@@ -1914,6 +1914,7 @@
               "items": {
                 "$ref": "#/$defs/ScalarExprSpec"
               },
+              "minItems": 1,
               "type": "array"
             },
             "kind": {
@@ -1933,6 +1934,7 @@
               "items": {
                 "$ref": "#/$defs/ScalarExprSpec"
               },
+              "minItems": 1,
               "type": "array"
             },
             "kind": {

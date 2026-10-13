@@ -333,6 +333,15 @@ fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
     removed_id["program"]["module"] = serde_json::json!({"id": "us:policies/base"});
     cases.push(removed_id);
 
+    // An operand-less max() / min() deserializes, but `ProgramSpec::to_program`
+    // refuses it, so the schema does too.
+    for function in ["max", "min"] {
+        let mut empty = base.clone();
+        *first_max_expr(&mut empty["program"]).expect("fixture has a max() rule") =
+            serde_json::json!({"kind": function, "items": []});
+        cases.push(empty);
+    }
+
     let mut removed_extends = base;
     removed_extends["program"]["extends"] = serde_json::json!("us:policies/base");
     cases.push(removed_extends);
@@ -342,6 +351,20 @@ fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
             !validator.is_valid(&case),
             "invalid v2 artifact must fail schema: {case}"
         );
+    }
+}
+
+/// The first `max(...)` expression node anywhere under `value`.
+fn first_max_expr(value: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    if value.get("kind").and_then(serde_json::Value::as_str) == Some("max")
+        && value.get("items").is_some()
+    {
+        return Some(value);
+    }
+    match value {
+        serde_json::Value::Object(fields) => fields.values_mut().find_map(first_max_expr),
+        serde_json::Value::Array(items) => items.iter_mut().find_map(first_max_expr),
+        _ => None,
     }
 }
 

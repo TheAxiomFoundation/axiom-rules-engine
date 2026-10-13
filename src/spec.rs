@@ -84,6 +84,11 @@ pub enum SpecError {
         effective_from: NaiveDate,
         effective_to: NaiveDate,
     },
+    /// `max()` or `min()` with no operand, which has no value. A
+    /// `model::Program` built directly in Rust skips this check; explain, fast
+    /// and dense then each fail with a type mismatch carrying this text.
+    #[error("{function}() requires at least one operand")]
+    EmptyExtremum { function: &'static str },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1095,9 +1100,12 @@ pub enum ScalarExprSpec {
         right: Box<ScalarExprSpec>,
     },
     Max {
+        // `to_program` refuses an empty list, so the schema does too.
+        #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
         items: Vec<ScalarExprSpec>,
     },
     Min {
+        #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
         items: Vec<ScalarExprSpec>,
     },
     Ceil {
@@ -1196,6 +1204,19 @@ impl OverPeriodsKindSpec {
     }
 }
 
+/// Convert the operands of `max()` or `min()`, refusing an empty list. With
+/// no operand there is no value; refusing it on load keeps a program that
+/// could only fail at evaluation from compiling at all.
+fn extremum_operands(
+    function: &'static str,
+    items: &[ScalarExprSpec],
+) -> Result<Vec<ScalarExpr>, SpecError> {
+    if items.is_empty() {
+        return Err(SpecError::EmptyExtremum { function });
+    }
+    items.iter().map(ScalarExprSpec::to_model).collect()
+}
+
 impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
@@ -1228,18 +1249,8 @@ impl ScalarExprSpec {
                 Box::new(left.to_model()?),
                 Box::new(right.to_model()?),
             )),
-            Self::Max { items } => Ok(ScalarExpr::Max(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
-            Self::Min { items } => Ok(ScalarExpr::Min(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
+            Self::Max { items } => Ok(ScalarExpr::Max(extremum_operands("max", items)?)),
+            Self::Min { items } => Ok(ScalarExpr::Min(extremum_operands("min", items)?)),
             Self::Ceil { value } => Ok(ScalarExpr::Ceil(Box::new(value.to_model()?))),
             Self::Floor { value } => Ok(ScalarExpr::Floor(Box::new(value.to_model()?))),
             Self::PeriodStart => Ok(ScalarExpr::PeriodStart),
