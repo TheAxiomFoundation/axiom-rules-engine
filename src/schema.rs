@@ -163,6 +163,9 @@ fn archived_compiled_artifact_v1_schema() -> Value {
 /// before format 3 (#125, #155). It is loaded from the checked-in file for the
 /// same reason as v1: format-2 artifacts are still read, through the format-2
 /// compatibility loader, and their schema must not move with current types.
+/// It leaves the top-level keys open, so it accepts a format-2 payload that
+/// carries `engine_build`, `source_closure` or `program.interface`, which the
+/// compatibility loader refuses.
 #[cfg(feature = "schema")]
 fn archived_compiled_artifact_v2_schema() -> Value {
     serde_json::from_str(include_str!("../schemas/compiled-artifact.v2.schema.json"))
@@ -190,14 +193,17 @@ fn archived_compiled_artifact_v2_schema() -> Value {
 /// - The wire struct defaults `engine_version`, `engine_build`,
 ///   `source_closure`, `program.interface` and `metadata.input_catalog`,
 ///   because the format-2 compatibility loader reads the same struct. The
-///   format-3 loader requires the first four of those keys but
-///   `source_closure`, refuses a null for any of them, refuses an unknown
-///   top-level key and refuses `program.extends` in any form, so the schema
-///   says the same.
-/// - Checks no JSON Schema can state are the loader's alone: `program.interface`
-///   must equal what the engine derives from the program, `metadata` what it
-///   computes, `source_closure.modules` must be sorted by target and its
-///   `digest` must be the digest of those modules.
+///   format-3 loader requires `engine_version`, `engine_build`,
+///   `program.interface` and `metadata.input_catalog`, refuses a null for
+///   any of them or for `source_closure`, refuses an unknown top-level key
+///   and refuses `program.extends` in any form, so the schema says the same.
+/// - Checks no JSON Schema can state are the loader's alone:
+///   `program.interface` must equal what the engine derives from the
+///   program and `metadata` what it computes; `source_closure.modules` must
+///   be sorted by target without repeats and list the root, and `digest`
+///   must be the digest of those modules. The module-target pattern
+///   approximates `validate_module_target`, which also refuses `.` and `..`
+///   segments and a final segment ending in `.yaml`, `.yml` or `.test`.
 #[cfg(feature = "schema")]
 pub fn compiled_artifact_schema() -> Value {
     let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
@@ -212,8 +218,9 @@ pub fn compiled_artifact_schema() -> Value {
          with its interface block (entity roster, input slots and \
          relations), evaluation order, fast-path metadata and input \
          catalog, stamped with the artifact format version, the compiling \
-         engine's version and build, and the RuleSpec module texts it was \
-         compiled from. Produced by `axiom-rules-engine compile`.",
+         engine's version and build, and the digests of the RuleSpec module \
+         texts it was compiled from. Produced by `axiom-rules-engine \
+         compile`.",
     );
     schema
 }
@@ -520,6 +527,21 @@ fn close_format_3_artifact_schema(schema: &mut Value) {
     );
     object(schema, &["$defs", "EngineBuild", "properties", "commit"])
         .insert("pattern".to_string(), json!(COMMIT));
+    // The modules list the root, so there is at least one, and under a
+    // canonical root none is originless.
+    let closure = object(schema, &["$defs", "SourceClosure"]);
+    closure.insert(
+        "if".to_string(),
+        json!({ "properties": { "root": { "type": "string" } } }),
+    );
+    closure.insert(
+        "then".to_string(),
+        json!({ "properties": { "modules": { "items": {
+            "properties": { "target": { "type": "string" } }
+        } } } }),
+    );
+    object(schema, &["$defs", "SourceClosure", "properties", "modules"])
+        .insert("minItems".to_string(), json!(1));
     object(schema, &["$defs", "SourceClosure", "properties", "root"])
         .insert("pattern".to_string(), json!(MODULE_TARGET));
     object(schema, &["$defs", "SourceClosure", "properties", "digest"])

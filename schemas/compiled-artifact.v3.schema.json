@@ -2409,6 +2409,13 @@
         }
       ],
       "description": "Which RuleSpec text an artifact was compiled from: every module text the\nloader read to lower the program, the root included. It identifies module\ntext and nothing else; a corpus provision index, which fills `source_url`\nfields after compilation, is not in it.",
+      "if": {
+        "properties": {
+          "root": {
+            "type": "string"
+          }
+        }
+      },
       "properties": {
         "digest": {
           "description": "`sha256:` and the SHA-256 of `axiom-rules-engine/source-closure/v1\\n`\nfollowed by one `<target>\\t<sha256>\\n` line per module, in order\n(an empty target for an originless root).",
@@ -2420,6 +2427,7 @@
           "items": {
             "$ref": "#/$defs/SourceClosureModule"
           },
+          "minItems": 1,
           "type": "array"
         },
         "root": {
@@ -2436,6 +2444,19 @@
         "digest",
         "root"
       ],
+      "then": {
+        "properties": {
+          "modules": {
+            "items": {
+              "properties": {
+                "target": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
       "type": "object"
     },
     "SourceClosureModule": {
@@ -2744,7 +2765,7 @@
       }
     }
   ],
-  "description": "A compiled RuleSpec program, artifact format 3: the ProgramSpec IR with its interface block (entity roster, input slots and relations), evaluation order, fast-path metadata and input catalog, stamped with the artifact format version, the compiling engine's version and build, and the RuleSpec module texts it was compiled from. Produced by `axiom-rules-engine compile`.",
+  "description": "A compiled RuleSpec program, artifact format 3: the ProgramSpec IR with its interface block (entity roster, input slots and relations), evaluation order, fast-path metadata and input catalog, stamped with the artifact format version, the compiling engine's version and build, and the digests of the RuleSpec module texts it was compiled from. Produced by `axiom-rules-engine compile`.",
   "properties": {
     "artifact_format_version": {
       "const": 3,

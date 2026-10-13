@@ -528,12 +528,20 @@ fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
         ("/source_closure/root", serde_json::json!("uksi/2013/376")),
     ] {
         let mut wrong = base.clone();
-        let Some(slot) = wrong.pointer_mut(pointer) else {
-            continue;
-        };
-        *slot = replacement;
+        *wrong
+            .pointer_mut(pointer)
+            .expect("the fixture's artifact has a source closure") = replacement;
         cases.push(wrong);
     }
+    // A closure must list its root, and under a canonical root no module is
+    // originless.
+    let mut no_modules = base.clone();
+    no_modules["source_closure"]["modules"] = serde_json::json!([]);
+    cases.push(no_modules);
+    let mut originless_under_a_root = base.clone();
+    originless_under_a_root["source_closure"]["root"] =
+        serde_json::json!("uk:legislation/uksi/2013/376");
+    cases.push(originless_under_a_root);
     let mut no_template = base.clone();
     no_template["program"]["interface"]["entities"][0]
         .as_object_mut()
@@ -604,6 +612,8 @@ fn v3_artifact_schema_and_the_archives_reject_each_others_generation() {
     let v3 = validator(CURRENT_ARTIFACT_SCHEMA);
     assert!(v3.is_valid(&v3_artifact));
     assert!(v2.is_valid(&v2_artifact));
+    // The v2 archive leaves the top-level keys open, so it accepts
+    // `v3_stamped_2`, which only the compatibility loader refuses (below).
     for (validator, name, refused) in [
         (
             &v3,

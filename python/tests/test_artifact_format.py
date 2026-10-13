@@ -104,11 +104,27 @@ def test_format_3_interface_objects_have_exactly_their_keys() -> None:
     CompiledProgram.model_validate(_format_3(inputs=[_interface_input()]))
     entity = {"kind": "Person", "id_template": "Person:{index}", "instances": {"source": "supplied"}}
     CompiledProgram.model_validate(_format_3(entities=[entity]))
-    for nullable in ["dtype", "default", "values", "values_basis"]:
+    relation = {
+        "name": "member_of",
+        "arity": 2,
+        "slot_entities": None,
+        "lookup_slots": [],
+        "accepts_supplied_tuples": True,
+        "provenance": {"kind": "supplied"},
+    }
+    CompiledProgram.model_validate(_format_3(relations=[relation]))
+    # Every nullable key must be written, as null when it has no value.
+    for nullable in ["dtype", "dtype_basis", "default", "values", "values_basis"]:
         missing = _interface_input()
         del missing[nullable]
         with pytest.raises(ValidationError):
             CompiledProgram.model_validate(_format_3(inputs=[missing]))
+    for field, interface in [
+        ("entities", {key: value for key, value in entity.items() if key != "id_template"}),
+        ("relations", {key: value for key, value in relation.items() if key != "slot_entities"}),
+    ]:
+        with pytest.raises(ValidationError):
+            CompiledProgram.model_validate(_format_3(**{field: [interface]}))
     with pytest.raises(ValidationError):
         CompiledProgram.model_validate(_format_3(inputs=[_interface_input(unexpected=1)]))
     with pytest.raises(ValidationError):
