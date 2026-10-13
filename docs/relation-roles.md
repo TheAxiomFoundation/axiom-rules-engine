@@ -410,10 +410,13 @@ over determined ids, which #215 section 7 shows sound.
 - #215's plan makes every relation read refuse under the option until its
   third PR gives relations open-world semantics.
 - A predicate runs only when a relation is read. So under the option, every
-  construct in this note refuses by name until that PR lands, and all of them
-  lift with it.
-- Whichever of this series and #215's third PR lands second lifts the new
-  expression kinds.
+  construct in this note refuses by name until that PR lands.
+- Two steps, each done by whichever of its two PRs lands second:
+  - Each new expression kind gets code-level handling under the option, for
+    now a named refusal. This is the later of #251 (#215's first PR) and the
+    PR in this series that adds the kind.
+  - The refusals lift and this section's semantics take effect. This is the
+    later of #215's third PR and this series.
 
 ## 5. Execution paths
 
@@ -624,7 +627,14 @@ the pilot's scope:
 - the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
 It must never return a wrong household silently, whether too small or too
-large.
+large. That holds under two preconditions, which the fixture's tests meet:
+- **A complete roster.** Every evaluated person has a `member_of_household`
+  record. A person with none has no candidates and gets an empty household.
+- **Correct supplied ids,** where ids are read. The engine trusts them. Ids
+  that split two tied people give a household that is too small. A check the
+  pilot can add: a derived relation of ties between people with different
+  ids, evaluated only when ids are supplied, with a rule that flags any such
+  tie when no exception applies.
 
 **The household is a closure.** (a)(3) puts a meal group together. (b)(1)
 requires certain people to be "included in the same household", whether or
@@ -636,8 +646,8 @@ Every tie is symmetric:
 - the spouse and parent tests run in both directions;
 - a shared meal group is an equality.
 
-So the closures split a residence into disjoint households, one for each
-connected group of ties.
+So, when no exception applies, the closures split a residence into disjoint
+households, one for each connected group of ties.
 
 The chain can be any length, so this note cannot compute every household.
 #231's recursion can. Until then the fixture computes the closure exactly in
@@ -667,6 +677,8 @@ closure is one household.
 # Data relations. Each is a supplied pair fact with declared kinds.
 - {name: member_of_household, kind: data_relation,
    data_relation: {arity: 2, arguments: [Person, Household]}}
+- {name: residence_size, kind: derived, entity: Household, dtype: Integer,   # gives the
+   versions: [{effective_from: 2026-01-01, formula: len(member_of_household)}]} # Household kind a rule
 - {name: spouse_of, kind: data_relation,
    data_relation: {arity: 2, arguments: [Person, Person]}}
 - {name: parent_of, kind: data_relation,                 # natural, adoptive or step
@@ -758,10 +770,17 @@ closure is one household.
   institution, or one of its listed exceptions).
 - `snap_household_unit`. The caller's household id, read only in the cases
   above.
+- (b)(1)(iii) excludes a foster child. `snap_tie` does not test for one,
+  because a foster placement is a (b)(4) case. It sets
+  `snap_household_exception_may_apply`, so that household comes from the
+  supplied ids.
 - `snap_ineligible_member_under_b7`. The person is barred by (b)(7) "as a
   member of any household".
 
 **Encoding notes.**
+- `residence_size` exists only so that the `Household` kind has a rule.
+  Without one, compiling warns `UnknownRelationArgumentEntity`, and under
+  strict relation-entity mode that warning is an error.
 - Pair atoms come before the value reads they guard. A co-resident's age is
   read only for a parent-child or parental-control pair, and the unit id only
   once the supplied case applies.
@@ -785,7 +804,8 @@ households, each worked out by hand from the regulation's text:
 | Applicant married to B; B buys and prepares food with roommate X; the applicant buys separately | All three are one household: a required tie, then a meal-group tie |
 | A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
 | Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
-| Two separate groups in one residence, each with a chain of three ties, with two applicants evaluated | Each applicant gets exactly their own group from the supplied ids |
+| Two separate groups in one residence, each a chain of three ties, with the applicants at the ends of their chains | Each applicant gets exactly their own group from the supplied ids |
+| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (first precondition above). |
 | The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
@@ -820,9 +840,9 @@ Each is sized for one build lane.
 
 **Next steps.**
 
-1. With #215's third PR, lift atoms, `exists` and path sources under the
-   three-valued option. Whichever of #251 and this series lands second lifts
-   the new expression kinds.
+1. Under the three-valued option, follow the two steps in section 4. The
+   later of #251 and each PR here adds the named refusals. The later of
+   #215's third PR and this series lifts them.
 2. Recursion (#253, then #231) makes the household exact.
 3. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
 4. The pilot (TheAxiomFoundation/rulespec-us#1428) is encoded. It should
