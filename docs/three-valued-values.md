@@ -664,8 +664,9 @@ refused. Nothing ever coerces unknown to not-holds, zero or an absent member.
 
 Internally a result is a value or unknown-with-needs, carried as a value
 through the interpreter (`Determination<T>`). Interrupts stay reserved for
-failures and deferral. The same code path serves both modes, which is what
-makes invariant 6 hold by construction.
+failures, refusals and deferral; a refusal is an interrupt of its own, so no
+catching position can mistake it for a failure. The same code path serves
+both modes, which is what makes invariant 6 hold by construction.
 
 **Overlap with #211.** That PR memoizes a relation's members per (relation,
 entity, period) and replays their trace effects, and it predates main's

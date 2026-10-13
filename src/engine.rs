@@ -327,23 +327,18 @@ fn scalar_value_text(value: &ScalarValue, normalize: bool) -> String {
     }
 }
 
-/// How the refusal of a construct `MissingFacts::Indeterminate` does not
-/// support yet begins.
-const UNSUPPORTED_PREFIX: &str = "missing_facts=indeterminate does not yet support ";
-
 /// The refusal, under `MissingFacts::Indeterminate`, of a construct the #215
 /// series has not yet given three-valued semantics
 /// (`docs/three-valued-values.md`, section 10); each later PR of the series
-/// removes the uses it lifts. A refusal is not an evaluation failure: no
-/// `and`/`or` item catches it (see [`is_refusal`]), so the evaluation that
+/// removes the uses it lifts. A refusal is not an evaluation failure: it is
+/// its own interrupt, which no `and`/`or` item catches, so the evaluation that
 /// reaches the construct is refused whatever the item's siblings hold, and
 /// nothing reads an unknown there as `not_holds`, zero or an absent member.
-fn unsupported_under_indeterminate(construct: &str) -> EvalError {
-    EvalError::TypeMismatch(format!("{UNSUPPORTED_PREFIX}{construct}"))
-}
-
-fn is_refusal(error: &EvalError) -> bool {
-    matches!(error, EvalError::TypeMismatch(message) if message.starts_with(UNSUPPORTED_PREFIX))
+/// The drive returns it as the `TypeMismatch` it carries.
+fn unsupported_under_indeterminate(construct: &str) -> Interrupt {
+    Interrupt::Refused(EvalError::TypeMismatch(format!(
+        "missing_facts=indeterminate does not yet support {construct}"
+    )))
 }
 
 /// A determined value where a construct reads one that this series has not
@@ -352,7 +347,7 @@ fn is_refusal(error: &EvalError) -> bool {
 fn require_determined<T>(determination: Determination<T>, construct: &str) -> Eval<T> {
     match determination {
         Determined(value) => Ok(value),
-        Indeterminate(_) => Err(unsupported_under_indeterminate(construct).into()),
+        Indeterminate(_) => Err(unsupported_under_indeterminate(construct)),
     }
 }
 
@@ -476,12 +471,15 @@ impl Deferred {
 }
 
 /// Why an evaluation inside the interpreter stopped before producing a value:
-/// an evaluation error, or a rule deferred to the driver, which evaluates it
-/// and retries. Only the drivers see `Defer`; the public entry points return
-/// `EvalError`.
-#[derive(Debug)]
+/// an evaluation error; the refusal of a construct `MissingFacts::Indeterminate`
+/// does not support yet (see [`unsupported_under_indeterminate`]), which
+/// nothing catches; or a rule deferred to the driver, which evaluates it and
+/// retries. Only the drivers see `Defer`; the public entry points return
+/// `EvalError`, and a refusal as the `TypeMismatch` it carries.
+#[derive(Clone, Debug)]
 enum Interrupt {
     Error(EvalError),
+    Refused(EvalError),
     Defer(Deferred),
 }
 
@@ -489,7 +487,7 @@ impl Interrupt {
     fn within_rule(self, rule: &str) -> Self {
         match self {
             Self::Error(error) => Self::Error(error.within_rule(rule)),
-            deferred => deferred,
+            other => other,
         }
     }
 }
@@ -627,9 +625,10 @@ pub struct Engine<'a> {
     /// Judgment rule evaluations that ended unknown, with their needs, keyed
     /// like `judgment_cache`. Only `MissingFacts::Indeterminate` fills it.
     undetermined_judgments: HashMap<CacheKey, Needs>,
-    /// Deferred rule evaluations that failed in the current drive, under
-    /// `MissingFacts::Indeterminate` (see [`Engine::run_tasks`]).
-    failed: HashMap<Deferred, EvalError>,
+    /// Deferred rule evaluations that failed or were refused in the current
+    /// drive, under `MissingFacts::Indeterminate` (see [`Engine::run_tasks`]).
+    /// It holds no deferral.
+    failed: HashMap<Deferred, Interrupt>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
     active_evaluations: Vec<CacheKey>,
     /// Whether to record the per-node trace. The bulk evaluator borrows this
@@ -938,12 +937,15 @@ impl<'a> Engine<'a> {
                         // interrupted evaluation retried: it reaches the
                         // reference again, finds the record instead of
                         // deferring, and fails there, where an item can catch
-                        // it. A refusal is recorded the same way and, caught
-                        // nowhere, ends the evaluation as an error does.
-                        Err(Interrupt::Error(error)) if self.three_valued() => {
+                        // it. A refusal is recorded the same way, as a
+                        // refusal, so that it is caught nowhere and ends the
+                        // evaluation as an error does.
+                        Err(failure @ (Interrupt::Error(_) | Interrupt::Refused(_)))
+                            if self.three_valued() =>
+                        {
                             tasks.pop();
                             waiting.remove(&task);
-                            self.failed.insert(task, error);
+                            self.failed.insert(task, failure);
                             continue;
                         }
                         Err(interrupt) => interrupt,
@@ -951,7 +953,7 @@ impl<'a> Engine<'a> {
                 }
             };
             match interrupt {
-                Interrupt::Error(error) => return Err(error),
+                Interrupt::Error(error) | Interrupt::Refused(error) => return Err(error),
                 // A rule deferred while a task waiting on it is still open
                 // reaches itself.
                 Interrupt::Defer(deferred) if waiting.contains(&deferred) => {
@@ -994,8 +996,8 @@ impl<'a> Engine<'a> {
         // A failure the driver recorded for this request in the current drive
         // is raised here, where the reference sits (see `run_tasks`).
         if !self.failed.is_empty() {
-            if let Some(error) = self.failed.get(&Deferred::Scalar(key.clone())) {
-                return Err(error.clone().into());
+            if let Some(failure) = self.failed.get(&Deferred::Scalar(key.clone())) {
+                return Err(failure.clone());
             }
         }
         if self.depth >= self.suspend_depth {
@@ -1067,8 +1069,8 @@ impl<'a> Engine<'a> {
             return Ok(Indeterminate(needs.clone()));
         }
         if !self.failed.is_empty() {
-            if let Some(error) = self.failed.get(&Deferred::Judgment(key.clone())) {
-                return Err(error.clone().into());
+            if let Some(failure) = self.failed.get(&Deferred::Judgment(key.clone())) {
+                return Err(failure.clone());
             }
         }
         if self.depth >= self.suspend_depth {
@@ -1620,7 +1622,7 @@ impl<'a> Engine<'a> {
                 where_clause,
             } => {
                 if self.three_valued() {
-                    return Err(unsupported_under_indeterminate("`count` over a relation").into());
+                    return Err(unsupported_under_indeterminate("`count` over a relation"));
                 }
                 let (count, _) = self.fold_related(
                     expr,
@@ -1641,7 +1643,7 @@ impl<'a> Engine<'a> {
                 where_clause,
             } => {
                 if self.three_valued() {
-                    return Err(unsupported_under_indeterminate("`sum` over a relation").into());
+                    return Err(unsupported_under_indeterminate("`sum` over a relation"));
                 }
                 let (_, total) = self.fold_related(
                     expr,
@@ -1767,7 +1769,7 @@ impl<'a> Engine<'a> {
                 related_slot,
             } => {
                 if self.three_valued() {
-                    return Err(unsupported_under_indeterminate("`relation_member`").into());
+                    return Err(unsupported_under_indeterminate("`relation_member`"));
                 }
                 let context = relation_context
                     .ok_or_else(|| relation_member_outside_derived_relation(relation))?;
@@ -1856,7 +1858,7 @@ impl<'a> Engine<'a> {
                     Some(needs) => needs.extend(item_needs),
                     None => needs = Some(item_needs),
                 },
-                Err(Interrupt::Error(error)) if self.three_valued() && !is_refusal(&error) => {
+                Err(Interrupt::Error(error)) if self.three_valued() => {
                     keep_least_failure(&mut failure, error);
                 }
                 Err(interrupt) => return Err(interrupt),
@@ -2168,7 +2170,9 @@ impl<'a> Engine<'a> {
         // mode must never read one that way, so until the series gives
         // relations open-world semantics every read is refused.
         if self.three_valued() {
-            return Err(unsupported_under_indeterminate("reading a relation's members").into());
+            return Err(unsupported_under_indeterminate(
+                "reading a relation's members",
+            ));
         }
         self.nested(|engine| {
             engine.related_entity_ids_at_level(
@@ -2970,7 +2974,7 @@ mod three_valued_tests {
             assert!(
                 matches!(
                     engine.failed.get(&Deferred::Judgment(key.clone())),
-                    Some(EvalError::ExpectedJudgment(_))
+                    Some(Interrupt::Error(EvalError::ExpectedJudgment(_)))
                 ),
                 "the wrong-kind reference deferred and failed: {:?}",
                 engine.failed

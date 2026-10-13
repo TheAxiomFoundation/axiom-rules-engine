@@ -1723,6 +1723,80 @@ fn unlifted_constructs_are_refused_by_name() {
     }
 }
 
+/// 10, continued. A refusal deep enough to defer is refused at every
+/// threshold: before `false` in an `and`, and beside a failing item and a
+/// decisive one in an `or`. The driver records a deferred rule's refusal as a
+/// refusal, so the retry raises it where no item catches it. After `false`
+/// it is never reached, as on main.
+#[test]
+fn a_deferred_refusal_is_caught_nowhere() {
+    let depth = 12;
+    let mut rules = vec![judgment_rule(
+        "refuses0",
+        cmp(if_then(flag("m"), int(1), int(2)), ComparisonOp::Gt, int(0)),
+    )];
+    for index in 1..depth {
+        rules.push(judgment_rule(
+            &format!("refuses{index}"),
+            and(vec![
+                judgment_ref(&format!("refuses{}", index - 1)),
+                holds(),
+            ]),
+        ));
+    }
+    let deep = || judgment_ref(&format!("refuses{}", depth - 1));
+    rules.push(judgment_rule(
+        "before_false",
+        and(vec![deep(), not_holds()]),
+    ));
+    rules.push(judgment_rule("after_false", and(vec![not_holds(), deep()])));
+    rules.push(judgment_rule(
+        "beside_failure",
+        or(vec![fails(), deep(), holds()]),
+    ));
+    let program = program(rules);
+    let data = DataSet::default();
+    let refused = format!("{REFUSAL}an `if` whose condition is undetermined");
+    for threshold in THRESHOLDS {
+        let results = on_stack(64 * MIB, || {
+            at_threshold(threshold, || {
+                ["before_false", "after_false", "beside_failure"].map(|rule| {
+                    three_valued(&program, &data).judgment_determination(rule, "c1", &jan())
+                })
+            })
+        });
+        let [before_false, after_false, beside_failure] = results;
+        for (rule, result) in [
+            ("before_false", before_false),
+            ("beside_failure", beside_failure),
+        ] {
+            match result {
+                Err(error) => assert_eq!(
+                    error.to_string(),
+                    refused,
+                    "{rule} at threshold {threshold:?}"
+                ),
+                Ok(answer) => panic!(
+                    "{rule} at threshold {threshold:?} must be refused, not answered: {answer:?}"
+                ),
+            }
+        }
+        assert_eq!(
+            format!("{after_false:?}"),
+            ok(Determined(NotHolds)),
+            "threshold {threshold:?}"
+        );
+    }
+    for (rule, expected) in [
+        ("before_false", err(missing_input("m"))),
+        ("after_false", format!("{:?}", Ok::<_, EvalError>(NotHolds))),
+        ("beside_failure", err(EvalError::DivisionByZero)),
+    ] {
+        let today = on_stack(64 * MIB, || judge_today(&program, &data, rule));
+        assert_eq!(today, expected, "{rule} without the option");
+    }
+}
+
 /// 11. Without the option the engine computes what `Engine::new` computes:
 /// `MissingInput` at the same point, defaults applied, short circuits as
 /// today. Both the default options and `Engine::new` are compared over every
