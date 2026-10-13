@@ -93,7 +93,130 @@ class CompiledProgramMetadata(BaseModel):
     input_catalog: list[CompiledInputCatalogEntry]
 
 
+class _Exact(BaseModel):
+    """Format-3 identity and interface objects have exactly their keys: an
+    unknown key is refused, and so is a missing one, a nullable one
+    included."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EngineBuild(_Exact):
+    """The build of the engine that compiled an artifact."""
+
+    commit: str | None
+    dirty: bool | None
+
+
+class SourceClosureModule(_Exact):
+    target: str | None
+    sha256: str
+
+
+class SourceClosure(_Exact):
+    """The RuleSpec module texts an artifact was compiled from."""
+
+    root: str | None
+    modules: list[SourceClosureModule]
+    digest: str
+
+
+class SuppliedInstances(_Exact):
+    source: Literal["supplied"]
+
+
+class AliasInstances(_Exact):
+    source: Literal["alias"]
+    of: str | None
+    via: list[str]
+
+
+class UnscopedInstances(_Exact):
+    source: Literal["unscoped"]
+
+
+EntityInstances = Annotated[
+    SuppliedInstances | AliasInstances | UnscopedInstances,
+    Field(discriminator="source"),
+]
+
+
+class InterfaceEntity(_Exact):
+    kind: str
+    id_template: str | None
+    instances: EntityInstances
+
+
+class InterfaceInput(_Exact):
+    name: str
+    legal_id: str
+    entities: list[str]
+    dtype: Literal["bool", "text", "date", "integer", "decimal"] | None
+    dtype_basis: Literal["usage", "declared"] | None
+    default: ScalarValue | None
+    values: list[int] | None
+    values_basis: Literal["parameter_index"] | None
+
+
+class RelationReads(_Exact):
+    inputs: list[str]
+    rules: list[str]
+    relations: list[str]
+
+
+class SuppliedRelation(_Exact):
+    kind: Literal["supplied"]
+
+
+class DerivedRelation(_Exact):
+    kind: Literal["derived"]
+    rule: str
+    source_relation: str
+    reads: RelationReads
+
+
+RelationProvenance = Annotated[
+    SuppliedRelation | DerivedRelation, Field(discriminator="kind")
+]
+
+
+class InterfaceRelation(_Exact):
+    name: str
+    arity: int
+    slot_entities: list[str] | None
+    lookup_slots: list[int]
+    accepts_supplied_tuples: bool
+    provenance: RelationProvenance
+
+
+class ProgramInterface(_Exact):
+    """``program.interface``: the entity roster, input slots and relations
+    the engine derived from the program. Execution never reads it."""
+
+    entities: list[InterfaceEntity]
+    inputs: list[InterfaceInput]
+    relations: list[InterfaceRelation]
+
+
+class CompiledProgramBody(Program):
+    interface: ProgramInterface
+
+
 class CompiledProgram(BaseModel):
+    """A format-3 compiled artifact, as ``compile`` writes it."""
+
+    artifact_format_version: Literal[3]
+    engine_version: str
+    engine_build: EngineBuild
+    source_closure: SourceClosure | None = None
+    program: CompiledProgramBody
+    metadata: CompiledProgramMetadata
+
+
+class LegacyCompiledProgramV2(BaseModel):
+    """A format-2 compiled artifact. The engine runs one only on request,
+    through its format-2 compatibility loader (``accept_artifact_format=2``)."""
+
     artifact_format_version: Literal[2]
     engine_version: str | None = None
     program: Program

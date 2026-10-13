@@ -428,9 +428,11 @@ fn fast_mode_answers_the_shape_the_retired_blocker_named() {
 #[cfg(feature = "unit-derivation")]
 #[test]
 fn an_aggregation_artifact_the_previous_engine_compiled_still_loads() {
-    use axiom_rules_engine::unit_derivation::CompiledAggregationArtifact;
+    use axiom_rules_engine::unit_derivation::{
+        CompiledAggregationArtifact, EmbeddedArtifactLoading,
+    };
 
-    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+    let value: serde_json::Value = serde_json::from_str(include_str!(
         "fixtures/artifacts/nz_best_start_carer_sum.pre-lazy-fast-path.stage3.json"
     ))
     .expect("fixture is JSON");
@@ -442,14 +444,19 @@ fn an_aggregation_artifact_the_previous_engine_compiled_still_loads() {
             format!("carer_best_start_total: {RETIRED_SUM_BLOCKER}"),
         ]
     );
-    // Loading regenerates the phase-two artifact (relations only, no derived
-    // rules, so no blockers) and compares it in full, engine version included.
-    // Restamp that one field so the fixture survives a crate version bump. The
-    // digested source artifact stays exactly as the previous engine wrote it.
-    value["phase_two_artifact"]["engine_version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
-
-    let loaded = CompiledAggregationArtifact::from_json_str(&value.to_string())
-        .expect("the previous engine's source digest must still match after loading");
+    // Both embedded artifacts are format 2, so they load through the
+    // compatibility loader, which the caller opts in to. Loading regenerates
+    // the phase-two artifact (relations only, no derived rules, so no
+    // blockers) and compares its program and metadata; its engine_version is
+    // its own, so nothing is restamped. The digested source artifact stays
+    // exactly as the previous engine wrote it.
+    let loaded = CompiledAggregationArtifact::from_json_str_with_loading(
+        &value.to_string(),
+        EmbeddedArtifactLoading {
+            accept_legacy_format_2: true,
+        },
+    )
+    .expect("the previous engine's source digest must still match after loading");
     assert_eq!(
         serde_json::to_value(&loaded.source_artifact).expect("source serialises"),
         stored_source

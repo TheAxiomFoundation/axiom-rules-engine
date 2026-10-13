@@ -1,0 +1,44 @@
+format: rulespec/v1
+rules:
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, TaxUnit]
+  - name: payment_to_person
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Payment, Person]
+  - name: payment_counted
+    kind: derived
+    entity: Payment
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: amount * share
+  - name: person_payments
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: sum(payment_to_person.payment_counted)
+  - name: tax_unit_payments
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: sum(member_of_tax_unit.person_payments)
+  - name: tax_unit_size
+    kind: derived
+    entity: TaxUnit
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(member_of_tax_unit)

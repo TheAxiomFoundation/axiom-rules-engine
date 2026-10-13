@@ -74,11 +74,14 @@ rules:
 
 // Provenance exports.
 const engineVersion = engine.engine_version();
+const engineBuild = JSON.parse(engine.engine_build());
 const artifactFormatVersion = engine.artifact_format_version();
 console.log(`engine_version: ${engineVersion}`);
+console.log(`engine_build: ${JSON.stringify(engineBuild)}`);
 console.log(`artifact_format_version: ${artifactFormatVersion}`);
 assert.match(engineVersion, /^\d+\.\d+\.\d+$/);
-assert.equal(typeof artifactFormatVersion, "number");
+assert.equal(artifactFormatVersion, 3);
+assert.deepEqual(Object.keys(engineBuild).sort(), ["commit", "dirty"]);
 
 // compile: {canonical_target: yaml_text} map -> CompiledProgramArtifact JSON.
 const modulesJson = JSON.stringify({
@@ -89,6 +92,17 @@ const artifactJson = engine.compile(modulesJson, STATE_TARGET);
 const artifact = JSON.parse(artifactJson);
 assert.equal(artifact.artifact_format_version, artifactFormatVersion);
 assert.equal(artifact.engine_version, engineVersion);
+assert.deepEqual(artifact.engine_build, engineBuild);
+// Format 3: the module texts the compile read, and the interface block.
+assert.equal(artifact.source_closure.root, STATE_TARGET);
+assert.deepEqual(
+  artifact.source_closure.modules.map((module) => module.target),
+  [STATE_TARGET, FEDERAL_TARGET].sort(),
+);
+assert.deepEqual(
+  artifact.program.interface.inputs.map((input) => input.name),
+  ["household_size", "net_income"],
+);
 assert.ok(
   artifact.program.derived.some((derived) => derived.id === OUTPUT_ID),
   `compiled program exposes ${OUTPUT_ID}`,
@@ -161,8 +175,32 @@ assert.throws(
 const v1Artifact = JSON.stringify({ ...artifact, artifact_format_version: 1 });
 assert.throws(
   () => engine.execute(v1Artifact, JSON.stringify(request)),
-  /requires exact version/,
-  "v1 artifacts are rejected by the v2 engine",
+  /is older than this engine/,
+  "v1 artifacts are rejected by the format-3 engine",
+);
+
+// The same program as a format-2 artifact: `execute` refuses it as the older
+// side; `execute_legacy_format_2` runs it unchanged, to the same answer, and
+// refuses format 3.
+const format2 = structuredClone(artifact);
+format2.artifact_format_version = 2;
+delete format2.engine_build;
+delete format2.source_closure;
+delete format2.program.interface;
+const format2Json = JSON.stringify(format2);
+assert.throws(
+  () => engine.execute(format2Json, JSON.stringify(request)),
+  /is older than this engine: it is artifact format 2/,
+  "execute reads format 3 only",
+);
+const legacyResponse = JSON.parse(
+  engine.execute_legacy_format_2(format2Json, JSON.stringify(request)),
+);
+assert.equal(legacyResponse.results[0].outputs[OUTPUT_ID].value.value, "268");
+assert.throws(
+  () => engine.execute_legacy_format_2(artifactJson, JSON.stringify(request)),
+  /reads format 2 only/,
+  "the format-2 loader refuses format 3",
 );
 
 console.log("smoke test passed");
