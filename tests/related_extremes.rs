@@ -41,6 +41,7 @@ use axiom_rules_engine::dense::{
 };
 use axiom_rules_engine::depth::with_suspend_depth;
 use axiom_rules_engine::engine::EvalError;
+use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules_engine::spec::{
     DatasetSpec, DerivedSemanticsSpec, ExtremeSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec,
     PeriodSpec, RelatedValueRefSpec, RelationRecordSpec, ScalarExprSpec, ScalarValueSpec,
@@ -685,6 +686,95 @@ fn a_child_in_one_family_reads_that_familys_income() {
 }
 
 #[test]
+fn duplicate_relation_tuples_change_no_extreme_value_only_cardinality_or_trace() {
+    for roster in [
+        Roster {
+            people: vec![person(5, &[0])],
+            family_incomes: vec![decimal("52000")],
+        },
+        three_children(),
+    ] {
+        let data = dataset(&roster);
+        let mut duplicated = data.clone();
+        duplicated
+            .relations
+            .extend(data.relations.iter().rev().cloned());
+        duplicated.relations.extend(data.relations.iter().cloned());
+        for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+            for query in [
+                query(Roster::family_id(0), &["youngest_age", "oldest_age"]),
+                query(Roster::family_id(0), &["only_age"]),
+                query(Roster::person_id(0), &["family_income_doubled_of"]),
+            ] {
+                let original = run(mode.clone(), data.clone(), vec![query.clone()]);
+                let repeated = run(mode.clone(), duplicated.clone(), vec![query]);
+                match (original, repeated) {
+                    (Ok(original), Ok(repeated)) => assert_eq!(
+                        serde_json::to_value(original).unwrap(),
+                        serde_json::to_value(repeated).unwrap()
+                    ),
+                    (Err(original), Err(repeated)) => {
+                        assert!(matches!(
+                            &original,
+                            ApiError::Eval(EvalError::AmbiguousRelatedEntity { count: 3, .. })
+                        ));
+                        assert_eq!(original.to_string(), repeated.to_string());
+                    }
+                    (original, repeated) => {
+                        panic!("duplicate tuples changed the outcome: {original:?}, {repeated:?}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn integer_and_decimal_member_values_compare_numerically() {
+    let mut roster = three_children();
+    roster.people[0].age = ScalarValueSpec::Decimal {
+        value: "-1.25".to_string(),
+    };
+    roster.people[1].age = ScalarValueSpec::Integer { value: 5 };
+    roster.people[2].age = ScalarValueSpec::Decimal {
+        value: "9.50".to_string(),
+    };
+    for person in &mut roster.people {
+        person.eligible = true;
+    }
+    let data = dataset(&roster);
+    for (output, expected) in [
+        ("youngest_age", "-1.25"),
+        ("oldest_age", "9.5"),
+        ("youngest_eligible_age", "-1.25"),
+        ("oldest_eligible_age", "9.5"),
+    ] {
+        let value = explain_one(&data, Roster::family_id(0), output).unwrap();
+        assert_eq!(
+            value,
+            ScalarValueSpec::Decimal {
+                value: expected.to_string()
+            },
+            "{output}"
+        );
+        let fast = run(
+            ExecutionMode::Fast,
+            data.clone(),
+            vec![query(Roster::family_id(0), &[output])],
+        )
+        .unwrap();
+        assert_eq!(fast.metadata.actual_mode, ExecutionMode::Fast);
+        assert!(matches!(
+            &fast.results[0].outputs[output],
+            OutputValue::Scalar { value: actual, .. } if actual == &value
+        ));
+        // A dense column represents this numeric mix as decimals.
+        let dense = dense_families(&roster, &[0], output, false).unwrap();
+        assert_eq!(dense_value(&dense, 0), value);
+    }
+}
+
+#[test]
 fn a_child_in_no_family_fails_rather_than_reading_zero() {
     let roster = example_roster();
     let data = dataset(&roster);
@@ -813,6 +903,56 @@ fn min_where_and_max_where_with_no_selected_member_fail_even_when_the_family_is_
 }
 
 #[test]
+fn a_member_value_failure_precedes_a_later_member_predicate_failure() {
+    let mut roster = three_children();
+    roster.people[0].eligible = true;
+    let mut data = dataset(&roster);
+    data.inputs.retain(|record| {
+        !(record.entity_id == "p00" && record.name == "age")
+            && !(record.entity_id == "p01" && record.name == "eligible")
+    });
+    // Deliberately reverse the tuples: members still run in sorted id order,
+    // and each member's predicate runs before its value.
+    data.relations.reverse();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        for output in ["youngest_eligible_age", "oldest_eligible_age"] {
+            let error = run(
+                mode.clone(),
+                data.clone(),
+                vec![query(Roster::family_id(0), &[output])],
+            )
+            .expect_err("the first member has no value");
+            assert!(
+                matches!(
+                    &error,
+                    ApiError::Eval(EvalError::MissingInput { name, entity_id, .. })
+                        if name == "age" && entity_id == "p00"
+                ),
+                "{output}: {error}"
+            );
+        }
+    }
+    // An excluded member's missing value is never read. Selection can then
+    // reach the later predicate, which becomes the first failure.
+    data.inputs
+        .iter_mut()
+        .find(|record| record.entity_id == "p00" && record.name == "eligible")
+        .unwrap()
+        .value = ScalarValueSpec::Bool { value: false };
+    for output in ["youngest_eligible_age", "oldest_eligible_age"] {
+        let error = explain_one(&data, Roster::family_id(0), output).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                EvalError::MissingInput { name, entity_id, .. }
+                    if name == "eligible" && entity_id == "p01"
+            ),
+            "{output}: {error}"
+        );
+    }
+}
+
+#[test]
 fn only_over_a_family_with_several_members_fails_and_reads_no_value() {
     // f00 has three members; one lacks `age`. Explain reads no member's
     // value before it knows there is exactly one, so the error is the
@@ -852,6 +992,106 @@ fn only_returns_the_member_value_with_its_own_kind() {
             value: date("2019-03-01")
         }
     );
+}
+
+#[test]
+fn only_returns_text_and_boolean_values_in_every_mode() {
+    let source = format!(
+        "format: rulespec/v1\nrules:\n  - name: member_of_family\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Family]\n{}{}",
+        rule("Family", "only_name", "Text", "only(member_of_family.name)"),
+        rule(
+            "Family",
+            "only_flag",
+            "Bool",
+            "only(member_of_family.eligible)"
+        ),
+    );
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source).unwrap();
+    let mut data = dataset(&Roster {
+        people: vec![person(5, &[0])],
+        family_incomes: vec![decimal("1")],
+    });
+    data.inputs.retain(|record| record.name == "eligible");
+    data.inputs.push(input(
+        "Person",
+        Roster::person_id(0),
+        "name",
+        ScalarValueSpec::Text {
+            value: "Ana".to_string(),
+        },
+    ));
+    let expected = [
+        (
+            "only_name",
+            ScalarValueSpec::Text {
+                value: "Ana".into(),
+            },
+        ),
+        ("only_flag", ScalarValueSpec::Bool { value: true }),
+    ];
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        let response = execute_compiled_request(
+            artifact.clone(),
+            CompiledExecutionRequest {
+                relation_binding: Default::default(),
+                mode: mode.clone(),
+                dataset: data.clone(),
+                queries: vec![query(Roster::family_id(0), &["only_name", "only_flag"])],
+                pins: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(response.metadata.actual_mode, mode);
+        for (output, value) in &expected {
+            assert!(matches!(
+                &response.results[0].outputs[*output],
+                OutputValue::Scalar { value: actual, .. } if actual == value
+            ));
+        }
+    }
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Family")).unwrap();
+    let relations = dense
+        .relations()
+        .iter()
+        .map(|schema| {
+            let inputs = schema
+                .related_inputs
+                .iter()
+                .map(|name| {
+                    let column = match name.as_str() {
+                        "name" => DenseColumn::Text(vec!["Ana".into()]),
+                        "eligible" => DenseColumn::Bool(vec![true]),
+                        other => panic!("unexpected input: {other}"),
+                    };
+                    (name.clone(), column)
+                })
+                .collect();
+            (
+                schema.key.clone(),
+                DenseRelationBatchSpec {
+                    offsets: vec![0, 1],
+                    inputs,
+                },
+            )
+        })
+        .collect();
+    let response = dense
+        .execute(
+            &month().to_model().unwrap(),
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations,
+            },
+            &["only_name".into(), "only_flag".into()],
+        )
+        .unwrap();
+    for (output, value) in &expected {
+        match &response.outputs[*output] {
+            DenseOutputValue::Scalar(values) => assert_eq!(dense_value(values, 0), *value),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -1076,6 +1316,31 @@ fn only_other_forms_of_min_and_max_keep_their_scalar_meaning() {
 }
 
 #[test]
+fn same_kind_relation_direction_is_refused_for_every_new_call() {
+    for formula in [
+        "min(parent_of.age)",
+        "max(parent_of.age)",
+        "min_where(parent_of, age, eligible)",
+        "max_where(parent_of, age, eligible)",
+        "only(parent_of.age)",
+    ] {
+        let source = format!(
+            "format: rulespec/v1\nrules:\n  - name: parent_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Person]\n{}",
+            rule("Person", "value", "Decimal", formula),
+        );
+        let error = lower_rulespec_str(&source).expect_err("both relation directions match");
+        assert!(
+            matches!(
+                &error,
+                RuleSpecError::AmbiguousRelationDirection { relation, citing, entity, .. }
+                    if relation == "parent_of" && citing == "value" && entity == "Person"
+            ),
+            "{formula}: {error}"
+        );
+    }
+}
+
+#[test]
 fn the_new_aggregates_serialize_as_new_kinds_and_round_trip() {
     let artifact = artifact();
     let json = serde_json::to_string(artifact).expect("serializes");
@@ -1219,7 +1484,7 @@ fn dense_refuses_a_nested_aggregate_and_lifetime_refuses_a_bare_one_by_name() {
         .expect_err("a nested aggregate is refused");
     assert!(
         matches!(&error, DenseCompileError::Unsupported(message)
-            if message == "aggregation over relation `member_of_family` nested inside a related expression"),
+            if message == "only over relation `member_of_family` nested inside a related expression"),
         "{error}"
     );
     // Lifetime execution reads a relation aggregate in no period, so outside

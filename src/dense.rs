@@ -17,7 +17,7 @@ use crate::engine::{
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
-    ComparisonOp, DType, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
+    ComparisonOp, DType, Derived, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
     JudgmentOutcome, OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode,
     SCALAR_ENTITY, ScalarExpr, ScalarValue,
 };
@@ -410,6 +410,11 @@ enum CompiledScalarExpr {
         default: ScalarValue,
     },
     Derived(usize),
+    /// Commencement of a rule inlined on the current-record axis.
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledScalarExpr>,
+    },
     /// An inlined rule's output rounding, applied before its dependent reads it.
     Round {
         value: Box<CompiledScalarExpr>,
@@ -505,6 +510,12 @@ enum CompiledRelatedScalarExpr {
         default: ScalarValue,
     },
     RootScalar(Box<CompiledScalarExpr>),
+    /// An inlined dependency has its own commencement, independently of the
+    /// aggregate rule that reads it.
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledRelatedScalarExpr>,
+    },
     /// An inlined related rule's output rounding, under the related-row mask.
     Round {
         value: Box<CompiledRelatedScalarExpr>,
@@ -600,6 +611,10 @@ enum CompiledRelatedJudgmentExpr {
         right: CompiledRelatedScalarExpr,
     },
     RootJudgment(Box<CompiledJudgmentExpr>),
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledRelatedJudgmentExpr>,
+    },
     /// A `relation_member` outside a derived relation's own predicate: in a
     /// `count`/`sum` `where` clause, or in a related rule a predicate reads.
     /// Explain evaluates both without a relation context, so every related
@@ -620,9 +635,72 @@ enum CompiledJudgmentExpr {
         right: CompiledScalarExpr,
     },
     Derived(usize),
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledJudgmentExpr>,
+    },
     And(Vec<CompiledJudgmentExpr>),
     Or(Vec<CompiledJudgmentExpr>),
     Not(Box<CompiledJudgmentExpr>),
+}
+
+#[derive(Clone, Debug)]
+struct RuleCommencement {
+    derived: String,
+    effective_from: NaiveDate,
+}
+
+impl RuleCommencement {
+    fn rows(&self, period: &Period, enforce: bool, mask: &RowMask) -> (RowMask, RowErrors) {
+        if enforce && period.start < self.effective_from {
+            let mut errors = RowErrors::new();
+            errors.record_all(
+                mask,
+                &EvalError::MissingDerivedFormulaVersion {
+                    derived: self.derived.clone(),
+                    at: period.start,
+                },
+            );
+            (RowMask::none(mask.len()), errors)
+        } else {
+            (mask.clone(), RowErrors::new())
+        }
+    }
+}
+
+/// Inlined rules obey the same supported version shape as root rules: one
+/// unbounded version, evaluated only after its commencement. A related rule
+/// can change independently of the aggregate that reads it.
+fn inlined_rule_semantics(
+    derived: &Derived,
+) -> Result<(&DerivedSemantics, Option<RuleCommencement>), DenseCompileError> {
+    match derived.versions.as_slice() {
+        [] => Ok((&derived.semantics, None)),
+        [only] if only.effective_to.is_none() => Ok((
+            &only.semantics,
+            Some(RuleCommencement {
+                derived: derived.name.clone(),
+                effective_from: only.effective_from,
+            }),
+        )),
+        _ => Err(DenseCompileError::Unsupported(format!(
+            "versioned inlined derived formulas in `{}`; use generic API execution",
+            derived.name
+        ))),
+    }
+}
+
+fn named_aggregate_error(
+    function: &str,
+    relation: &str,
+    error: DenseCompileError,
+) -> DenseCompileError {
+    match error {
+        DenseCompileError::Unsupported(message) => DenseCompileError::Unsupported(format!(
+            "{message} (while compiling {function} over relation `{relation}`)"
+        )),
+        other => other,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1024,6 +1102,7 @@ impl DenseCompiledProgram {
             }
             CompiledScalarExpr::Ceil(value)
             | CompiledScalarExpr::Floor(value)
+            | CompiledScalarExpr::Commenced { value, .. }
             | CompiledScalarExpr::Round { value, .. } => {
                 self.scalar_reduces_over_periods(value, reduces)
             }
@@ -1082,7 +1161,10 @@ impl DenseCompiledProgram {
             CompiledJudgmentExpr::And(items) | CompiledJudgmentExpr::Or(items) => items
                 .iter()
                 .any(|item| self.judgment_reduces_over_periods(item, reduces)),
-            CompiledJudgmentExpr::Not(item) => self.judgment_reduces_over_periods(item, reduces),
+            CompiledJudgmentExpr::Not(item)
+            | CompiledJudgmentExpr::Commenced { value: item, .. } => {
+                self.judgment_reduces_over_periods(item, reduces)
+            }
         }
     }
 
@@ -1673,12 +1755,18 @@ impl<'a> DenseCompiler<'a> {
                 value,
                 where_clause,
             } => {
-                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
-                let value = self.compile_related_value(relation_index, value)?;
+                let function = extreme.call_name(where_clause.is_some());
+                let relation_index = self
+                    .relation(relation, *current_slot, *related_slot)
+                    .map_err(|error| named_aggregate_error(function, relation, error))?;
+                let value = self
+                    .compile_related_value(relation_index, value)
+                    .map_err(|error| named_aggregate_error(function, relation, error))?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
-                    .transpose()?;
+                    .transpose()
+                    .map_err(|error| named_aggregate_error(function, relation, error))?;
                 Ok(CompiledScalarExpr::ExtremeRelated {
                     extreme: *extreme,
                     relation: relation_index,
@@ -1694,12 +1782,17 @@ impl<'a> DenseCompiler<'a> {
                 value,
                 where_clause,
             } => {
-                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
-                let value = self.compile_related_value(relation_index, value)?;
+                let relation_index = self
+                    .relation(relation, *current_slot, *related_slot)
+                    .map_err(|error| named_aggregate_error("only", relation, error))?;
+                let value = self
+                    .compile_related_value(relation_index, value)
+                    .map_err(|error| named_aggregate_error("only", relation, error))?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
-                    .transpose()?;
+                    .transpose()
+                    .map_err(|error| named_aggregate_error("only", relation, error))?;
                 Ok(CompiledScalarExpr::OnlyRelated {
                     relation: relation_index,
                     relation_name: relation.clone(),
@@ -1842,8 +1935,14 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related judgment dependency `{name}`"
                     ))
                 })?;
-                if self.reads_current_record(relation_index, "predicate", name, &derived.entity)? {
-                    return match &derived.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(derived)?;
+                let compiled = if self.reads_current_record(
+                    relation_index,
+                    "predicate",
+                    name,
+                    &derived.entity,
+                )? {
+                    match semantics {
                         DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
                             Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
                                 compiler.compile_current_judgment_expr(
@@ -1858,21 +1957,31 @@ impl<'a> DenseCompiler<'a> {
                                 "where-clause predicates cannot reference scalar derived values (`{name}`)"
                             )))
                         }
-                    };
-                }
-                match &derived.semantics {
-                    DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
-                        compiler.related_rules.push(name.clone());
-                        let scope = compiler.membership_scope.take();
-                        let compiled = compiler.compile_related_predicate(relation_index, expr);
-                        compiler.membership_scope = scope;
-                        compiler.related_rules.pop();
-                        compiled
-                    }),
-                    DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
-                        "where-clause predicates cannot reference scalar derived values (`{name}`)"
-                    ))),
-                }
+                    }
+                } else {
+                    match semantics {
+                        DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
+                            compiler.related_rules.push(name.clone());
+                            let scope = compiler.membership_scope.take();
+                            let compiled = compiler.compile_related_predicate(relation_index, expr);
+                            compiler.membership_scope = scope;
+                            compiler.related_rules.pop();
+                            compiled
+                        }),
+                        DerivedSemantics::Scalar(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
+                                "where-clause predicates cannot reference scalar derived values (`{name}`)"
+                            )))
+                        }
+                    }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledRelatedJudgmentExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             JudgmentExpr::RelationMember {
                 relation,
@@ -1963,8 +2072,14 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related scalar dependency `{name}`"
                     ))
                 })?;
-                if self.reads_current_record(relation_index, "scalar", name, &derived.entity)? {
-                    return match &derived.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(derived)?;
+                let compiled = if self.reads_current_record(
+                    relation_index,
+                    "scalar",
+                    name,
+                    &derived.entity,
+                )? {
+                    match semantics {
                         DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
                             let value = compiler.compile_current_scalar_expr(
                                 name,
@@ -1985,28 +2100,38 @@ impl<'a> DenseCompiler<'a> {
                                 "related scalar expressions cannot reference judgment derived values (`{name}`)"
                             )))
                         }
-                    };
-                }
-                match &derived.semantics {
-                    DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
-                        compiler.related_rules.push(name.clone());
-                        let scope = compiler.membership_scope.take();
-                        let compiled = compiler.compile_related_scalar(relation_index, expr);
-                        compiler.membership_scope = scope;
-                        compiler.related_rules.pop();
-                        let value = compiled?;
-                        Ok(match derived.rounding {
-                            Some(rounding) => CompiledRelatedScalarExpr::Round {
-                                value: Box::new(value),
-                                rounding,
-                            },
-                            None => value,
-                        })
-                    }),
-                    DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
-                        "related scalar expressions cannot reference judgment derived values (`{name}`)"
-                    ))),
-                }
+                    }
+                } else {
+                    match semantics {
+                        DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
+                            compiler.related_rules.push(name.clone());
+                            let scope = compiler.membership_scope.take();
+                            let compiled = compiler.compile_related_scalar(relation_index, expr);
+                            compiler.membership_scope = scope;
+                            compiler.related_rules.pop();
+                            let value = compiled?;
+                            Ok(match derived.rounding {
+                                Some(rounding) => CompiledRelatedScalarExpr::Round {
+                                    value: Box::new(value),
+                                    rounding,
+                                },
+                                None => value,
+                            })
+                        }),
+                        DerivedSemantics::Judgment(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
+                                "related scalar expressions cannot reference judgment derived values (`{name}`)"
+                            )))
+                        }
+                    }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledRelatedScalarExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 Ok(CompiledRelatedScalarExpr::ParameterLookup {
@@ -2097,14 +2222,23 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { relation, .. }
-            | ScalarExpr::SumRelated { relation, .. }
-            | ScalarExpr::ExtremeRelated { relation, .. }
-            | ScalarExpr::OnlyRelated { relation, .. } => {
+            ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
                 )))
             }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                where_clause,
+                ..
+            } => Err(DenseCompileError::Unsupported(format!(
+                "{} over relation `{relation}` nested inside a related expression",
+                extreme.call_name(where_clause.is_some())
+            ))),
+            ScalarExpr::OnlyRelated { relation, .. } => Err(DenseCompileError::Unsupported(
+                format!("only over relation `{relation}` nested inside a related expression"),
+            )),
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a related expression",
                 kind.as_call_name()
@@ -2152,7 +2286,8 @@ impl<'a> DenseCompiler<'a> {
                         entity: dependency.entity.clone(),
                     });
                 }
-                match &dependency.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(dependency)?;
+                let compiled = match semantics {
                     DerivedSemantics::Scalar(expr) => self.inline_rule(name, |compiler| {
                         let value =
                             compiler.compile_current_scalar_expr(name, &dependency.entity, expr)?;
@@ -2167,7 +2302,14 @@ impl<'a> DenseCompiler<'a> {
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "scalar expression cannot reference judgment derived value (`{name}`)"
                     ))),
-                }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledScalarExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 Ok(CompiledScalarExpr::ParameterLookup {
@@ -2270,13 +2412,26 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { .. }
-            | ScalarExpr::SumRelated { .. }
-            | ScalarExpr::ExtremeRelated { .. }
-            | ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
-                "current-entity derived relation predicates cannot aggregate another relation"
-                    .to_string(),
-            )),
+            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
+                Err(DenseCompileError::Unsupported(
+                    "current-entity derived relation predicates cannot aggregate another relation"
+                        .to_string(),
+                ))
+            }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                where_clause,
+                ..
+            } => Err(DenseCompileError::Unsupported(format!(
+                "current-entity derived relation predicates cannot use {} over relation `{relation}`",
+                extreme.call_name(where_clause.is_some())
+            ))),
+            ScalarExpr::OnlyRelated { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "current-entity derived relation predicates cannot use only over relation `{relation}`"
+                )))
+            }
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a current-entity related expression",
                 kind.as_call_name()
@@ -2323,14 +2478,22 @@ impl<'a> DenseCompiler<'a> {
                         entity: dependency.entity.clone(),
                     });
                 }
-                match &dependency.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(dependency)?;
+                let compiled = match semantics {
                     DerivedSemantics::Judgment(expr) => self.inline_rule(name, |compiler| {
                         compiler.compile_current_judgment_expr(name, &dependency.entity, expr)
                     }),
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "judgment expression cannot reference scalar derived value (`{name}`)"
                     ))),
-                }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledJudgmentExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             JudgmentExpr::RelationMember { relation, .. } => Err(DenseCompileError::Unsupported(
                 format!("current-entity relation predicate `{relation}`"),
@@ -3428,6 +3591,12 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 RowErrors::new(),
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (values, formula_errors) = self.eval_scalar_expr(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledScalarExpr::Round { value, rounding } => {
                 eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
             }
@@ -3934,6 +4103,13 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     ) -> Flow<(Vec<bool>, RowErrors)> {
         let length = self.batch.relations[relation].related_count;
         match expr {
+            CompiledRelatedJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (values, formula_errors) =
+                    self.eval_related_predicate(relation, value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledRelatedJudgmentExpr::Literal(value) => {
                 Ok((vec![*value; length], RowErrors::new()))
             }
@@ -4007,6 +4183,13 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     ) -> Flow<DenseEval> {
         let length = self.batch.relations[relation].related_count;
         match expr {
+            CompiledRelatedScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (values, formula_errors) =
+                    self.resolve_related_scalar(relation, value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledRelatedScalarExpr::Literal(value) => Ok((
                 broadcast_scalar_literal::<N>(value, length),
                 RowErrors::new(),
@@ -4264,6 +4447,12 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 Ok((outcomes, errors))
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
+            CompiledJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (values, formula_errors) = self.eval_judgment_expr(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -4513,6 +4702,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((broadcast_scalar_literal::<N>(value, len), RowErrors::new()))
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
+            CompiledScalarExpr::Commenced { value, .. } => self.eval_scalar(value, mask),
             CompiledScalarExpr::Round { value, rounding } => {
                 eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
             }
@@ -4955,6 +5145,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((outcomes, errors))
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
+            CompiledJudgmentExpr::Commenced { value, .. } => self.eval_judgment(value, mask),
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -5020,6 +5211,7 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         }
         CompiledScalarExpr::Ceil(value)
         | CompiledScalarExpr::Floor(value)
+        | CompiledScalarExpr::Commenced { value, .. }
         | CompiledScalarExpr::Round { value, .. } => nested_over_periods_kind(value),
         CompiledScalarExpr::DateAddDays { date, days } => {
             nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
