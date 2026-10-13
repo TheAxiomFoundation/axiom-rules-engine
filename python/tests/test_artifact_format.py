@@ -136,7 +136,7 @@ def _request() -> CompiledExecutionRequest:
         queries=[
             ExecutionQuery(
                 entity_id="p1",
-                period=Period(period_kind="Year", start="2025-01-01", end="2025-12-31"),
+                period=Period(period_kind="tax_year", start="2025-01-01", end="2025-12-31"),
                 outputs=[],
             )
         ],
@@ -213,14 +213,17 @@ def compiled_artifacts(tmp_path: Path) -> tuple[Path, Path, CompiledProgram]:
     return format_3, format_2, compiled
 
 
-def _income_request() -> CompiledExecutionRequest:
+OUTPUT_ID = f"{TARGET}#format_test_tax"
+
+
+def _income_request(input_name: str) -> CompiledExecutionRequest:
     return CompiledExecutionRequest.model_validate(
         {
             "mode": "explain",
             "dataset": {
                 "inputs": [
                     {
-                        "name": "format_test_income",
+                        "name": input_name,
                         "entity": "Person",
                         "entity_id": "p1",
                         "interval": {"start": "2025-01-01", "end": "2025-12-31"},
@@ -231,8 +234,8 @@ def _income_request() -> CompiledExecutionRequest:
             "queries": [
                 {
                     "entity_id": "p1",
-                    "period": {"period_kind": "Year", "start": "2025-01-01", "end": "2025-12-31"},
-                    "outputs": ["format_test_tax"],
+                    "period": {"period_kind": "tax_year", "start": "2025-01-01", "end": "2025-12-31"},
+                    "outputs": [OUTPUT_ID],
                 }
             ],
         }
@@ -253,16 +256,19 @@ def test_compile_output_is_a_format_3_compiled_program(compiled_artifacts) -> No
 
 @needs_binary
 def test_the_client_runs_format_2_only_on_request(compiled_artifacts) -> None:
-    format_3, format_2, _ = compiled_artifacts
+    format_3, format_2, compiled = compiled_artifacts
+    # The interface names the input's request name.
+    (income,) = compiled.program.interface.inputs
+    request = _income_request(income.legal_id)
     engine = AxiomRulesEngine(binary_path=BINARY)
-    current = engine.execute_compiled(artifact_path=format_3, request=_income_request())
+    current = engine.execute_compiled(artifact_path=format_3, request=request)
     with pytest.raises(RuntimeError, match="is older than this engine"):
-        engine.execute_compiled(artifact_path=format_2, request=_income_request())
+        engine.execute_compiled(artifact_path=format_2, request=request)
     legacy = engine.execute_compiled(
-        artifact_path=format_2, request=_income_request(), accept_artifact_format=2
+        artifact_path=format_2, request=request, accept_artifact_format=2
     )
     assert legacy == current
-    assert Decimal(current.results[0].outputs["format_test_tax"].value.value) == 250
+    assert Decimal(current.results[0].outputs[OUTPUT_ID].value.value) == 250
 
 
 @needs_binary
