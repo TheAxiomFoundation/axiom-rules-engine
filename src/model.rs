@@ -250,6 +250,9 @@ pub enum MissingFacts {
 }
 
 /// A fact an evaluation reached and could not read.
+///
+/// Hidden, like [`MissingFacts`], until the #215 series lands.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Need {
     /// An input cell no record covers.
@@ -279,6 +282,9 @@ impl fmt::Display for Need {
 /// The facts an unknown result needs. A set, so it does not depend on
 /// evaluation or dataset order, and never empty: it is built from one need
 /// and grows only by union.
+///
+/// Hidden, like [`MissingFacts`], until the #215 series lands.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Needs(BTreeSet<Need>);
 
@@ -314,6 +320,9 @@ impl fmt::Display for Needs {
 /// result of a scalar or judgment evaluation everywhere, inside the
 /// interpreter and out of it; only an evaluation under
 /// [`MissingFacts::Indeterminate`] is ever `Indeterminate`.
+///
+/// Hidden, like [`MissingFacts`], until the #215 series lands.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Determination<T> {
     Determined(T),

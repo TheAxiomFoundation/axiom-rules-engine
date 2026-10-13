@@ -131,6 +131,8 @@ pub enum EvalError {
     },
     /// An evaluation under `MissingFacts::Indeterminate` ended unknown, at an
     /// entry point whose result cannot say so ([`Engine::evaluate_scalar`]).
+    /// Hidden, like the option, until the #215 series lands.
+    #[doc(hidden)]
     #[error("result is indeterminate: it needs {needs}")]
     Indeterminate { needs: Needs },
     #[error(
@@ -819,10 +821,12 @@ impl<'a> Engine<'a> {
         self.options.missing_facts == MissingFacts::Indeterminate
     }
 
+    // The names below are not links: until the #215 series lands all three
+    // are hidden from the docs, where a link would lead nowhere.
     /// The value of a scalar rule. A result that is indeterminate, which only
-    /// an engine built with [`Engine::with_options`] can reach, is
-    /// [`EvalError::Indeterminate`]; [`Engine::scalar_determination`] returns
-    /// it as a value.
+    /// an engine built with `Engine::with_options` can reach, is
+    /// `EvalError::Indeterminate`; `Engine::scalar_determination` returns it
+    /// as a value.
     pub fn evaluate_scalar(
         &mut self,
         derived_name: &str,
@@ -852,7 +856,9 @@ impl<'a> Engine<'a> {
     }
 
     /// The value of a scalar rule, or the inputs it needs when it is
-    /// indeterminate.
+    /// indeterminate. Hidden, like [`Engine::with_options`], until the #215
+    /// series lands.
+    #[doc(hidden)]
     pub fn scalar_determination(
         &mut self,
         derived_name: &str,
@@ -864,7 +870,9 @@ impl<'a> Engine<'a> {
     }
 
     /// The outcome of a judgment rule, or the inputs it needs when it is
-    /// unknown.
+    /// unknown. Hidden, like [`Engine::with_options`], until the #215 series
+    /// lands.
+    #[doc(hidden)]
     pub fn judgment_determination(
         &mut self,
         derived_name: &str,
@@ -1245,6 +1253,8 @@ impl<'a> Engine<'a> {
     }
 
     /// The needs of a rule evaluation that ended unknown, scalar or judgment.
+    /// Hidden, like [`Engine::with_options`], until the #215 series lands.
+    #[doc(hidden)]
     pub fn needs(&self, derived: &str, entity_id: &str, period: &Period) -> Option<Needs> {
         let key = CacheKey {
             derived: derived.to_string(),
