@@ -3446,6 +3446,16 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             relation,
             where_clause,
             ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
+            relation,
+            where_clause,
+            ..
         } => {
             if relation == alias {
                 *relation = relation_name.to_string();
@@ -3758,6 +3768,16 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             relation,
             where_clause,
             ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
+            relation,
+            where_clause,
+            ..
         } => {
             names.insert(relation.clone());
             if let Some(where_clause) = where_clause {
@@ -3957,6 +3977,18 @@ fn rewrite_scalar_relation_references(
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
             relation,
             value,
             where_clause,
@@ -4221,6 +4253,16 @@ fn scalar_uses_imported_derived(
             .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
             .unwrap_or(false),
         ScalarExprSpec::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
             value,
             where_clause,
             ..

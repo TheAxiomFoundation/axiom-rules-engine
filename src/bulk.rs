@@ -897,9 +897,10 @@ impl<'a> BulkEvaluator<'a> {
                 mask,
                 EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                self.eval_per_entity(expr, mask)
-            }
+            ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::OnlyRelated { .. } => self.eval_per_entity(expr, mask),
             // The fallback of a `match` without `_`: every row that reaches it
             // fails with explain's error, and any failure sends the request to
             // explain, which names the rule.

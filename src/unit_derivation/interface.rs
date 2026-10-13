@@ -202,6 +202,18 @@ impl<'a> PhaseTwoEngine<'a> {
                 current_slot,
                 where_clause,
                 ..
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                where_clause,
+                ..
             } => {
                 self.collect_relation_reasons(
                     relation,

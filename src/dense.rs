@@ -13,13 +13,13 @@ use thiserror::Error;
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::{
     ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
-    relation_member_outside_derived_relation,
+    decimal_tie_prefers, extreme_value_type_error, relation_member_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
-    ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
-    OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
-    ScalarExpr, ScalarValue,
+    ComparisonOp, DType, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
+    JudgmentOutcome, OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode,
+    SCALAR_ENTITY, ScalarExpr, ScalarValue,
 };
 
 #[derive(Clone, Debug)]
@@ -99,6 +99,11 @@ trait DenseNum: Copy + PartialOrd {
     /// `partial_cmp` made the sort's comparator inconsistent, which lets
     /// `sort_by` panic.
     fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering;
+    /// Whether `self` replaces an equal `other` as a `min`/`max` over related
+    /// entities, so the result does not depend on member order: explain's
+    /// rule for decimals (larger scale, then non-negative zero), and
+    /// non-negative zero for `f64`.
+    fn tie_prefers(&self, other: &Self) -> bool;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
 }
@@ -152,6 +157,10 @@ impl DenseNum for Decimal {
 
     fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.cmp(other)
+    }
+
+    fn tie_prefers(&self, other: &Self) -> bool {
+        decimal_tie_prefers(self, other)
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
@@ -237,6 +246,10 @@ impl DenseNum for f64 {
             (false, true) => std::cmp::Ordering::Less,
             (false, false) => self.total_cmp(other),
         }
+    }
+
+    fn tie_prefers(&self, other: &Self) -> bool {
+        !self.is_sign_negative() && other.is_sign_negative()
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
@@ -438,6 +451,23 @@ enum CompiledScalarExpr {
     },
     SumRelated {
         relation: usize,
+        value: Box<CompiledRelatedScalarExpr>,
+        predicate: Option<CompiledRelatedJudgmentExpr>,
+    },
+    /// `min`/`max` over related entities. `relation_name` is the relation as
+    /// the formula names it, for explain's errors: a derived relation's schema
+    /// is keyed to its chain's base relation.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: usize,
+        relation_name: String,
+        value: Box<CompiledRelatedScalarExpr>,
+        predicate: Option<CompiledRelatedJudgmentExpr>,
+    },
+    /// `only` over related entities; `relation_name` as for `ExtremeRelated`.
+    OnlyRelated {
+        relation: usize,
+        relation_name: String,
         value: Box<CompiledRelatedScalarExpr>,
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
@@ -1013,9 +1043,10 @@ impl DenseCompiledProgram {
                 self.scalar_reduces_over_periods(from, reduces)
                     || self.scalar_reduces_over_periods(to, reduces)
             }
-            CompiledScalarExpr::CountRelated { .. } | CompiledScalarExpr::SumRelated { .. } => {
-                false
-            }
+            CompiledScalarExpr::CountRelated { .. }
+            | CompiledScalarExpr::SumRelated { .. }
+            | CompiledScalarExpr::ExtremeRelated { .. }
+            | CompiledScalarExpr::OnlyRelated { .. } => false,
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -1623,22 +1654,55 @@ impl<'a> DenseCompiler<'a> {
                 where_clause,
             } => {
                 let relation_index = self.relation(relation, *current_slot, *related_slot)?;
-                let value = match value {
-                    RelatedValueRef::Input(name) => {
-                        let input_index = self.related_input(relation_index, name);
-                        CompiledRelatedScalarExpr::Input(input_index)
-                    }
-                    RelatedValueRef::Derived(name) => self.compile_related_scalar(
-                        relation_index,
-                        &ScalarExpr::Derived(name.clone()),
-                    )?,
-                };
+                let value = self.compile_related_value(relation_index, value)?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
                     .transpose()?;
                 Ok(CompiledScalarExpr::SumRelated {
                     relation: relation_index,
+                    value: Box::new(value),
+                    predicate,
+                })
+            }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
+                let value = self.compile_related_value(relation_index, value)?;
+                let predicate = where_clause
+                    .as_deref()
+                    .map(|inner| self.compile_related_predicate(relation_index, inner))
+                    .transpose()?;
+                Ok(CompiledScalarExpr::ExtremeRelated {
+                    extreme: *extreme,
+                    relation: relation_index,
+                    relation_name: relation.clone(),
+                    value: Box::new(value),
+                    predicate,
+                })
+            }
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
+                let value = self.compile_related_value(relation_index, value)?;
+                let predicate = where_clause
+                    .as_deref()
+                    .map(|inner| self.compile_related_predicate(relation_index, inner))
+                    .transpose()?;
+                Ok(CompiledScalarExpr::OnlyRelated {
+                    relation: relation_index,
+                    relation_name: relation.clone(),
                     value: Box::new(value),
                     predicate,
                 })
@@ -1850,6 +1914,23 @@ impl<'a> DenseCompiler<'a> {
         }
     }
 
+    /// The value an aggregation reads on each related row: the related input,
+    /// or the related rule inlined for the related rows.
+    fn compile_related_value(
+        &mut self,
+        relation_index: usize,
+        value: &RelatedValueRef,
+    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
+        match value {
+            RelatedValueRef::Input(name) => Ok(CompiledRelatedScalarExpr::Input(
+                self.related_input(relation_index, name),
+            )),
+            RelatedValueRef::Derived(name) => {
+                self.compile_related_scalar(relation_index, &ScalarExpr::Derived(name.clone()))
+            }
+        }
+    }
+
     fn compile_related_scalar(
         &mut self,
         relation_index: usize,
@@ -2016,7 +2097,10 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
+            ScalarExpr::CountRelated { relation, .. }
+            | ScalarExpr::SumRelated { relation, .. }
+            | ScalarExpr::ExtremeRelated { relation, .. }
+            | ScalarExpr::OnlyRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
                 )))
@@ -2186,12 +2270,13 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                Err(DenseCompileError::Unsupported(
-                    "current-entity derived relation predicates cannot aggregate another relation"
-                        .to_string(),
-                ))
-            }
+            ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
+                "current-entity derived relation predicates cannot aggregate another relation"
+                    .to_string(),
+            )),
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a current-entity related expression",
                 kind.as_call_name()
@@ -3431,6 +3516,27 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 value,
                 predicate,
             } => self.eval_sum_related(*relation, value, predicate.as_ref(), mask),
+            CompiledScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                relation_name,
+                value,
+                predicate,
+            } => self.eval_extreme_related(
+                *extreme,
+                (*relation, relation_name),
+                value,
+                predicate.as_ref(),
+                mask,
+            ),
+            CompiledScalarExpr::OnlyRelated {
+                relation,
+                relation_name,
+                value,
+                predicate,
+            } => {
+                self.eval_only_related((*relation, relation_name), value, predicate.as_ref(), mask)
+            }
             CompiledScalarExpr::NoMatch {
                 subject,
                 placeholder,
@@ -3666,6 +3772,158 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         }
         errors.absorb(stopped);
         Ok((N::into_column(totals), errors))
+    }
+
+    /// `min`/`max` over each root row's members, walked as `sum` walks them:
+    /// for each member (in batch order) the `where` clause and then the value,
+    /// so a root fails with its first failing member's error. Numbers compare
+    /// in mode `N` and dates chronologically; a boolean or text value is
+    /// explain's type error. A root left with no member fails with explain's
+    /// empty-aggregate error, which names the root entity kind where explain
+    /// names the id (dense rows carry none), as `MissingInput` does.
+    fn eval_extreme_related(
+        &mut self,
+        extreme: Extreme,
+        (relation, relation_name): (usize, &str),
+        value: &CompiledRelatedScalarExpr,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let function = extreme.call_name(predicate.is_some());
+        let (members, mut related_errors, mut errors) =
+            self.filtered_members(relation, predicate, mask)?;
+        let (values, value_errors) = self.resolve_related_scalar(relation, value, &members)?;
+        let live = members.without(&value_errors);
+        related_errors.absorb(value_errors);
+        let owners = Rc::clone(&self.batch.relations[relation].owners);
+        let row_count = self.batch.row_count;
+        let mut extremes = match &values {
+            DenseColumn::Date(dates) => Extremes::Dates {
+                values: dates,
+                best: vec![None; row_count],
+            },
+            DenseColumn::Bool(_) | DenseColumn::Text(_) => {
+                let found = if matches!(values, DenseColumn::Bool(_)) {
+                    "a boolean"
+                } else {
+                    "text"
+                };
+                related_errors.record_all(
+                    &live,
+                    &extreme_value_type_error(function, relation_name, found),
+                );
+                Extremes::Numbers {
+                    values: Vec::new(),
+                    best: vec![None; row_count],
+                }
+            }
+            numeric => Extremes::Numbers {
+                values: numeric_values::<N>(numeric, &live, &mut related_errors),
+                best: vec![None; row_count],
+            },
+        };
+        // Membership errors (already in `errors`) come before every member's;
+        // then a root takes its first failing member's error, in batch order.
+        // No member's value can fail the comparison itself, so that order is
+        // the whole of explain's.
+        for (failed, error) in related_errors.iter() {
+            errors.record(owners[failed], error.clone());
+        }
+        let live = live.without(&related_errors);
+        for related in live.rows() {
+            let owner = owners[related];
+            if !errors.contains(owner) {
+                extremes.take(extreme, owner, related);
+            }
+        }
+        let empty = |errors: &mut RowErrors, row: usize| {
+            errors.record(
+                row,
+                EvalError::EmptyRelatedAggregate {
+                    function,
+                    relation: relation_name.to_string(),
+                    entity_id: self.program.root_entity.clone(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                },
+            );
+        };
+        let column = match extremes {
+            Extremes::Numbers { best, .. } => {
+                let mut column = vec![N::ZERO; row_count];
+                for row in mask.without(&errors).rows() {
+                    match best[row] {
+                        Some(value) => column[row] = value,
+                        None => empty(&mut errors, row),
+                    }
+                }
+                N::into_column(column)
+            }
+            Extremes::Dates { best, .. } => {
+                let mut column = vec![NaiveDate::default(); row_count];
+                for row in mask.without(&errors).rows() {
+                    match best[row] {
+                        Some(value) => column[row] = value,
+                        None => empty(&mut errors, row),
+                    }
+                }
+                DenseColumn::Date(column)
+            }
+        };
+        Ok((column, errors))
+    }
+
+    /// `only` over each root row's members: the `where` clause for every
+    /// member, then the value of the one member a root selects. A root that
+    /// selects none or several fails with explain's error (naming the root
+    /// entity kind, as `eval_extreme_related` does) and reads no value. The
+    /// value keeps its column's type, as an input read does.
+    fn eval_only_related(
+        &mut self,
+        (relation, relation_name): (usize, &str),
+        value: &CompiledRelatedScalarExpr,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let (members, where_errors, mut errors) =
+            self.filtered_members(relation, predicate, mask)?;
+        errors.absorb(self.lift_errors(relation, &where_errors));
+        let owners = Rc::clone(&self.batch.relations[relation].owners);
+        let row_count = self.batch.row_count;
+        let mut counts = vec![0_usize; row_count];
+        let mut single = vec![0_usize; row_count];
+        for related in members.rows() {
+            counts[owners[related]] += 1;
+            single[owners[related]] = related;
+        }
+        let mut chosen = vec![false; self.batch.relations[relation].related_count];
+        for row in mask.without(&errors).rows() {
+            let error = match counts[row] {
+                1 => {
+                    chosen[single[row]] = true;
+                    continue;
+                }
+                0 => EvalError::NoRelatedEntity {
+                    relation: relation_name.to_string(),
+                    entity_id: self.program.root_entity.clone(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                },
+                count => EvalError::AmbiguousRelatedEntity {
+                    relation: relation_name.to_string(),
+                    entity_id: self.program.root_entity.clone(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                    count,
+                },
+            };
+            errors.record(row, error);
+        }
+        let chosen = RowMask::from_bits(chosen);
+        let (values, value_errors) = self.resolve_related_scalar(relation, value, &chosen)?;
+        let read = chosen.without(&value_errors);
+        errors.absorb(self.lift_errors(relation, &value_errors));
+        Ok((gather_to_owners(&values, &owners, &read, row_count), errors))
     }
 
     fn eval_related_predicate(
@@ -4384,6 +4642,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 N::into_column(vec![N::ZERO; len]),
                 "sum over a relation",
             )),
+            CompiledScalarExpr::ExtremeRelated { extreme, .. } => Ok(ambiguous(
+                N::into_column(vec![N::ZERO; len]),
+                match extreme {
+                    Extreme::Min => "min over a relation",
+                    Extreme::Max => "max over a relation",
+                },
+            )),
+            CompiledScalarExpr::OnlyRelated { .. } => Ok(ambiguous(
+                N::into_column(vec![N::ZERO; len]),
+                "only over a relation",
+            )),
         }
     }
 
@@ -4737,7 +5006,9 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::PeriodStart
         | CompiledScalarExpr::PeriodEnd
         | CompiledScalarExpr::CountRelated { .. }
-        | CompiledScalarExpr::SumRelated { .. } => None,
+        | CompiledScalarExpr::SumRelated { .. }
+        | CompiledScalarExpr::ExtremeRelated { .. }
+        | CompiledScalarExpr::OnlyRelated { .. } => None,
         CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),
         CompiledScalarExpr::Add(items)
         | CompiledScalarExpr::Max(items)
@@ -5143,6 +5414,95 @@ fn lookup_parameter_dense<N: DenseNum>(
             }
             N::into_column(values)
         }
+    }
+}
+
+/// The running `min`/`max` of each root row over its related rows' values:
+/// numbers in mode `N`, or dates.
+enum Extremes<'v, N: DenseNum> {
+    Numbers {
+        values: Vec<N>,
+        best: Vec<Option<N>>,
+    },
+    Dates {
+        values: &'v [NaiveDate],
+        best: Vec<Option<NaiveDate>>,
+    },
+}
+
+impl<N: DenseNum> Extremes<'_, N> {
+    /// Fold `related`'s value into `owner`'s extreme. Ties keep the first
+    /// unless `tie_prefers` says otherwise, so member order never shows.
+    fn take(&mut self, extreme: Extreme, owner: usize, related: usize) {
+        match self {
+            Self::Numbers { values, best } => {
+                let candidate = values[related];
+                best[owner] = Some(match best[owner] {
+                    Some(current)
+                        if !(extreme.improves(&candidate, &current)
+                            || (candidate == current && candidate.tie_prefers(&current))) =>
+                    {
+                        current
+                    }
+                    _ => candidate,
+                });
+            }
+            Self::Dates { values, best } => {
+                let candidate = values[related];
+                best[owner] = Some(match best[owner] {
+                    Some(current) if !extreme.improves(&candidate, &current) => current,
+                    _ => candidate,
+                });
+            }
+        }
+    }
+}
+
+/// A root-row column holding, for each related row of `rows`, its value of
+/// `values` at the root row that owns it. Rows of no related row hold the
+/// column type's default.
+fn gather_to_owners(
+    values: &DenseColumn,
+    owners: &[usize],
+    rows: &RowMask,
+    row_count: usize,
+) -> DenseColumn {
+    fn gather<T: Clone>(
+        values: &[T],
+        default: T,
+        owners: &[usize],
+        rows: &RowMask,
+        row_count: usize,
+    ) -> Vec<T> {
+        let mut gathered = vec![default; row_count];
+        for related in rows.rows() {
+            gathered[owners[related]] = values[related].clone();
+        }
+        gathered
+    }
+    match values {
+        DenseColumn::Bool(values) => {
+            DenseColumn::Bool(gather(values, false, owners, rows, row_count))
+        }
+        DenseColumn::Integer(values) => {
+            DenseColumn::Integer(gather(values, 0, owners, rows, row_count))
+        }
+        DenseColumn::Decimal(values) => {
+            DenseColumn::Decimal(gather(values, Decimal::ZERO, owners, rows, row_count))
+        }
+        DenseColumn::Float(values) => {
+            DenseColumn::Float(gather(values, 0.0, owners, rows, row_count))
+        }
+        DenseColumn::Text(values) => {
+            DenseColumn::Text(gather(values, String::new(), owners, rows, row_count))
+        }
+        DenseColumn::Date(values) => DenseColumn::Date(gather(
+            values,
+            NaiveDate::default(),
+            owners,
+            rows,
+            row_count,
+        )),
     }
 }
 

@@ -768,7 +768,7 @@ fn format_scalar_expression(
     program: &crate::model::Program,
     expr: &crate::model::ScalarExpr,
 ) -> String {
-    use crate::model::{RelatedValueRef, ScalarExpr};
+    use crate::model::{Extreme, RelatedValueRef, ScalarExpr};
     match expr {
         ScalarExpr::Literal(value) => format_scalar_value(value),
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
@@ -878,8 +878,35 @@ fn format_scalar_expression(
             related_slot,
             value,
             where_clause,
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
         } => format!(
-            "sum_related({}, {current_slot}, {related_slot}, {}{})",
+            "{}({}, {current_slot}, {related_slot}, {}{})",
+            match expr {
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Min,
+                    ..
+                } => "min_related",
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Max,
+                    ..
+                } => "max_related",
+                ScalarExpr::OnlyRelated { .. } => "only_related",
+                _ => "sum_related",
+            },
             json_string(relation),
             match value {
                 RelatedValueRef::Input(name) => format!("input({})", json_string(name)),

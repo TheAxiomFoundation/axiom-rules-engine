@@ -23,8 +23,9 @@ use thiserror::Error;
 
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
-    IndexedParameterSpec, JudgmentExprSpec, OverPeriodsKindSpec, ParameterVersionSpec, ProgramSpec,
-    RelatedValueRefSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec, UnitSpec,
+    ExtremeSpec, IndexedParameterSpec, JudgmentExprSpec, OverPeriodsKindSpec, ParameterVersionSpec,
+    ProgramSpec, RelatedValueRefSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
+    UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -1489,6 +1490,31 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 "{func}() requires at least one operand"
             )));
         }
+        // `min(relation.field)` / `max(relation.field)`: with a single
+        // relation field access argument these aggregate over the related
+        // entities. Every other form keeps its scalar meaning below.
+        Expr::Call { func, args }
+            if matches!(func.as_str(), "max" | "min")
+                && args.len() == 1
+                && relation_field_access(&args[0]).is_some() =>
+        {
+            let (relation, field) = relation_field_access(&args[0]).expect("checked by the guard");
+            let extreme = if func == "min" {
+                ExtremeSpec::Min
+            } else {
+                ExtremeSpec::Max
+            };
+            ctx.relations.borrow_mut().insert(relation.to_string());
+            let (current_slot, related_slot) = infer_slots(relation);
+            ScalarExprSpec::ExtremeRelated {
+                extreme,
+                relation: relation.to_string(),
+                current_slot,
+                related_slot,
+                value: related_value_ref(field, ctx),
+                where_clause: None,
+            }
+        }
         Expr::Call { func, args } => match func.as_str() {
             "max" => ScalarExprSpec::Max {
                 items: args
@@ -1653,6 +1679,28 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     "sum(...) requires a relation field access argument".to_string(),
                 ));
             }
+            // `only(relation.field)`: the field of the one related entity.
+            // Zero or several related entities fail at evaluation; it never
+            // reads a default.
+            "only" => {
+                if args.len() != 1 {
+                    return Err(FormulaError::lower("only takes 1 arg".to_string()));
+                }
+                let Some((relation, field)) = relation_field_access(&args[0]) else {
+                    return Err(FormulaError::lower(
+                        "only(...) requires a relation field access argument".to_string(),
+                    ));
+                };
+                ctx.relations.borrow_mut().insert(relation.to_string());
+                let (current_slot, related_slot) = infer_slots(relation);
+                ScalarExprSpec::OnlyRelated {
+                    relation: relation.to_string(),
+                    current_slot,
+                    related_slot,
+                    value: related_value_ref(field, ctx),
+                    where_clause: None,
+                }
+            }
             // Extension: filtered aggregation via named calls, because the
             // deployed DSL has no lambda / predicate syntax on sum/len. Each
             // takes a relation and a Boolean input field that the caller
@@ -1713,6 +1761,35 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     related_slot,
                     value,
                     where_clause: Some(Box::new(where_clause)),
+                }
+            }
+            //   min_where(relation, field, predicate_field)
+            //   max_where(relation, field, predicate_field)
+            //
+            // The extreme of `field` over the related entities for which the
+            // Boolean `predicate_field` holds, with `sum_where`'s argument
+            // forms and resolution.
+            "min_where" | "max_where" => {
+                if args.len() != 3 {
+                    return Err(FormulaError::lower(format!("{func} takes 3 args")));
+                }
+                let extreme = if func == "min_where" {
+                    ExtremeSpec::Min
+                } else {
+                    ExtremeSpec::Max
+                };
+                let relation = expect_var(&args[0], &format!("{func} arg 1"))?;
+                let field = expect_var(&args[1], &format!("{func} arg 2"))?;
+                let pred = expect_var(&args[2], &format!("{func} arg 3"))?;
+                ctx.relations.borrow_mut().insert(relation.clone());
+                let (current_slot, related_slot) = infer_slots(&relation);
+                ScalarExprSpec::ExtremeRelated {
+                    extreme,
+                    relation,
+                    current_slot,
+                    related_slot,
+                    value: related_value_ref(&field, ctx),
+                    where_clause: Some(Box::new(related_predicate(pred, ctx))),
                 }
             }
             // Any other `*_over_periods` name is an unrecognized reduction, not a
@@ -1782,6 +1859,46 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
     })
 }
 
+/// The relation and field of a `relation.field` argument, or `None` for any
+/// other form.
+fn relation_field_access(e: &Expr) -> Option<(&str, &str)> {
+    match e {
+        Expr::FieldAccess { obj, field } => match obj.as_ref() {
+            Expr::Var(relation) => Some((relation.as_str(), field.as_str())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A related entity's field as an aggregation reads it: its derived rule when
+/// one has that name, else its input.
+fn related_value_ref(field: &str, ctx: &LowerCtx) -> RelatedValueRefSpec {
+    if ctx.derived.contains(field) {
+        RelatedValueRefSpec::Derived {
+            name: field.to_string(),
+        }
+    } else {
+        RelatedValueRefSpec::Input {
+            name: field.to_string(),
+        }
+    }
+}
+
+/// A `*_where` predicate on the related entity: its derived judgment when one
+/// has that name, else its Boolean input compared with `true`.
+fn related_predicate(pred: String, ctx: &LowerCtx) -> JudgmentExprSpec {
+    if ctx.derived.contains(&pred) {
+        JudgmentExprSpec::Derived { name: pred }
+    } else {
+        JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::Input { name: pred }),
+            op: ComparisonOpSpec::Eq,
+            right: Box::new(lit_bool_spec(true)),
+        }
+    }
+}
+
 fn expect_var(e: &Expr, ctx: &str) -> Result<String, FormulaError> {
     match e {
         Expr::Var(v) => Ok(v.clone()),
@@ -1843,7 +1960,8 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
         // Don't descend into:
         //   * Comparisons (operands compare by their own type)
         //   * ParameterLookup index (always Integer)
-        //   * CountRelated / SumRelated (aggregators)
+        //   * CountRelated / SumRelated / ExtremeRelated / OnlyRelated
+        //     (aggregators)
         //   * Input / Derived / PeriodStart/End / DateAddDays / DaysBetween
         _ => {}
     }

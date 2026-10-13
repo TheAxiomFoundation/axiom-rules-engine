@@ -2220,6 +2220,16 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             value,
             where_clause,
             ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
+            value,
+            where_clause,
+            ..
         } => {
             visit(Ref::Aggregate);
             match value {
@@ -4098,6 +4108,9 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::CountRelated { .. }
+        // Added after #201: no earlier engine listed a blocker for them.
+        | ScalarExprSpec::ExtremeRelated { .. }
+        | ScalarExprSpec::OnlyRelated { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => 0,
         ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),
