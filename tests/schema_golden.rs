@@ -13,6 +13,10 @@
 //!   RuleSpec fixture to a `CompiledProgramArtifact` and validates the actual
 //!   serialized bytes against the derived artifact schema — the round-trip that
 //!   proves the schema matches what the engine emits.
+//!
+//! The derived artifact schema is `compiled-artifact.v3`. The v2 and v1
+//! schemas are frozen archives; format-2 artifacts are checked against the v2
+//! archive and the format-2 compatibility loader.
 
 #![cfg(feature = "schema")]
 
@@ -21,8 +25,57 @@ use std::path::PathBuf;
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::schema::{all_schemas, to_pretty_string};
 
+/// The derived schema for the format the engine writes.
+const CURRENT_ARTIFACT_SCHEMA: &str = "compiled-artifact.v3.schema.json";
+/// The frozen schema for format 2, which the compatibility loader reads.
+const FORMAT_2_ARTIFACT_SCHEMA: &str = "compiled-artifact.v2.schema.json";
+
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas")
+}
+
+fn published_schema(file_name: &str) -> serde_json::Value {
+    all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == file_name)
+        .unwrap_or_else(|| panic!("{file_name} is published"))
+        .schema
+}
+
+fn validator(file_name: &str) -> jsonschema::Validator {
+    jsonschema::draft7::new(&published_schema(file_name))
+        .unwrap_or_else(|error| panic!("{file_name} compiles: {error}"))
+}
+
+fn schema_errors(validator: &jsonschema::Validator, value: &serde_json::Value) -> Vec<String> {
+    validator
+        .iter_errors(value)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect()
+}
+
+/// The in-repo fixture the artifact-schema tests compile.
+fn compiled_fixture() -> CompiledProgramArtifact {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
+    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
+    CompiledProgramArtifact::from_rulespec_str(&source).expect("fixture compiles to an artifact")
+}
+
+/// The format-2 artifact of the same program, as engines before format 3
+/// wrote it: format 3 without `engine_build`, `source_closure` and
+/// `program.interface`, stamped 2.
+fn as_format_2(artifact: &CompiledProgramArtifact) -> serde_json::Value {
+    let mut value = serde_json::to_value(artifact).expect("artifact serializes");
+    let object = value.as_object_mut().unwrap();
+    object.remove("engine_build");
+    object.remove("source_closure");
+    object.insert("artifact_format_version".to_string(), serde_json::json!(2));
+    value["program"]
+        .as_object_mut()
+        .unwrap()
+        .remove("interface");
+    value
 }
 
 #[cfg(feature = "unit-derivation")]
@@ -88,21 +141,89 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
         .expect("fixture compiles to an artifact");
     let artifact_json = serde_json::to_value(&artifact).expect("artifact serializes to JSON");
 
-    let schema_value = all_schemas()
-        .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
-        .expect("artifact schema is published")
-        .schema;
-    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
-
-    let errors: Vec<String> = validator
-        .iter_errors(&artifact_json)
-        .map(|error| format!("{} at {}", error, error.instance_path()))
-        .collect();
+    let errors = schema_errors(&validator(CURRENT_ARTIFACT_SCHEMA), &artifact_json);
     assert!(
         errors.is_empty(),
         "compiled artifact did not validate against its own schema:\n{}",
         errors.join("\n")
+    );
+
+    // The same module under a canonical target, so its source closure names
+    // the module rather than an originless root.
+    struct OneModule(String);
+    impl axiom_rules_engine::source::ModuleSource for OneModule {
+        fn load(
+            &self,
+            target: &str,
+        ) -> Result<Option<String>, axiom_rules_engine::source::SourceError> {
+            Ok((target == "uk:legislation/uksi/2013/376").then(|| self.0.clone()))
+        }
+    }
+    let targeted = CompiledProgramArtifact::from_rulespec_with_source(
+        "uk:legislation/uksi/2013/376",
+        &OneModule(source),
+    )
+    .expect("fixture compiles under a canonical target");
+    let targeted = serde_json::to_value(&targeted).unwrap();
+    assert_eq!(
+        targeted["source_closure"]["root"],
+        "uk:legislation/uksi/2013/376"
+    );
+    let errors = schema_errors(&validator(CURRENT_ARTIFACT_SCHEMA), &targeted);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+/// The artifact's schema is the wire struct's, so the generated schema
+/// describes the interface block at `program.interface`, required and never
+/// null, beside the unchanged `ProgramSpec` fields.
+#[test]
+fn artifact_schema_describes_the_interface_at_program_interface() {
+    let schema = published_schema(CURRENT_ARTIFACT_SCHEMA);
+    assert_eq!(
+        schema["properties"]["program"]["$ref"],
+        "#/$defs/ArtifactProgram"
+    );
+    let program = &schema["$defs"]["ArtifactProgram"];
+    assert_eq!(
+        program["properties"]["interface"]["$ref"],
+        "#/$defs/ProgramInterface"
+    );
+    assert!(
+        program["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("interface")),
+        "{program}"
+    );
+    for field in ["module", "units", "relations", "parameters", "derived"] {
+        assert!(
+            program["properties"].get(field).is_some(),
+            "ArtifactProgram lists `{field}`"
+        );
+    }
+    for definition in [
+        "ProgramInterface",
+        "InterfaceEntity",
+        "EntityInstances",
+        "InterfaceInput",
+        "InterfaceRelation",
+        "RelationProvenance",
+        "RelationReads",
+        "EngineBuild",
+        "SourceClosure",
+        "SourceClosureModule",
+    ] {
+        assert!(
+            schema["$defs"].get(definition).is_some(),
+            "the schema defines `{definition}`"
+        );
+    }
+    // The raw request's program is the `ProgramSpec`, which has no interface.
+    let request = published_schema("execution-request.v1.schema.json");
+    assert!(
+        request["$defs"]["ProgramSpec"]["properties"]
+            .get("interface")
+            .is_none()
     );
 }
 
@@ -191,8 +312,11 @@ fn artifact_schema_accepts_the_annotated_divergences() {
     // (`money` for decimal), decimal values as both a bare integer and a
     // string, a date value, exact module source metadata, and a
     // judgment/comparison expression.
-    // If any of these regress, this artifact stops validating.
-    let artifact = serde_json::json!({
+    // If any of these regress, this artifact stops validating. It is written
+    // as format 2 and checked against the frozen v2 schema, then given format
+    // 3's additions (an unknown build, and the interface this engine derives
+    // from the program) and checked against the derived v3 schema.
+    let format_2 = serde_json::json!({
         "artifact_format_version": 2,
         "engine_version": "0.1.0",
         "program": {
@@ -244,21 +368,26 @@ fn artifact_schema_accepts_the_annotated_divergences() {
             "input_catalog": []}
     });
 
-    let schema_value = all_schemas()
-        .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
-        .expect("artifact schema is published")
-        .schema;
-    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
-    let errors: Vec<String> = validator
-        .iter_errors(&artifact)
-        .map(|error| format!("{} at {}", error, error.instance_path()))
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "annotated-divergence artifact did not validate:\n{}",
-        errors.join("\n")
-    );
+    let program: axiom_rules_engine::spec::ProgramSpec =
+        serde_json::from_value(format_2["program"].clone()).expect("the program deserializes");
+    let interface =
+        axiom_rules_engine::interface::derive_interface(&program).expect("the program derives");
+    let mut format_3 = format_2.clone();
+    format_3["artifact_format_version"] = serde_json::json!(3);
+    format_3["engine_build"] = serde_json::json!({"commit": null, "dirty": null});
+    format_3["program"]["interface"] = serde_json::to_value(interface).unwrap();
+
+    for (schema, artifact) in [
+        (FORMAT_2_ARTIFACT_SCHEMA, &format_2),
+        (CURRENT_ARTIFACT_SCHEMA, &format_3),
+    ] {
+        let errors = schema_errors(&validator(schema), artifact);
+        assert!(
+            errors.is_empty(),
+            "annotated-divergence artifact did not validate against {schema}:\n{}",
+            errors.join("\n")
+        );
+    }
 
     // And the reverse: everything the schema advertises for `dtype` must
     // actually deserialize into a DTypeSpec, so schema and serde agree.
@@ -273,25 +402,19 @@ fn artifact_schema_accepts_the_annotated_divergences() {
     }
 }
 
+/// Every case here is refused by the derived schema and by the default
+/// loader alike.
 #[test]
 fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
-    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
-    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
-        .expect("fixture compiles to an artifact");
-    let base = serde_json::to_value(&artifact).expect("artifact serializes");
-    let schema = all_schemas()
-        .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
-        .expect("artifact schema is published")
-        .schema;
-    let validator = jsonschema::draft7::new(&schema).expect("artifact schema compiles");
+    let base = serde_json::to_value(compiled_fixture()).expect("artifact serializes");
+    let validator = validator(CURRENT_ARTIFACT_SCHEMA);
 
     let mut cases = Vec::new();
-    let mut v1 = base.clone();
-    v1["artifact_format_version"] = serde_json::json!(1);
-    cases.push(v1);
+    for version in [1, 2, 4] {
+        let mut stamped = base.clone();
+        stamped["artifact_format_version"] = serde_json::json!(version);
+        cases.push(stamped);
+    }
 
     for verification in [
         serde_json::json!({"corpus_citation_path": ""}),
@@ -342,14 +465,90 @@ fn artifact_schema_rejects_wrong_version_and_invalid_provenance() {
         cases.push(empty);
     }
 
-    let mut removed_extends = base;
-    removed_extends["program"]["extends"] = serde_json::json!("us:policies/base");
-    cases.push(removed_extends);
+    // Format 3 refuses the removed composition directive in any form, a
+    // null included.
+    for extends in [
+        serde_json::json!("us:policies/base"),
+        serde_json::Value::Null,
+    ] {
+        let mut removed_extends = base.clone();
+        removed_extends["program"]["extends"] = extends;
+        cases.push(removed_extends);
+    }
+
+    // The keys format 3 closes or requires, and the identities' spelling.
+    let mut unknown_key = base.clone();
+    unknown_key["unexpected"] = serde_json::json!(true);
+    cases.push(unknown_key);
+    for key in ["engine_version", "engine_build"] {
+        for absent in [false, true] {
+            let mut missing = base.clone();
+            if absent {
+                missing.as_object_mut().unwrap().remove(key);
+            } else {
+                missing[key] = serde_json::Value::Null;
+            }
+            cases.push(missing);
+        }
+    }
+    let mut null_closure = base.clone();
+    null_closure["source_closure"] = serde_json::Value::Null;
+    cases.push(null_closure);
+    for absent in [false, true] {
+        let mut missing = base.clone();
+        if absent {
+            missing["program"]
+                .as_object_mut()
+                .unwrap()
+                .remove("interface");
+        } else {
+            missing["program"]["interface"] = serde_json::Value::Null;
+        }
+        cases.push(missing);
+    }
+    let mut no_catalog = base.clone();
+    no_catalog["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("input_catalog");
+    cases.push(no_catalog);
+    for build in [
+        serde_json::json!({"commit": "5D63E8F3", "dirty": false}),
+        serde_json::json!({"commit": null, "dirty": true}),
+        serde_json::json!({"commit": null}),
+        serde_json::json!({"commit": null, "dirty": null, "host": "ci"}),
+    ] {
+        let mut wrong = base.clone();
+        wrong["engine_build"] = build;
+        cases.push(wrong);
+    }
+    for (pointer, replacement) in [
+        ("/source_closure/digest", serde_json::json!("sha256:short")),
+        ("/source_closure/modules/0/sha256", serde_json::json!("ABC")),
+        ("/source_closure/root", serde_json::json!("uksi/2013/376")),
+    ] {
+        let mut wrong = base.clone();
+        let Some(slot) = wrong.pointer_mut(pointer) else {
+            continue;
+        };
+        *slot = replacement;
+        cases.push(wrong);
+    }
+    let mut no_template = base.clone();
+    no_template["program"]["interface"]["entities"][0]
+        .as_object_mut()
+        .expect("the fixture's interface lists an entity")
+        .remove("id_template");
+    cases.push(no_template);
 
     for case in cases {
         assert!(
             !validator.is_valid(&case),
-            "invalid v2 artifact must fail schema: {case}"
+            "invalid format-3 artifact must fail schema: {case}"
+        );
+        assert!(
+            CompiledProgramArtifact::from_json_str(&case.to_string()).is_err(),
+            "the loader must refuse what the schema refuses: {case}"
         );
     }
 }
@@ -370,28 +569,12 @@ fn first_max_expr(value: &mut serde_json::Value) -> Option<&mut serde_json::Valu
 
 #[test]
 fn v1_and_v2_artifact_schemas_reject_the_other_generation() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
-    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
-    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
-        .expect("fixture compiles to a v2 artifact");
-    let v2_artifact = serde_json::to_value(&artifact).expect("artifact serializes");
+    let v2_artifact = as_format_2(&compiled_fixture());
     let mut v1_artifact = v2_artifact.clone();
     v1_artifact["artifact_format_version"] = serde_json::json!(1);
 
-    let schemas = all_schemas();
-    let v1_schema = schemas
-        .iter()
-        .find(|named| named.file_name == "compiled-artifact.v1.schema.json")
-        .expect("archived v1 schema is published");
-    let v2_schema = schemas
-        .iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
-        .expect("current v2 schema is published");
-    let v1_validator =
-        jsonschema::draft7::new(&v1_schema.schema).expect("v1 artifact schema compiles");
-    let v2_validator =
-        jsonschema::draft7::new(&v2_schema.schema).expect("v2 artifact schema compiles");
+    let v1_validator = validator("compiled-artifact.v1.schema.json");
+    let v2_validator = validator(FORMAT_2_ARTIFACT_SCHEMA);
 
     assert!(v1_validator.is_valid(&v1_artifact));
     assert!(v2_validator.is_valid(&v2_artifact));
@@ -399,22 +582,67 @@ fn v1_and_v2_artifact_schemas_reject_the_other_generation() {
     assert!(!v2_validator.is_valid(&v1_artifact));
 }
 
+/// The v3 schema and the frozen v1 and v2 schemas each refuse the other
+/// generations' artifacts, as the loaders do: a format-2 artifact is the
+/// format-3 one without its three additions, stamped 2.
+#[test]
+fn v3_artifact_schema_and_the_archives_reject_each_others_generation() {
+    let artifact = compiled_fixture();
+    let v3_artifact = serde_json::to_value(&artifact).unwrap();
+    let v2_artifact = as_format_2(&artifact);
+    let mut v1_artifact = v2_artifact.clone();
+    v1_artifact["artifact_format_version"] = serde_json::json!(1);
+    // Format 3 with only its stamp lowered, and format 2 with only its stamp
+    // raised.
+    let mut v3_stamped_2 = v3_artifact.clone();
+    v3_stamped_2["artifact_format_version"] = serde_json::json!(2);
+    let mut v2_stamped_3 = v2_artifact.clone();
+    v2_stamped_3["artifact_format_version"] = serde_json::json!(3);
+
+    let v1 = validator("compiled-artifact.v1.schema.json");
+    let v2 = validator(FORMAT_2_ARTIFACT_SCHEMA);
+    let v3 = validator(CURRENT_ARTIFACT_SCHEMA);
+    assert!(v3.is_valid(&v3_artifact));
+    assert!(v2.is_valid(&v2_artifact));
+    for (validator, name, refused) in [
+        (
+            &v3,
+            "v3",
+            vec![&v2_artifact, &v1_artifact, &v3_stamped_2, &v2_stamped_3],
+        ),
+        (&v2, "v2", vec![&v3_artifact, &v2_stamped_3]),
+        (&v1, "v1", vec![&v3_artifact]),
+    ] {
+        for artifact in refused {
+            assert!(
+                !validator.is_valid(artifact),
+                "the {name} schema must refuse {artifact}"
+            );
+        }
+    }
+    for artifact in [&v2_artifact, &v3_stamped_2, &v2_stamped_3] {
+        CompiledProgramArtifact::from_json_str(&artifact.to_string())
+            .expect_err("the default loader reads only a real format-3 artifact");
+    }
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&v2_artifact.to_string())
+        .expect("the compatibility loader reads the format-2 artifact");
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&v3_stamped_2.to_string())
+        .expect_err("the compatibility loader refuses format 3's additions");
+}
+
 /// The schema and the loader must agree on the v0.1-maintenance serialization.
 ///
 /// Engines on that line write `"extends": null` unconditionally and predate
-/// `metadata.input_catalog`; every published artifact has this shape. The
-/// loader accepts it, so a schema-first consumer must reach the same verdict —
-/// a schema that forbids the `extends` KEY (rather than a non-null value)
-/// rejects every artifact the engine loads, which is the compat lie this
-/// change set exists to remove.
+/// `metadata.input_catalog`; every published artifact has this shape. It is
+/// format 2, so the format-2 compatibility loader accepts it, and a
+/// schema-first consumer reading the frozen v2 schema must reach the same
+/// verdict: a schema that forbids the `extends` KEY (rather than a non-null
+/// value) rejects every artifact the engine loads, which is the compat lie
+/// this change set exists to remove. The default loader and the v3 schema
+/// both refuse it.
 #[test]
 fn artifact_schema_and_loader_agree_on_maintenance_line_artifacts() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/rulespec/uksi/2013/376/rules.yaml");
-    let source = std::fs::read_to_string(&fixture).expect("fixture is readable");
-    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
-        .expect("fixture compiles to an artifact");
-    let mut value = serde_json::to_value(&artifact).expect("artifact serializes");
+    let mut value = as_format_2(&compiled_fixture());
     // Reshape to what a v0.1-maintenance engine emits.
     value["program"]["extends"] = serde_json::Value::Null;
     value["metadata"]
@@ -422,24 +650,22 @@ fn artifact_schema_and_loader_agree_on_maintenance_line_artifacts() {
         .expect("metadata is an object")
         .remove("input_catalog");
 
-    let schema_value = all_schemas()
-        .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
-        .expect("artifact schema is published")
-        .schema;
-    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
-
-    let errors: Vec<String> = validator
-        .iter_errors(&value)
-        .map(|error| format!("{} at {}", error, error.instance_path()))
-        .collect();
+    let validator = validator(FORMAT_2_ARTIFACT_SCHEMA);
+    let errors = schema_errors(&validator, &value);
     assert!(
         errors.is_empty(),
         "schema rejects the maintenance-line shape the loader accepts:\n{}",
         errors.join("\n")
     );
-    CompiledProgramArtifact::from_json_str(&value.to_string())
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect("the loader accepts the same shape the schema accepts");
+
+    assert!(
+        !self::validator(CURRENT_ARTIFACT_SCHEMA).is_valid(&value),
+        "the v3 schema refuses the format-2 shape"
+    );
+    CompiledProgramArtifact::from_json_str(&value.to_string())
+        .expect_err("the default loader refuses the format-2 shape");
 
     // And both refuse a real (non-null) composition directive.
     value["program"]["extends"] = serde_json::json!("us:policies/base");
@@ -447,6 +673,6 @@ fn artifact_schema_and_loader_agree_on_maintenance_line_artifacts() {
         validator.iter_errors(&value).next().is_some(),
         "schema must reject a non-null extends"
     );
-    CompiledProgramArtifact::from_json_str(&value.to_string())
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&value.to_string())
         .expect_err("the loader must reject a non-null extends");
 }

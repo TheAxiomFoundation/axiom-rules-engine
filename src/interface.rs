@@ -34,6 +34,7 @@ pub struct ProgramInterface {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = require_every_key))]
 #[serde(deny_unknown_fields)]
 pub struct InterfaceEntity {
     pub kind: String,
@@ -48,6 +49,7 @@ pub struct InterfaceEntity {
 /// Where a kind's instances come from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = require_every_key))]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EntityInstances {
     /// The caller supplies the instances.
@@ -65,6 +67,7 @@ pub enum EntityInstances {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = require_every_key))]
 #[serde(deny_unknown_fields)]
 pub struct InterfaceInput {
     /// The runtime slot.
@@ -122,6 +125,7 @@ pub enum ValuesBasis {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = require_every_key))]
 #[serde(deny_unknown_fields)]
 pub struct InterfaceRelation {
     pub name: String,
@@ -166,6 +170,42 @@ pub struct RelationReads {
     pub rules: Vec<String>,
     /// Relation names.
     pub relations: Vec<String>,
+}
+
+/// The schema of an object whose every key must be written, a nullable one
+/// included ([`required_nullable`]): every property is required, in each
+/// variant of a tagged enum too. The property schemas keep their null type.
+#[cfg(feature = "schema")]
+pub(crate) fn require_every_key(schema: &mut schemars::Schema) {
+    fn require(object: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(serde_json::Value::Array(variants)) = object.get_mut("oneOf") {
+            for variant in variants {
+                if let Some(variant) = variant.as_object_mut() {
+                    require(variant);
+                }
+            }
+        }
+        let Some(keys) = object
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        if let serde_json::Value::Array(required) = object
+            .entry("required")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        {
+            for key in keys {
+                if !required.iter().any(|existing| existing == key.as_str()) {
+                    required.push(serde_json::Value::String(key));
+                }
+            }
+        }
+    }
+    if let Some(object) = schema.as_object_mut() {
+        require(object);
+    }
 }
 
 /// A key whose value may be null but must be written: absence is an error.

@@ -263,6 +263,10 @@ pub struct CompiledProgramArtifact {
 /// differ here write artifacts that differ in this field alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
 #[serde(deny_unknown_fields)]
 pub struct EngineBuild {
     /// The commit the engine was built from (40 lowercase hex digits), or
@@ -329,6 +333,10 @@ impl std::fmt::Display for EngineBuild {
 /// fields after compilation, is not in it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
 #[serde(deny_unknown_fields)]
 pub struct SourceClosure {
     /// The root module's canonical target; null for an originless root (an
@@ -345,6 +353,10 @@ pub struct SourceClosure {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
 #[serde(deny_unknown_fields)]
 pub struct SourceClosureModule {
     /// The module's canonical target; null for an originless root.
@@ -586,10 +598,11 @@ pub struct CompiledProgramMetadata {
     /// the artifact and keeps this value unchanged, with a
     /// `stale_fast_path_metadata` diagnostic.
     pub fast_path: FastPathMetadata,
-    /// Defaulted only so an artifact that predates the catalog can be read at
-    /// all. Absence is filled from the embedded program in `from_json_source`;
-    /// a catalog that IS present is still checked against the program, so an
-    /// explicit `[]` remains a mismatch rather than a way to skip the check.
+    /// Required in format 3. Defaulted only so a format-2 artifact that
+    /// predates the catalog can be read at all: the format-2 compatibility
+    /// loader fills an absent one from the embedded program. A catalog that
+    /// IS present is still checked against the program, so an explicit `[]`
+    /// remains a mismatch rather than a way to skip the check.
     #[serde(default)]
     pub input_catalog: Vec<CompiledInputCatalogEntry>,
 }
