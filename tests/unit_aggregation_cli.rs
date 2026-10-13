@@ -86,9 +86,10 @@ fn write_request_tolerates_only_a_broken_pipe() {
 /// The fixture pins `plan_digest` and `trace_root`. Both commit to the SHA-256
 /// of the whole serialized source artifact, which records `engine_version` and
 /// the unit table seeded into this program, so a version cut or a newly seeded
-/// currency moves both digests while every family value stays the same. The
-/// source artifact also records `engine_build`, which differs from build to
-/// build, so the test writes it as a build that could not know its commit
+/// currency moves both digests while every family value stays the same. From
+/// format 3 the source artifact also carries its `program.interface` and
+/// `source_closure`, and `engine_build`, which differs from build to build, so
+/// the test writes it as a build that could not know its commit
 /// (`{"commit": null, "dirty": null}`) before aggregating. They
 /// also hash inputs the result never shows, such as the canonical plan
 /// (citations included), the request, and the constitution trace. On drift the
@@ -379,6 +380,146 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
     assert!(unknown.status.success());
     let unknown: serde_json::Value = serde_json::from_slice(&unknown.stdout).unwrap();
     assert_eq!(unknown["families"]["status"], "indeterminate");
+
+    fs::remove_dir_all(&temp).expect("remove test-owned directory");
+}
+
+/// The artifact the previous engine wrote, whose embedded artifacts are both
+/// format 2; see `tests/fast_path_metadata.rs`.
+fn previous_engine_stage3() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/artifacts/nz_best_start_carer_sum.pre-lazy-fast-path.stage3.json")
+}
+
+const LEGACY_NOTICE: &str = "notice[legacy_artifact_format]";
+
+/// Format-2 embedded artifacts are read only on request. Without
+/// `--accept-artifact-format 2` both unit-aggregation commands refuse a
+/// format-2 artifact and name it the older side; with it they read the
+/// artifact unchanged through the format-2 compatibility loader and say so on
+/// stderr. The source digest is what the previous engine recorded, and the
+/// families are the ones the format-3 run produces.
+#[test]
+fn format_2_embedded_artifacts_load_only_with_accept_artifact_format() {
+    let temp = std::env::temp_dir().join(format!(
+        "axiom-stage3-legacy-cli-test-{}",
+        std::process::id()
+    ));
+    if temp.exists() {
+        fs::remove_dir_all(&temp).expect("remove stale test-owned directory");
+    }
+    fs::create_dir_all(&temp).expect("create test-owned directory");
+    let request = fs::read(fixture("nz_income_explorer_request.json")).unwrap();
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(previous_engine_stage3()).unwrap()).unwrap();
+    let expected: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture("nz_income_explorer_result.json")).unwrap())
+            .unwrap();
+    let previous = previous_engine_stage3();
+    let run = |artifact: &Path, accept: bool| {
+        let mut args = vec![
+            "run-unit-aggregation",
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--enable-experimental-unit-derivation",
+        ];
+        if accept {
+            args.extend(["--accept-artifact-format", "2"]);
+        }
+        run_with_stdin(&args, &request)
+    };
+
+    let refused = run(&previous, false);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("is older than this engine: it is artifact format 2")
+            && stderr.contains("--accept-artifact-format 2"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(LEGACY_NOTICE), "{stderr}");
+
+    let ran = run(&previous, true);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ran.stderr).contains(LEGACY_NOTICE));
+    let result: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(result["plan_digest"], stored["plan_digest"]);
+    assert_eq!(result["families"], expected["families"]);
+
+    // The previous engine's format-2 source artifact, compiled against.
+    let source_artifact = temp.join("source.v2.json");
+    fs::write(
+        &source_artifact,
+        serde_json::to_string_pretty(&stored["source_artifact"]).unwrap(),
+    )
+    .unwrap();
+    let output = temp.join("stage3.json");
+    let compile = |accept: bool| {
+        let mut command = engine();
+        command
+            .args(["compile-unit-aggregation", "--plan"])
+            .arg(fixture("nz_income_explorer_family.yaml"))
+            .arg("--source-artifact")
+            .arg(&source_artifact)
+            .arg("--output")
+            .arg(&output);
+        if accept {
+            command.args(["--accept-artifact-format", "2"]);
+        }
+        command.output().expect("compile aggregation artifact")
+    };
+    let refused = compile(false);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("is older than this engine"), "{stderr}");
+    assert!(!output.exists(), "a refused compile writes nothing");
+
+    let compiled = compile(true);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(String::from_utf8_lossy(&compiled.stderr).contains(LEGACY_NOTICE));
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(written["source_artifact"], stored["source_artifact"]);
+    assert_eq!(
+        written["source_artifact_digest"],
+        stored["source_artifact_digest"]
+    );
+    assert_eq!(
+        written["phase_two_artifact"]["artifact_format_version"],
+        serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION)
+    );
+    assert!(!run(&output, false).status.success());
+    let ran = run(&output, true);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(result["families"], expected["families"]);
+
+    for (value, refusal) in [
+        (Some("3"), "accepts only 2"),
+        (None, "missing `--accept-artifact-format` value"),
+    ] {
+        let mut args = vec![
+            "run-unit-aggregation",
+            "--enable-experimental-unit-derivation",
+            "--accept-artifact-format",
+        ];
+        args.extend(value);
+        let output = run_with_stdin(&args, &request);
+        assert!(!output.status.success(), "{value:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(refusal), "{value:?}: {stderr}");
+    }
 
     fs::remove_dir_all(&temp).expect("remove test-owned directory");
 }

@@ -687,7 +687,30 @@ impl CompiledAggregationArtifact {
                 "could not deserialize compiled artifact: {error}"
             ))
         })?;
-        validate_compiled_artifact(artifact, loading)
+        let artifact = validate_compiled_artifact(artifact, loading)?;
+        // Deserializing an embedded artifact drops what its loader refuses,
+        // such as a key format 3 does not have, so each also goes through
+        // that loader as written.
+        let written: serde_json::Value = serde_json::from_str(source).map_err(|error| {
+            UnitDerivationError::InvalidAggregationArtifact(format!(
+                "could not deserialize compiled artifact: {error}"
+            ))
+        })?;
+        for (key, role, format) in [
+            (
+                "source_artifact",
+                "source",
+                artifact.source_artifact.artifact_format_version,
+            ),
+            (
+                "phase_two_artifact",
+                "phase-two",
+                artifact.phase_two_artifact.artifact_format_version,
+            ),
+        ] {
+            load_embedded_json(&written[key].to_string(), format, role, loading)?;
+        }
+        Ok(artifact)
     }
 
     fn constitution_digest_bytes(&self) -> Result<[u8; 32], UnitDerivationError> {
@@ -923,10 +946,21 @@ fn load_embedded_artifact(
             "could not serialize embedded {role} artifact: {error}"
         ))
     })?;
-    let loaded = if loading.accept_legacy_format_2 && artifact.artifact_format_version == 2 {
-        crate::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(&source)
+    load_embedded_json(&source, artifact.artifact_format_version, role, loading)
+}
+
+/// [`load_embedded_artifact`] for an embedded artifact's JSON text, whose
+/// declared format is `format`.
+fn load_embedded_json(
+    source: &str,
+    format: u32,
+    role: &str,
+    loading: EmbeddedArtifactLoading,
+) -> Result<crate::compile::CompiledProgramArtifact, UnitDerivationError> {
+    let loaded = if loading.accept_legacy_format_2 && format == 2 {
+        crate::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(source)
     } else {
-        crate::compile::CompiledProgramArtifact::from_json_str(&source)
+        crate::compile::CompiledProgramArtifact::from_json_str(source)
     };
     loaded.map_err(|error| {
         UnitDerivationError::InvalidAggregationArtifact(format!(

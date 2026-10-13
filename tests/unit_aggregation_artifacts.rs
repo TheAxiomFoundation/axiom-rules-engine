@@ -184,3 +184,24 @@ fn the_previous_engines_stage3_artifact_loads_through_the_legacy_path() {
             .is_err()
     );
 }
+
+/// The embedded artifacts also go through their loader as written, so a key
+/// format 3 does not have, which deserialization alone would drop before the
+/// digest and content checks, is refused.
+#[test]
+fn an_embedded_artifact_with_a_key_its_loader_refuses_is_refused() {
+    let stage3 = compile_stage3(&source_artifact());
+    for (key, role) in [
+        ("source_artifact", "source"),
+        ("phase_two_artifact", "phase-two"),
+    ] {
+        let mut extra = stage3.clone();
+        extra[key]["unexpected"] = json!(true);
+        let error = load(&extra).expect_err(key);
+        assert!(
+            error.contains(&format!("production {role} artifact validation failed"))
+                && error.contains("unknown top-level key `unexpected`"),
+            "{key}: {error}"
+        );
+    }
+}
