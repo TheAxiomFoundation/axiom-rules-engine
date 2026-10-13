@@ -187,46 +187,52 @@ Each PR states these and adds property and differential tests.
 
 Synthetic engine fixtures. The pilot modules come from the encoder.
 
-**7 CFR 273.1(b)(1) chains.** The household as a closure:
+**7 CFR 273.1(b)(1) chains.** The household as a closure, replacing the
+two-tie set and the chain guard of `relation-roles.md` section 8:
 
 ```yaml
-- name: snap_household_member
+- name: snap_tie_closure              # recursive
   kind: derived_relation
-  derived_relation:
-    arity: 2
-    slot_entities: [Person, Person]
-    current_slot: 0
-    related_slot: 1
-    source_relation: lives_with
+  derived_relation: {arity: 2, slot_entities: [Person, Person],
+                     current_slot: 0, related_slot: 1, source_relation: lives_with}
   versions:
     - effective_from: 2026-01-01
       formula: >
         candidate == anchor
-        or exists(snap_household_member(anchor, p), snap_tie(p, candidate))
+        or exists(snap_tie_closure(anchor, p), snap_tie(p, candidate))
+
+- name: snap_household_member
+  kind: derived_relation
+  derived_relation: {arity: 2, slot_entities: [Person, Person],
+                     current_slot: 0, related_slot: 1, source_relation: lives_with}
+  versions:
+    - effective_from: 2026-01-01
+      formula: >
+        (not anchor.snap_exception_in_residence
+         and snap_tie_closure(anchor, candidate))
+        or (anchor.snap_exception_in_residence
+            and candidate.snap_household_unit == anchor.snap_household_unit)
 ```
 
-`snap_tie` is section 8 of `relation-roles.md`: a shared meal group or a
-(b)(1) required combination. The formula says a person is a member when they
-are the applicant, or are tied to a member. That is the closure, and the guard
-and its input in `relation-roles.md` are no longer needed. The reference sits
-in an `exists` domain under no `not`, so it is positive.
+`snap_tie`, `lives_with` and `snap_exception_in_residence` are as in
+`relation-roles.md` section 8. `snap_tie` already covers (b)(1)(i)–(iii),
+including "a household member other than his or her parent".
+
+`snap_tie_closure` says a person is in the closure when they are the
+applicant, or are tied to someone in it. Its only reference to itself is an
+`exists` domain under no `not`, so it is positive. `snap_household_member` is
+not recursive. It reads the closure through an atom, and its `not` applies to
+a rule outside the group.
+
+The chain guard is gone. The exception fallback stays until the (b)(2)–(b)(6)
+and (b)(7)(vi) exceptions are encoded, because each of them needs a tier B
+reading of its order against (b)(1).
 
 The tests cover the cases `relation-roles.md` sends to its guard. In one, the
 applicant lives with their child, who is under 22. The child's other parent
 is also in the home, with that parent's own child under 22 from another
 relationship. Each person buys food separately. All four are one household,
-by three ties.
-
-(b)(1)(iii) refers to "a household member other than his or her parent",
-which is also positive in the household:
-
-```
-exists(snap_household_member(anchor, p),
-       p != candidate and not parent_of(p, candidate)
-       and has_parental_control(p, candidate) and candidate.age < 18)
-```
-
-The `not` applies to `parent_of`, a base relation outside the group.
+by three ties, now with no supplied ids.
 
 **42 CFR 435.603(f)(2).** "The household is the household of the taxpayer
 claiming such individual". This is a reference at another anchor. If the
