@@ -86,7 +86,10 @@ fn write_request_tolerates_only_a_broken_pipe() {
 /// The fixture pins `plan_digest` and `trace_root`. Both commit to the SHA-256
 /// of the whole serialized source artifact, which records `engine_version` and
 /// the unit table seeded into this program, so a version cut or a newly seeded
-/// currency moves both digests while every family value stays the same. They
+/// currency moves both digests while every family value stays the same. The
+/// source artifact also records `engine_build`, which differs from build to
+/// build, so the test writes it as a build that could not know its commit
+/// (`{"commit": null, "dirty": null}`) before aggregating. They
 /// also hash inputs the result never shows, such as the canonical plan
 /// (citations included), the request, and the constitution trace. On drift the
 /// failure lists the JSON paths that moved, so a digest-only change is easy to
@@ -287,6 +290,16 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
         "source compile failed: {}",
         String::from_utf8_lossy(&source_compile.stderr)
     );
+    // The digests below hash the whole source artifact, engine_build
+    // included; record it as unknown so they do not move with every build.
+    let mut compiled: serde_json::Value =
+        serde_json::from_slice(&fs::read(&source_artifact).unwrap()).unwrap();
+    compiled["engine_build"] = serde_json::json!({"commit": null, "dirty": null});
+    fs::write(
+        &source_artifact,
+        serde_json::to_string_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
     let plan = fixture("nz_income_explorer_family.yaml");
     let request = fs::read(fixture("nz_income_explorer_request.json")).unwrap();
 

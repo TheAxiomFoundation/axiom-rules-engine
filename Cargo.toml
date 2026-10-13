@@ -11,7 +11,10 @@ keywords = ["rules-engine", "rules-as-code", "legal", "policy", "rulespec"]
 # out (they regenerate via `emit-schemas`) with one exception: the `schema`
 # feature's src/schema.rs include_str!s compiled-artifact.v1.schema.json, so
 # that file must ship or all-features builds (docs.rs included) cannot compile.
+# build.rs stamps the artifact's `engine_build`; without it a published crate
+# would not build.
 include = [
+    "build.rs",
     "src/**",
     "docs/**",
     "schemas/compiled-artifact.v1.schema.json",

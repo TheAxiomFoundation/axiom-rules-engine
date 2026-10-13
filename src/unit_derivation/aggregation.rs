@@ -670,13 +670,24 @@ impl CompiledAggregationArtifact {
         })
     }
 
+    /// Load and validate a stage-3 artifact whose embedded artifacts are
+    /// format 3.
     pub fn from_json_str(source: &str) -> Result<Self, UnitDerivationError> {
+        Self::from_json_str_with_loading(source, EmbeddedArtifactLoading::default())
+    }
+
+    /// Load and validate a stage-3 artifact, reading its embedded artifacts
+    /// as `loading` allows.
+    pub fn from_json_str_with_loading(
+        source: &str,
+        loading: EmbeddedArtifactLoading,
+    ) -> Result<Self, UnitDerivationError> {
         let artifact: Self = serde_json::from_str(source).map_err(|error| {
             UnitDerivationError::InvalidAggregationArtifact(format!(
                 "could not deserialize compiled artifact: {error}"
             ))
         })?;
-        validate_compiled_artifact(artifact)
+        validate_compiled_artifact(artifact, loading)
     }
 
     fn constitution_digest_bytes(&self) -> Result<[u8; 32], UnitDerivationError> {
@@ -684,9 +695,21 @@ impl CompiledAggregationArtifact {
     }
 }
 
+/// How a stage-3 artifact's embedded compiled artifacts (the source artifact
+/// and the phase-two artifact) load: through the default loader, which reads
+/// format 3 only, unless the caller opts in to the format-2 compatibility
+/// loader for embedded artifacts that are format 2.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EmbeddedArtifactLoading {
+    pub accept_legacy_format_2: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UnitDerivationDocumentRegistry {
     aggregation: BTreeMap<String, CompiledAggregationArtifact>,
+    /// How each registered artifact's embedded artifacts were loaded, so
+    /// execution revalidates them the same way.
+    loading: BTreeMap<String, EmbeddedArtifactLoading>,
 }
 
 impl UnitDerivationDocumentRegistry {
@@ -695,23 +718,56 @@ impl UnitDerivationDocumentRegistry {
         source: &str,
         source_artifact: &crate::compile::CompiledProgramArtifact,
     ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
-        let artifact = compile_aggregation_plan(source, source_artifact)?;
-        self.register_aggregation_artifact(artifact)
+        self.register_aggregation_source_with_loading(
+            source,
+            source_artifact,
+            EmbeddedArtifactLoading::default(),
+        )
+    }
+
+    pub fn register_aggregation_source_with_loading(
+        &mut self,
+        source: &str,
+        source_artifact: &crate::compile::CompiledProgramArtifact,
+        loading: EmbeddedArtifactLoading,
+    ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
+        let plan = parse_aggregation_plan(source)?;
+        let artifact = compile_aggregation_plan_value(plan, source_artifact, loading)?;
+        self.register_aggregation_artifact_with_loading(artifact, loading)
     }
 
     pub fn register_aggregation_json(
         &mut self,
         source: &str,
     ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
-        let artifact = CompiledAggregationArtifact::from_json_str(source)?;
-        self.register_aggregation_artifact(artifact)
+        self.register_aggregation_json_with_loading(source, EmbeddedArtifactLoading::default())
+    }
+
+    pub fn register_aggregation_json_with_loading(
+        &mut self,
+        source: &str,
+        loading: EmbeddedArtifactLoading,
+    ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
+        let artifact = CompiledAggregationArtifact::from_json_str_with_loading(source, loading)?;
+        self.register_aggregation_artifact_with_loading(artifact, loading)
     }
 
     pub fn register_aggregation_artifact(
         &mut self,
         artifact: CompiledAggregationArtifact,
     ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
-        let artifact = validate_compiled_artifact(artifact)?;
+        self.register_aggregation_artifact_with_loading(
+            artifact,
+            EmbeddedArtifactLoading::default(),
+        )
+    }
+
+    pub fn register_aggregation_artifact_with_loading(
+        &mut self,
+        artifact: CompiledAggregationArtifact,
+        loading: EmbeddedArtifactLoading,
+    ) -> Result<&CompiledAggregationArtifact, UnitDerivationError> {
+        let artifact = validate_compiled_artifact(artifact, loading)?;
         let id = artifact.plan.id.clone();
         if self.aggregation.contains_key(&id) {
             return Err(UnitDerivationError::DuplicateNamespace {
@@ -720,6 +776,7 @@ impl UnitDerivationDocumentRegistry {
             });
         }
         self.aggregation.insert(id.clone(), artifact);
+        self.loading.insert(id.clone(), loading);
         Ok(&self.aggregation[&id])
     }
 
@@ -740,25 +797,35 @@ impl UnitDerivationDocumentRegistry {
                     from: "unit-derivation document registry".to_string(),
                     reference: id.to_string(),
                 })?;
-        execute_aggregation_plan(artifact, request, config)
+        let loading = self.loading.get(id).copied().unwrap_or_default();
+        execute_aggregation_plan_with_loading(artifact, request, config, loading)
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compile_aggregation_plan(
     source: &str,
     source_artifact: &crate::compile::CompiledProgramArtifact,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
-    let plan: AggregationPlan = serde_yaml::from_str(source).map_err(|error| {
+    compile_aggregation_plan_value(
+        parse_aggregation_plan(source)?,
+        source_artifact,
+        EmbeddedArtifactLoading::default(),
+    )
+}
+
+fn parse_aggregation_plan(source: &str) -> Result<AggregationPlan, UnitDerivationError> {
+    serde_yaml::from_str(source).map_err(|error| {
         UnitDerivationError::InvalidPlan(format!("invalid aggregation plan YAML: {error}"))
-    })?;
-    compile_aggregation_plan_value(plan, source_artifact)
+    })
 }
 
 fn compile_aggregation_plan_value(
     plan: AggregationPlan,
     source_artifact: &crate::compile::CompiledProgramArtifact,
+    loading: EmbeddedArtifactLoading,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
-    let source_artifact = validate_source_artifact(source_artifact.clone())?;
+    let source_artifact = load_embedded_artifact(source_artifact.clone(), "source", loading)?;
     validate_aggregation_plan(&plan, &source_artifact)?;
     let source_artifact_digest = source_artifact_digest(&source_artifact)?;
     let phase_two_artifact = compile_phase_two_artifact(&plan)?;
@@ -778,6 +845,7 @@ fn compile_aggregation_plan_value(
 
 fn validate_compiled_artifact(
     mut artifact: CompiledAggregationArtifact,
+    loading: EmbeddedArtifactLoading,
 ) -> Result<CompiledAggregationArtifact, UnitDerivationError> {
     if artifact.format != COMPILED_AGGREGATION_ARTIFACT_FORMAT {
         return Err(UnitDerivationError::InvalidAggregationArtifact(format!(
@@ -791,7 +859,8 @@ fn validate_compiled_artifact(
             artifact.semantics_version
         )));
     }
-    artifact.source_artifact = validate_source_artifact(artifact.source_artifact)?;
+    // The digest is over the loaded source artifact's serialization.
+    artifact.source_artifact = load_embedded_artifact(artifact.source_artifact, "source", loading)?;
     let actual_source_digest = source_artifact_digest(&artifact.source_artifact)?;
     if artifact.source_artifact_digest != actual_source_digest {
         return Err(UnitDerivationError::InvalidAggregationArtifact(
@@ -800,7 +869,7 @@ fn validate_compiled_artifact(
         ));
     }
     let expected =
-        compile_aggregation_plan_value(artifact.plan.clone(), &artifact.source_artifact)?;
+        compile_aggregation_plan_value(artifact.plan.clone(), &artifact.source_artifact, loading)?;
     if artifact.plan_digest != expected.plan_digest {
         return Err(UnitDerivationError::InvalidAggregationArtifact(
             "advertised plan digest does not match the embedded plan".to_string(),
@@ -816,47 +885,52 @@ fn validate_compiled_artifact(
             "embedded source artifact does not match the registered plan binding".to_string(),
         ));
     }
-    let actual_phase = serde_json::to_value(&artifact.phase_two_artifact).map_err(|error| {
-        UnitDerivationError::InvalidAggregationArtifact(format!(
-            "could not inspect embedded phase-two artifact: {error}"
-        ))
-    })?;
-    let expected_phase = serde_json::to_value(&expected.phase_two_artifact).map_err(|error| {
-        UnitDerivationError::InvalidAggregationArtifact(format!(
-            "could not inspect regenerated phase-two artifact: {error}"
-        ))
-    })?;
-    if actual_phase != expected_phase {
+    // The phase-two check compares executable content: the regenerated
+    // artifact's program and metadata. The stored artifact's format,
+    // engine_version and engine_build are its own and are not compared with
+    // the running engine's, so a rebuild or a version cut does not refuse it.
+    let inspect = |program: &crate::spec::ProgramSpec, which: &str| {
+        serde_json::to_value(program).map_err(|error| {
+            UnitDerivationError::InvalidAggregationArtifact(format!(
+                "could not inspect {which} phase-two artifact: {error}"
+            ))
+        })
+    };
+    if inspect(&artifact.phase_two_artifact.program, "embedded")?
+        != inspect(&expected.phase_two_artifact.program, "regenerated")?
+        || artifact.phase_two_artifact.metadata != expected.phase_two_artifact.metadata
+    {
         return Err(UnitDerivationError::InvalidAggregationArtifact(
             "embedded phase-two artifact does not match the registered plan".to_string(),
         ));
     }
-    // Run the production artifact loader as the final registry boundary. This
-    // is the same metadata/version/program validation used by run-compiled.
-    let phase_source = serde_json::to_string(&artifact.phase_two_artifact).map_err(|error| {
-        UnitDerivationError::InvalidAggregationArtifact(format!(
-            "could not serialize embedded phase-two artifact: {error}"
-        ))
-    })?;
-    crate::compile::CompiledProgramArtifact::from_json_str(&phase_source).map_err(|error| {
-        UnitDerivationError::InvalidAggregationArtifact(format!(
-            "production phase-two artifact validation failed: {error}"
-        ))
-    })?;
+    // Run the production artifact loader as the final registry boundary: the
+    // stored artifact must pass its own loader, the one run-compiled uses.
+    load_embedded_artifact(artifact.phase_two_artifact.clone(), "phase-two", loading)?;
     Ok(artifact)
 }
 
-fn validate_source_artifact(
+/// Reload an embedded artifact through the production loader: the default
+/// loader, or the format-2 compatibility loader for a format-2 artifact when
+/// the caller opted in.
+fn load_embedded_artifact(
     artifact: crate::compile::CompiledProgramArtifact,
+    role: &str,
+    loading: EmbeddedArtifactLoading,
 ) -> Result<crate::compile::CompiledProgramArtifact, UnitDerivationError> {
     let source = serde_json::to_string(&artifact).map_err(|error| {
         UnitDerivationError::InvalidAggregationArtifact(format!(
-            "could not serialize embedded source artifact: {error}"
+            "could not serialize embedded {role} artifact: {error}"
         ))
     })?;
-    crate::compile::CompiledProgramArtifact::from_json_str(&source).map_err(|error| {
+    let loaded = if loading.accept_legacy_format_2 && artifact.artifact_format_version == 2 {
+        crate::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(&source)
+    } else {
+        crate::compile::CompiledProgramArtifact::from_json_str(&source)
+    };
+    loaded.map_err(|error| {
         UnitDerivationError::InvalidAggregationArtifact(format!(
-            "production source artifact validation failed: {error}"
+            "production {role} artifact validation failed: {error}"
         ))
     })
 }
@@ -1617,7 +1691,10 @@ fn canonical_constitution_bytes(plan: &AggregationPlan) -> Result<Vec<u8>, UnitD
 }
 
 fn digest_text(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex(&super::evaluate::sha256(bytes)))
+    format!(
+        "sha256:{}",
+        crate::digest::hex(&crate::digest::sha256(bytes))
+    )
 }
 
 fn decode_digest(value: &str) -> Result<[u8; 32], UnitDerivationError> {
@@ -1642,25 +1719,30 @@ fn decode_digest(value: &str) -> Result<[u8; 32], UnitDerivationError> {
     Ok(output)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(DIGITS[(byte >> 4) as usize] as char);
-        output.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
+#[cfg(test)]
 pub(crate) fn execute_aggregation_plan(
     artifact: &CompiledAggregationArtifact,
     request: &AggregationRequest,
     config: &UnitDerivationConfig,
 ) -> Result<AggregationResult, UnitDerivationError> {
+    execute_aggregation_plan_with_loading(
+        artifact,
+        request,
+        config,
+        EmbeddedArtifactLoading::default(),
+    )
+}
+
+fn execute_aggregation_plan_with_loading(
+    artifact: &CompiledAggregationArtifact,
+    request: &AggregationRequest,
+    config: &UnitDerivationConfig,
+    loading: EmbeddedArtifactLoading,
+) -> Result<AggregationResult, UnitDerivationError> {
     if !config.enabled {
         return Err(UnitDerivationError::Disabled);
     }
-    let artifact = validate_compiled_artifact(artifact.clone())?;
+    let artifact = validate_compiled_artifact(artifact.clone(), loading)?;
     let plan = &artifact.plan;
     let people = validate_request(plan, request)?;
 

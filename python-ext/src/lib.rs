@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec, DenseRelationKey,
     DenseRelationSchema,
@@ -83,6 +83,9 @@ struct CompiledDenseProgramHandle {
     derived_metadata: Vec<DerivedMetadataHandle>,
     input_catalog: HashMap<String, String>,
     input_request_names: HashMap<String, Vec<String>>,
+    /// The format of the artifact the program came from.
+    #[pyo3(get)]
+    artifact_format_version: u32,
 }
 
 #[pymethods]
@@ -108,6 +111,37 @@ impl CompiledDenseProgramHandle {
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let artifact = CompiledProgramArtifact::from_composed_rulespec_file(path, &roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        compiled_dense_from_artifact(artifact, entity)
+    }
+
+    /// Load a compiled artifact file. It must be format 3;
+    /// `accept_artifact_format=2` also reads a format-2 artifact, unchanged,
+    /// through the format-2 compatibility loader.
+    #[staticmethod]
+    #[pyo3(signature = (path, entity=None, accept_artifact_format=None))]
+    fn from_artifact_file(
+        path: &str,
+        entity: Option<&str>,
+        accept_artifact_format: Option<u32>,
+    ) -> PyResult<Self> {
+        let accept_format_2 = match accept_artifact_format {
+            None => false,
+            Some(2) => true,
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "accept_artifact_format accepts only 2, the format the engine reads through its compatibility loader; got {other}"
+                )));
+            }
+        };
+        let artifact = match CompiledProgramArtifact::from_json_file(path) {
+            Err(CompileError::UnsupportedArtifactFormatVersion { found: 2, .. })
+                if accept_format_2 =>
+            {
+                CompiledProgramArtifact::from_legacy_format_2_json_file(path)
+            }
+            loaded => loaded,
+        }
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
         compiled_dense_from_artifact(artifact, entity)
     }
 
@@ -289,6 +323,7 @@ fn compiled_dense_from_artifact(
         derived_metadata,
         input_catalog,
         input_request_names,
+        artifact_format_version: artifact.artifact_format_version,
     })
 }
 

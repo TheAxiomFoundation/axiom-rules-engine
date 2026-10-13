@@ -7,7 +7,8 @@ use axiom_rules_engine::api::{
     execute_request,
 };
 use axiom_rules_engine::compile::{
-    ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
+    ARTIFACT_FORMAT_VERSION, CompileError, CompiledProgramArtifact, CorpusProvisionIndex,
+    EngineBuild, LEGACY_ARTIFACT_FORMATS, compile_summary_lines,
 };
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
@@ -116,9 +117,10 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         name: "capabilities",
         aliases: &[],
         description: &[
-            "Print, as JSON, the engine version and the artifact format",
-            "version the loader enforces. Semver alone cannot answer",
-            "whether an artifact will load; this can.",
+            "Print, as JSON, the engine version and build, the artifact",
+            "format the loader reads and the older formats it reads on",
+            "request. Semver alone cannot answer whether an artifact will",
+            "load; this can.",
         ],
     },
     CommandMetadata {
@@ -164,12 +166,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "engine_version": env!("CARGO_PKG_VERSION"),
+                        "engine_build": EngineBuild::current(),
                         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                        // Read only when the caller asks, through the
+                        // format-2 compatibility loader.
+                        "legacy_artifact_formats": LEGACY_ARTIFACT_FORMATS,
                         // A format-2 artifact whose executed relations
                         // declare no slot kinds loads in engines without
-                        // this capability and is refused by engines with it
-                        // (`migrate artifact` types it).
-                        "capabilities": ["relation_entity_typing"],
+                        // `relation_entity_typing` and is refused by engines
+                        // with it (`migrate artifact` types it). Engines
+                        // with `artifact_interface` write and check
+                        // `program.interface`.
+                        "capabilities": ["relation_entity_typing", "artifact_interface"],
                     }))?
                 );
                 return Ok(());
@@ -469,12 +477,54 @@ Lenient execution retains mismatched tuples and reports the policy in metadata
 and on stderr.";
 
 const RUN_COMPILED_USAGE: &str = "\
-usage: axiom-rules-engine run-compiled --artifact <compiled.json> [--relation-binding strict|lenient] < request.json
+usage: axiom-rules-engine run-compiled --artifact <compiled.json> [--relation-binding strict|lenient] [--accept-artifact-format 2] < request.json
 
 Execute a CompiledExecutionRequest. Relation tuple kind mismatches are errors by
 default. The flag overrides the request's relation_binding field. Lenient
 execution retains mismatched tuples and reports the policy in metadata and on
-stderr.";
+stderr.
+
+The artifact must be format 3. --accept-artifact-format 2 also reads a
+format-2 artifact, unchanged, through the format-2 compatibility loader, with a
+notice on stderr.";
+
+/// Parse `--accept-artifact-format`'s value: the one older format this
+/// engine reads through a compatibility loader.
+fn parse_accept_artifact_format(value: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    match value.as_deref() {
+        Some(format) if LEGACY_ARTIFACT_FORMATS.iter().any(|legacy| legacy.to_string() == format) => {
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "`--accept-artifact-format` accepts only 2, the format this engine reads through its compatibility loader (it reads format {ARTIFACT_FORMAT_VERSION} by default); got `{other}`"
+        )
+        .into()),
+        None => Err("missing `--accept-artifact-format` value; use 2".into()),
+    }
+}
+
+fn notice_legacy_artifact(shown: &str) {
+    eprintln!(
+        "notice[legacy_artifact_format]: reading `{shown}` as artifact format 2 through the format-2 compatibility loader; recompile it with this engine for format {ARTIFACT_FORMAT_VERSION}"
+    );
+}
+
+/// Load a compiled artifact: format 3, or format 2 through the
+/// compatibility loader when the caller accepts it.
+fn load_artifact(
+    path: &std::path::Path,
+    accept_format_2: bool,
+) -> Result<CompiledProgramArtifact, Box<dyn std::error::Error>> {
+    match CompiledProgramArtifact::from_json_file(path) {
+        Err(CompileError::UnsupportedArtifactFormatVersion { found: 2, .. }) if accept_format_2 => {
+            notice_legacy_artifact(&path.display().to_string());
+            Ok(CompiledProgramArtifact::from_legacy_format_2_json_file(
+                path,
+            )?)
+        }
+        loaded => Ok(loaded?),
+    }
+}
 
 fn parse_relation_binding(
     value: Option<String>,
@@ -500,11 +550,16 @@ fn warn_lenient_relation_binding(policy: RelationBinding) {
 fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut artifact_path: Option<PathBuf> = None;
     let mut relation_binding = None;
+    let mut accept_format_2 = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
             "--help" | "-h" => {
                 println!("{RUN_COMPILED_USAGE}");
                 return Ok(());
@@ -520,7 +575,7 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let artifact_path =
         artifact_path.ok_or("missing required `--artifact /path/to/compiled.json` argument")?;
-    let artifact = CompiledProgramArtifact::from_json_file(&artifact_path)?;
+    let artifact = load_artifact(&artifact_path, accept_format_2)?;
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
@@ -536,21 +591,28 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "unit-derivation")]
 const COMPILE_UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --source-artifact <compiled-program.json> --output <compiled-aggregation.json>
+usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --source-artifact <compiled-program.json> --output <compiled-aggregation.json> [--accept-artifact-format 2]
 
 The authoring YAML is accepted only at this compile boundary. The output is a
 canonically digested experimental artifact containing a production-validated
 source program and phase-two program; run-unit-aggregation accepts only that
-compiled artifact.";
+compiled artifact. The source artifact must be format 3;
+--accept-artifact-format 2 also reads a format-2 source artifact, unchanged,
+through the format-2 compatibility loader, with a notice on stderr.";
 
 #[cfg(feature = "unit-derivation")]
 fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut plan_path: Option<PathBuf> = None;
     let mut source_artifact_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut accept_format_2 = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
             "--plan" => {
                 plan_path = Some(PathBuf::from(
                     iter.next().ok_or("`--plan` requires a path argument")?,
@@ -585,10 +647,16 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
     let output_path = output_path
         .ok_or("missing required `--output /path/to/compiled-aggregation.json` argument")?;
     let source = std::fs::read_to_string(&plan_path)?;
-    let source_artifact = CompiledProgramArtifact::from_json_file(&source_artifact_path)?;
+    let source_artifact = load_artifact(&source_artifact_path, accept_format_2)?;
     let mut registry =
         axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
-    let artifact = registry.register_aggregation_source(&source, &source_artifact)?;
+    let artifact = registry.register_aggregation_source_with_loading(
+        &source,
+        &source_artifact,
+        axiom_rules_engine::unit_derivation::EmbeddedArtifactLoading {
+            accept_legacy_format_2: accept_format_2,
+        },
+    )?;
     std::fs::write(&output_path, artifact.to_json_pretty()?)?;
     println!("compiled_unit_aggregation: {}", output_path.display());
     println!("plan: {}", artifact.plan_id());
@@ -598,20 +666,27 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
 
 #[cfg(feature = "unit-derivation")]
 const UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine run-unit-aggregation --artifact <compiled-aggregation.json> --enable-experimental-unit-derivation < request.json
+usage: axiom-rules-engine run-unit-aggregation --artifact <compiled-aggregation.json> --enable-experimental-unit-derivation [--accept-artifact-format 2] < request.json
 
 This command is compiled only with the off-by-default `unit-derivation` Cargo
 feature. The explicit runtime switch is also mandatory. Raw plan sidecars are
 not executable; the artifact must pass the experimental document registry and
-the embedded production phase-two artifact loader.";
+the embedded production phase-two artifact loader. Its embedded artifacts must
+be format 3; --accept-artifact-format 2 also reads format-2 embedded artifacts
+through the format-2 compatibility loader, with a notice on stderr.";
 
 #[cfg(feature = "unit-derivation")]
 fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut artifact_path: Option<PathBuf> = None;
     let mut enabled = false;
+    let mut accept_format_2 = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
             "--artifact" => {
                 artifact_path = Some(PathBuf::from(
                     iter.next().ok_or("`--artifact` requires a path argument")?,
@@ -638,11 +713,21 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     }
     let artifact_path = artifact_path
         .ok_or("missing required `--artifact /path/to/compiled-aggregation.json` argument")?;
-    let artifact_source = std::fs::read_to_string(artifact_path)?;
+    let artifact_source = std::fs::read_to_string(&artifact_path)?;
     let mut registry =
         axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
     let plan_id = {
-        let artifact = registry.register_aggregation_json(&artifact_source)?;
+        let artifact = registry.register_aggregation_json_with_loading(
+            &artifact_source,
+            axiom_rules_engine::unit_derivation::EmbeddedArtifactLoading {
+                accept_legacy_format_2: accept_format_2,
+            },
+        )?;
+        if artifact.source_artifact.artifact_format_version == 2
+            || artifact.phase_two_artifact.artifact_format_version == 2
+        {
+            notice_legacy_artifact(&artifact_path.display().to_string());
+        }
         artifact.plan_id().to_string()
     };
     let mut input = String::new();
