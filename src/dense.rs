@@ -1756,9 +1756,10 @@ impl<'a> DenseCompiler<'a> {
                 where_clause,
             } => {
                 let function = extreme.call_name(where_clause.is_some());
-                let relation_index = self
-                    .relation(relation, *current_slot, *related_slot)
-                    .map_err(|error| named_aggregate_error(function, relation, error))?;
+                // A relation schema may be shared by several aggregations.
+                // Its own unsupported construct determines the error, so a
+                // different first reader cannot change the refusal text.
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                 let value = self
                     .compile_related_value(relation_index, value)
                     .map_err(|error| named_aggregate_error(function, relation, error))?;
@@ -1782,9 +1783,7 @@ impl<'a> DenseCompiler<'a> {
                 value,
                 where_clause,
             } => {
-                let relation_index = self
-                    .relation(relation, *current_slot, *related_slot)
-                    .map_err(|error| named_aggregate_error("only", relation, error))?;
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
                 let value = self
                     .compile_related_value(relation_index, value)
                     .map_err(|error| named_aggregate_error("only", relation, error))?;

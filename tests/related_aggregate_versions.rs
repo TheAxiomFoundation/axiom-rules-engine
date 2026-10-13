@@ -11,6 +11,7 @@ use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseOutputValue,
     DenseRelationBatchSpec,
 };
+use axiom_rules_engine::depth::with_suspend_depth;
 use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::spec::{
     DatasetSpec, InputRecordSpec, IntervalSpec, PeriodKindSpec, PeriodSpec, RelationRecordSpec,
@@ -366,6 +367,49 @@ fn dense_checks_current_record_dependencies_in_derived_relation_filters() {
                     .as_decimal(),
                 "{dtype}: {function}"
             );
+        }
+    }
+}
+
+#[test]
+fn dense_shared_relation_refusals_do_not_depend_on_the_reader_or_deferral_threshold() {
+    // All these aggregates reach the same unsupported membership test in a
+    // shared derived relation. The refusal must name that test consistently,
+    // whichever aggregate reaches the schema first as compilation proceeds.
+    let mut reference = None;
+    for formula in [
+        "len(eligible_members)",
+        "sum(eligible_members.age)",
+        "min(eligible_members.age)",
+        "max(eligible_members.age)",
+        "only(eligible_members.age)",
+        "min_where(eligible_members, age, eligible)",
+        "max_where(eligible_members, age, eligible)",
+    ] {
+        let module = format!(
+            "format: rulespec/v1\nrules:\n  - name: member_of_family\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Family]\n  - name: other_relation\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Family]\n  - name: eligible_family\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: member_of_family\n      entity: EligibleFamily\n      member_relation: eligible_members\n      slot_entities: [Person, Family]\n    versions:\n      - effective_from: '2026-01-01'\n        formula: other_relation\n  - name: answer\n    kind: derived\n    entity: EligibleFamily\n    dtype: Decimal\n    versions:\n      - effective_from: '2026-01-01'\n        formula: {formula}\n"
+        );
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&module).unwrap();
+        let program = artifact.program.to_program().unwrap();
+        for threshold in [usize::MAX, 1, 2, 3] {
+            let error = with_suspend_depth(threshold, || {
+                DenseCompiledProgram::from_program(&program, Some("EligibleFamily"))
+                    .expect_err("membership in another relation is unsupported")
+            });
+            let DenseCompileError::Unsupported(message) = error else {
+                panic!("{formula}: {error}");
+            };
+            assert!(
+                message.contains("`relation_member` of `other_relation`"),
+                "{message}"
+            );
+            match &reference {
+                None => reference = Some(message),
+                Some(reference) => assert_eq!(
+                    &message, reference,
+                    "{formula}, deferral threshold {threshold}"
+                ),
+            }
         }
     }
 }
