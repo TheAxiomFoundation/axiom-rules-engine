@@ -496,7 +496,10 @@ fn relation_slot_entity_diagnostics(
     // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
-    let filtered_kinds = crate::relation_typing::filtered_entity_kinds(program);
+    // Resolved once for the program: asking per tuple would follow a chain of
+    // derived relations again for every tuple naming one.
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
     let canonical = |entity: &str| {
         filtered_kinds
             .get(entity)
@@ -530,9 +533,7 @@ fn relation_slot_entity_diagnostics(
         // execution reads each slot by its declared kind, so the declaration
         // is the expected tuple order. An untyped relation no rule executes
         // has no expectation to check.
-        let Some(expected_entities) =
-            crate::relation_typing::effective_slot_entities(program, &record.name)
-        else {
+        let Some(expected_entities) = slot_kinds.get(&record.name) else {
             continue;
         };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
