@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
-use axiom_rules_engine::depth::with_suspend_depth;
+use axiom_rules_engine::depth::{count_visits, with_suspend_depth};
 use axiom_rules_engine::engine::{Engine, EvalError, EvaluationOptions};
 use axiom_rules_engine::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Determination,
@@ -761,9 +761,9 @@ fn program_with_rules(base: &Program, rules: Vec<Derived>) -> Program {
     program
 }
 
-/// 7. A rule that fails caches nothing, wherever its failure is caught: the
+/// 7. A rule that fails caches no value, wherever its failure is caught: the
 /// result of `(missing == 1 and R) or R` is unknown, `R` has no cached value
-/// and no needs, and evaluating `R` itself later fails.
+/// and no needs, and evaluating `R` itself in a later drive fails.
 #[test]
 fn a_rule_whose_failure_is_caught_caches_nothing() {
     let program = program(vec![
@@ -2042,6 +2042,91 @@ fn a_long_chain_answers_under_the_option_on_a_small_stack() {
         format!("{unknown_value:?}"),
         unknown::<ScalarValue>(&["start"])
     );
+}
+
+/// A rule's failure is evaluated once per drive. A rule that fails is
+/// remembered for the rest of the drive and raised at each later reference
+/// (section 5.9), so a chain whose every level references the level below
+/// twice, at positions that catch a failure, costs work linear in its
+/// length, like the same chain over an unknown base, whose rules are cached.
+/// Evaluating the rule again at each reference doubled the work per level:
+/// 6,291,453 and 2,883,576 visits for the two chains below, where an unknown
+/// base takes 63 and 149.
+///
+/// Two shapes: `r_k := r_{k-1} and r_{k-1}` over `1 / 0 > 0`, 20 levels; and
+/// the note's `(R and Q) or not R` (section 12) chained 18 levels, `r_k :=
+/// (r_{k-1} and q) or not r_{k-1}`, over `100 / size > 10` with `size` zero.
+/// Each with no deferral and at release's threshold, 128, which these chains
+/// never reach, so the driver's record of a deferred rule's failure cannot
+/// hide the cost; and at debug's, 8, where they defer.
+#[test]
+fn a_rule_that_fails_is_evaluated_once_per_drive() {
+    let chain = |base: JudgmentExpr, levels: usize, level: &dyn Fn(&str) -> JudgmentExpr| {
+        let mut rules = vec![judgment_rule("r0", base)];
+        for index in 1..=levels {
+            rules.push(judgment_rule(
+                &format!("r{index}"),
+                level(&format!("r{}", index - 1)),
+            ));
+        }
+        program(rules)
+    };
+    let doubled = |below: &str| and(vec![judgment_ref(below), judgment_ref(below)]);
+    let boarder = |below: &str| {
+        or(vec![
+            and(vec![
+                judgment_ref(below),
+                cmp(input("q"), ComparisonOp::Eq, int(1)),
+            ]),
+            not(judgment_ref(below)),
+        ])
+    };
+    let size_test = || cmp(div(int(100), input("size")), ComparisonOp::Gt, int(10));
+    let shapes = [
+        (
+            "doubled",
+            chain(fails(), 20, &doubled),
+            DataSet::default(),
+            chain(flag("m"), 20, &doubled),
+            DataSet::default(),
+            "r20",
+            unknown::<JudgmentOutcome>(&["m"]),
+        ),
+        (
+            "boarder",
+            chain(size_test(), 18, &boarder),
+            inputs(&[
+                ("size", ScalarValue::Integer(0)),
+                ("q", ScalarValue::Integer(1)),
+            ]),
+            chain(size_test(), 18, &boarder),
+            inputs(&[("q", ScalarValue::Integer(1))]),
+            "r18",
+            unknown::<JudgmentOutcome>(&["size"]),
+        ),
+    ];
+    on_stack(64 * MIB, || {
+        let mut visits = Vec::new();
+        for (shape, failing, failing_data, unknown_base, unknown_data, root, expected) in &shapes {
+            for threshold in [usize::MAX, 128, 8] {
+                let run = |program: &Program, data: &DataSet| {
+                    with_suspend_depth(threshold, || count_visits(|| judge(program, data, root)))
+                };
+                let (failed, failing_visits) = run(failing, failing_data);
+                let (undetermined, unknown_visits) = run(unknown_base, unknown_data);
+                let at = format!("{shape} at threshold {threshold}");
+                assert_eq!(failed, err(EvalError::DivisionByZero), "{at}");
+                assert_eq!(&undetermined, expected, "{at}");
+                visits.push((at, failing_visits, unknown_visits));
+            }
+        }
+        for (at, failing_visits, unknown_visits) in &visits {
+            assert!(
+                *failing_visits < 4 * unknown_visits,
+                "{at}: {failing_visits} visits over a failing base, {unknown_visits} over an unknown one; all: {visits:?}"
+            );
+        }
+    });
 }
 
 // ===========================================================================

@@ -374,8 +374,10 @@ scalar operator propagates even when an earlier operand was indeterminate.
 
 Catching is local. A rule's body is evaluated the same way wherever it is
 referenced from, so the result cached for a rule is intrinsic to the rule,
-entity and period. A rule that fails caches nothing; the failure is caught, or
-not, at the position that referenced it.
+entity and period. A rule that fails caches no value, but its failure is
+remembered for the rest of the drive, as 5.10 already does for a deferred
+rule, and raised at each reference; each reference catches it, or not, where
+it sits.
 
 A deferral is not a failure and is never caught. Neither is a refusal: the
 checks of section 4 run before evaluation, and the temporary refusals of an

@@ -455,7 +455,8 @@ pub(crate) struct CacheKey {
 /// A derived-rule evaluation the interpreter deferred to its driver instead of
 /// recursing into it (see [`crate::depth`]). Whether a scalar or a judgment
 /// was asked for is part of it: a reference of the wrong kind fails where one
-/// of the right kind would not.
+/// of the right kind would not. The drive's record of rule evaluations that
+/// failed is keyed the same way, deferred or not (see [`Engine::failed`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Deferred {
     Scalar(CacheKey),
@@ -625,9 +626,11 @@ pub struct Engine<'a> {
     /// Judgment rule evaluations that ended unknown, with their needs, keyed
     /// like `judgment_cache`. Only `MissingFacts::Indeterminate` fills it.
     undetermined_judgments: HashMap<CacheKey, Needs>,
-    /// Deferred rule evaluations that failed or were refused in the current
-    /// drive, under `MissingFacts::Indeterminate` (see [`Engine::run_tasks`]).
-    /// It holds no deferral.
+    /// Rule evaluations that failed or were refused in the current drive,
+    /// under `MissingFacts::Indeterminate`, keyed by what was asked for. Each
+    /// is raised again at every later reference in the drive instead of being
+    /// evaluated again (see [`Engine::remember_failure`] and
+    /// [`Engine::run_tasks`]). It holds no deferral.
     failed: HashMap<Deferred, Interrupt>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
     active_evaluations: Vec<CacheKey>,
@@ -879,8 +882,9 @@ impl<'a> Engine<'a> {
     /// one: an error propagates unchanged from the rule it occurs in to the
     /// root, so a task's error is the root's. Under
     /// `MissingFacts::Indeterminate` an error can instead be caught on its
-    /// way, by an `and`/`or` item, so a task's error is recorded and raised
-    /// again where the task was referenced (see [`Engine::run_tasks`]).
+    /// way, by an `and`/`or` item, so a rule's error is recorded and raised
+    /// again wherever the rule is referenced later in the drive (see
+    /// [`Engine::remember_failure`] and [`Engine::run_tasks`]).
     fn drive<T>(&mut self, root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
         let result = self.run_tasks(root);
         // Every retry reaches the loops its first attempt was interrupted in,
@@ -939,7 +943,12 @@ impl<'a> Engine<'a> {
                         // deferring, and fails there, where an item can catch
                         // it. A refusal is recorded the same way, as a
                         // refusal, so that it is caught nowhere and ends the
-                        // evaluation as an error does.
+                        // evaluation as an error does. The rule has already
+                        // recorded a failure of its formula (see
+                        // `remember_failure`); this also records one raised
+                        // before the formula runs, such as a missing formula
+                        // version, which the retry would otherwise defer
+                        // again.
                         Err(failure @ (Interrupt::Error(_) | Interrupt::Refused(_)))
                             if self.three_valued() =>
                         {
@@ -993,8 +1002,8 @@ impl<'a> Engine<'a> {
         if let Some(needs) = self.indeterminate_scalars.get(&key) {
             return Ok(Indeterminate(needs.clone()));
         }
-        // A failure the driver recorded for this request in the current drive
-        // is raised here, where the reference sits (see `run_tasks`).
+        // A failure this request met earlier in the drive is raised again
+        // here, where the reference sits (see `remember_failure`).
         if !self.failed.is_empty() {
             if let Some(failure) = self.failed.get(&Deferred::Scalar(key.clone())) {
                 return Err(failure.clone());
@@ -1031,11 +1040,14 @@ impl<'a> Engine<'a> {
         debug_assert_eq!(finished, key);
         let value = match evaluated.map_err(|interrupt| {
             interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
-        })? {
-            Determined(value) => value,
-            Indeterminate(needs) => {
+        }) {
+            Ok(Determined(value)) => value,
+            Ok(Indeterminate(needs)) => {
                 self.indeterminate_scalars.insert(key, needs.clone());
                 return Ok(Indeterminate(needs));
+            }
+            Err(interrupt) => {
+                return Err(self.remember_failure(Deferred::Scalar(key), interrupt));
             }
         };
         // Apply the rule's opt-in output rounding before caching, so the
@@ -1104,15 +1116,37 @@ impl<'a> Engine<'a> {
         debug_assert_eq!(finished, key);
         let value = match evaluated.map_err(|interrupt| {
             interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
-        })? {
-            Determined(value) => value,
-            Indeterminate(needs) => {
+        }) {
+            Ok(Determined(value)) => value,
+            Ok(Indeterminate(needs)) => {
                 self.undetermined_judgments.insert(key, needs.clone());
                 return Ok(Indeterminate(needs));
+            }
+            Err(interrupt) => {
+                return Err(self.remember_failure(Deferred::Judgment(key), interrupt));
             }
         };
         self.judgment_cache.insert(key, value);
         Ok(Determined(value))
+    }
+
+    /// Under `MissingFacts::Indeterminate`, remember for the rest of the drive
+    /// that rule evaluation `request` failed or was refused, and return the
+    /// interrupt. Every later reference raises it again from the record (see
+    /// [`Engine::scalar_rule`]) instead of evaluating the rule again. An
+    /// `and`/`or` item catches a failure, so without the record a rule that
+    /// fails would be evaluated once per reference, and a chain whose every
+    /// level references the level below twice would double its work per
+    /// level (`docs/three-valued-values.md`, 5.9). Like a cached value, the
+    /// failure is intrinsic to the rule, entity and period: the rule's body is
+    /// evaluated the same way wherever it is referenced from. A deferral is
+    /// not a failure and is not kept. Without the mode the first failure ends
+    /// the drive, so nothing is kept.
+    fn remember_failure(&mut self, request: Deferred, failure: Interrupt) -> Interrupt {
+        if self.three_valued() && !matches!(failure, Interrupt::Defer(_)) {
+            self.failed.insert(request, failure.clone());
+        }
+        failure
     }
 
     pub(crate) fn evaluated_trace_instances(
@@ -2913,12 +2947,13 @@ mod three_valued_tests {
         .expect("the options are accepted")
     }
 
-    /// The failure the driver records for a deferred rule is keyed by the
-    /// kind of value asked for as well as by rule, entity and period. The
-    /// program checks refuse a wrong-kind reference, so only an engine that
-    /// skips them can show the key matters: at threshold 1 the judgment
-    /// reference to the scalar rule `s` defers, fails and is recorded, and the
-    /// scalar reference to `s` later in the same drive still evaluates it.
+    /// The failure the drive records for a rule is keyed by the kind of value
+    /// asked for as well as by rule, entity and period. The program checks
+    /// refuse a wrong-kind reference, so only an engine that skips them can
+    /// show the key matters: the judgment reference to the scalar rule `s`
+    /// fails and is recorded, by the rule itself and, at threshold 1, where it
+    /// defers, by the driver too, and the scalar reference to `s` later in the
+    /// same drive still evaluates it.
     #[test]
     fn a_failed_wrong_kind_reference_does_not_fail_a_right_kind_one() {
         let program = program(vec![
@@ -2959,32 +2994,35 @@ mod three_valued_tests {
             });
         }
 
-        // The record is what made the difference at threshold 1: drive the
-        // same evaluation by hand and look at it before the drive clears it.
-        with_suspend_depth(1, || {
-            let mut engine = three_valued(&program, &data);
-            engine.program_checks = false;
-            let result = engine.run_tasks(|engine| engine.judgment_rule("root", "c1", &period()));
-            assert!(matches!(result, Ok(Determined(JudgmentOutcome::Holds))));
-            let key = CacheKey {
-                derived: "s".to_string(),
-                entity_id: "c1".to_string(),
-                period: period(),
-            };
-            assert!(
-                matches!(
-                    engine.failed.get(&Deferred::Judgment(key.clone())),
-                    Some(Interrupt::Error(EvalError::ExpectedJudgment(_)))
-                ),
-                "the wrong-kind reference deferred and failed: {:?}",
-                engine.failed
-            );
-            assert!(!engine.failed.contains_key(&Deferred::Scalar(key)));
-            assert_eq!(
-                engine.cached_scalar("s", "c1", &period()),
-                Some(ScalarValue::Integer(5))
-            );
-        });
+        // The record is what made the difference: drive the same evaluation
+        // by hand and look at it before the drive clears it.
+        for threshold in [usize::MAX, 1] {
+            with_suspend_depth(threshold, || {
+                let mut engine = three_valued(&program, &data);
+                engine.program_checks = false;
+                let result =
+                    engine.run_tasks(|engine| engine.judgment_rule("root", "c1", &period()));
+                assert!(matches!(result, Ok(Determined(JudgmentOutcome::Holds))));
+                let key = CacheKey {
+                    derived: "s".to_string(),
+                    entity_id: "c1".to_string(),
+                    period: period(),
+                };
+                assert!(
+                    matches!(
+                        engine.failed.get(&Deferred::Judgment(key.clone())),
+                        Some(Interrupt::Error(EvalError::ExpectedJudgment(_)))
+                    ),
+                    "threshold {threshold}: the wrong-kind reference failed: {:?}",
+                    engine.failed
+                );
+                assert!(!engine.failed.contains_key(&Deferred::Scalar(key)));
+                assert_eq!(
+                    engine.cached_scalar("s", "c1", &period()),
+                    Some(ScalarValue::Integer(5))
+                );
+            });
+        }
     }
 
     /// Two `match` failures with the same message, one raised in the
