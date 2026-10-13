@@ -33,15 +33,28 @@ output's formula is evaluated for that entity and period as follows.
 - **Every other node evaluates all of its operands, left to right,** with one
   exception: division evaluates its divisor first, fails on a zero divisor, and
   only then evaluates the dividend.
-- **Aggregations are lazy per related entity.** `count`/`sum` over a relation
-  visit the distinct related entity ids in sorted order. For each one, a derived
-  relation's membership predicate is evaluated first, then the `where` clause,
-  then (for `sum`) the summed value. A stage is evaluated only for entities that
-  passed the previous one.
+- **Aggregations are lazy per related entity.** `count`, `sum`, `min`/`max`
+  and `only` over a relation visit the distinct related entity ids in sorted
+  order. For each one, a derived relation's membership predicate is evaluated
+  first, then the `where` clause, then (for `sum`, `min` and `max`) the
+  member's value. A stage is evaluated only for entities that passed the
+  previous one, and the first failing member fails the aggregation. `only`
+  evaluates the `where` clause for every member and then reads the value of
+  the one member it selected, so it reads no value when it selected none or
+  several.
+- **`min`, `max` and `only` over a relation never default.** `min`/`max`
+  compare numbers numerically and dates chronologically; a Boolean or text
+  member value is a type error, as is a date among numbers. With no selected
+  member they fail with `EmptyRelatedAggregate`. `only` fails with
+  `NoRelatedEntity` when no member is selected and `AmbiguousRelatedEntity`
+  (with the count) when several are. Each error names the relation, the
+  entity and the period. `if len(r) > 0: min(r.f) else: ...` and
+  `if len(r) == 1: only(r.f) else: ...` are total, because conditionals are
+  lazy.
 - **Derived rules are values.** A rule referenced from a formula is evaluated
   when evaluation reaches the reference, and not otherwise, for the entity the
   reference is evaluated for: in a rule body, the entity that rule is being
-  evaluated for; in a `count`/`sum` `where` clause or summed value, each
+  evaluated for; in an aggregation's `where` clause or value, each
   related entity, whatever entity the referenced rule declares (a `Household`
   rule in a `where` clause over household members is evaluated for each
   member); and inside a derived relation's own predicate, the current entity
@@ -53,13 +66,19 @@ output's formula is evaluated for that entity and period as follows.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
-  `max`/`min` and `ceil`/`floor` yield decimals even in a rule declared
-  `integer`. An `if` yields the kind of the branch each row takes. Output
-  rounding applies to decimal values only.
+  `max`/`min` (scalar or over numbers of related entities) and `ceil`/`floor`
+  yield decimals even in a rule declared `integer`. `min`/`max` over dates
+  yield a date, and `only` yields its member's value with its own kind. An
+  `if` yields the kind of the branch each row takes. Output rounding applies
+  to decimal values only. Equal decimals that differ in scale (`2.5` and
+  `2.50`) or in the sign of zero are one value; a response writes every
+  decimal normalized, and `min`/`max` over related entities keep the larger
+  scale, then the non-negative zero, so no evaluator's member order shows in
+  the value it computes.
 - **`relation_member` needs a derived relation.** It tests whether the current
   and related entity of the derived relation whose predicate is being
   evaluated appear together, in the slots it names, in the named relation.
-  That predicate is the only place that supplies them. Anywhere else, including a `count`/`sum` `where` clause
+  That predicate is the only place that supplies them. Anywhere else, including an aggregation's `where` clause
   and a rule the predicate references, `relation_member` is a type error of
   the evaluation that reaches it.
 - **An error fails the (query, output) it occurs in.** Division by zero, a
@@ -113,8 +132,9 @@ constructs fast declines or cannot answer (period bounds, date arithmetic,
 over-periods reductions), listed per rule. Execution never reads it, so it
 cannot change a result. It scans every branch, so a listed construct that only
 dead branches reach still runs on the fast path. It does not look inside
-relation aggregations, which fast evaluates row by row on the explain
-interpreter. Date values are not listed either (date literals, date inputs
+relation aggregations (`count`, `sum`, `min`/`max`, `only`), which fast
+evaluates row by row on the explain interpreter; one that yields a date sends
+the request to explain. Date values are not listed either (date literals, date inputs
 and date-valued parameters), although fast declines them when a live row
 reaches them.
 
@@ -154,15 +174,24 @@ batch happens to look up.
    it tests the relation's source, or a source further up its chain, with the
    slots the chain reads it with: such a test holds for every filtered tuple.
    The dense compiler rejects a predicate with any other membership test. A
-   `relation_member` in a `count`/`sum` `where` clause, in any rule such a
-   clause or a summed value reads, or in a related entity's rule that a
+   `relation_member` in an aggregation's `where` clause, in any rule such a
+   clause or an aggregated value reads, or in a related entity's rule that a
    predicate reads, fails the rows that reach it, as in explain. One in a
    rule dense evaluates on the root row (a root entity's rule outside related
    expressions, or a current entity's rule that a predicate reads) makes the
    dense compiler reject the program, even where explain would never reach
    it.
 
-Dense evaluates the rules a `where` clause, a summed value or a related rule's
+Dense reduces `min`/`max` over each row's related rows, walking them as it
+walks a `sum`, and gathers the one related row an `only` selects; both report
+explain's errors for the rows that reach them. Because dense rows carry no
+entity ids, `EmptyRelatedAggregate`, `NoRelatedEntity` and
+`AmbiguousRelatedEntity` name the root entity kind where explain names the
+entity id, as a missing root input does. An aggregation nested inside a
+related expression (a related rule that itself aggregates) makes the dense
+compiler reject the program, whichever aggregate it is.
+
+Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
 body reads on the related rows, for the related entity as explain does. Only a
 derived relation's own predicate reads a rule of the relation's current slot
 entity on the root row. In that predicate, a rule of an entity that is neither
@@ -179,10 +208,12 @@ order where explain reports the first in sorted id order.
 Lifetime execution (`execute_lifetime*`) has no explain counterpart. It follows
 the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
-period.
+period. In an output that reduces over periods, a relation aggregation outside
+the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,
+which names it.
 
-The dense compiler also declines one shape by depth. A `count`/`sum` inlines
-the rules its `where` clause and summed value read, and a current-entity rule
+The dense compiler also declines one shape by depth. An aggregation inlines
+the rules its `where` clause and value read, and a current-entity rule
 read there inlines the same way, so the compiled expression nests as deep as
 the chain of rules it inlines. Past `dense::MAX_INLINE_DEPTH` (512) levels the
 compiler returns `DenseCompileError::Unsupported` and the generic API

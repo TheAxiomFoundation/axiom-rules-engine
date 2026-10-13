@@ -1871,3 +1871,123 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn the_rulespec_reference_example_answers_as_documented() {
+    // The worked example in docs/rulespec.md, run as written.
+    let reference = include_str!("../docs/rulespec.md");
+    let section = &reference[reference
+        .find("### Minimum, maximum and exactly-one over related entities")
+        .expect("the section exists")..];
+    let start = section
+        .find("```yaml\n")
+        .expect("the section has an example")
+        + "```yaml\n".len();
+    let end = start + section[start..].find("\n```").expect("the example ends");
+    let source = format!("format: rulespec/v1\n{}\n", &section[start..end]);
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(&source).expect("the example compiles");
+    let tax_year = PeriodSpec {
+        kind: PeriodKindSpec::TaxYear,
+        start: date("2026-04-01"),
+        end: date("2027-03-31"),
+    };
+    let span = IntervalSpec {
+        start: tax_year.start,
+        end: tax_year.end,
+    };
+    let record = |entity: &str, id: &str, name: &str, value: ScalarValueSpec| InputRecordSpec {
+        name: name.to_string(),
+        entity: entity.to_string(),
+        entity_id: id.to_string(),
+        interval: span.clone(),
+        value,
+    };
+    let tuple = |person: &str, family: &str| RelationRecordSpec {
+        name: RELATION.to_string(),
+        tuple: vec![person.to_string(), family.to_string()],
+        interval: span.clone(),
+    };
+    // f0 has children aged 7 and 4; f1 has none; p2 is in no family and p3
+    // in both.
+    let dataset = DatasetSpec {
+        inputs: vec![
+            record("Person", "p0", "age", ScalarValueSpec::Integer { value: 7 }),
+            record("Person", "p1", "age", ScalarValueSpec::Integer { value: 4 }),
+            record(
+                "Family",
+                "f0",
+                "family_income",
+                ScalarValueSpec::Decimal {
+                    value: "48000".to_string(),
+                },
+            ),
+            record(
+                "Family",
+                "f1",
+                "family_income",
+                ScalarValueSpec::Decimal {
+                    value: "30000".to_string(),
+                },
+            ),
+        ],
+        relations: vec![
+            tuple("p0", "f0"),
+            tuple("p1", "f0"),
+            tuple("p3", "f0"),
+            tuple("p3", "f1"),
+        ],
+    };
+    let ask = |data: &DatasetSpec, entity_id: &str, output: &str| {
+        execute_compiled_request(
+            artifact.clone(),
+            CompiledExecutionRequest {
+                relation_binding: Default::default(),
+                mode: ExecutionMode::Explain,
+                dataset: data.clone(),
+                queries: vec![ExecutionQuery {
+                    entity_id: entity_id.to_string(),
+                    period: tax_year.clone(),
+                    outputs: vec![output.to_string()],
+                    assessment_date: None,
+                }],
+                pins: Vec::new(),
+            },
+        )
+        .map(|response| match &response.results[0].outputs[output] {
+            OutputValue::Scalar { value, .. } => numeric(value),
+            other => panic!("{other:?}"),
+        })
+    };
+    // p3 has no age recorded, and `min` reads every member's, so f0's
+    // youngest child is asked of a dataset holding only its children.
+    let mut children_only = dataset.clone();
+    children_only
+        .relations
+        .retain(|tuple| tuple.tuple[0] != "p3");
+    assert_eq!(
+        ask(&children_only, "f0", "youngest_child_age").unwrap(),
+        decimal("4")
+    );
+    assert_eq!(
+        ask(&children_only, "f1", "youngest_child_age").unwrap(),
+        Decimal::ZERO
+    );
+    assert_eq!(
+        ask(&dataset, "p0", "family_income_of_child").unwrap(),
+        decimal("48000")
+    );
+    let none = ask(&dataset, "p2", "family_income_of_child").expect_err("no family");
+    assert!(
+        matches!(none, ApiError::Eval(EvalError::NoRelatedEntity { .. })),
+        "{none}"
+    );
+    let two = ask(&dataset, "p3", "family_income_of_child").expect_err("two families");
+    assert!(
+        matches!(
+            two,
+            ApiError::Eval(EvalError::AmbiguousRelatedEntity { count: 2, .. })
+        ),
+        "{two}"
+    );
+}
