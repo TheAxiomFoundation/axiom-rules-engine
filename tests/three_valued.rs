@@ -1296,6 +1296,111 @@ fn no_match_patterns_are_not_checked() {
     );
 }
 
+/// 8f. The program checks walk every part of a formula that evaluation can
+/// reach: a `count`'s `where` clause, a `sum`'s summed value, an `if`'s else
+/// branch, and a `where` clause inside a derived relation's predicate, where
+/// a `relation_member` has no relation context. Each defect sits where this
+/// evaluation does not reach it, so only the checks can refuse it; without
+/// the option each program answers as on main.
+#[test]
+fn program_checks_walk_where_clauses_summed_values_and_else_branches() {
+    let count = |relation: &str, where_clause: Option<JudgmentExpr>| ScalarExpr::CountRelated {
+        relation: relation.to_string(),
+        current_slot: 1,
+        related_slot: 0,
+        where_clause: where_clause.map(Box::new),
+    };
+    let positive = |expr: ScalarExpr| cmp(expr, ComparisonOp::Gt, int(0));
+    let nowhere = || EvalError::UnknownDerived("nowhere".to_string());
+    let mut program = program(vec![
+        judgment_rule(
+            "where_clause",
+            and(vec![
+                not_holds(),
+                positive(count("members", Some(judgment_ref("nowhere")))),
+            ]),
+        ),
+        judgment_rule(
+            "summed_value",
+            and(vec![
+                not_holds(),
+                positive(ScalarExpr::SumRelated {
+                    relation: "members".to_string(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRef::Derived("nowhere".to_string()),
+                    where_clause: None,
+                }),
+            ]),
+        ),
+        derived(
+            "else_branch",
+            DType::Integer,
+            DerivedSemantics::Scalar(if_then(holds(), int(1), scalar_ref("nowhere"))),
+        ),
+        judgment_rule(
+            "member_in_a_predicate_where_clause",
+            and(vec![not_holds(), positive(count("filtered", None))]),
+        ),
+    ]);
+    program.add_relation("members", 2).expect("new relation");
+    program
+        .add_relation_schema(RelationSchema {
+            name: "filtered".to_string(),
+            arity: 2,
+            slot_entities: Vec::new(),
+            derivation: Some(RelationDerivation {
+                source_relation: "members".to_string(),
+                current_slot: 1,
+                related_slot: 0,
+                entity: None,
+                member_relation: None,
+                slot_entities: Vec::new(),
+                predicate: positive(count(
+                    "members",
+                    Some(JudgmentExpr::RelationMember {
+                        relation: "members".to_string(),
+                        current_slot: 1,
+                        related_slot: 0,
+                    }),
+                )),
+            }),
+        })
+        .expect("new relation");
+    let data = DataSet::default();
+    let not_holds_today = format!("{:?}", Ok::<_, EvalError>(NotHolds));
+    for (rule, refusal, today) in [
+        ("where_clause", nowhere(), not_holds_today.clone()),
+        ("summed_value", nowhere(), not_holds_today.clone()),
+        (
+            "else_branch",
+            nowhere(),
+            format!("{:?}", Ok::<_, EvalError>(ScalarValue::Integer(1))),
+        ),
+        (
+            "member_in_a_predicate_where_clause",
+            EvalError::TypeMismatch(
+                "relation predicate `members` can only be evaluated inside a derived relation"
+                    .to_string(),
+            ),
+            not_holds_today.clone(),
+        ),
+    ] {
+        let (under_option, without) = match program.derived[rule].semantics {
+            DerivedSemantics::Judgment(_) => (
+                judge(&program, &data, rule),
+                judge_today(&program, &data, rule),
+            ),
+            DerivedSemantics::Scalar(_) => (
+                value_of(&program, &data, rule),
+                value_today(&program, &data, rule),
+            ),
+        };
+        assert_eq!(under_option, err(refusal), "{rule}");
+        assert_eq!(without, today, "{rule} without the option");
+    }
+}
+
 /// 9. Scalar operators keep the reference order. Arithmetic before the first
 /// indeterminate operand happens as today, so it can overflow; operands after
 /// it are still evaluated and converted, so they can fail; a divisor is
@@ -1943,6 +2048,100 @@ fn needs_are_per_period_on_one_engine() {
                 );
             }
         }
+    }
+}
+
+/// 14. Two records for one cell with the same start and different values
+/// are `AmbiguousInput` under the option, in either record order, as without
+/// it, and never indeterminate: a record covers the cell, so it is no need
+/// (invariant 7). Read after a missing operand, the cell still fails the
+/// operator (section 5.5).
+#[test]
+fn conflicting_records_are_ambiguous_never_a_need() {
+    let program = program(vec![
+        judgment_rule("read", cmp(input("x"), ComparisonOp::Gt, int(0))),
+        scalar_rule("after_missing", add(vec![input("m"), input("x")])),
+    ]);
+    let ambiguous = err(EvalError::AmbiguousInput {
+        name: "x".to_string(),
+        entity_id: "c1".to_string(),
+        effective_from: date(2026, 1, 1),
+    });
+    for (first, second) in [(1, 2), (2, 1)] {
+        let data = inputs(&[
+            ("x", ScalarValue::Integer(first)),
+            ("x", ScalarValue::Integer(second)),
+        ]);
+        let order = format!("records {first}, {second}");
+        assert_eq!(judge(&program, &data, "read"), ambiguous, "{order}");
+        assert_eq!(
+            value_of(&program, &data, "after_missing"),
+            ambiguous,
+            "{order}"
+        );
+        assert_eq!(
+            judge_today(&program, &data, "read"),
+            ambiguous,
+            "{order} without the option"
+        );
+        assert_eq!(
+            value_today(&program, &data, "after_missing"),
+            err(missing_input("m")),
+            "{order} without the option"
+        );
+    }
+}
+
+/// 15. The note's `(R and Q) or not R` (section 12), with `R` unknown and
+/// `Q` holding, is unknown and needs `R`'s cell, though every completion
+/// holds: a known conservatism of the strong-Kleene rules. Rewritten as
+/// `Q or not R` it holds. Without the option it is `MissingInput` for `R`'s
+/// cell.
+#[test]
+fn r_and_q_or_not_r_is_unknown_though_every_completion_holds() {
+    let program = program(vec![
+        judgment_rule("r", flag("boarder")),
+        judgment_rule("q", flag("q")),
+        judgment_rule(
+            "root",
+            or(vec![
+                and(vec![judgment_ref("r"), judgment_ref("q")]),
+                not(judgment_ref("r")),
+            ]),
+        ),
+        judgment_rule(
+            "rewritten",
+            or(vec![judgment_ref("q"), not(judgment_ref("r"))]),
+        ),
+    ]);
+    let partial = inputs(&[("q", ScalarValue::Bool(true))]);
+    assert_eq!(
+        judge(&program, &partial, "root"),
+        unknown::<JudgmentOutcome>(&["boarder"])
+    );
+    assert_eq!(
+        judge(&program, &partial, "rewritten"),
+        ok(Determined(Holds))
+    );
+    assert_eq!(
+        judge_today(&program, &partial, "root"),
+        err(missing_input("boarder"))
+    );
+    for boarder in [true, false] {
+        let complete = inputs(&[
+            ("q", ScalarValue::Bool(true)),
+            ("boarder", ScalarValue::Bool(boarder)),
+        ]);
+        assert_eq!(
+            judge(&program, &complete, "root"),
+            ok(Determined(Holds)),
+            "boarder = {boarder}"
+        );
+        assert_eq!(
+            judge_today(&program, &complete, "root"),
+            format!("{:?}", Ok::<_, EvalError>(Holds)),
+            "boarder = {boarder} without the option"
+        );
     }
 }
 
