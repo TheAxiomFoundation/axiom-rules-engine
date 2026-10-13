@@ -42,6 +42,10 @@ Out of scope:
 
 ## 2. What main does today (621e0f24)
 
+This section was checked against 621e0f24. Since then #249 (bfebac66) has
+made chain typing, direction and binding linear. Its property tests check the
+new walks against the old ones, so the behaviour below is unchanged.
+
 **Predicates.**
 
 - **Evaluation.** To find a derived relation's members for an id, the engine
@@ -508,7 +512,8 @@ handle atoms, domains and paths:
 
 - RuleSpec alias rewriting and used-relation collection (`src/rulespec.rs`).
   Otherwise an imported relation used only in an atom is pruned.
-- `relation_typing.rs`: `effective_slot_entities` and the derivation checks.
+- `relation_typing.rs`: `effective_slot_entities`, the `EffectiveSlotEntities`
+  table and `follow_chains` (#249), and the derivation checks.
 - `relation_direction.rs`: `kinds_of` and slot resolution.
 - `migrate.rs`.
 - The fast-path metadata walk in `compile.rs`, which is written into
@@ -805,7 +810,7 @@ households, each worked out by hand from the regulation's text:
 | A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
 | Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
 | Two separate groups in one residence, each a chain of three ties, with the applicants at the ends of their chains | Each applicant gets exactly their own group from the supplied ids |
-| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (first precondition above). |
+| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (second precondition above). |
 | The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
@@ -830,10 +835,14 @@ Each is sized for one build lane.
 3. **Bounded `exists`.** Variables and scope, the resumable site and its key,
    the refusals, deferral transparency, and the expansion test.
 4. **Path sources.** The artifact form, candidate generation, every walk in
-   section 6, and the differential test against `exists`. This lands after
-   #211 and #249, or with an explicit merge plan for them, because those PRs
-   rewrite the single-source walks (`kinds_of`, `effective_slot_entities`,
-   dense's `derivation_of`) that path sources turn into graphs.
+   section 6, and the differential test against `exists`. #249 has landed:
+   the chain walks in typing, direction and migration now go through
+   `follow_chains` (`relation_typing.rs`), which follows one successor per
+   node. A path source makes a relation read several relations, one per
+   step, so this PR extends `follow_chains` or adds a graph walk beside it.
+   It also lands after #211, still open, which rewrites the chain walks in
+   validation, binding and all three evaluators, or with an explicit merge
+   plan for it.
 5. **Fixture and docs.** The 273.1 fixture and its hand-worked cases, the
    `relation_roles` capability, `docs/execution-semantics.md`, and a
    `DECISIONS.md` entry.
