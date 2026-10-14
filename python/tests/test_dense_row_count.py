@@ -22,7 +22,6 @@ when it is not built. Build locally with::
     maturin develop --release --manifest-path python-ext/Cargo.toml
 """
 
-from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -115,21 +114,41 @@ rules:
 OLD_MESSAGE = "neither root inputs nor relations"
 
 
-def _compile(tmp_path: Path, source: str, entity: str) -> CompiledDenseProgram:
-    root = (tmp_path / "rulespec-us").resolve()
-    path = root / "us/policies/tests/row_count.yaml"
-    path.parent.mkdir(parents=True)
-    path.write_text(source, encoding="utf-8")
-    return CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity=entity)
+Compile = Callable[[str, str], CompiledDenseProgram]
+
+
+@pytest.fixture(scope="session")
+def compile_program(tmp_path_factory) -> Compile:
+    """Compile a module for an entity once per session; execution does not
+    change a compiled program, so tests share it."""
+    compiled: dict[tuple[str, str], CompiledDenseProgram] = {}
+
+    def compile_(source: str, entity: str) -> CompiledDenseProgram:
+        if (source, entity) not in compiled:
+            root = (tmp_path_factory.mktemp("row_count") / "rulespec-us").resolve()
+            path = root / "us/policies/tests/row_count.yaml"
+            path.parent.mkdir(parents=True)
+            path.write_text(source, encoding="utf-8")
+            compiled[source, entity] = CompiledDenseProgram.from_file(
+                path, rulespec_roots=[root], entity=entity
+            )
+        return compiled[source, entity]
+
+    return compile_
 
 
 Runner = Callable[..., dict[str, Any]]
 
 
+def _stated(row_count) -> dict[str, Any]:
+    # An unstated count is left out, so the default path is what runs.
+    return {} if row_count is None else {"row_count": row_count}
+
+
 def _wrapper(method: str) -> Runner:
     def run(program, inputs, relations=None, row_count=None):
         return getattr(program, method)(
-            **MONTH, inputs=inputs, relations=relations, row_count=row_count
+            **MONTH, inputs=inputs, relations=relations, **_stated(row_count)
         )
 
     return run
@@ -156,7 +175,7 @@ def _native(method: str) -> Runner:
             {name: np.asarray(values) for name, values in inputs.items()},
             prepared,
             None,
-            row_count=row_count,
+            **_stated(row_count),
         )
 
     return run
@@ -186,9 +205,9 @@ def _only_relation_key(program: CompiledDenseProgram) -> str:
 
 @pytest.mark.parametrize("row_count", [0, 1, 3])
 def test_an_input_free_program_runs_for_a_stated_row_count(
-    tmp_path, run, row_count
+    compile_program, run, row_count
 ) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
     assert program.root_inputs == [] and program.relations == []
 
     result = run(program, {}, row_count=row_count)
@@ -216,8 +235,10 @@ rules:
 """
 
 
-def test_a_parameter_only_program_runs_for_a_stated_row_count(tmp_path, run) -> None:
-    program = _compile(tmp_path, PARAMETER_MODULE, "Household")
+def test_a_parameter_only_program_runs_for_a_stated_row_count(
+    compile_program, run
+) -> None:
+    program = compile_program(PARAMETER_MODULE, "Household")
     assert program.root_inputs == [] and program.relations == []
 
     result = run(program, {}, row_count=2)
@@ -228,9 +249,9 @@ def test_a_parameter_only_program_runs_for_a_stated_row_count(tmp_path, run) -> 
 
 
 def test_an_input_free_program_without_a_row_count_says_to_state_one(
-    tmp_path, run
+    compile_program, run
 ) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(ValueError) as excinfo:
         run(program, {})
@@ -242,11 +263,11 @@ def test_an_input_free_program_without_a_row_count_says_to_state_one(
 
 
 def test_columns_an_input_free_program_does_not_read_give_no_row_count(
-    tmp_path, run
+    compile_program, run
 ) -> None:
     # A column the program never reads is ignored, so it cannot be what sizes
     # the result; the error names it so a caller sees it was not used.
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(ValueError) as excinfo:
         run(program, {"zeta": np.array([1.0, 2.0]), "alpha": np.array([3.0, 4.0])})
@@ -259,8 +280,8 @@ def test_columns_an_input_free_program_does_not_read_give_no_row_count(
 # --- Problem 2: a missing or misspelt root input got a false message. ---
 
 
-def test_a_missing_root_input_is_named(tmp_path, run) -> None:
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+def test_a_missing_root_input_is_named(compile_program, run) -> None:
+    program = compile_program(DOUBLED_MODULE, "Household")
 
     with pytest.raises(ValueError) as excinfo:
         run(program, {})
@@ -272,10 +293,12 @@ def test_a_missing_root_input_is_named(tmp_path, run) -> None:
     assert "not root inputs" not in message
 
 
-def test_a_misspelt_root_input_is_refused_not_read_as_zero_rows(tmp_path, run) -> None:
+def test_a_misspelt_root_input_is_refused_not_read_as_zero_rows(
+    compile_program, run
+) -> None:
     # Defaulting to zero rows would return an empty result here, with no error,
     # because no row would ever read `rent`.
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+    program = compile_program(DOUBLED_MODULE, "Household")
 
     with pytest.raises(ValueError) as excinfo:
         run(program, {"rnet": np.array([1000.0, 2000.0])})
@@ -286,18 +309,20 @@ def test_a_misspelt_root_input_is_refused_not_read_as_zero_rows(tmp_path, run) -
     assert "not root inputs: `rnet`" in message
 
 
-def test_with_a_stated_row_count_the_missing_input_is_reported(tmp_path, run) -> None:
+def test_with_a_stated_row_count_the_missing_input_is_reported(
+    compile_program, run
+) -> None:
     # Since #201 an absent column is a missing input on every row, reported
     # by the first row that reads it.
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+    program = compile_program(DOUBLED_MODULE, "Household")
 
     with pytest.raises(RuntimeError, match="missing input `rent`"):
         run(program, {}, row_count=2)
 
 
-def test_a_stated_zero_rows_reads_no_input(tmp_path, run) -> None:
+def test_a_stated_zero_rows_reads_no_input(compile_program, run) -> None:
     # Zero rows is allowed when the caller says so: no row reads `rent`.
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+    program = compile_program(DOUBLED_MODULE, "Household")
 
     result = run(program, {}, row_count=0)
 
@@ -308,8 +333,8 @@ def test_a_stated_zero_rows_reads_no_input(tmp_path, run) -> None:
 # --- A stated count must agree with every supplied column and offsets. ---
 
 
-def test_a_stated_row_count_that_agrees_changes_nothing(tmp_path, run) -> None:
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+def test_a_stated_row_count_that_agrees_changes_nothing(compile_program, run) -> None:
+    program = compile_program(DOUBLED_MODULE, "Household")
     rent = np.array([100.0, 250.5, 0.0])
 
     inferred = run(program, {"rent": rent})
@@ -324,9 +349,9 @@ def test_a_stated_row_count_that_agrees_changes_nothing(tmp_path, run) -> None:
 
 @pytest.mark.parametrize("row_count", [0, 2, 4])
 def test_a_stated_row_count_that_disagrees_with_a_column_is_refused(
-    tmp_path, run, row_count
+    compile_program, run, row_count
 ) -> None:
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+    program = compile_program(DOUBLED_MODULE, "Household")
 
     with pytest.raises(
         RuntimeError,
@@ -335,8 +360,8 @@ def test_a_stated_row_count_that_disagrees_with_a_column_is_refused(
         run(program, {"rent": np.array([1.0, 2.0, 3.0])}, row_count=row_count)
 
 
-def test_a_stated_row_count_must_agree_with_the_offsets(tmp_path, run) -> None:
-    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+def test_a_stated_row_count_must_agree_with_the_offsets(compile_program, run) -> None:
+    program = compile_program(HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
     relations = {
         key: DenseRelationBatch(
@@ -354,9 +379,9 @@ def test_a_stated_row_count_must_agree_with_the_offsets(tmp_path, run) -> None:
 
 
 def test_a_relation_still_gives_the_row_count_when_none_is_stated(
-    tmp_path, run
+    compile_program, run
 ) -> None:
-    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    program = compile_program(HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
     relations = {
         key: DenseRelationBatch(
@@ -370,9 +395,9 @@ def test_a_relation_still_gives_the_row_count_when_none_is_stated(
 
 
 def test_a_relation_program_needs_its_relation_batch_even_with_a_count(
-    tmp_path, run
+    compile_program, run
 ) -> None:
-    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    program = compile_program(HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
 
     for row_count in (None, 2):
@@ -384,8 +409,8 @@ def test_a_relation_program_needs_its_relation_batch_even_with_a_count(
 
 
 @pytest.mark.parametrize("row_count", [-1, -(2**63), -(2**70), -(2**200)])
-def test_a_negative_row_count_is_refused(tmp_path, run, row_count) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+def test_a_negative_row_count_is_refused(compile_program, run, row_count) -> None:
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(ValueError, match="row_count must be non-negative"):
         run(program, {}, row_count=row_count)
@@ -395,9 +420,9 @@ def test_a_negative_row_count_is_refused(tmp_path, run, row_count) -> None:
     "row_count", [2.0, "2", True, False, np.True_, np.float64(2.0), [2]]
 )
 def test_a_row_count_that_is_not_an_integer_is_refused(
-    tmp_path, run, row_count
+    compile_program, run, row_count
 ) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(TypeError, match="row_count must be an integer, not"):
         run(program, {}, row_count=row_count)
@@ -406,35 +431,37 @@ def test_a_row_count_that_is_not_an_integer_is_refused(
 @pytest.mark.parametrize(
     "row_count", [np.int64(2), np.uint32(2), np.int8(2), np.array(2)]
 )
-def test_a_numpy_integer_row_count_is_accepted(tmp_path, run, row_count) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+def test_a_numpy_integer_row_count_is_accepted(compile_program, run, row_count) -> None:
+    program = compile_program(FIVE_MODULE, "Household")
 
     assert run(program, {}, row_count=row_count)["row_count"] == 2
 
 
 @pytest.mark.parametrize("row_count", [2**60, 2**63 - 1, 2**63, 2**64 - 1])
-def test_the_engine_bound_refuses_a_huge_row_count(tmp_path, run, row_count) -> None:
+def test_the_engine_bound_refuses_a_huge_row_count(
+    compile_program, run, row_count
+) -> None:
     # MAX_DENSE_ROWS (#255) is the arbiter: every count that fits a usize
     # reaches the engine, which refuses one above the bound before allocating.
     # A pyo3 PanicException is a BaseException, so it would fail this test.
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(RuntimeError, match=f"row_count {row_count} exceeds"):
         run(program, {}, row_count=row_count)
 
 
 @pytest.mark.parametrize("row_count", [2**64, 2**70, 2**200])
-def test_a_row_count_past_usize_overflows(tmp_path, run, row_count) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+def test_a_row_count_past_usize_overflows(compile_program, run, row_count) -> None:
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(OverflowError, match="row_count"):
         run(program, {}, row_count=row_count)
 
 
-def test_a_stated_related_row_count_is_read_the_same_way(tmp_path, run) -> None:
+def test_a_stated_related_row_count_is_read_the_same_way(compile_program, run) -> None:
     # `related_row_count` shares the extraction: a bool is refused, and a
     # count past i64::MAX reaches the engine rather than overflowing here.
-    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    program = compile_program(HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
 
     def relations(related_row_count):
@@ -462,8 +489,8 @@ def test_a_stated_related_row_count_is_read_the_same_way(tmp_path, run) -> None:
         run(program, {}, relations(2**64))
 
 
-def test_the_native_row_count_is_keyword_only(tmp_path) -> None:
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+def test_the_native_row_count_is_keyword_only(compile_program) -> None:
+    program = compile_program(FIVE_MODULE, "Household")
 
     with pytest.raises(TypeError, match="positional argument"):
         program._native.execute(
@@ -495,9 +522,9 @@ def run_lifetime(request) -> Callable[..., dict[str, Any]]:
 
 
 def test_an_input_free_lifetime_program_runs_for_stated_row_counts(
-    tmp_path, run_lifetime
+    compile_program, run_lifetime
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_FIVE_MODULE, "Worker")
+    program = compile_program(LIFETIME_FIVE_MODULE, "Worker")
 
     result = run_lifetime(program, [({}, None, 3), [{}, None, 3]])
 
@@ -505,8 +532,10 @@ def test_an_input_free_lifetime_program_runs_for_stated_row_counts(
     np.testing.assert_array_equal(result["outputs"]["total"], [10.0, 10.0, 10.0])
 
 
-def test_a_lifetime_batch_without_a_row_count_is_named(tmp_path, run_lifetime) -> None:
-    program = _compile(tmp_path, LIFETIME_FIVE_MODULE, "Worker")
+def test_a_lifetime_batch_without_a_row_count_is_named(
+    compile_program, run_lifetime
+) -> None:
+    program = compile_program(LIFETIME_FIVE_MODULE, "Worker")
 
     for batches, index in (([{}, {}], 0), ([({}, None, 2), ({}, None)], 1)):
         with pytest.raises(ValueError) as excinfo:
@@ -518,9 +547,9 @@ def test_a_lifetime_batch_without_a_row_count_is_named(tmp_path, run_lifetime) -
 
 
 def test_a_lifetime_batch_missing_its_root_input_names_it(
-    tmp_path, run_lifetime
+    compile_program, run_lifetime
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_EARNINGS_MODULE, "Worker")
+    program = compile_program(LIFETIME_EARNINGS_MODULE, "Worker")
 
     with pytest.raises(ValueError) as excinfo:
         run_lifetime(
@@ -534,18 +563,18 @@ def test_a_lifetime_batch_missing_its_root_input_names_it(
 
 
 def test_lifetime_stated_row_counts_must_agree_across_batches(
-    tmp_path, run_lifetime
+    compile_program, run_lifetime
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_FIVE_MODULE, "Worker")
+    program = compile_program(LIFETIME_FIVE_MODULE, "Worker")
 
     with pytest.raises(RuntimeError, match="period 1 has 3 rows but period 0 has 2"):
         run_lifetime(program, [({}, None, 2), ({}, None, 3)])
 
 
 def test_a_lifetime_stated_row_count_must_agree_with_its_columns(
-    tmp_path, run_lifetime
+    compile_program, run_lifetime
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_EARNINGS_MODULE, "Worker")
+    program = compile_program(LIFETIME_EARNINGS_MODULE, "Worker")
     earnings = np.array([10.0, 20.0])
 
     result = run_lifetime(
@@ -563,9 +592,9 @@ def test_a_lifetime_stated_row_count_must_agree_with_its_columns(
 
 
 def test_a_lifetime_stated_row_count_is_checked_like_execute(
-    tmp_path, run_lifetime
+    compile_program, run_lifetime
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_FIVE_MODULE, "Worker")
+    program = compile_program(LIFETIME_FIVE_MODULE, "Worker")
 
     with pytest.raises(ValueError, match="row_count must be non-negative"):
         run_lifetime(program, [({}, None, -1), ({}, None, -1)])
@@ -579,9 +608,9 @@ def test_a_lifetime_stated_row_count_is_checked_like_execute(
 
 @pytest.mark.parametrize("batch", [(), ({}, None, 2, None)])
 def test_a_lifetime_batch_of_the_wrong_shape_is_refused(
-    tmp_path, run_lifetime, batch
+    compile_program, run_lifetime, batch
 ) -> None:
-    program = _compile(tmp_path, LIFETIME_FIVE_MODULE, "Worker")
+    program = compile_program(LIFETIME_FIVE_MODULE, "Worker")
 
     with pytest.raises(
         ValueError, match=r"\(inputs\[, relations\[, row_count\]\]\) tuple"
@@ -596,7 +625,7 @@ def test_a_lifetime_batch_of_the_wrong_shape_is_refused(
 @pytest.mark.parametrize("stated", [None, 0, 1, 2, 3, 4])
 @pytest.mark.parametrize("extra", [False, True])
 def test_every_result_row_count_is_one_the_caller_gave(
-    tmp_path, run, column_rows, stated, extra
+    compile_program, run, column_rows, stated, extra
 ) -> None:
     """For `doubled = rent * 2`, over every small combination of a `rent`
     column (or none), a stated count (or none), and an unread extra column:
@@ -610,7 +639,7 @@ def test_every_result_row_count_is_one_the_caller_gave(
     - with no `rent` column, the only rows that can succeed are zero stated
       rows, and any other stated count fails on the missing input.
     """
-    program = _compile(tmp_path, DOUBLED_MODULE, "Household")
+    program = compile_program(DOUBLED_MODULE, "Household")
     inputs: dict[str, np.ndarray] = {}
     rent = None
     if column_rows is not None:
@@ -666,7 +695,7 @@ def test_every_result_row_count_is_one_the_caller_gave(
     ],
 )
 def test_every_integer_row_count_is_accepted_or_refused_by_class(
-    tmp_path, run, row_count
+    compile_program, run, row_count
 ) -> None:
     """The partition of integer row counts, by class representative: negative
     counts raise ValueError; counts past a 64-bit usize raise OverflowError;
@@ -675,7 +704,7 @@ def test_every_integer_row_count_is_accepted_or_refused_by_class(
     the bound are left out: the engine accepts them and allocates one value
     per row, so one larger than memory aborts the process (the per-row
     executor buffers #255 leaves infallible)."""
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
     _check_row_count_class(program, run, row_count)
 
 
@@ -697,12 +726,12 @@ def _check_row_count_class(
         np.testing.assert_array_equal(result["outputs"]["five"], [5] * row_count)
 
 
-def test_integer_row_counts_property(tmp_path) -> None:
+def test_integer_row_counts_property(compile_program) -> None:
     """The same partition over Hypothesis-generated integers (skipped when
     Hypothesis is not installed)."""
     hypothesis = pytest.importorskip("hypothesis")
     strategies = pytest.importorskip("hypothesis.strategies")
-    program = _compile(tmp_path, FIVE_MODULE, "Household")
+    program = compile_program(FIVE_MODULE, "Household")
 
     counts = strategies.one_of(
         strategies.integers(max_value=-1),
