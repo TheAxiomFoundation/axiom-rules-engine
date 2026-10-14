@@ -978,6 +978,7 @@ fn dense_names_a_match_reached_through_a_derived_relation_as_explain_does() {
                             "status".to_string(),
                             DenseColumn::Integer(statuses.clone()),
                         )]),
+                        ..Default::default()
                     },
                 )]),
             };
@@ -1483,6 +1484,7 @@ fn household_batch(households: &[Household]) -> DenseBatchSpec {
                     ("eligible".to_string(), DenseColumn::Integer(eligible)),
                     ("status".to_string(), DenseColumn::Integer(status)),
                 ]),
+                ..Default::default()
             },
         )]),
     }

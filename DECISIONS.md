@@ -4,6 +4,129 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
+
+**Decision.** Every buffer the dense executor sizes by a row count, the
+batch's `row_count` or a relation's related count, is reserved with
+`Vec::try_reserve_exact`, through `row_buffer`, `filled_rows` and
+`copied_rows` in `src/lazy.rs`. When the allocator refuses one, the call
+fails with `EvalError::TypeMismatch` naming the count ("evaluation needs a
+buffer of N rows, more than this process can allocate"), propagated through
+`Flow` like any whole-call error. A batch whose buffers fit gets exactly the
+results it got before.
+
+**Why.** Binding (the entry below) bounds each count by `MAX_DENSE_ROWS` and
+reserves a relation's owners fallibly, but trusts a count up to that bound.
+Execution then filled broadcast literals, operator results, row masks,
+projections and cached rule columns with `vec!`. Two kinds of batch could
+therefore still abort the process, the Python interpreter included:
+
+- a stated related count whose 8-byte owners fit but whose 16-byte decimal or
+  24-byte text buffers did not
+- a huge `row_count` for a rule with no input and no relation, such as
+  `formula: 5` over 2^50 rows
+
+**Consequences.**
+
+- The covered buffers are:
+  - every operator's output column, broadcast literals and period dates
+  - placeholders for missing inputs and failed rows
+  - copies of input columns and of cached rule columns
+  - numeric conversions and comparison outcomes
+  - root and related row masks, and root-to-related projections
+  - related counts and sums, parameter lookups, and the lifetime executor's
+    reductions
+
+  `RowMask`'s set operations now return `Result`, so the bulk evaluator
+  propagates a refusal too; there it sends the request to explain, as any bulk
+  error does.
+- Some buffers are gone rather than made fallible:
+  - a mask with no active row holds no bits
+  - masks and relation offsets share their `Vec` instead of copying it into
+    an `Rc` slice
+  - `not` negates in place
+  - a period-invariant input moves its column out instead of copying it
+  - `RowErrors` renames its entries in place and restricts them by inserting
+    them one at a time; collecting into a
+    new map gathered every entry in one buffer first
+- A rule before its commencement date types its formula, which allocates the
+  formula's column, before it records an error on every row. A batch too large
+  to evaluate is refused before a pass over its rows.
+- Still infallible:
+  - allocations sized by something other than a row count (one per rule,
+    period, output or relation key)
+  - the heap data of each text value, cloned per row with ordinary allocation
+  - the entries `RowErrors` records, one per failing row; dense records them
+    only after a buffer for the same rows was granted
+- A reservation fails only when the allocator refuses it. On a host that
+  overcommits memory, a large but possible count can pass its reservation and
+  still exhaust memory as the buffer is filled. A request no host can grant is
+  an error everywhere. On wasm32 the allocator returns null when linear memory
+  cannot grow, so there a request that does not fit in 4 GiB is an error too.
+- `tests/dense_executor_alloc.rs` runs in its own binary, so a regression aborts
+  only that binary. Its allocator refuses three things: any single allocation
+  above a cap that a test sets, the nth allocation of at least 2 KiB that a
+  test chooses, and anything past 1 GiB live. A regression therefore aborts
+  promptly. The cap tests a count whose narrow buffers fit and whose wide ones
+  do not, with small, real batches. Refusing each large allocation in turn
+  reaches the buffers no wider than one already granted, such as masks and
+  copies, which no cap can single out.
+
+## 2026-10-14 — Dense batches justify every row count they claim
+
+**Decision.** Dense binding refuses a batch whose row counts nothing
+confirms, before it allocates anything from them. `row_count` is the caller's
+stated root row count: every supplied root column must have that length, and
+it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest per-row
+buffer element). A relation's related row count is its last offset. A nonzero
+one must be confirmed by a supplied related column of that length or by an
+explicit `DenseRelationBatchSpec::related_row_count`; a stated count must equal
+the last offset, and so must every supplied related column, whether or not the
+program reads it. Counts above `MAX_DENSE_ROWS` are refused, and the owners
+buffer is reserved fallibly, so a stated count larger than memory is an error.
+Violations are `EvalError::TypeMismatch`.
+
+**Why.** Binding allocates one owner per related row, and the offsets were the
+only statement of how many there are. A relation with no related column (a
+`len`, or a filter that reads only the current entity) sized that buffer from
+the last offset alone: offsets `[0, usize::MAX]` panicked with "capacity
+overflow", and `[0, 2^50]` aborted the process, the Python interpreter
+included. `row_count = usize::MAX` overflowed `row_count + 1`. Requiring
+confirmation turns a malformed offsets vector into an error, as `row_count`
+already did for root columns.
+
+**Consequences.**
+
+- A caller that passes offsets with related rows but no related column must
+  state the count: `related_row_count` in Rust, or
+  `DenseRelationBatch(related_row_count=...)` (the `"related_row_count"`
+  relation-dict key) in Python. It is the caller's assertion, so it should be
+  counted independently of the offsets: one per root and member pair, so a
+  related entity two roots share counts twice. Fixtures in this repository
+  that built such relations now state the counts they built.
+- Missing input columns keep their lazy meaning: an absent root or related
+  column fails only the rows that read it. A relation whose only related column
+  is omitted that way still needs its count confirmed, by a stated count.
+- Binding first walks the schemas in order, checking each key's offsets when
+  its first schema reaches it and each schema's read columns, so the first
+  error a per-schema binding reports is unchanged. Confirmation, the bound and
+  the columns no schema reads are checked after that walk, key by key. The
+  Python extension does not convert unread columns; it passes their lengths
+  in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
+  alone, checked like `inputs` but never readable), so the engine orders
+  every error and nothing is allocated from a claimed length.
+- A stated count is trusted up to the bound. Binding's owners reservation fails
+  cleanly for a count no host can hold. Execution then reserves each per-row
+  buffer fallibly too (the entry above), so a count that fits the owners buffer
+  but not a later, wider buffer is refused there.
+- `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
+  `input_lengths`), which breaks struct literals outside this crate; it now
+  derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
+  breaking one for 0.2.x users: cut it as 0.3.0.
+- Root columns, and the columns no schema reads within a key, are reported
+  smallest name first; read columns keep schema order. So a malformed batch
+  reports the same error on every run.
+
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 
 **Decision.** A fresh compile no longer lists "fast mode does not yet support

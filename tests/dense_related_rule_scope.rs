@@ -293,6 +293,10 @@ impl Data {
                     DenseRelationBatchSpec {
                         offsets: offsets.clone(),
                         inputs,
+                        related_row_count: Some(
+                            self.rows.iter().map(|row| row.related.len()).sum(),
+                        ),
+                        ..Default::default()
                     },
                 )
             })
