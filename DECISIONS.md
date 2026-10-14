@@ -4,6 +4,47 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-13 — An empty `min`/`max` and a non-singleton `only` over related entities fail rather than default
+
+**Decision.** `min(r.f)` and `max(r.f)` (and `min_where` / `max_where`) over
+related entities fail with `EmptyRelatedAggregate` when no member is
+selected. `only(r.f)` fails with `NoRelatedEntity` when none is and with
+`AmbiguousRelatedEntity`, which reports the count, when several are. Each error
+names the relation, the entity and the period. None of them returns 0, a
+sentinel, or the first member. A rule whose law gives the empty case a value
+writes it as a guard, `if len(r) > 0: min(r.f) else: <value>`; conditionals
+are lazy, so the guarded form never fails. The aggregates are new expression
+kinds (`extreme_related`, `only_related`); `ARTIFACT_FORMAT_VERSION` stays 2
+(#232, step 1).
+
+**Why.**
+
+- A default would invent a value the law does not give. A family with no
+  children has no youngest child, and 0 would read as the age of a newborn. A
+  child in no family has no family income, and 0 would read as a family that
+  earns nothing. Where the law does say what the empty case is, the guard
+  states it in the rule, next to the citation, instead of the engine choosing.
+- Taking one member of an ambiguous `only` would make the answer depend on
+  dataset or id order, and would hide a data error (a person recorded in two
+  families) that the caller needs to see.
+- A failure names its cause at the rule that needs the value. A default would
+  flow silently into every rule that depends on it.
+
+**Consequences.**
+
+- Old to new: every artifact still loads, and a program that uses none of the
+  new aggregates compiles to the same bytes (checked against `origin/main` on
+  the repository's fixtures and on rulespec-nz and rulespec-us modules, PR #254).
+- New to old: an engine without the variants refuses an artifact that uses
+  them when it loads it, as for any new expression variant (#186).
+  `capabilities` lists `related_min_max_only` on engines that load them.
+- `min`/`max` compare numbers numerically and yield a decimal, as `sum`
+  does, and compare dates chronologically. Equal decimals of different scale
+  keep the larger scale, then the non-negative zero, so dense's batch order
+  and explain's id order give the same value.
+- Dense rows carry no entity ids, so dense's errors name the root entity kind
+  where explain names the id.
+
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 
 **Decision.** A fresh compile no longer lists "fast mode does not yet support

@@ -61,7 +61,7 @@ use axiom_rules_engine::dense::{
 use axiom_rules_engine::engine::EvalError;
 use axiom_rules_engine::model::{DType, Period, PeriodKind, Program};
 use axiom_rules_engine::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, DerivedSpec, ExtremeSpec,
     IndexedParameterSpec, InputRecordSpec, IntervalSpec, JudgmentExprSpec, JudgmentOutcomeSpec,
     ParameterVersionSpec, PeriodKindSpec, PeriodSpec, ProgramSpec, RelatedValueRefSpec,
     RelationDerivationSpec, RelationRecordSpec, RelationSpec, RoundingModeSpec, ScalarExprSpec,
@@ -138,6 +138,13 @@ enum NumG {
     /// set and the program declares it.
     Count(bool, Option<PBoolG>),
     Sum(bool, PValG, Option<PBoolG>),
+    /// `max` (first flag) or `min` over [`MEMBERS`], or over [`FILTERED`]
+    /// when the second flag is set and the program declares it. With the last
+    /// flag, guarded by a count of the same members: `if count > 0`.
+    Extreme(bool, bool, PValG, Option<PBoolG>, bool),
+    /// `only` over [`MEMBERS`] or [`FILTERED`] as for [`NumG::Extreme`]; with
+    /// the last flag, guarded by `if count == 1`.
+    Only(bool, PValG, Option<PBoolG>, bool),
     /// `count` over [`LINKED`], or with a value a `sum` of an earlier numeric
     /// household rule (a `count` when there is none).
     Linked(Option<u8>, Option<LinkedPredG>),
@@ -380,6 +387,10 @@ struct Profile {
     /// weight, rows linked to one or two rows of the batch, and one or two
     /// aggregation-free rules ([`ProgramG::plain_rules`]) for them to read.
     linked_relation: bool,
+    /// Weight of each of the `min`/`max` and `only` leaves over the members
+    /// relation (with `relations` on); 0 generates none, so the profiles that
+    /// predate them generate the same cases.
+    related_extremes_weight: u32,
 }
 
 /// Evaluation order in isolation: lazy `if`, short-circuit `and`/`or`, divisor
@@ -400,6 +411,7 @@ const EVAL_ORDER: Profile = Profile {
     aggregation_weight: 1,
     source_membership_weight: 1,
     linked_relation: false,
+    related_extremes_weight: 0,
 };
 
 /// Everything the generator knows.
@@ -421,6 +433,7 @@ const FULL: Profile = Profile {
     aggregation_weight: 1,
     source_membership_weight: 1,
     linked_relation: false,
+    related_extremes_weight: 0,
 };
 
 /// Relation aggregation in depth, the shapes behind the two divergences the
@@ -444,6 +457,7 @@ const RELATIONS: Profile = Profile {
     aggregation_weight: 3,
     source_membership_weight: 1,
     linked_relation: false,
+    related_extremes_weight: 0,
 };
 
 /// The dense-compatible subset: every row requests every household rule,
@@ -468,6 +482,7 @@ const DENSE: Profile = Profile {
     aggregation_weight: 2,
     source_membership_weight: 4,
     linked_relation: false,
+    related_extremes_weight: 0,
 };
 
 /// [`DENSE`] with counts and sums over [`LINKED`], a relation between two
@@ -480,6 +495,27 @@ const LINKED_DENSE: Profile = Profile {
     name: "linked-dense",
     relation_member_weight: 0,
     linked_relation: true,
+    ..DENSE
+};
+
+/// [`RELATIONS`] with `min`/`max` and `only` over the members relation and
+/// over [`FILTERED`], bare (failing a household with no member, or with
+/// other than one for `only`) or guarded by a count of the same members. A
+/// `relation_member` outside [`FILTERED`]'s predicate, which [`RELATIONS`]
+/// covers, is left out: its errors would mask the aggregates' own.
+const RELATED_EXTREMES: Profile = Profile {
+    name: "related-extremes",
+    relation_member_weight: 0,
+    aggregation_weight: 1,
+    related_extremes_weight: 2,
+    ..RELATIONS
+};
+
+/// [`DENSE`] with the [`RELATED_EXTREMES`] leaves: dense reduces them per row
+/// over the relation's offsets and must hold explain's values and errors.
+const DENSE_EXTREMES: Profile = Profile {
+    name: "dense-extremes",
+    related_extremes_weight: 2,
     ..DENSE
 };
 
@@ -723,6 +759,41 @@ fn num_strategy(profile: Profile) -> BoxedStrategy<NumG> {
         };
         leaves.push((profile.aggregation_weight, count));
         leaves.push((profile.aggregation_weight, sum));
+        if profile.related_extremes_weight > 0 {
+            // A bare aggregate fails every household with no member (or, for
+            // `only`, with other than one), which fails the whole request, so
+            // most are guarded and most cases still answer.
+            let guarded = || proptest::bool::weighted(0.9);
+            let filtered = || {
+                if profile.derived_relation {
+                    any::<bool>().boxed()
+                } else {
+                    Just(false).boxed()
+                }
+            };
+            leaves.push((
+                profile.related_extremes_weight,
+                (
+                    any::<bool>(),
+                    filtered(),
+                    pval_strategy(),
+                    predicate(),
+                    guarded(),
+                )
+                    .prop_map(|(max, filtered, value, predicate, guarded)| {
+                        NumG::Extreme(max, filtered, value, predicate, guarded)
+                    })
+                    .boxed(),
+            ));
+            leaves.push((
+                profile.related_extremes_weight,
+                (filtered(), pval_strategy(), predicate(), guarded())
+                    .prop_map(|(filtered, value, predicate, guarded)| {
+                        NumG::Only(filtered, value, predicate, guarded)
+                    })
+                    .boxed(),
+            ));
+        }
     }
     if profile.linked_relation {
         let predicate = || proptest::option::weighted(0.8, linked_pred_strategy());
@@ -1328,6 +1399,24 @@ fn aggregated_relation(filtered: bool, cx: &Cx<'_>) -> &'static str {
     }
 }
 
+/// The person value a `sum`, `min`/`max` or `only` reads: a person input, or
+/// an earlier numeric person rule (the input when there is none).
+fn lower_pval(value: &PValG, cx: &Cx<'_>) -> RelatedValueRefSpec {
+    match value {
+        PValG::Input(index) => RelatedValueRefSpec::Input {
+            name: person_num_input(*index),
+        },
+        PValG::Rule(index) => match Cx::pick(cx.person, RuleTag::Num, *index) {
+            Some(name) => RelatedValueRefSpec::Derived {
+                name: name.to_string(),
+            },
+            None => RelatedValueRefSpec::Input {
+                name: person_num_input(*index),
+            },
+        },
+    }
+}
+
 fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
     let integer_kinds = cx.profile.integer_kinds;
     match expr {
@@ -1360,23 +1449,70 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
             relation: aggregated_relation(*filtered, cx).to_string(),
             current_slot: 1,
             related_slot: 0,
-            value: match value {
-                PValG::Input(index) => RelatedValueRefSpec::Input {
-                    name: person_num_input(*index),
-                },
-                PValG::Rule(index) => match Cx::pick(cx.person, RuleTag::Num, *index) {
-                    Some(name) => RelatedValueRefSpec::Derived {
-                        name: name.to_string(),
-                    },
-                    None => RelatedValueRefSpec::Input {
-                        name: person_num_input(*index),
-                    },
-                },
-            },
+            value: lower_pval(value, cx),
             where_clause: predicate
                 .as_ref()
                 .map(|predicate| Box::new(lower_pbool(predicate, cx))),
         },
+        NumG::Extreme(max, filtered, value, predicate, guarded) => {
+            let relation = aggregated_relation(*filtered, cx).to_string();
+            let where_clause = predicate
+                .as_ref()
+                .map(|predicate| Box::new(lower_pbool(predicate, cx)));
+            let extreme = ScalarExprSpec::ExtremeRelated {
+                extreme: if *max {
+                    ExtremeSpec::Max
+                } else {
+                    ExtremeSpec::Min
+                },
+                relation: relation.clone(),
+                current_slot: 1,
+                related_slot: 0,
+                value: lower_pval(value, cx),
+                where_clause: where_clause.clone(),
+            };
+            if !*guarded {
+                return extreme;
+            }
+            let count = ScalarExprSpec::CountRelated {
+                relation,
+                current_slot: 1,
+                related_slot: 0,
+                where_clause,
+            };
+            if_expr(
+                cmp(count, ComparisonOpSpec::Gt, int_lit(0)),
+                extreme,
+                lit(num_literal(0, integer_kinds)),
+            )
+        }
+        NumG::Only(filtered, value, predicate, guarded) => {
+            let relation = aggregated_relation(*filtered, cx).to_string();
+            let where_clause = predicate
+                .as_ref()
+                .map(|predicate| Box::new(lower_pbool(predicate, cx)));
+            let only = ScalarExprSpec::OnlyRelated {
+                relation: relation.clone(),
+                current_slot: 1,
+                related_slot: 0,
+                value: lower_pval(value, cx),
+                where_clause: where_clause.clone(),
+            };
+            if !*guarded {
+                return only;
+            }
+            let count = ScalarExprSpec::CountRelated {
+                relation,
+                current_slot: 1,
+                related_slot: 0,
+                where_clause,
+            };
+            if_expr(
+                cmp(count, ComparisonOpSpec::Eq, int_lit(1)),
+                only,
+                lit(num_literal(0, integer_kinds)),
+            )
+        }
         NumG::Linked(value, predicate) => {
             let where_clause = predicate
                 .as_ref()
@@ -2217,6 +2353,16 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             }
         }
         ScalarExprSpec::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
             value,
             where_clause,
             ..
@@ -3432,6 +3578,38 @@ fn fmt_scalar(expr: &ScalarExprSpec) -> String {
                 None => format!("sum({relation}.{value})"),
             }
         }
+        ScalarExprSpec::ExtremeRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::OnlyRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        } => {
+            let function = match expr {
+                ScalarExprSpec::ExtremeRelated {
+                    extreme: ExtremeSpec::Min,
+                    ..
+                } => "min",
+                ScalarExprSpec::ExtremeRelated { .. } => "max",
+                _ => "only",
+            };
+            let relation = fmt_relation(relation);
+            let value = match value {
+                RelatedValueRefSpec::Input { name } | RelatedValueRefSpec::Derived { name } => name,
+            };
+            match where_clause {
+                Some(predicate) => format!(
+                    "{function}({relation}.{value} where {})",
+                    fmt_judgment(predicate)
+                ),
+                None => format!("{function}({relation}.{value})"),
+            }
+        }
         ScalarExprSpec::If {
             condition,
             then_expr,
@@ -4098,6 +4276,9 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::CountRelated { .. }
+        // Added after #201: no earlier engine listed a blocker for them.
+        | ScalarExprSpec::ExtremeRelated { .. }
+        | ScalarExprSpec::OnlyRelated { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => 0,
         ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),
@@ -4495,6 +4676,82 @@ fn random_programs_dense_matches_explain_over_linked_households() {
     }
 }
 
+/// Whether a case's lowered program contains `min`/`max` or `only` over
+/// related entities. This counts presence in the program, not evaluation: an
+/// aggregate in a branch no row takes still counts. The roster properties in
+/// `tests/related_extremes.rs` check evaluation of every new aggregate
+/// directly.
+fn uses_related_extremes(case: &CaseG, profile: Profile) -> bool {
+    let program = serde_json::to_string(&lower(case, profile).program).expect("serializes");
+    program.contains(r#""kind":"extreme_related""#) || program.contains(r#""kind":"only_related""#)
+}
+
+/// Fails unless at least a quarter of a full run's programs contain the new
+/// aggregates, so the property cannot pass on programs that never use them.
+fn assert_related_extremes_present(name: &str, stats: &Stats, present: u32) {
+    eprintln!(
+        "{name}: {present} of {} programs contain min/max/only",
+        stats.cases
+    );
+    if report_only() || stats.cases < 200 {
+        return;
+    }
+    assert!(
+        present >= stats.cases.div_ceil(4),
+        "{name}: only {present} of {} programs contain min/max/only",
+        stats.cases
+    );
+}
+
+/// Fast must return exactly what explain returns on programs with `min`,
+/// `max` and `only` over the members relation and over a derived relation
+/// filtering it, bare or guarded by a count, with `where` clauses.
+#[test]
+fn random_programs_fast_matches_explain_on_related_extremes() {
+    let present = Cell::new(0);
+    let stats = run_property(
+        "random_programs_fast_matches_explain_on_related_extremes",
+        8,
+        RELATED_EXTREMES,
+        |case, stats| {
+            if uses_related_extremes(case, RELATED_EXTREMES) {
+                present.set(present.get() + 1);
+            }
+            check_explain_vs_fast(case, RELATED_EXTREMES, stats)
+        },
+    );
+    assert_exercised("related-extremes", &stats, 0.05);
+    assert_related_extremes_present("related-extremes", &stats, present.get());
+}
+
+/// Dense must hold explain's value for every row and output, and fail exactly
+/// when explain fails (same error variant), on programs with `min`, `max` and
+/// `only` over the members relation and over a derived relation filtering it.
+#[test]
+fn random_programs_dense_matches_explain_on_related_extremes() {
+    let present = Cell::new(0);
+    let stats = run_property(
+        "random_programs_dense_matches_explain_on_related_extremes",
+        9,
+        DENSE_EXTREMES,
+        |case, stats| {
+            if uses_related_extremes(case, DENSE_EXTREMES) {
+                present.set(present.get() + 1);
+            }
+            check_dense(case, DENSE_EXTREMES, stats)
+        },
+    );
+    assert_exercised("dense-extremes", &stats, 0.05);
+    assert_related_extremes_present("dense-extremes", &stats, present.get());
+    if !report_only() && stats.cases >= 200 {
+        assert!(
+            stats.dense_declined <= stats.cases * 2 / 10,
+            "the dense compiler declined too many generated programs: {}",
+            stats.summary("dense-extremes")
+        );
+    }
+}
+
 /// A pinned rule evaluates to its literal in every mode and never needs the
 /// inputs its original formula reads: fast with a pin equals explain with the
 /// pin, and dropping the inputs only the pinned rule reads changes nothing.
@@ -4819,7 +5076,10 @@ fn check_deferral_independence(
             checks.push(checked);
         }
     }
-    if profile.name == DENSE.name || profile.name == LINKED_DENSE.name {
+    if profile.name == DENSE.name
+        || profile.name == LINKED_DENSE.name
+        || profile.name == DENSE_EXTREMES.name
+    {
         let mut outputs = Vec::new();
         for output in lowered
             .queries
@@ -4871,6 +5131,9 @@ fn random_programs_are_independent_of_the_deferral_threshold() {
         // Aggregations over related households, whose folds evaluate rules
         // for an entity other than the row's.
         ("deferral: linked dense", 14, LINKED_DENSE),
+        // `min`/`max`/`only` folds, which resume where a member deferred.
+        ("deferral: related extremes", 16, RELATED_EXTREMES),
+        ("deferral: dense related extremes", 17, DENSE_EXTREMES),
         ("deferral: evaluation order", 15, EVAL_ORDER),
     ] {
         let stats = run_property_cases(name, property, profile, cases, |case, stats| {

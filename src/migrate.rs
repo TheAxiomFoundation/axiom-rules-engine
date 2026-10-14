@@ -1386,6 +1386,21 @@ impl EvidenceCollector<'_> {
                 related_slot,
                 value,
                 where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
             } => self.aggregate(
                 relation,
                 *current_slot,

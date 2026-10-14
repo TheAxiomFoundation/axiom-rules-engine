@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
-    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
-    Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
-    RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
+    IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
+    ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
+    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef,
+    UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -1148,6 +1149,28 @@ pub enum ScalarExprSpec {
         #[serde(default, rename = "where")]
         where_clause: Option<Box<JudgmentExprSpec>>,
     },
+    /// `min`/`max` (and `min_where`/`max_where`) over related entities. A
+    /// new variant: an engine without it refuses the artifact on load, and a
+    /// program that does not use it serializes exactly as before.
+    ExtremeRelated {
+        extreme: ExtremeSpec,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `only(relation.field)`: the value of the single related entity. Zero
+    /// or several members fail the evaluation.
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
     If {
         condition: Box<JudgmentExprSpec>,
         then_expr: Box<ScalarExprSpec>,
@@ -1201,6 +1224,32 @@ impl OverPeriodsKindSpec {
             OverPeriodsKind::Max => Self::Max,
             OverPeriodsKind::Count => Self::Count,
             OverPeriodsKind::SumTopN => Self::SumTopN,
+        }
+    }
+}
+
+/// Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring
+/// [`crate::model::Extreme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExtremeSpec {
+    Min,
+    Max,
+}
+
+impl ExtremeSpec {
+    fn to_model(self) -> Extreme {
+        match self {
+            Self::Min => Extreme::Min,
+            Self::Max => Extreme::Max,
+        }
+    }
+
+    pub fn from_model(extreme: Extreme) -> Self {
+        match extreme {
+            Extreme::Min => Self::Min,
+            Extreme::Max => Self::Max,
         }
     }
 }
@@ -1293,6 +1342,40 @@ impl ScalarExprSpec {
                 value,
                 where_clause,
             } => Ok(ScalarExpr::SumRelated {
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::ExtremeRelated {
+                extreme: extreme.to_model(),
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::OnlyRelated {
                 relation: relation.clone(),
                 current_slot: *current_slot,
                 related_slot: *related_slot,
