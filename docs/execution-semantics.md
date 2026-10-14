@@ -205,9 +205,12 @@ live row reaches cannot fail the batch. This also applies to a derived value
 or judgment inlined into a related aggregate or a derived relation's filter.
 Dense supports a single unbounded formula version for those dependencies;
 multiple versions or an `effective_to` bound make compilation fail with
-`DenseCompileError::Unsupported`. For `min`, `max` and `only`, that refusal
-names the function and relation whose dependency cannot be compiled.
-Relation batches are positional, so
+`DenseCompileError::Unsupported`. For `min`, `max` and `only`, a refusal of
+the value the aggregate reads or of its `where` clause names the function and
+the relation. A refusal from the relation itself, such as a derived relation's
+filter, names only the construct that cannot be compiled: every reader of the
+relation shares that filter, so its refusal reads the same whichever reader
+reaches it first. Relation batches are positional, so
 when several related rows of one entity fail, dense reports the first in batch
 order where explain reports the first in sorted id order.
 

@@ -4676,25 +4676,29 @@ fn random_programs_dense_matches_explain_over_linked_households() {
     }
 }
 
-/// Whether a case's lowered program aggregates with `min`/`max` or `only`.
+/// Whether a case's lowered program contains `min`/`max` or `only` over
+/// related entities. This counts presence in the program, not evaluation: an
+/// aggregate in a branch no row takes still counts. The roster properties in
+/// `tests/related_extremes.rs` check evaluation of every new aggregate
+/// directly.
 fn uses_related_extremes(case: &CaseG, profile: Profile) -> bool {
     let program = serde_json::to_string(&lower(case, profile).program).expect("serializes");
     program.contains(r#""kind":"extreme_related""#) || program.contains(r#""kind":"only_related""#)
 }
 
-/// Fails unless at least a quarter of a full run's cases reached the new
-/// aggregates, so the property is not passing vacuously.
-fn assert_related_extremes_reached(name: &str, stats: &Stats, reached: u32) {
+/// Fails unless at least a quarter of a full run's programs contain the new
+/// aggregates, so the property cannot pass on programs that never use them.
+fn assert_related_extremes_present(name: &str, stats: &Stats, present: u32) {
     eprintln!(
-        "{name}: {reached} of {} cases used min/max/only",
+        "{name}: {present} of {} programs contain min/max/only",
         stats.cases
     );
     if report_only() || stats.cases < 200 {
         return;
     }
     assert!(
-        reached >= stats.cases / 4,
-        "{name}: only {reached} of {} cases used min/max/only",
+        present >= stats.cases / 4,
+        "{name}: only {present} of {} programs contain min/max/only",
         stats.cases
     );
 }
@@ -4704,20 +4708,20 @@ fn assert_related_extremes_reached(name: &str, stats: &Stats, reached: u32) {
 /// filtering it, bare or guarded by a count, with `where` clauses.
 #[test]
 fn random_programs_fast_matches_explain_on_related_extremes() {
-    let reached = Cell::new(0);
+    let present = Cell::new(0);
     let stats = run_property(
         "random_programs_fast_matches_explain_on_related_extremes",
         8,
         RELATED_EXTREMES,
         |case, stats| {
             if uses_related_extremes(case, RELATED_EXTREMES) {
-                reached.set(reached.get() + 1);
+                present.set(present.get() + 1);
             }
             check_explain_vs_fast(case, RELATED_EXTREMES, stats)
         },
     );
     assert_exercised("related-extremes", &stats, 0.05);
-    assert_related_extremes_reached("related-extremes", &stats, reached.get());
+    assert_related_extremes_present("related-extremes", &stats, present.get());
 }
 
 /// Dense must hold explain's value for every row and output, and fail exactly
@@ -4725,20 +4729,20 @@ fn random_programs_fast_matches_explain_on_related_extremes() {
 /// `only` over the members relation and over a derived relation filtering it.
 #[test]
 fn random_programs_dense_matches_explain_on_related_extremes() {
-    let reached = Cell::new(0);
+    let present = Cell::new(0);
     let stats = run_property(
         "random_programs_dense_matches_explain_on_related_extremes",
         9,
         DENSE_EXTREMES,
         |case, stats| {
             if uses_related_extremes(case, DENSE_EXTREMES) {
-                reached.set(reached.get() + 1);
+                present.set(present.get() + 1);
             }
             check_dense(case, DENSE_EXTREMES, stats)
         },
     );
     assert_exercised("dense-extremes", &stats, 0.05);
-    assert_related_extremes_reached("dense-extremes", &stats, reached.get());
+    assert_related_extremes_present("dense-extremes", &stats, present.get());
     if !report_only() && stats.cases >= 200 {
         assert!(
             stats.dense_declined <= stats.cases * 2 / 10,
