@@ -506,6 +506,7 @@ fn build_batch(
                         offsets,
                         inputs: HashMap::new(),
                         related_row_count: extract_related_row_count(relation_dict)?,
+                        input_lengths: HashMap::new(),
                     },
                     input_dict,
                 ))
@@ -526,10 +527,10 @@ fn build_batch(
         }
     }
 
-    // Only the columns a schema reads are converted; the rest reach the
-    // engine as length-only stand-ins.
+    // Only the columns a schema reads are converted; the engine gets the
+    // rest's lengths alone.
     for (key, (batch, input_dict)) in bound_relations.iter_mut() {
-        forward_unread_related_columns(batch, input_dict, key)?;
+        forward_unread_lengths(batch, input_dict, key, row_count)?;
     }
 
     Ok(DenseBatchSpec {
@@ -542,25 +543,26 @@ fn build_batch(
     })
 }
 
-/// Pass the engine stand-ins for the relation's supplied columns that no
-/// schema reads, so it applies the same rules to them as to a Rust caller's:
-/// every supplied related column must have one value per related row, and
-/// one that does confirms the related row count. They are never read, so a
-/// stand-in only needs the column's length: one byte per value, for at most
-/// two columns per key. They are the smallest-named one that agrees with the
-/// last offset, when nothing else confirms it, and the smallest-named one that
-/// does not, which the engine reports. The engine orders every error, so a
-/// malformed batch fails as it would from Rust.
-fn forward_unread_related_columns(
+/// Pass the engine the lengths of the relation's supplied columns that no
+/// schema reads, which are never converted, so it applies the same rules to
+/// them as to a Rust caller's columns: each must have one value per related
+/// row, and one that does confirms the related row count. Only lengths cross,
+/// so nothing is allocated from a column's claimed length, and the engine
+/// orders every error. Malformed offsets are left for the engine to report
+/// first.
+fn forward_unread_lengths(
     batch: &mut DenseRelationBatchSpec,
     input_dict: &Bound<'_, PyDict>,
     key: &DenseRelationKey,
+    row_count: usize,
 ) -> PyResult<()> {
-    let Some(&related_count) = batch.offsets.last() else {
+    let offsets = &batch.offsets;
+    let well_formed = row_count.checked_add(1) == Some(offsets.len())
+        && offsets.first() == Some(&0)
+        && offsets.windows(2).all(|pair| pair[0] <= pair[1]);
+    if !well_formed {
         return Ok(());
-    };
-    let mut agreeing: Option<(String, usize)> = None;
-    let mut disagreeing: Option<(String, usize)> = None;
+    }
     for (name, column) in input_dict.iter() {
         let name = name.extract::<String>()?;
         if batch.inputs.contains_key(&name) {
@@ -572,25 +574,7 @@ fn forward_unread_related_columns(
                 relation_key(key)
             ))
         })?;
-        let slot = if length == related_count {
-            &mut agreeing
-        } else {
-            &mut disagreeing
-        };
-        if slot.as_ref().is_none_or(|(smallest, _)| name < *smallest) {
-            *slot = Some((name, length));
-        }
-    }
-    let confirmed = batch.related_row_count.is_some()
-        || batch
-            .inputs
-            .values()
-            .any(|column| column.len() == related_count);
-    let agreeing = agreeing.filter(|_| !confirmed);
-    for (name, length) in [agreeing, disagreeing].into_iter().flatten() {
-        batch
-            .inputs
-            .insert(name, DenseColumn::Bool(vec![false; length]));
+        batch.input_lengths.insert(name, length);
     }
     Ok(())
 }
@@ -620,12 +604,19 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
     if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
         return decimal_column_from_f64(array.as_slice()?);
     }
-    // An empty one-dimensional array of any dtype converts as an empty list
-    // of anything, so the list fallbacks below would call it bool. Keep its
-    // numpy dtype. (`len` is the element count, so a `(2, 0)` array would also
-    // be empty; it is not a column and falls through to be refused.)
+    // A column is one-dimensional. The list fallbacks below would read a
+    // `(0, 2)` array, which iterates as no rows, as an empty column.
+    if let Ok(array) = value.cast::<PyUntypedArray>() {
+        if array.ndim() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "dense columns must be one-dimensional, but this array has shape {:?}",
+                array.shape()
+            )));
+        }
+    }
+    // An empty array of any dtype converts as an empty list of anything, so
+    // the list fallbacks below would call it bool. Keep its numpy dtype.
     if let Ok(array) = value.cast::<PyUntypedArray>()
-        && array.ndim() == 1
         && array.len() == 0
     {
         match array.dtype().kind() {

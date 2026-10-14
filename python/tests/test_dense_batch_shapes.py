@@ -431,3 +431,43 @@ def test_a_two_dimensional_empty_array_is_refused(tmp_path) -> None:
     program = _compile(tmp_path, INTEGER_COPY_MODULE, "Person")
     with pytest.raises(ValueError, match="dense columns must be"):
         program.execute(**MONTH, inputs={"x": np.empty((2, 0), dtype=np.int64)})
+
+
+def test_an_empty_array_with_a_second_axis_is_refused(tmp_path) -> None:
+    # A (0, 2) array iterates as no rows, so the list fallbacks used to read
+    # it as an empty column.
+    program = _compile(tmp_path, INTEGER_COPY_MODULE, "Person")
+    with pytest.raises(ValueError, match="one-dimensional"):
+        program.execute(**MONTH, inputs={"x": np.empty((0, 2), dtype=np.int64)})
+
+
+def test_an_unread_column_is_checked_by_length_without_allocating(tmp_path) -> None:
+    # A zero-stride view claims 2^50 values on eight bytes of storage. Only
+    # its length reaches the engine, which refuses it; nothing is allocated
+    # from that length.
+    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    key = _only_relation_key(program)
+    age = np.broadcast_to(np.array(1, dtype=np.int64), (2**50,))
+    with pytest.raises(
+        RuntimeError, match=f"`age` .* has length {2**50} but related row count is 1"
+    ):
+        program.execute(
+            **MONTH,
+            inputs={},
+            relations={key: DenseRelationBatch(offsets=np.array([0, 1]), inputs={"age": age})},
+        )
+
+
+def test_malformed_offsets_are_reported_before_an_unread_entry(tmp_path) -> None:
+    # An unread entry with no length would be a type error, but the engine's
+    # offsets error comes first.
+    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    key = _only_relation_key(program)
+    with pytest.raises(RuntimeError, match="offsets must start at 0"):
+        program.execute(
+            **MONTH,
+            inputs={},
+            relations={
+                key: DenseRelationBatch(offsets=np.array([1, 1]), inputs={"age": np.array(1)})
+            },
+        )

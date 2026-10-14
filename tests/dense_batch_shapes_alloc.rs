@@ -90,6 +90,7 @@ fn stated_related_row_count_larger_than_memory_is_refused_at_binding() {
                             offsets: vec![0, claimed],
                             inputs: HashMap::new(),
                             related_row_count: Some(claimed),
+                            ..Default::default()
                         },
                     )]),
                 },

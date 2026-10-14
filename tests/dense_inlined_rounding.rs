@@ -120,7 +120,7 @@ fn batch(households: &[Household]) -> DenseBatchSpec {
             DenseRelationBatchSpec {
                 offsets,
                 inputs: HashMap::from([("status".to_string(), DenseColumn::Integer(statuses))]),
-                related_row_count: None,
+                ..Default::default()
             },
         )]),
     }

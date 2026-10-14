@@ -312,6 +312,12 @@ pub struct DenseRelationBatchSpec {
     /// two roots share counts twice), independently of the offsets, rather
     /// than copying the last offset.
     pub related_row_count: Option<usize>,
+    /// Related columns supplied by length alone, without their values. Each
+    /// is checked like a column in `inputs` (it must have the related row
+    /// count, and one that does confirms the count), but no rule can read
+    /// one. A binding layer that does not convert the columns no rule reads,
+    /// as the PyO3 extension does not, passes their lengths here.
+    pub input_lengths: HashMap<String, usize>,
 }
 
 /// One period's dense input: `row_count` root rows, root columns of that
@@ -1305,15 +1311,26 @@ impl DenseCompiledProgram {
         related_count: usize,
     ) -> Result<(), EvalError> {
         let name = &key.name;
-        let disagreeing = first_by_name(&relation_batch.inputs, |column| {
-            column.len() != related_count
-        });
+        // Every supplied column's length: the columns with values, then the
+        // ones supplied by length alone.
+        let lengths = || {
+            relation_batch
+                .inputs
+                .iter()
+                .map(|(input, column)| (input, column.len()))
+                .chain(
+                    relation_batch
+                        .input_lengths
+                        .iter()
+                        .map(|(input, length)| (input, *length)),
+                )
+        };
+        let disagreeing = lengths()
+            .filter(|(_, length)| *length != related_count)
+            .min_by_key(|(input, _)| *input);
         let confirmed = related_count == 0
             || relation_batch.related_row_count.is_some()
-            || relation_batch
-                .inputs
-                .values()
-                .any(|column| column.len() == related_count);
+            || lengths().any(|(_, length)| length == related_count);
         if !confirmed && disagreeing.is_none() {
             return Err(EvalError::TypeMismatch(format!(
                 "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the number of related rows the offsets index (one per root and member pair)"
@@ -1325,13 +1342,8 @@ impl DenseCompiledProgram {
             )));
         }
         // A supplied column that disagrees confirms nothing and is malformed.
-        if let Some((input, column)) = disagreeing {
-            return Err(related_length_mismatch(
-                input,
-                name,
-                column.len(),
-                related_count,
-            ));
+        if let Some((input, length)) = disagreeing {
+            return Err(related_length_mismatch(input, name, length, related_count));
         }
         Ok(())
     }

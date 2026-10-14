@@ -1401,7 +1401,7 @@ fn the_lifetime_gate_accepts_exactly_the_outputs_that_reduce_over_periods() {
                             "income".to_string(),
                             DenseColumn::Integer(vec![10, 20]),
                         )]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             })

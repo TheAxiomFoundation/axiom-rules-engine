@@ -7,6 +7,8 @@
 //! 2. Agreement with the stated contract: a batch is refused exactly when
 //!    `expected_refusal`, the contract written out independently below, finds
 //!    a problem, with the error kind it names and a message naming the rule.
+//!    A column supplied by length alone (`input_lengths`) is treated exactly
+//!    as the column with its values: the oracle does not distinguish them.
 //! 3. Differential: an accepted batch's `len(members)` and `sum(members.income)`
 //!    equal the values computed directly from its offsets, household flags and
 //!    incomes; a missing income fails the first row that reads one, as lazy
@@ -198,6 +200,9 @@ struct Shape {
     /// reads `note`.
     income: Option<Vec<i64>>,
     note: Option<Vec<bool>>,
+    /// Supply `note` by length alone (`input_lengths`), which binding must
+    /// treat exactly as the column.
+    note_by_length: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,25 +230,29 @@ fn valid_shape() -> impl Strategy<Value = Shape> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(rows, values, state_count, supply_income, supply_note)| {
-            let mut offsets = vec![0_usize];
-            for (size, _) in &rows {
-                offsets.push(offsets.last().copied().unwrap_or(0) + size);
-            }
-            let related = *offsets.last().expect("offsets are non-empty");
-            // Binding accepts the starting shape: with no column to confirm a
-            // nonzero related count, it is stated.
-            let state_count = state_count || !(supply_income || supply_note);
-            Shape {
-                row_count: rows.len(),
-                active: rows.iter().map(|(_, active)| *active).collect(),
-                offsets: Some(offsets),
-                related_row_count: state_count.then_some(related),
-                income: supply_income.then(|| values[..related].to_vec()),
-                note: supply_note.then(|| vec![true; related]),
-            }
-        })
+        .prop_map(
+            |(rows, values, state_count, supply_income, supply_note, note_by_length)| {
+                let mut offsets = vec![0_usize];
+                for (size, _) in &rows {
+                    offsets.push(offsets.last().copied().unwrap_or(0) + size);
+                }
+                let related = *offsets.last().expect("offsets are non-empty");
+                // Binding accepts the starting shape: with no column to confirm a
+                // nonzero related count, it is stated.
+                let state_count = state_count || !(supply_income || supply_note);
+                Shape {
+                    row_count: rows.len(),
+                    active: rows.iter().map(|(_, active)| *active).collect(),
+                    offsets: Some(offsets),
+                    related_row_count: state_count.then_some(related),
+                    income: supply_income.then(|| values[..related].to_vec()),
+                    note: supply_note.then(|| vec![true; related]),
+                    note_by_length,
+                }
+            },
+        )
 }
 
 fn corruption() -> impl Strategy<Value = Corruption> {
@@ -333,11 +342,16 @@ fn batch(program: &DenseCompiledProgram, shape: &Shape) -> DenseBatchSpec {
     let mut relations = HashMap::new();
     if let Some(offsets) = &shape.offsets {
         let mut related = HashMap::new();
+        let mut lengths = HashMap::new();
         if let Some(income) = &shape.income {
             related.insert("income".to_string(), DenseColumn::Integer(income.clone()));
         }
         if let Some(note) = &shape.note {
-            related.insert("note".to_string(), DenseColumn::Bool(note.clone()));
+            if shape.note_by_length {
+                lengths.insert("note".to_string(), note.len());
+            } else {
+                related.insert("note".to_string(), DenseColumn::Bool(note.clone()));
+            }
         }
         relations.insert(
             only_key(program),
@@ -345,6 +359,7 @@ fn batch(program: &DenseCompiledProgram, shape: &Shape) -> DenseBatchSpec {
                 offsets: offsets.clone(),
                 inputs: related,
                 related_row_count: shape.related_row_count,
+                input_lengths: lengths,
             },
         );
     }

@@ -247,6 +247,7 @@ fn relation_stating(
                 .map(|(name, column)| (name.to_string(), column))
                 .collect(),
             related_row_count,
+            ..Default::default()
         },
     )])
 }
@@ -980,4 +981,99 @@ fn the_lowest_varying_row_is_reported_with_the_period_it_changes_in() {
         }
         other => panic!("unexpected error {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Columns supplied by length alone
+// ---------------------------------------------------------------------------
+
+fn relation_with_lengths(
+    program: &DenseCompiledProgram,
+    offsets: Vec<usize>,
+    inputs: Vec<(&str, DenseColumn)>,
+    input_lengths: Vec<(&str, usize)>,
+) -> HashMap<DenseRelationKey, DenseRelationBatchSpec> {
+    HashMap::from([(
+        only_key(program),
+        DenseRelationBatchSpec {
+            offsets,
+            inputs: inputs
+                .into_iter()
+                .map(|(name, column)| (name.to_string(), column))
+                .collect(),
+            input_lengths: input_lengths
+                .into_iter()
+                .map(|(name, length)| (name.to_string(), length))
+                .collect(),
+            ..Default::default()
+        },
+    )])
+}
+
+#[test]
+fn a_length_only_column_confirms_the_offsets() {
+    let program = compile(HOUSEHOLD_SIZE_RULESPEC, "Household");
+    let result = run(
+        &program,
+        DenseBatchSpec {
+            row_count: 2,
+            inputs: HashMap::new(),
+            relations: relation_with_lengths(&program, vec![0, 3, 5], vec![], vec![("age", 5)]),
+        },
+        "household_size",
+    )
+    .expect("a length-only column of the right length confirms the count");
+    assert_eq!(integers(&result, "household_size"), vec![3, 2]);
+}
+
+#[test]
+fn length_only_columns_are_checked_with_supplied_ones_in_name_order() {
+    // A huge claimed length allocates nothing: only the number is compared.
+    let program = compile(HOUSEHOLD_INCOME_RULESPEC, "Household");
+    for _ in 0..16 {
+        let result = run(
+            &program,
+            DenseBatchSpec {
+                row_count: 2,
+                inputs: HashMap::new(),
+                relations: relation_with_lengths(
+                    &program,
+                    vec![0, 2, 3],
+                    vec![
+                        ("income", DenseColumn::Integer(vec![100, 50, 7])),
+                        ("zeta", DenseColumn::Bool(vec![true])),
+                    ],
+                    vec![("eta", usize::MAX), ("theta", 1 << 50)],
+                ),
+            },
+            "household_income",
+        );
+        assert_type_mismatch(
+            result,
+            &[&format!(
+                "dense relation input `eta` for `member_of_household` has length {} but related row count is 3",
+                usize::MAX
+            )],
+        );
+    }
+}
+
+#[test]
+fn a_length_only_column_cannot_be_read() {
+    // `income` supplied by length is not data: the rule that reads it fails
+    // on its rows as for an absent column.
+    let program = compile(HOUSEHOLD_INCOME_RULESPEC, "Household");
+    let result = run(
+        &program,
+        DenseBatchSpec {
+            row_count: 2,
+            inputs: HashMap::new(),
+            relations: relation_with_lengths(&program, vec![0, 2, 3], vec![], vec![("income", 3)]),
+        },
+        "household_income",
+    );
+    assert!(
+        matches!(result, Err(EvalError::MissingInput { ref name, .. }) if name == "income"),
+        "unexpected result {result:?}"
+    );
 }
