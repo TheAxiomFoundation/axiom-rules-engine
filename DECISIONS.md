@@ -4,6 +4,54 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-14 — Dense batches justify every row count they claim
+
+**Decision.** Dense binding refuses a batch whose row counts nothing
+confirms, before it allocates anything from them. `row_count` is the caller's
+stated root row count: every supplied root column must have that length, and
+it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest per-row
+buffer element). A relation's related row count is its last offset. A nonzero
+one must be confirmed by a supplied related column of that length or by an
+explicit `DenseRelationBatchSpec::related_row_count`; a stated count must equal
+the last offset, and so must every supplied related column, whether or not the
+program reads it. Counts above `MAX_DENSE_ROWS` are refused, and the owners
+buffer is reserved fallibly, so a stated count larger than memory is an error.
+Violations are `EvalError::TypeMismatch`.
+
+**Why.** Binding allocates one owner per related row, and the offsets were the
+only statement of how many there are. A relation with no related column (a
+`len`, or a filter that reads only the current entity) sized that buffer from
+the last offset alone: offsets `[0, usize::MAX]` panicked with "capacity
+overflow", and `[0, 2^50]` aborted the process, the Python interpreter
+included. `row_count = usize::MAX` overflowed `row_count + 1`. Requiring
+confirmation turns a malformed offsets vector into an error, as `row_count`
+already did for root columns.
+
+**Consequences.**
+
+- A caller that passes offsets with related rows but no related column must
+  state the count: `related_row_count` in Rust, or
+  `DenseRelationBatch(related_row_count=...)` (the `"related_row_count"`
+  relation-dict key) in Python. It is the caller's assertion, so it should come
+  from the related entity's own row count, not from the last offset. Fixtures
+  in this repository that built such relations now state their counts.
+- Missing input columns keep their lazy meaning: an absent root or related
+  column fails only the rows that read it. A relation whose only related column
+  is omitted that way still needs its count confirmed, by a stated count.
+- Columns no schema reads are length-checked after every per-schema check, so
+  the first error a per-schema binding reports is unchanged. The Python
+  extension does not convert them; it checks their lengths itself and lets one
+  of the right length confirm the count.
+- A stated count is trusted up to the bound. Binding's owners reservation fails
+  cleanly for a count no host can hold; a count that fits the owners buffer but
+  not a later per-row buffer can still exhaust memory during execution.
+- `DenseRelationBatchSpec` gained a public field, which breaks struct literals
+  outside this crate; it now derives `Default`, so literals can end with
+  `..Default::default()`. With the new refusal, that makes the next release a
+  breaking one for 0.2.x users: cut it as 0.3.0.
+- Of several malformed columns, the one with the smallest name is reported, so
+  a batch reports the same error on every run.
+
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 
 **Decision.** A fresh compile no longer lists "fast mode does not yet support
