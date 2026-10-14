@@ -36,11 +36,17 @@
 //!    refusal naming one of the batch's counts whose widest buffer exceeds the
 //!    cap. When every count's widest buffer fits under the cap, it returns
 //!    exactly what it returns uncapped.
+//! 3. **Any refusal.** For every generated program and batch large enough
+//!    that each count-sized buffer is a large allocation, refusing any one of
+//!    an execution's large allocations, first through last, refuses the call
+//!    with one of the batch's counts. A cap cannot reach a buffer no wider than
+//!    one already granted, such as a row mask or a copy of a column; this can.
+//!    On a host short of memory, any of them may be the one refused.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -71,9 +77,30 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 const LIVE_CEILING: usize = 1 << 30;
 static SERIAL: Mutex<()> = Mutex::new(());
 
+/// Allocations of at least this many bytes are numbered while a test counts
+/// them. In a batch of at least this many rows, every count-sized buffer is
+/// one of them. Nothing else execution allocates is this large: the largest
+/// is a `RowErrors` map node, about 1.5 KiB (eleven 128-byte entries).
+const LARGE: usize = 2 << 10;
+/// Whether large allocations are being numbered.
+static NUMBERING: AtomicBool = AtomicBool::new(false);
+static LARGE_SEEN: AtomicUsize = AtomicUsize::new(0);
+/// The number of the large allocation to refuse; 0 refuses none.
+static REFUSE_LARGE: AtomicUsize = AtomicUsize::new(0);
+
 impl Guarded {
+    /// Whether to refuse a request for `size` bytes before asking the host:
+    /// it is over the cap, or it is the large allocation a test chose to
+    /// refuse.
     fn over_cap(size: usize) -> bool {
-        size > CAP.load(Ordering::SeqCst)
+        if size > CAP.load(Ordering::SeqCst) {
+            return true;
+        }
+        if size >= LARGE && NUMBERING.load(Ordering::SeqCst) {
+            let number = LARGE_SEEN.fetch_add(1, Ordering::SeqCst) + 1;
+            return number == REFUSE_LARGE.load(Ordering::SeqCst);
+        }
+        false
     }
 
     /// Count `size` more live bytes, unless that passes the ceiling.
@@ -167,6 +194,29 @@ fn capped<T>(cap: usize, run: impl FnOnce() -> T) -> T {
     let _lift = CapGuard;
     CAP.store(cap, Ordering::SeqCst);
     run()
+}
+
+/// Stops numbering large allocations when dropped.
+struct NumberingGuard;
+
+impl Drop for NumberingGuard {
+    fn drop(&mut self) {
+        NUMBERING.store(false, Ordering::SeqCst);
+        REFUSE_LARGE.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Run `run`, refusing its `refuse`-th allocation of at least `LARGE` bytes
+/// (none when 0). Returns its result and how many large allocations it asked
+/// for, the refused one included.
+fn refusing_large<T>(refuse: usize, run: impl FnOnce() -> T) -> (T, usize) {
+    let _stop = NumberingGuard;
+    LARGE_SEEN.store(0, Ordering::SeqCst);
+    REFUSE_LARGE.store(refuse, Ordering::SeqCst);
+    NUMBERING.store(true, Ordering::SeqCst);
+    let value = run();
+    NUMBERING.store(false, Ordering::SeqCst);
+    (value, LARGE_SEEN.load(Ordering::SeqCst))
 }
 
 // ---------------------------------------------------------------------------
@@ -775,8 +825,8 @@ fn stated_relation_batch(related: usize) -> DenseBatchSpec {
             member_key(),
             DenseRelationBatchSpec {
                 offsets: vec![0, related],
-                inputs: HashMap::new(),
                 related_row_count: Some(related),
+                ..Default::default()
             },
         )]),
     }
@@ -1390,8 +1440,13 @@ fn columns(
         .boxed()
 }
 
-fn root_rows() -> impl Strategy<Value = usize> {
-    prop_oneof![0_usize..=4, 5_usize..=64, 65_usize..=1500]
+fn root_rows() -> BoxedStrategy<usize> {
+    prop_oneof![0_usize..=4, 5_usize..=64, 65_usize..=1500].boxed()
+}
+
+/// Enough rows that every count-sized buffer is a large allocation.
+fn large_rows() -> BoxedStrategy<usize> {
+    (LARGE..=LARGE + 256).boxed()
 }
 
 fn root_columns(rows: usize) -> BoxedStrategy<HashMap<String, DenseColumn>> {
@@ -1406,8 +1461,8 @@ fn root_columns(rows: usize) -> BoxedStrategy<HashMap<String, DenseColumn>> {
 }
 
 /// A batch of `rows` households, each with up to six members.
-fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
-    root_rows().prop_flat_map(move |rows| {
+fn batch(relations: bool, rows: BoxedStrategy<usize>) -> impl Strategy<Value = DenseBatchSpec> {
+    rows.prop_flat_map(move |rows| {
         let members = prop::collection::vec(0_usize..=6, rows);
         (Just(rows), root_columns(rows), members, any::<bool>()).prop_flat_map(
             move |(rows, inputs, members, state_count)| {
@@ -1444,6 +1499,7 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
                                             offsets,
                                             inputs: related_inputs,
                                             related_row_count: state_count.then_some(related),
+                                            ..Default::default()
                                         },
                                     )])
                                 } else {
@@ -1458,8 +1514,8 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
 }
 
 /// One to three periods of the same households, each with its own columns.
-fn lifetime_batches() -> impl Strategy<Value = Vec<DenseBatchSpec>> {
-    (root_rows(), 1_usize..=3).prop_flat_map(|(rows, periods)| {
+fn lifetime_batches(rows: BoxedStrategy<usize>) -> impl Strategy<Value = Vec<DenseBatchSpec>> {
+    (rows, 1_usize..=3).prop_flat_map(|(rows, periods)| {
         prop::collection::vec(root_columns(rows), periods).prop_map(move |periods| {
             periods
                 .into_iter()
@@ -1590,7 +1646,7 @@ fn a_cap_changes_a_result_only_by_refusing_a_count() {
     let strategy = (any::<bool>()).prop_flat_map(|relations| {
         (
             rules(relations),
-            batch(relations),
+            batch(relations, root_rows()),
             select(MODES.to_vec()),
             cap(),
         )
@@ -1619,7 +1675,7 @@ fn a_cap_changes_a_lifetime_result_only_by_refusing_a_count() {
     let _serial = serial();
     let strategy = (
         lifetime_rules(),
-        lifetime_batches(),
+        lifetime_batches(root_rows()),
         select(MODES.to_vec()),
         cap(),
     );
@@ -1635,4 +1691,82 @@ fn a_cap_changes_a_lifetime_result_only_by_refusing_a_count() {
             check_differential(&counts, cap, &uncapped, &result)
         })
         .expect("a cap only ever refuses a count");
+}
+
+/// Execute `input` once counting its large allocations, then once refusing
+/// each of them in turn. Each refusal must refuse the call with one of
+/// `counts`. The input is cloned before numbering starts, so only
+/// execution's own allocations are numbered.
+fn check_every_refusal<B: Clone>(
+    counts: &[usize],
+    input: &B,
+    run: impl Fn(B) -> Result<DenseExecutionResult, EvalError>,
+) -> Result<(), TestCaseError> {
+    let fresh = input.clone();
+    let (unrefused, large) = refusing_large(0, || run(fresh));
+    if let Err(error) = &unrefused {
+        prop_assert!(
+            refused_count(error).is_none(),
+            "an unrefused batch was refused: {error:?}"
+        );
+    }
+    prop_assert!(
+        large > 0,
+        "a batch of {counts:?} rows made no large allocation"
+    );
+    for refuse in 1..=large {
+        let fresh = input.clone();
+        let (result, _) = refusing_large(refuse, || run(fresh));
+        match &result {
+            Err(error) => prop_assert!(
+                refused_count(error).is_some_and(|count| counts.contains(&count)),
+                "refusing large allocation {refuse} of {large} gave {error:?}"
+            ),
+            Ok(_) => prop_assert!(
+                false,
+                "refusing large allocation {refuse} of {large} still succeeded"
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn refusing_any_large_allocation_refuses_the_call() {
+    let _serial = serial();
+    let strategy = any::<bool>().prop_flat_map(|relations| {
+        (
+            rules(relations),
+            batch(relations, large_rows()),
+            select(MODES.to_vec()),
+        )
+    });
+    runner(24)
+        .run(&strategy, |((rules, chosen), batch, mode)| {
+            let outputs = names(&rules);
+            let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
+            check_every_refusal(&counts(&batch), &batch, |batch| {
+                execute(&program, mode, batch, &outputs)
+            })
+        })
+        .expect("refusing any large allocation refuses the call");
+}
+
+#[test]
+fn refusing_any_large_lifetime_allocation_refuses_the_call() {
+    let _serial = serial();
+    let strategy = (
+        lifetime_rules(),
+        lifetime_batches(large_rows()),
+        select(MODES.to_vec()),
+    );
+    runner(16)
+        .run(&strategy, |(rules, batches, mode)| {
+            let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
+            let outputs = vec!["life".to_string()];
+            check_every_refusal(&[batches[0].row_count], &batches, |batches| {
+                execute_lifetime(&program, mode, batches, &outputs)
+            })
+        })
+        .expect("refusing any large allocation refuses the call");
 }
