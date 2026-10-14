@@ -9,7 +9,9 @@ use axiom_rules_engine::dense::{
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
 use axiom_rules_engine::spec::DTypeSpec;
 use chrono::NaiveDate;
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::{
+    PyArray1, PyArrayDescrMethods, PyReadonlyArray1, PyUntypedArray, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -503,6 +505,7 @@ fn build_batch(
                     DenseRelationBatchSpec {
                         offsets,
                         inputs: HashMap::new(),
+                        related_row_count: extract_related_row_count(relation_dict)?,
                     },
                     input_dict,
                 ))
@@ -523,6 +526,14 @@ fn build_batch(
         }
     }
 
+    // Only the columns a schema reads are converted and passed on, so the
+    // engine never sees the rest. Check those here as the engine checks every
+    // supplied related column: each must have one value per related row, and
+    // one that does confirms the offsets as a read column would.
+    for (key, (batch, input_dict)) in bound_relations.iter_mut() {
+        confirm_unread_related_columns(key, batch, input_dict, row_count)?;
+    }
+
     Ok(DenseBatchSpec {
         row_count,
         inputs: root_inputs,
@@ -530,6 +541,79 @@ fn build_batch(
             .into_iter()
             .map(|(key, (batch, _))| (key, batch))
             .collect(),
+    })
+}
+
+/// Length-check the relation's supplied columns that no schema reads, without
+/// converting them, and let one of the right length confirm the related row
+/// count when nothing else does. Errors the engine reports first (malformed
+/// offsets, a read column of the wrong length) are left for it to report.
+fn confirm_unread_related_columns(
+    key: &DenseRelationKey,
+    batch: &mut DenseRelationBatchSpec,
+    input_dict: &Bound<'_, PyDict>,
+    row_count: usize,
+) -> PyResult<()> {
+    let offsets = &batch.offsets;
+    let well_formed = row_count.checked_add(1) == Some(offsets.len())
+        && offsets.first() == Some(&0)
+        && offsets.windows(2).all(|pair| pair[0] <= pair[1]);
+    let Some(&related_count) = offsets.last().filter(|_| well_formed) else {
+        return Ok(());
+    };
+    // The engine reports a read column of the wrong length before any unread
+    // one; leave that error to it.
+    if batch
+        .inputs
+        .values()
+        .any(|column| column.len() != related_count)
+    {
+        return Ok(());
+    }
+    let mut unread = Vec::new();
+    for (name, column) in input_dict.iter() {
+        let name = name.extract::<String>()?;
+        if batch.inputs.contains_key(&name) {
+            continue;
+        }
+        let length = column.len().map_err(|_| {
+            PyValueError::new_err(format!(
+                "dense relation input `{name}` for `{}` must be an array or list with one value per related row",
+                relation_key(key)
+            ))
+        })?;
+        unread.push((name, length));
+    }
+    unread.sort();
+    if let Some((name, length)) = unread.iter().find(|(_, length)| *length != related_count) {
+        return Err(PyValueError::new_err(format!(
+            "dense relation input `{name}` for `{}` has length {length} but related row count is {related_count}",
+            relation_key(key)
+        )));
+    }
+    let confirmed = batch.related_row_count.is_some()
+        || batch
+            .inputs
+            .values()
+            .any(|column| column.len() == related_count);
+    if !confirmed && !unread.is_empty() {
+        batch.related_row_count = Some(related_count);
+    }
+    Ok(())
+}
+
+/// A relation dict's optional `related_row_count`. Absent or `None` leaves the
+/// related row count to be confirmed by the relation's columns.
+fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Option<usize>> {
+    let Some(value) = relation_dict.get_item("related_row_count")? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let count = value.extract::<i64>()?;
+    usize::try_from(count).map(Some).map_err(|_| {
+        PyValueError::new_err("dense relation related_row_count must be non-negative")
     })
 }
 
@@ -542,6 +626,18 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
     }
     if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
         return decimal_column_from_f64(array.as_slice()?);
+    }
+    // An empty array of any dtype converts as an empty list of anything, so
+    // the list fallbacks below would call it bool. Keep its numpy dtype.
+    if let Ok(array) = value.cast::<PyUntypedArray>()
+        && array.len() == 0
+    {
+        match array.dtype().kind() {
+            b'i' | b'u' => return Ok(DenseColumn::Integer(Vec::new())),
+            b'f' => return Ok(DenseColumn::Decimal(Vec::new())),
+            b'U' | b'S' => return Ok(DenseColumn::Text(Vec::new())),
+            _ => {}
+        }
     }
     if let Ok(values) = value.extract::<Vec<bool>>() {
         return Ok(DenseColumn::Bool(values));

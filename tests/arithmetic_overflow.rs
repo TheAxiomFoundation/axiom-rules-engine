@@ -254,6 +254,7 @@ fn dense_members(rulespec: &str, households: &[&[&str]]) -> Result<Vec<Decimal>,
                 DenseRelationBatchSpec {
                     offsets,
                     inputs: HashMap::from([("income".to_string(), DenseColumn::Decimal(incomes))]),
+                    related_row_count: None,
                 },
             )]),
         },
