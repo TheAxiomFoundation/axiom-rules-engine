@@ -21,14 +21,14 @@
 //!
 //! Invariants, checked by the examples and properties below:
 //!
-//! 1. **Sharing.** For every generated program and small batch, execution
-//!    makes no allocation as large as the cap unless its result is an error
-//!    that names a long text, and under the cap it returns exactly what it
-//!    returns uncapped.
-//! 2. **Refusal.** An error naming a long text copies it fallibly: under the
-//!    cap, or with any one of its large allocations refused, execution returns
-//!    the uncapped result or the refusal naming one of the batch's counts. It
-//!    never aborts.
+//! 1. **Sharing.** For every generated program and small batch that
+//!    execution completes, it makes no allocation as large as the cap, and
+//!    under the cap it returns exactly what it returns uncapped.
+//! 2. **Refusal.** When execution fails, the errors of its failing rows name
+//!    their texts fallibly: under the cap, or with any one of its large
+//!    allocations refused, it returns the uncapped error or the refusal naming
+//!    one of the batch's counts. It never aborts. (A row's error can name a
+//!    long text even when the error reported, the lowest row's, does not.)
 //! 3. **Differential.** When both numeric modes succeed, their text outputs
 //!    are equal: text never depends on the numeric mode.
 
@@ -44,7 +44,7 @@ use axiom_rules_engine::model::{Period, PeriodKind};
 use axiom_rules_engine::spec::ProgramSpec;
 use chrono::NaiveDate;
 use proptest::prelude::*;
-use proptest::sample::{Index, select};
+use proptest::sample::select;
 use proptest::test_runner::{Config, TestRunner};
 use serde_json::{Value, json};
 
@@ -1034,7 +1034,6 @@ fn runner(cases: u32) -> TestRunner {
 /// Invariants 1 and 2 for one case: `run` executes a fresh copy of the case.
 fn check_case(
     counts: &[usize],
-    numbered: Index,
     run: impl Fn() -> Result<DenseExecutionResult, EvalError>,
 ) -> Result<(), TestCaseError> {
     let (uncapped, large) = refusing_large(CAP, 0, &run);
@@ -1044,14 +1043,13 @@ fn check_case(
             "a small batch was refused uncapped: {error:?}"
         );
     }
-    let long_error = names_long_text(&uncapped);
-    // Invariant 1: no text is copied, so a run whose result names no long
-    // text asks for nothing as large as the cap.
-    if !long_error {
-        prop_assert_eq!(large, 0, "{:?}", summary(&uncapped));
+    // Invariant 1: no text is copied, so a run that completes asks for
+    // nothing as large as the cap.
+    if uncapped.is_ok() {
+        prop_assert_eq!(large, 0);
     }
     let agrees = |result: &Result<DenseExecutionResult, EvalError>| -> Result<(), TestCaseError> {
-        if long_error
+        if uncapped.is_err()
             && let Err(error) = result
             && let Some(count) = refused_count(error)
         {
@@ -1065,14 +1063,10 @@ fn check_case(
         Ok(())
     };
     agrees(&capped(CAP, &run))?;
-    // Invariant 2: refuse the first, the last and one other large allocation.
-    if large > 0 {
-        let mut refused = vec![1, large, numbered.index(large) + 1];
-        refused.dedup();
-        for number in refused {
-            let (result, _) = refusing_large(CAP, number, &run);
-            agrees(&result)?;
-        }
+    // Invariant 2: refuse each large allocation in turn.
+    for number in 1..=large {
+        let (result, _) = refusing_large(CAP, number, &run);
+        agrees(&result)?;
     }
     Ok(())
 }
@@ -1080,22 +1074,14 @@ fn check_case(
 #[test]
 fn no_generated_program_copies_a_text_per_row() {
     let _serial = serial();
-    let strategy = any::<bool>().prop_flat_map(|relations| {
-        (
-            rules(relations),
-            batch(relations),
-            select(MODES.to_vec()),
-            any::<Index>(),
-        )
-    });
+    let strategy = any::<bool>()
+        .prop_flat_map(|relations| (rules(relations), batch(relations), select(MODES.to_vec())));
     runner(256)
-        .run(&strategy, |((rules, chosen), batch, mode, numbered)| {
+        .run(&strategy, |((rules, chosen), batch, mode)| {
             let outputs = names(&rules);
             let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
             let counts = counts(&batch);
-            check_case(&counts, numbered, || {
-                execute(&program, mode, batch.clone(), &outputs)
-            })
+            check_case(&counts, || execute(&program, mode, batch.clone(), &outputs))
         })
         .expect("no text is copied per row");
 }
@@ -1103,18 +1089,13 @@ fn no_generated_program_copies_a_text_per_row() {
 #[test]
 fn no_generated_lifetime_program_copies_a_text_per_row() {
     let _serial = serial();
-    let strategy = (
-        lifetime_rules(),
-        lifetime_batches(),
-        select(MODES.to_vec()),
-        any::<Index>(),
-    );
+    let strategy = (lifetime_rules(), lifetime_batches(), select(MODES.to_vec()));
     runner(128)
-        .run(&strategy, |(rules, batches, mode, numbered)| {
+        .run(&strategy, |(rules, batches, mode)| {
             let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let counts = vec![batches[0].row_count];
             let outputs = vec!["life".to_string()];
-            check_case(&counts, numbered, || {
+            check_case(&counts, || {
                 execute_lifetime(&program, mode, batches.clone(), &outputs)
             })
         })

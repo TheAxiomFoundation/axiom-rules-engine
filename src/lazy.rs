@@ -17,21 +17,31 @@
 //! [`row_buffer`] or [`filled_rows`], which reserve it fallibly. A batch can
 //! state more rows than any buffer of them fits in memory, and the failed
 //! allocation is then an error naming the count, not an aborted process.
+//!
+//! A text is never copied once per row. Dense text columns share each value
+//! (`Arc<str>`), and [`RowErrors`] shares an error among the rows it fails
+//! (`Rc<EvalError>`). An error that names a text copies it with
+//! [`copied_text`] or [`debug_text`], also fallibly.
 
 use std::collections::BTreeMap;
+use std::fmt::{self, Write as _};
 use std::rc::Rc;
 
 use crate::engine::EvalError;
+
+/// The error for an allocation the allocator refused, naming the row count of
+/// the evaluation that needed it.
+fn refusal(rows: usize) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "evaluation needs a buffer of {rows} rows, more than this process can allocate"
+    ))
+}
 
 /// An empty buffer with room for `rows` elements, reserved fallibly: when
 /// the allocator cannot grant it, the error names the count.
 pub(crate) fn row_buffer<T>(rows: usize) -> Result<Vec<T>, EvalError> {
     let mut buffer = Vec::new();
-    buffer.try_reserve_exact(rows).map_err(|_| {
-        EvalError::TypeMismatch(format!(
-            "evaluation needs a buffer of {rows} rows, more than this process can allocate"
-        ))
-    })?;
+    buffer.try_reserve_exact(rows).map_err(|_| refusal(rows))?;
     Ok(buffer)
 }
 
@@ -47,6 +57,93 @@ pub(crate) fn copied_rows<T: Clone>(values: &[T]) -> Result<Vec<T>, EvalError> {
     let mut buffer = row_buffer(values.len())?;
     buffer.extend_from_slice(values);
     Ok(buffer)
+}
+
+/// A copy of `text`, reserved fallibly. The refusal names `rows`, the row
+/// count of the evaluation that copies it.
+pub(crate) fn copied_text(text: &str, rows: usize) -> Result<String, EvalError> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(text.len())
+        .map_err(|_| refusal(rows))?;
+    copy.push_str(text);
+    Ok(copy)
+}
+
+/// `text` as `{:?}` renders it, quoted and escaped, reserved fallibly. The
+/// rendering is measured first, so writing it never grows the reservation.
+pub(crate) fn debug_text(text: &str, rows: usize) -> Result<String, EvalError> {
+    struct Length(usize);
+    impl fmt::Write for Length {
+        fn write_str(&mut self, part: &str) -> fmt::Result {
+            self.0 = self.0.saturating_add(part.len());
+            Ok(())
+        }
+    }
+    let mut length = Length(0);
+    // Neither writer can fail: one counts, and the other has room.
+    let _ = write!(length, "{text:?}");
+    let mut rendered = String::new();
+    rendered
+        .try_reserve_exact(length.0)
+        .map_err(|_| refusal(rows))?;
+    let _ = write!(rendered, "{text:?}");
+    Ok(rendered)
+}
+
+/// A copy of `error` whose texts are reserved fallibly. Only the errors that
+/// name a value of the batch can hold a text as long as the batch's own; any
+/// other error holds names from the program and is cloned as it is.
+pub(crate) fn copied_error(error: &EvalError, rows: usize) -> Result<EvalError, EvalError> {
+    let copy = |text: &str| copied_text(text, rows);
+    Ok(match error {
+        EvalError::NoMatchingArm {
+            rule,
+            subject,
+            value,
+            patterns,
+        } => EvalError::NoMatchingArm {
+            rule: copy(rule)?,
+            subject: copy(subject)?,
+            value: copy(value)?,
+            patterns: copy(patterns)?,
+        },
+        EvalError::LifetimePeriodVaryingInput {
+            input,
+            first_period,
+            first_value,
+            second_period,
+            second_value,
+        } => EvalError::LifetimePeriodVaryingInput {
+            input: copy(input)?,
+            first_period: copy(first_period)?,
+            first_value: copy(first_value)?,
+            second_period: copy(second_period)?,
+            second_value: copy(second_value)?,
+        },
+        EvalError::OverPeriodsTopNPeriodVarying {
+            reduction,
+            first_period,
+            first_value,
+            second_period,
+            second_value,
+        } => EvalError::OverPeriodsTopNPeriodVarying {
+            reduction: *reduction,
+            first_period: copy(first_period)?,
+            first_value: copy(first_value)?,
+            second_period: copy(second_period)?,
+            second_value: copy(second_value)?,
+        },
+        EvalError::OverPeriodsTopNOutOfRange {
+            reduction,
+            n,
+            period_count,
+        } => EvalError::OverPeriodsTopNOutOfRange {
+            reduction: *reduction,
+            n: copy(n)?,
+            period_count: *period_count,
+        },
+        other => other.clone(),
+    })
 }
 
 /// The rows a columnar node is evaluated for.
@@ -204,10 +301,12 @@ impl Iterator for RowIter<'_> {
     }
 }
 
-/// The first error of each failing row of a columnar evaluation.
+/// The first error of each failing row of a columnar evaluation. Rows that
+/// fail with the same error share it, so recording, lifting, lowering or
+/// restricting an error copies a pointer, never the texts the error holds.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RowErrors {
-    errors: BTreeMap<usize, EvalError>,
+    errors: BTreeMap<usize, Rc<EvalError>>,
 }
 
 impl RowErrors {
@@ -223,20 +322,35 @@ impl RowErrors {
         self.errors.contains_key(&row)
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, row: usize) -> Option<&EvalError> {
+        self.errors.get(&row).map(|error| &**error)
+    }
+
+    /// The error of `row`, to record for another row.
+    pub(crate) fn get_shared(&self, row: usize) -> Option<&Rc<EvalError>> {
         self.errors.get(&row)
     }
 
     /// Record `error` for `row` unless the row already failed: a row stops at
     /// its first error, so a later one never replaces it.
     pub(crate) fn record(&mut self, row: usize, error: EvalError) {
-        self.errors.entry(row).or_insert(error);
+        self.errors.entry(row).or_insert_with(|| Rc::new(error));
     }
 
-    /// Record the same error for every row of `mask`.
+    /// Record an error another row holds for `row`, sharing it.
+    pub(crate) fn record_shared(&mut self, row: usize, error: &Rc<EvalError>) {
+        self.errors.entry(row).or_insert_with(|| Rc::clone(error));
+    }
+
+    /// Record the same error for every row of `mask`, shared by all of them.
     pub(crate) fn record_all(&mut self, mask: &RowMask, error: &EvalError) {
+        if mask.is_empty() {
+            return;
+        }
+        let error = Rc::new(error.clone());
         for row in mask.rows() {
-            self.record(row, error.clone());
+            self.record_shared(row, &error);
         }
     }
 
@@ -248,7 +362,7 @@ impl RowErrors {
             return;
         }
         for (row, error) in other.errors {
-            self.record(row, error);
+            self.errors.entry(row).or_insert(error);
         }
     }
 
@@ -264,30 +378,60 @@ impl RowErrors {
             self.errors
                 .iter()
                 .filter(|(row, _)| mask.contains(**row))
-                .map(|(row, error)| (*row, error.clone())),
+                .map(|(row, error)| (*row, Rc::clone(error))),
         );
         Self { errors }
     }
 
     /// Name `rule` in each `match` failure that does not name its rule yet:
-    /// explain names the innermost rule an error leaves. Renamed in place,
-    /// for the same reason `restricted_to` inserts one at a time.
-    pub(crate) fn within_rule(mut self, rule: &str) -> Self {
+    /// explain names the innermost rule an error leaves. An error only these
+    /// rows hold is renamed in place. One that other rows or evaluations
+    /// share is copied once, its texts reserved fallibly (a refusal names
+    /// `rows`), and the copy shared by every row here that held it.
+    pub(crate) fn within_rule(mut self, rule: &str, rows: usize) -> Result<Self, EvalError> {
+        let mut renamed: Option<(Rc<EvalError>, Rc<EvalError>)> = None;
         for error in self.errors.values_mut() {
-            // `within_rule` takes the error by value; a unit variant holds
-            // its place meanwhile.
-            *error = std::mem::replace(error, EvalError::DivisionByZero).within_rule(rule);
+            if !matches!(&**error, EvalError::NoMatchingArm { rule, .. } if rule.is_empty()) {
+                continue;
+            }
+            if let Some((source, copy)) = &renamed
+                && Rc::ptr_eq(error, source)
+            {
+                *error = Rc::clone(copy);
+                continue;
+            }
+            if let Some(unique) = Rc::get_mut(error) {
+                name_rule(unique, rule);
+                continue;
+            }
+            let mut copy = copied_error(error, rows)?;
+            name_rule(&mut copy, rule);
+            let copy = Rc::new(copy);
+            renamed = Some((std::mem::replace(error, Rc::clone(&copy)), copy));
         }
-        self
+        Ok(self)
     }
 
     /// The lowest failing row and its error.
     pub(crate) fn first(&self) -> Option<(usize, &EvalError)> {
-        self.errors.iter().next().map(|(row, error)| (*row, error))
+        self.errors
+            .iter()
+            .next()
+            .map(|(row, error)| (*row, &**error))
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &EvalError)> {
+    /// Each failing row and its error, to record for another row.
+    pub(crate) fn iter_shared(&self) -> impl Iterator<Item = (usize, &Rc<EvalError>)> {
         self.errors.iter().map(|(row, error)| (*row, error))
+    }
+}
+
+/// Name `rule` in a `match` failure that names none yet.
+fn name_rule(error: &mut EvalError, rule: &str) {
+    if let EvalError::NoMatchingArm { rule: existing, .. } = error
+        && existing.is_empty()
+    {
+        *existing = rule.to_string();
     }
 }
 

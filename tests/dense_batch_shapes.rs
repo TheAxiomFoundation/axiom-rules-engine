@@ -897,7 +897,7 @@ fn input_that_changes_dtype_reports_both_values() {
             ]),
             lifetime_batch(vec![
                 ("earnings", DenseColumn::Float(vec![1.0])),
-                ("base", DenseColumn::Text(vec!["1985".to_string()])),
+                ("base", DenseColumn::Text(vec!["1985".into()])),
             ]),
         ],
         false,

@@ -566,7 +566,9 @@ fn column(values: &Values) -> DenseColumn {
             DenseColumn::Decimal(values.iter().map(|value| Decimal::from(*value)).collect())
         }
         Values::Float(values) => DenseColumn::Float(values.clone()),
-        Values::Text(values) => DenseColumn::Text(values.clone()),
+        Values::Text(values) => {
+            DenseColumn::Text(values.iter().map(|value| value.as_str().into()).collect())
+        }
         Values::Date(values) => DenseColumn::Date(values.iter().map(|day| date(*day)).collect()),
     }
 }

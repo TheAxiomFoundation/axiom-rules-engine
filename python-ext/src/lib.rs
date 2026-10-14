@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -14,7 +15,7 @@ use numpy::{
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
@@ -358,7 +359,7 @@ fn execution_to_pydict(
                     output_dict.set_item(name, PyArray1::from_vec(py, values))?;
                 }
                 DenseColumn::Text(values) => {
-                    output_dict.set_item(name, PyList::new(py, values)?)?;
+                    output_dict.set_item(name, text_list(py, &values)?)?;
                 }
                 DenseColumn::Date(values) => {
                     let materialised = values
@@ -645,11 +646,29 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
         return decimal_column_from_f64(&values);
     }
     if let Ok(values) = value.extract::<Vec<String>>() {
-        return Ok(DenseColumn::Text(values));
+        return Ok(DenseColumn::Text(values.into_iter().map(Arc::from).collect()));
     }
     Err(PyValueError::new_err(
         "dense columns must be bool/int64/float64 numpy arrays or simple Python lists",
     ))
+}
+
+/// A text column as a Python list. The engine shares a text among the rows
+/// that hold it, and so does the list: each shared text becomes one Python
+/// string, referenced by every row that holds it.
+fn text_list<'py>(py: Python<'py>, values: &[Arc<str>]) -> PyResult<Bound<'py, PyList>> {
+    // Keyed by address: `values` keeps every text alive meanwhile.
+    let mut strings: HashMap<*const u8, Bound<'py, PyString>> = HashMap::new();
+    let items = values
+        .iter()
+        .map(|value| {
+            strings
+                .entry(Arc::as_ptr(value).cast::<u8>())
+                .or_insert_with(|| PyString::new(py, value))
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    PyList::new(py, items)
 }
 
 fn decimal_column_from_f64(values: &[f64]) -> PyResult<DenseColumn> {

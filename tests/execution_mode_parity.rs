@@ -2767,7 +2767,7 @@ fn dense_column(slot: &[ScalarValueSpec], values: Vec<ScalarValueSpec>) -> Dense
             values
                 .iter()
                 .map(|value| match value {
-                    ScalarValueSpec::Text { value } => value.clone(),
+                    ScalarValueSpec::Text { value } => value.as_str().into(),
                     _ => unreachable!(),
                 })
                 .collect(),
