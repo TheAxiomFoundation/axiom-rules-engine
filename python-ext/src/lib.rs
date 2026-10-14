@@ -612,9 +612,9 @@ fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Opti
         return Ok(None);
     }
     let count = value.extract::<i64>()?;
-    usize::try_from(count).map(Some).map_err(|_| {
-        PyValueError::new_err("dense relation related_row_count must be non-negative")
-    })
+    usize::try_from(count)
+        .map(Some)
+        .map_err(|_| PyValueError::new_err("dense relation related_row_count must be non-negative"))
 }
 
 fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
