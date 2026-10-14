@@ -43,14 +43,16 @@ already did for root columns.
   its first schema reaches it and each schema's read columns, so the first
   error a per-schema binding reports is unchanged. Confirmation, the bound and
   the columns no schema reads are checked after that walk, key by key. The
-  Python extension does not convert unread columns; it passes the engine
-  length-only stand-ins for them, so the engine orders every error.
+  Python extension does not convert unread columns; it passes their lengths
+  in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
+  alone, checked like `inputs` but never readable), so the engine orders
+  every error and nothing is allocated from a claimed length.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
   cleanly for a count no host can hold; a count that fits the owners buffer but
   not a later per-row buffer can still exhaust memory during execution.
-- `DenseRelationBatchSpec` gained a public field, which breaks struct literals
-  outside this crate; it now derives `Default`, so literals can end with
-  `..Default::default()`. With the new refusal, that makes the next release a
+- `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
+  `input_lengths`), which breaks struct literals outside this crate; it now
+  derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
   breaking one for 0.2.x users: cut it as 0.3.0.
 - Root columns, and the columns no schema reads within a key, are reported
   smallest name first; read columns keep schema order. So a malformed batch
