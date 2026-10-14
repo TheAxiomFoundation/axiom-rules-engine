@@ -4,6 +4,70 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
+
+**Decision.** Every buffer the dense executor sizes by a row count, the
+batch's `row_count` or a relation's related count, is reserved with
+`Vec::try_reserve_exact`, through `row_buffer`, `filled_rows` and
+`copied_rows` in `src/lazy.rs`. When the allocator refuses one, the call
+fails with `EvalError::TypeMismatch` naming the count ("evaluation needs a
+buffer of N rows, more than this process can allocate"), propagated through
+`Flow` like any whole-call error. A batch whose buffers fit gets exactly the
+results it got before.
+
+**Why.** Binding (the entry below) bounds each count by `MAX_DENSE_ROWS` and
+reserves a relation's owners fallibly, but trusts a count up to that bound.
+Execution then filled broadcast literals, operator results, row masks,
+projections and cached rule columns with `vec!`. Two kinds of batch could
+therefore still abort the process, the Python interpreter included:
+
+- a stated related count whose 8-byte owners fit but whose 16-byte decimal or
+  24-byte text buffers did not
+- a huge `row_count` for a rule with no input and no relation, such as
+  `formula: 5` over 2^50 rows
+
+**Consequences.**
+
+- The covered buffers are:
+  - every operator's output column, broadcast literals and period dates
+  - placeholders for missing inputs and failed rows
+  - copies of input columns and of cached rule columns
+  - numeric conversions and comparison outcomes
+  - root and related row masks, and root-to-related projections
+  - related counts and sums, parameter lookups, and the lifetime executor's
+    reductions
+
+  `RowMask`'s set operations now return `Result`, so the bulk evaluator
+  propagates a refusal too; there it sends the request to explain, as any bulk
+  error does.
+- Some buffers are gone rather than made fallible:
+  - a mask with no active row holds no bits
+  - masks and relation offsets share their `Vec` instead of copying it into
+    an `Rc` slice
+  - `not` negates in place
+  - a period-invariant input moves its column out instead of copying it
+  - `RowErrors` renames and restricts its entries in place; collecting into a
+    new map gathered every entry in one buffer first
+- A rule before its commencement date types its formula, which allocates the
+  formula's column, before it records an error on every row. A batch too large
+  to evaluate is refused before a pass over its rows.
+- Still infallible:
+  - allocations sized by something other than a row count (one per rule,
+    period, output or relation key)
+  - the heap data of each text value, cloned per row with ordinary allocation
+  - the entries `RowErrors` records, one per failing row; dense records them
+    only after a buffer for the same rows was granted
+- A reservation fails only when the allocator refuses it. On a host that
+  overcommits memory, a large but possible count can pass its reservation and
+  still exhaust memory as the buffer is filled. A request no host can grant is
+  an error everywhere. On wasm32 the allocator returns null when linear memory
+  cannot grow, so there a request that does not fit in 4 GiB is an error too.
+- `tests/dense_executor_alloc.rs` runs in its own binary, so a regression aborts
+  only that binary. Its allocator refuses any single allocation above a cap
+  that a test sets, and anything past 1 GiB live. A regression therefore aborts
+  promptly, and a count whose narrow buffers fit and whose wide ones do not can
+  be tested with small, real batches.
+
 ## 2026-10-14 — Dense batches justify every row count they claim
 
 **Decision.** Dense binding refuses a batch whose row counts nothing

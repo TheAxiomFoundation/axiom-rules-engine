@@ -672,7 +672,7 @@ impl<'a> BulkEvaluator<'a> {
     /// rows no earlier reference asked for.
     fn evaluate_scalar(&mut self, name: &str, mask: &RowMask) -> Flow<Scalars> {
         let pending = match self.scalar_cache.get(name) {
-            Some(cached) => mask.difference(&cached.computed),
+            Some(cached) => mask.difference(&cached.computed)?,
             None => mask.clone(),
         };
         if !pending.is_empty() && self.depth >= self.suspend_depth {
@@ -688,9 +688,9 @@ impl<'a> BulkEvaluator<'a> {
                 Some(cached) => {
                     cached
                         .values
-                        .assign_rows(&values, &pending.without(&errors));
+                        .assign_rows(&values, &pending.without(&errors)?);
                     cached.errors.absorb(errors);
-                    cached.computed = cached.computed.union(&pending);
+                    cached.computed = cached.computed.union(&pending)?;
                 }
                 None => {
                     self.scalar_cache.insert(
@@ -729,7 +729,7 @@ impl<'a> BulkEvaluator<'a> {
 
     fn evaluate_judgment(&mut self, name: &str, mask: &RowMask) -> Flow<Judgments> {
         let pending = match self.judgment_cache.get(name) {
-            Some(cached) => mask.difference(&cached.computed),
+            Some(cached) => mask.difference(&cached.computed)?,
             None => mask.clone(),
         };
         if !pending.is_empty() && self.depth >= self.suspend_depth {
@@ -743,11 +743,11 @@ impl<'a> BulkEvaluator<'a> {
             let (values, errors) = self.compute_judgment(name, &pending)?;
             match self.judgment_cache.get_mut(name) {
                 Some(cached) => {
-                    for row in pending.without(&errors).rows() {
+                    for row in pending.without(&errors)?.rows() {
                         cached.values[row] = values[row];
                     }
                     cached.errors.absorb(errors);
-                    cached.computed = cached.computed.union(&pending);
+                    cached.computed = cached.computed.union(&pending)?;
                 }
                 None => {
                     self.judgment_cache.insert(
@@ -848,7 +848,7 @@ impl<'a> BulkEvaluator<'a> {
                             Err(error) => overflow.record(row, error.into()),
                         }
                     }
-                    live = next.without(&overflow);
+                    live = next.without(&overflow)?;
                     errors.absorb(overflow);
                 }
                 Ok((ScalarColumn::Decimal(total), errors))
@@ -866,7 +866,7 @@ impl<'a> BulkEvaluator<'a> {
                         zero.record(row, EvalError::DivisionByZero);
                     }
                 }
-                let live = live.without(&zero);
+                let live = live.without(&zero)?;
                 errors.absorb(zero);
                 let (dividends, live) = self.eval_decimal_operand(left, &live, &mut errors)?;
                 let mut quotients = vec![Decimal::ZERO; len];
@@ -905,7 +905,7 @@ impl<'a> BulkEvaluator<'a> {
             // explain, which names the rule.
             ScalarExpr::NoMatch { subject, patterns } => {
                 let (values, mut errors) = self.eval_scalar_expr(subject, mask)?;
-                for row in mask.without(&errors).rows() {
+                for row in mask.without(&errors)?.rows() {
                     errors.record(
                         row,
                         crate::engine::no_matching_arm(subject, &values.value_at(row), patterns),
@@ -919,10 +919,10 @@ impl<'a> BulkEvaluator<'a> {
                 else_expr,
             } => {
                 let (condition, mut errors) = self.eval_judgment_expr(condition, mask)?;
-                let live = mask.without(&errors);
+                let live = mask.without(&errors)?;
                 // An undetermined condition takes the else branch.
-                let then_rows = live.filter(|row| condition[row].is_holds());
-                let else_rows = live.difference(&then_rows);
+                let then_rows = live.filter(|row| condition[row].is_holds())?;
+                let else_rows = live.difference(&then_rows)?;
                 let (then_values, then_errors) = self.eval_scalar_expr(then_expr, &then_rows)?;
                 let (else_values, else_errors) = self.eval_scalar_expr(else_expr, &else_rows)?;
                 errors.absorb(then_errors);
@@ -945,12 +945,12 @@ impl<'a> BulkEvaluator<'a> {
         errors: &mut RowErrors,
     ) -> Flow<(Vec<Decimal>, RowMask)> {
         let (column, operand_errors) = self.eval_scalar_expr(expr, mask)?;
-        let mut live = mask.without(&operand_errors);
+        let mut live = mask.without(&operand_errors)?;
         errors.absorb(operand_errors);
         let mut conversion_errors = RowErrors::new();
         let values = column.decimals(&live, &mut conversion_errors);
         if !conversion_errors.is_empty() {
-            live = live.without(&conversion_errors);
+            live = live.without(&conversion_errors)?;
             errors.absorb(conversion_errors);
         }
         Ok((values, live))
@@ -1059,7 +1059,7 @@ impl<'a> BulkEvaluator<'a> {
         mask: &RowMask,
     ) -> Flow<Scalars> {
         let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
-        let live = mask.without(&errors);
+        let live = mask.without(&errors)?;
         let definition = self.program.parameters.get(parameter);
         let version = definition.and_then(|definition| {
             definition
@@ -1140,9 +1140,9 @@ impl<'a> BulkEvaluator<'a> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
                 let (left, mut errors) = self.eval_scalar_expr(left, mask)?;
-                let live = mask.without(&errors);
+                let live = mask.without(&errors)?;
                 let (right, right_errors) = self.eval_scalar_expr(right, &live)?;
-                let live = live.without(&right_errors);
+                let live = live.without(&right_errors)?;
                 errors.absorb(right_errors);
                 let outcomes = compare_columns(&left, *op, &right, &live, &mut errors);
                 Ok((outcomes, errors))
@@ -1197,7 +1197,7 @@ impl<'a> BulkEvaluator<'a> {
                 break;
             }
             let (values, item_errors) = self.eval_judgment_expr(item, &pending)?;
-            let live = pending.without(&item_errors);
+            let live = pending.without(&item_errors)?;
             errors.absorb(item_errors);
             pending = live.filter(|row| {
                 let value = values[row];
@@ -1210,7 +1210,7 @@ impl<'a> BulkEvaluator<'a> {
                     }
                     true
                 }
-            });
+            })?;
         }
         for row in pending.rows() {
             if undetermined[row] {
