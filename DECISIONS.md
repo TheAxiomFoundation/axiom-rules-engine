@@ -63,10 +63,13 @@ therefore still abort the process, the Python interpreter included:
   an error everywhere. On wasm32 the allocator returns null when linear memory
   cannot grow, so there a request that does not fit in 4 GiB is an error too.
 - `tests/dense_executor_alloc.rs` runs in its own binary, so a regression aborts
-  only that binary. Its allocator refuses any single allocation above a cap
-  that a test sets, and anything past 1 GiB live. A regression therefore aborts
-  promptly, and a count whose narrow buffers fit and whose wide ones do not can
-  be tested with small, real batches.
+  only that binary. Its allocator refuses three things: any single allocation
+  above a cap that a test sets, the nth allocation of at least 2 KiB that a
+  test chooses, and anything past 1 GiB live. A regression therefore aborts
+  promptly. The cap tests a count whose narrow buffers fit and whose wide ones
+  do not, with small, real batches. Refusing each large allocation in turn
+  reaches the buffers no wider than one already granted, such as masks and
+  copies, which no cap can single out.
 
 ## 2026-10-14 — Dense batches justify every row count they claim
 
@@ -112,8 +115,9 @@ already did for root columns.
   alone, checked like `inputs` but never readable), so the engine orders
   every error and nothing is allocated from a claimed length.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
-  cleanly for a count no host can hold; a count that fits the owners buffer but
-  not a later per-row buffer can still exhaust memory during execution.
+  cleanly for a count no host can hold. Execution then reserves each per-row
+  buffer fallibly too (the entry above), so a count that fits the owners buffer
+  but not a later, wider buffer is refused there.
 - `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
   `input_lengths`), which breaks struct literals outside this crate; it now
   derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
