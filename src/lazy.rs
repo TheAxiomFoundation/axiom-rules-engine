@@ -604,4 +604,216 @@ mod tests {
         assert!(errors.restricted_to(&mask).get(2).is_none());
         Ok(())
     }
+
+    /// A `match` failure naming no rule yet, its subject's value `value`.
+    fn unnamed_match(value: &str) -> EvalError {
+        EvalError::NoMatchingArm {
+            rule: String::new(),
+            subject: "label".to_string(),
+            value: value.to_string(),
+            patterns: "\"a\"".to_string(),
+        }
+    }
+
+    fn named(error: Option<&EvalError>) -> Option<&str> {
+        match error {
+            Some(EvalError::NoMatchingArm { rule, .. }) => Some(rule),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_shared_error_is_renamed_once_and_an_unshared_one_in_place() -> Result<(), EvalError> {
+        let shared = Rc::new(unnamed_match("\"x\""));
+        let mut errors = RowErrors::new();
+        for row in 0..3 {
+            errors.record_shared(row, &shared);
+        }
+        errors.record(5, unnamed_match("\"y\""));
+        let unshared = Rc::as_ptr(errors.get_shared(5).expect("recorded"));
+
+        let renamed = errors.within_rule("rule", 6)?;
+        let copies: Vec<_> = (0..3)
+            .map(|row| Rc::clone(renamed.get_shared(row).expect("recorded")))
+            .collect();
+        // `shared` is held here too, so the rows that held it get one copy.
+        assert!(copies.iter().all(|copy| Rc::ptr_eq(copy, &copies[0])));
+        assert!(!Rc::ptr_eq(&copies[0], &shared));
+        assert_eq!(named(Some(&shared)), Some(""));
+        // The error only row 5 held is renamed where it is.
+        assert_eq!(
+            Rc::as_ptr(renamed.get_shared(5).expect("recorded")),
+            unshared
+        );
+        for row in [0, 1, 2, 5] {
+            assert_eq!(named(renamed.get(row)), Some("rule"));
+        }
+        Ok(())
+    }
+
+    /// The errors the model test records: plain, a `match` failure naming
+    /// no rule (renamed by `within_rule`), and one naming its rule already.
+    fn pool(index: u8) -> EvalError {
+        match index % 5 {
+            0 => EvalError::DivisionByZero,
+            1 => EvalError::UnknownDerived("d".to_string()),
+            2 => unnamed_match("\"x\""),
+            3 => EvalError::NoMatchingArm {
+                rule: "inner".to_string(),
+                subject: "label".to_string(),
+                value: "1".to_string(),
+                patterns: "2".to_string(),
+            },
+            _ => unnamed_match(&"\"y\"".repeat(40)),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Record(usize, u8),
+        /// Record row `.1`'s error, if it has one, for row `.0`.
+        RecordShared(usize, usize),
+        RecordAll(Vec<bool>, u8),
+        Absorb(Vec<(usize, u8)>),
+        Restrict(Vec<bool>),
+        WithinRule(u8),
+    }
+
+    const MODEL_ROWS: usize = 8;
+
+    fn op() -> impl Strategy<Value = Op> {
+        let row = 0..MODEL_ROWS;
+        let mask = prop::collection::vec(any::<bool>(), MODEL_ROWS);
+        prop_oneof![
+            (row.clone(), any::<u8>()).prop_map(|(row, error)| Op::Record(row, error)),
+            (row.clone(), row.clone()).prop_map(|(row, from)| Op::RecordShared(row, from)),
+            (mask.clone(), any::<u8>()).prop_map(|(mask, error)| Op::RecordAll(mask, error)),
+            prop::collection::vec((row, any::<u8>()), 0..4).prop_map(Op::Absorb),
+            mask.prop_map(Op::Restrict),
+            any::<u8>().prop_map(Op::WithinRule),
+        ]
+    }
+
+    /// The model's state and the shared one's, in comparable form.
+    fn rendered<'e>(errors: impl Iterator<Item = (usize, &'e EvalError)>) -> Vec<String> {
+        errors
+            .map(|(row, error)| format!("{row}: {error:?}"))
+            .collect()
+    }
+
+    proptest! {
+        /// Differential: sharing errors among rows changes nothing a caller
+        /// sees. The shared `RowErrors` agrees after every operation with a
+        /// model that holds its own copy of each row's error and renames it
+        /// with `EvalError::within_rule`, explain's rule.
+        #[test]
+        fn shared_errors_behave_as_copied_ones(ops in prop::collection::vec(op(), 0..24)) {
+            let mut shared = RowErrors::new();
+            let mut model: BTreeMap<usize, EvalError> = BTreeMap::new();
+            for op in ops {
+                match op {
+                    Op::Record(row, error) => {
+                        shared.record(row, pool(error));
+                        model.entry(row).or_insert_with(|| pool(error));
+                    }
+                    Op::RecordShared(row, from) => {
+                        if let Some(error) = shared.get_shared(from).cloned() {
+                            shared.record_shared(row, &error);
+                        }
+                        if let Some(error) = model.get(&from).cloned() {
+                            model.entry(row).or_insert(error);
+                        }
+                    }
+                    Op::RecordAll(bits, error) => {
+                        let mask = RowMask::from_bits(bits.clone());
+                        shared.record_all(&mask, &pool(error));
+                        for row in active(&bits) {
+                            model.entry(row).or_insert_with(|| pool(error));
+                        }
+                    }
+                    Op::Absorb(entries) => {
+                        let mut later = RowErrors::new();
+                        let mut later_model = BTreeMap::new();
+                        for (row, error) in entries {
+                            later.record(row, pool(error));
+                            later_model.entry(row).or_insert_with(|| pool(error));
+                        }
+                        shared.absorb(later);
+                        for (row, error) in later_model {
+                            model.entry(row).or_insert(error);
+                        }
+                    }
+                    Op::Restrict(bits) => {
+                        shared = shared.restricted_to(&RowMask::from_bits(bits.clone()));
+                        let kept = active(&bits);
+                        model.retain(|row, _| kept.contains(row));
+                    }
+                    Op::WithinRule(rule) => {
+                        let rule = format!("rule{}", rule % 3);
+                        shared = shared.within_rule(&rule, MODEL_ROWS).expect("small errors");
+                        model = model
+                            .into_iter()
+                            .map(|(row, error)| (row, error.within_rule(&rule)))
+                            .collect();
+                    }
+                }
+                prop_assert_eq!(
+                    rendered(shared.iter_shared().map(|(row, error)| (row, &**error))),
+                    rendered(model.iter().map(|(row, error)| (*row, error)))
+                );
+                prop_assert_eq!(
+                    shared.first().map(|(row, error)| format!("{row}: {error:?}")),
+                    model.iter().next().map(|(row, error)| format!("{row}: {error:?}"))
+                );
+            }
+        }
+
+        /// Differential: the fallible renderings are the infallible ones,
+        /// and a text's rendering is measured exactly, so writing it never
+        /// grows the reservation.
+        #[test]
+        fn fallible_texts_are_the_texts(
+            text in any::<String>(),
+            other in any::<String>(),
+            rows in 0_usize..1000,
+        ) {
+            let rendered = debug_text(&text, rows).expect("small text");
+            prop_assert_eq!(&rendered, &format!("{text:?}"));
+            prop_assert_eq!(rendered.capacity(), rendered.len());
+            prop_assert_eq!(copied_text(&text, rows).expect("small text"), text.clone());
+            for error in [
+                EvalError::NoMatchingArm {
+                    rule: other.clone(),
+                    subject: text.clone(),
+                    value: rendered.clone(),
+                    patterns: other.clone(),
+                },
+                EvalError::LifetimePeriodVaryingInput {
+                    input: other.clone(),
+                    first_period: other.clone(),
+                    first_value: rendered.clone(),
+                    second_period: text.clone(),
+                    second_value: other.clone(),
+                },
+                EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction: "sum_top_n_over_periods",
+                    first_period: other.clone(),
+                    first_value: rendered.clone(),
+                    second_period: text.clone(),
+                    second_value: other.clone(),
+                },
+                EvalError::OverPeriodsTopNOutOfRange {
+                    reduction: "sum_top_n_over_periods",
+                    n: text.clone(),
+                    period_count: rows,
+                },
+                EvalError::TypeMismatch(text.clone()),
+            ] {
+                prop_assert_eq!(
+                    format!("{:?}", copied_error(&error, rows).expect("small error")),
+                    format!("{error:?}")
+                );
+            }
+        }
+    }
 }

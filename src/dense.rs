@@ -338,7 +338,9 @@ pub struct DenseBatchSpec {
 const MAX_DENSE_ROWS: usize = isize::MAX as usize / WIDEST_DENSE_ELEMENT;
 
 /// The size of the widest element a dense buffer holds per row. List any new
-/// per-row element type here.
+/// per-row element type here. A text row is an `Arc<str>`; `ScalarValue`
+/// holds a `String`, so it is at least as wide as one, and sharing text left
+/// the bound where `String` rows set it.
 const WIDEST_DENSE_ELEMENT: usize = {
     let sizes = [
         size_of::<bool>(),

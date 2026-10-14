@@ -179,6 +179,13 @@ whichever rows reach it. On a host that overcommits memory, a large but
 possible count can pass its reservation and still exhaust memory as the buffer
 is filled. Only a refused request becomes an error.
 
+A text never multiplies by a row count. The rows of a text column share their
+values, so broadcasting a literal, projecting a root value to its related rows
+or looking up a parameter copies a pointer per row, not the text. An error
+that names a text (a `match` with no arm for it, a lifetime input that varies
+across periods) copies it fallibly too, once per run of failing rows whose
+values render alike, and the rows an error fails share it.
+
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
 live row reaches cannot fail the batch. Relation batches are positional, so

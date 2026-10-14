@@ -4,6 +4,66 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-14 — Dense text columns share their values
+
+**Decision.** `DenseColumn::Text` holds `Vec<Arc<str>>`. Each row points at a
+shared text, so filling a text column copies a pointer per row, never the
+text. Dense allocates the texts of literals and parameter tables once, when it
+compiles the program. Broadcasting a literal, projecting a root value to its
+related rows, looking up a table and copying an input or cached column all
+share them, and `if` and a merge of cached stretches move rows instead of
+cloning them. Errors follow the same rule. `RowErrors` shares one error among
+the rows it fails (`Rc<EvalError>`). An error that names a value of the batch
+(a `match` with no arm for it, a lifetime value that varies across periods)
+builds its texts with `try_reserve_exact`, once per run of consecutive failing
+rows whose values render alike. A refusal is the row-count error of the entry
+below: "evaluation needs a buffer of N rows, more than this process can
+allocate". A batch that fits gets exactly the results it got before.
+
+**Why.** After the entry below, the row buffers were fallible, but each
+`String`'s heap data was not. A stated related count N whose owners fit, over
+a root text of L bytes, asked for about N×L bytes in small allocations. On
+wasm32 or under RLIMIT_AS the first refused one aborted the process, and on a
+host that overcommits memory the rest could exhaust it. Making each copy
+fallible would turn the abort into an error but still ask for N×L bytes;
+sharing asks for N pointers. Errors had the same shape: a `match` with no arm
+for a long text named it once per failing row, and lifting the error to its
+root rows, lowering it to related rows or restricting a cached rule's errors
+to a reader cloned it again.
+
+**Consequences.**
+
+- `DenseColumn::Text(Vec<Arc<str>>)` replaces `Vec<String>` in the public
+  API. Build a column with `.into()` from `&str` or `String`, and share one
+  value among rows with `Arc::clone`. `Arc` keeps the column `Send` and
+  `Sync`, and its `Debug` output is unchanged. This breaks Rust callers, in
+  the release the entry two below already makes 0.3.0.
+- Python results are unchanged. The extension turns input text into shared
+  values, and returns each shared output text as one Python string that every
+  row holding it references.
+- `MAX_DENSE_ROWS` is unchanged. An `Arc<str>` row is 16 bytes, and the widest
+  per-row element is still `ScalarValue`, which holds a `String`.
+- An error shares its labels by run, not globally. Equal texts the caller
+  supplied as separate allocations, or failing rows that alternate between
+  values, are labelled once each. Each label is reserved fallibly, so the
+  difference is memory, not an abort.
+- `within_rule` renames an error only its rows hold in place. A shared error
+  is copied once, fallibly, and the copy is shared by the rows that held it.
+  The error a call returns is copied out fallibly too.
+- This closes the entry below's second infallible case, the heap data of each
+  text value. These remain infallible:
+  - allocations sized by the program: rule, parameter, relation and input
+    names, period labels, and the `Rc` around each distinct error
+  - the map entry `RowErrors` keeps for each failing row
+- The bulk evaluator (`src/bulk.rs`) still copies text per row. Its rows are
+  the entities a dataset supplies, not a count a caller states.
+- `tests/dense_text_alloc.rs` runs in its own binary. Its texts are four times
+  the allocator's cap, so any copy of one aborts the binary. The allocator
+  (`tests/support/guarded_alloc.rs`, shared with `dense_executor_alloc`) now
+  applies refusals only on the thread that set them. It can also number the
+  allocations of at least a threshold and refuse one, and the properties
+  refuse each large allocation of a run in turn.
+
 ## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
 
 **Decision.** Every buffer the dense executor sizes by a row count, the

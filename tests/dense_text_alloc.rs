@@ -30,9 +30,12 @@
 //!    one of the batch's counts. It never aborts. (A row's error can name a
 //!    long text even when the error reported, the lowest row's, does not.)
 //! 3. **Differential.** When both numeric modes succeed, their text outputs
-//!    are equal: text never depends on the numeric mode.
+//!    are equal: text never depends on the numeric mode. And a batch whose
+//!    equal texts share one allocation gives exactly the results of one
+//!    whose rows each hold their own copy, and satisfies 1 and 2 as well.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -84,6 +87,53 @@ fn texts() -> [String; 4] {
 /// A text column. Each row holds its own copy of its value.
 fn text_column(values: &[String]) -> DenseColumn {
     DenseColumn::Text(values.iter().map(|value| value.as_str().into()).collect())
+}
+
+/// `column` with its equal texts sharing one allocation, as a caller that
+/// interns its values supplies them.
+fn interned_column(column: &DenseColumn) -> DenseColumn {
+    match column {
+        DenseColumn::Text(values) => {
+            let mut shared: HashMap<&str, Arc<str>> = HashMap::new();
+            DenseColumn::Text(
+                values
+                    .iter()
+                    .map(|value| {
+                        Arc::clone(shared.entry(value).or_insert_with(|| Arc::clone(value)))
+                    })
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// `batch` with every text column interned.
+fn interned(batch: &DenseBatchSpec) -> DenseBatchSpec {
+    let columns = |inputs: &HashMap<String, DenseColumn>| {
+        inputs
+            .iter()
+            .map(|(name, column)| (name.clone(), interned_column(column)))
+            .collect()
+    };
+    DenseBatchSpec {
+        row_count: batch.row_count,
+        inputs: columns(&batch.inputs),
+        relations: batch
+            .relations
+            .iter()
+            .map(|(key, relation)| {
+                (
+                    key.clone(),
+                    DenseRelationBatchSpec {
+                        offsets: relation.offsets.clone(),
+                        inputs: columns(&relation.inputs),
+                        related_row_count: relation.related_row_count,
+                    },
+                )
+            })
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +679,90 @@ fn a_match_on_a_long_related_text_names_it_fallibly() {
 }
 
 #[test]
+fn a_long_text_shared_by_stated_related_rows_is_compared_and_named_once() {
+    let _serial = serial();
+    // 512 members whose nicknames share one long text, as an interning caller
+    // supplies them. Comparing them copies nothing; a `match` that covers
+    // none of them names the text once for the run of rows sharing it.
+    let related = 512;
+    let long: Arc<str> = long_text('x').into();
+    let batch = || DenseBatchSpec {
+        row_count: 1,
+        inputs: HashMap::new(),
+        relations: HashMap::from([(
+            member_key(),
+            DenseRelationBatchSpec {
+                offsets: vec![0, related],
+                inputs: HashMap::from([(
+                    "nickname".to_string(),
+                    DenseColumn::Text(vec![Arc::clone(&long); related]),
+                )]),
+                related_row_count: None,
+            },
+        )]),
+    };
+    let compared = compile(&program(
+        vec![scalar_rule(
+            "out",
+            "integer",
+            count_related(
+                "member",
+                Some(compare(input("nickname"), "eq", text(&long))),
+            ),
+        )],
+        // Declares the relations; `chosen` is unused.
+        Some(compare(input("nickname"), "eq", text(&long))),
+    ))
+    .expect("program compiles");
+    for uncapped in shared_under_cap("shared nickname", &compared, batch, &["out"], related) {
+        assert_eq!(
+            summary(&uncapped).expect("counts")["out"],
+            format!(
+                "{:?}",
+                DenseOutputValue::Scalar(DenseColumn::Integer(vec![512]))
+            )
+        );
+    }
+    let unmatched = compile(&program(
+        vec![scalar_rule("out", "integer", count_related("chosen", None))],
+        Some(compare(
+            if_then_else(
+                compare(input("nickname"), "eq", text("a")),
+                integer(1),
+                no_match(input("nickname"), vec![text("a")]),
+            ),
+            "eq",
+            integer(1),
+        )),
+    ))
+    .expect("program compiles");
+    for mode in MODES {
+        let outputs = vec!["out".to_string()];
+        let (uncapped, large) =
+            refusing_large(CAP, 0, || execute(&unmatched, mode, batch(), &outputs));
+        match &uncapped {
+            Err(EvalError::NoMatchingArm { value, .. }) => {
+                assert_eq!(value.as_str(), format!("{:?}", &*long));
+            }
+            other => panic!("{mode:?}: expected the match failure, got {other:?}"),
+        }
+        // One label for the 512 rows, not one each: each large allocation
+        // is a copy of the error, made a handful of times per call.
+        assert!(large <= 4, "{mode:?}: {large} large allocations");
+        for number in 1..=large {
+            let (result, _) =
+                refusing_large(CAP, number, || execute(&unmatched, mode, batch(), &outputs));
+            match result {
+                Err(error) if refused_count(&error).is_some() => {
+                    assert!([1, related].contains(&refused_count(&error).unwrap_or(0)));
+                }
+                other => assert_eq!(summary(&other), summary(&uncapped), "{mode:?}, {number}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn a_long_period_varying_text_input_is_named_fallibly() {
     let _serial = serial();
     let [_, _, long_x, long_y] = texts();
@@ -1081,7 +1215,16 @@ fn no_generated_program_copies_a_text_per_row() {
             let outputs = names(&rules);
             let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
             let counts = counts(&batch);
-            check_case(&counts, || execute(&program, mode, batch.clone(), &outputs))
+            check_case(&counts, || execute(&program, mode, batch.clone(), &outputs))?;
+            // Invariant 3: a caller's shared texts change no result.
+            let shared = interned(&batch);
+            prop_assert_eq!(
+                summary(&execute(&program, mode, shared.clone(), &outputs)),
+                summary(&execute(&program, mode, batch, &outputs))
+            );
+            check_case(&counts, || {
+                execute(&program, mode, shared.clone(), &outputs)
+            })
         })
         .expect("no text is copied per row");
 }
@@ -1097,6 +1240,14 @@ fn no_generated_lifetime_program_copies_a_text_per_row() {
             let outputs = vec!["life".to_string()];
             check_case(&counts, || {
                 execute_lifetime(&program, mode, batches.clone(), &outputs)
+            })?;
+            let shared: Vec<DenseBatchSpec> = batches.iter().map(interned).collect();
+            prop_assert_eq!(
+                summary(&execute_lifetime(&program, mode, shared.clone(), &outputs)),
+                summary(&execute_lifetime(&program, mode, batches, &outputs))
+            );
+            check_case(&counts, || {
+                execute_lifetime(&program, mode, shared.clone(), &outputs)
             })
         })
         .expect("no text is copied per row");
