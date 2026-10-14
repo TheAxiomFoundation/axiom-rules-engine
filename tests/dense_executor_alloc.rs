@@ -15,8 +15,8 @@
 //!
 //! - **The host.** A batch of 2^50 or more rows asks for at least a pebibyte,
 //!   which no host grants.
-//! - **This binary's allocator.** It refuses any single allocation above a
-//!   cap that a test sets. A relation's 8-byte owners can fit under the cap
+//! - **This binary's allocator** (`tests/support/guarded_alloc.rs`). It
+//!   refuses any single allocation above a cap that a test sets. A relation's 8-byte owners can fit under the cap
 //!   while a wider buffer for the same rows does not. Binding never sees that
 //!   case, and here it is reachable with small, real batches.
 //!
@@ -37,10 +37,7 @@
 //!    cap. When every count's widest buffer fits under the cap, it returns
 //!    exactly what it returns uncapped.
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -57,117 +54,15 @@ use proptest::test_runner::{Config, TestRunner};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
-// ---------------------------------------------------------------------------
-// The allocator. Every test takes `SERIAL`, so a cap one test sets never
-// refuses another test's allocations.
-// ---------------------------------------------------------------------------
+// This binary sets caps only; it numbers no allocations.
+#[allow(dead_code)]
+#[path = "support/guarded_alloc.rs"]
+mod guarded_alloc;
 
-struct Guarded;
-
-/// The largest single allocation granted; `usize::MAX` grants everything.
-static CAP: AtomicUsize = AtomicUsize::new(usize::MAX);
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-/// More live bytes than any case here needs by two orders of magnitude.
-const LIVE_CEILING: usize = 1 << 30;
-static SERIAL: Mutex<()> = Mutex::new(());
-
-impl Guarded {
-    fn over_cap(size: usize) -> bool {
-        size > CAP.load(Ordering::SeqCst)
-    }
-
-    /// Count `size` more live bytes, unless that passes the ceiling.
-    fn admit(size: usize) -> bool {
-        let before = LIVE.fetch_add(size, Ordering::SeqCst);
-        if before.saturating_add(size) > LIVE_CEILING {
-            LIVE.fetch_sub(size, Ordering::SeqCst);
-            return false;
-        }
-        true
-    }
-}
-
-unsafe impl GlobalAlloc for Guarded {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if Self::over_cap(layout.size()) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: forwarded unchanged to the system allocator, which decides
-        // first, so a request no host can grant is the host's refusal.
-        let pointer = unsafe { System.alloc(layout) };
-        if pointer.is_null() || Self::admit(layout.size()) {
-            return pointer;
-        }
-        // SAFETY: `pointer` was just allocated by `System` with `layout`.
-        unsafe { System.dealloc(pointer, layout) };
-        std::ptr::null_mut()
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if Self::over_cap(layout.size()) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: as in `alloc`.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if pointer.is_null() || Self::admit(layout.size()) {
-            return pointer;
-        }
-        // SAFETY: `pointer` was just allocated by `System` with `layout`.
-        unsafe { System.dealloc(pointer, layout) };
-        std::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: forwarded unchanged to the system allocator.
-        unsafe { System.dealloc(pointer, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if Self::over_cap(new_size) {
-            return std::ptr::null_mut();
-        }
-        let old_size = layout.size();
-        if new_size > old_size && !Self::admit(new_size - old_size) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: forwarded unchanged to the system allocator.
-        let moved = unsafe { System.realloc(pointer, layout, new_size) };
-        if new_size > old_size {
-            if moved.is_null() {
-                LIVE.fetch_sub(new_size - old_size, Ordering::SeqCst);
-            }
-        } else if !moved.is_null() {
-            LIVE.fetch_sub(old_size - new_size, Ordering::SeqCst);
-        }
-        moved
-    }
-}
+use guarded_alloc::{Guarded, capped, serial};
 
 #[global_allocator]
 static ALLOCATOR: Guarded = Guarded;
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Lifts the cap when dropped, so a failing assertion never leaves it set.
-struct CapGuard;
-
-impl Drop for CapGuard {
-    fn drop(&mut self) {
-        CAP.store(usize::MAX, Ordering::SeqCst);
-    }
-}
-
-/// Run `run` with every single allocation above `cap` bytes refused.
-fn capped<T>(cap: usize, run: impl FnOnce() -> T) -> T {
-    let _lift = CapGuard;
-    CAP.store(cap, Ordering::SeqCst);
-    run()
-}
 
 // ---------------------------------------------------------------------------
 // Refusals
