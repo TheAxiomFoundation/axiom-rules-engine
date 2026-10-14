@@ -46,7 +46,8 @@ therefore still abort the process, the Python interpreter included:
     an `Rc` slice
   - `not` negates in place
   - a period-invariant input moves its column out instead of copying it
-  - `RowErrors` renames and restricts its entries in place; collecting into a
+  - `RowErrors` renames its entries in place and restricts them by inserting
+    them one at a time; collecting into a
     new map gathered every entry in one buffer first
 - A rule before its commencement date types its formula, which allocates the
   formula's column, before it records an error on every row. A batch too large

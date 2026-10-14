@@ -429,6 +429,14 @@ fn program(rules: Vec<Value>, chosen: Option<Value>) -> Value {
                 "0": { "kind": "text", "value": "zero" },
                 "1": { "kind": "text", "value": "one" },
             })) },
+            { "name": "u", "unit": null, "versions": table(json!({
+                "0": { "kind": "bool", "value": false },
+                "1": { "kind": "bool", "value": true },
+            })) },
+            { "name": "w", "unit": null, "versions": table(json!({
+                "0": { "kind": "date", "value": "2026-01-01" },
+                "1": { "kind": "date", "value": "2026-06-30" },
+            })) },
         ],
         "derived": rules,
     })
@@ -563,6 +571,8 @@ fn root_cases() -> Vec<(&'static str, Vec<Value>)> {
             scalar("decimal", lookup("q", integer(1))),
         ),
         ("text parameter", scalar("text", lookup("t", integer(1)))),
+        ("bool parameter", scalar("bool", lookup("u", integer(1)))),
+        ("date parameter", scalar("date", lookup("w", integer(1)))),
         (
             "add",
             scalar("integer", items("add", vec![integer(5), integer(1)])),
@@ -1132,6 +1142,9 @@ fn date_expr(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         Just(json!({ "kind": "period_end" })).boxed(),
         Just(date("2026-01-15")).boxed(),
         Just(input("d")).boxed(),
+        number(scope, 0)
+            .prop_map(|index| lookup("w", index))
+            .boxed(),
     ];
     if !scope.dates.is_empty() {
         leaves.push(
@@ -1171,6 +1184,9 @@ fn judgment(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
             number(scope, 0),
         )
             .prop_map(|(op, label, index)| compare(lookup("t", index), op, text(label)))
+            .boxed(),
+        (select(vec!["eq", "ne"]), any::<bool>(), number(scope, 0))
+            .prop_map(|(op, value, index)| compare(lookup("u", index), op, boolean(value)))
             .boxed(),
     ];
     if !scope.judgments.is_empty() {

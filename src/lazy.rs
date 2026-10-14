@@ -13,10 +13,12 @@
 //!   enclosing expression, exactly as the reference evaluation of that row
 //!   stops there.
 //!
-//! Every buffer either evaluator sizes by a row count goes through
-//! [`row_buffer`] or [`filled_rows`], which reserve it fallibly. A batch can
-//! state more rows than any buffer of them fits in memory, and the failed
-//! allocation is then an error naming the count, not an aborted process.
+//! Every row mask, and every buffer the dense evaluator sizes by a row count,
+//! goes through [`row_buffer`], [`filled_rows`] or [`copied_rows`], which
+//! reserve it fallibly. A dense batch can state more rows than any buffer of
+//! them fits in memory, and the failed allocation is then an error naming the
+//! count, not an aborted process. The bulk evaluator's own column buffers are
+//! not covered.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
