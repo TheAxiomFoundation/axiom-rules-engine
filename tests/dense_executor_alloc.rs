@@ -678,6 +678,24 @@ fn root_cases() -> Vec<(&'static str, Vec<Value>)> {
             ],
         ),
         (
+            "scalar rule read as a judgment",
+            vec![
+                scalar_rule("five", "integer", integer(5)),
+                judgment_rule("out", derived("five")),
+            ],
+        ),
+        (
+            "judgment read as a scalar",
+            vec![
+                judgment_rule("big", compare(integer(5), "gt", integer(3))),
+                scalar_rule(
+                    "out",
+                    "integer",
+                    items("add", vec![derived("big"), integer(1)]),
+                ),
+            ],
+        ),
+        (
             "rounded",
             vec![rounded(scalar_rule("out", "decimal", decimal("2.555")))],
         ),
@@ -787,7 +805,7 @@ fn lifetime_cases() -> Vec<(&'static str, Value)> {
 #[test]
 fn a_huge_lifetime_row_count_is_refused_by_every_reduction() {
     let _serial = serial();
-    for (case, expr) in lifetime_cases() {
+    for (case, expr) in lifetime_cases().into_iter().chain(ambiguous_leaves(false)) {
         let rules = vec![scalar_rule("out", "decimal", expr)];
         let program =
             compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
@@ -1284,6 +1302,19 @@ fn finish(rule: Value, from: Option<&str>, round: bool) -> Value {
 /// of `chosen`.
 type Rules = (Vec<Value>, Option<Value>);
 
+/// Generated rules with their names in a random order to request them in.
+/// A rule an earlier output reads only on some rows is then extended to more
+/// rows by a later one, as it is when a caller asks for outputs out of
+/// dependency order.
+fn with_outputs(
+    rules: impl Strategy<Value = Rules>,
+) -> impl Strategy<Value = (Rules, Vec<String>)> {
+    rules.prop_flat_map(|rules| {
+        let outputs = names(&rules.0);
+        (Just(rules), Just(outputs).prop_shuffle())
+    })
+}
+
 /// Eight rules, each reading only earlier ones. `h` (a number) and `hj` (a
 /// judgment) read no relation, so `chosen`'s predicate can read them on the
 /// household's rows. Then the numbers `r0`, `r3` and `r5`, the judgments `r1`
@@ -1599,13 +1630,12 @@ fn runner(cases: u32) -> TestRunner {
 fn every_generated_program_refuses_a_huge_root_row_count() {
     let _serial = serial();
     let strategy = (
-        rules(false),
+        with_outputs(rules(false)),
         select(MODES.to_vec()),
         select(HUGE_ROWS.to_vec()),
     );
     runner(512)
-        .run(&strategy, |((rules, _), mode, rows)| {
-            let outputs = names(&rules);
+        .run(&strategy, |(((rules, _), outputs), mode, rows)| {
             let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let result = execute(&program, mode, empty_batch(rows), &outputs);
             match &result {
@@ -1645,28 +1675,30 @@ fn a_cap_changes_a_result_only_by_refusing_a_count() {
     let _serial = serial();
     let strategy = (any::<bool>()).prop_flat_map(|relations| {
         (
-            rules(relations),
+            with_outputs(rules(relations)),
             batch(relations, root_rows()),
             select(MODES.to_vec()),
             cap(),
         )
     });
     runner(512)
-        .run(&strategy, |((rules, chosen), batch, mode, cap)| {
-            let outputs = names(&rules);
-            let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
-            let counts = counts(&batch);
-            let uncapped = execute(&program, mode, batch.clone(), &outputs);
-            let result = capped(cap.unwrap_or(usize::MAX), || {
-                execute(&program, mode, batch, &outputs)
-            });
-            if let Some(cap) = cap
-                && counts.iter().all(|count| count * WIDEST <= cap)
-            {
-                prop_assert_eq!(summary(&result), summary(&uncapped));
-            }
-            check_differential(&counts, cap, &uncapped, &result)
-        })
+        .run(
+            &strategy,
+            |(((rules, chosen), outputs), batch, mode, cap)| {
+                let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
+                let counts = counts(&batch);
+                let uncapped = execute(&program, mode, batch.clone(), &outputs);
+                let result = capped(cap.unwrap_or(usize::MAX), || {
+                    execute(&program, mode, batch, &outputs)
+                });
+                if let Some(cap) = cap
+                    && counts.iter().all(|count| count * WIDEST <= cap)
+                {
+                    prop_assert_eq!(summary(&result), summary(&uncapped));
+                }
+                check_differential(&counts, cap, &uncapped, &result)
+            },
+        )
         .expect("a cap only ever refuses a count");
 }
 
@@ -1736,14 +1768,13 @@ fn refusing_any_large_allocation_refuses_the_call() {
     let _serial = serial();
     let strategy = any::<bool>().prop_flat_map(|relations| {
         (
-            rules(relations),
+            with_outputs(rules(relations)),
             batch(relations, large_rows()),
             select(MODES.to_vec()),
         )
     });
     runner(24)
-        .run(&strategy, |((rules, chosen), batch, mode)| {
-            let outputs = names(&rules);
+        .run(&strategy, |(((rules, chosen), outputs), batch, mode)| {
             let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
             check_every_refusal(&counts(&batch), &batch, |batch| {
                 execute(&program, mode, batch, &outputs)
@@ -1769,4 +1800,203 @@ fn refusing_any_large_lifetime_allocation_refuses_the_call() {
             })
         })
         .expect("refusing any large allocation refuses the call");
+}
+
+// ---------------------------------------------------------------------------
+// Every listed case, refusing each large allocation in turn
+// ---------------------------------------------------------------------------
+
+/// Rows enough that every count-sized buffer is a large allocation.
+const SWEEP_ROWS: usize = LARGE + 5;
+
+/// A root input that is negative, zero or positive by row, so rules take
+/// different branches on different rows.
+fn alternating(rows: usize) -> DenseColumn {
+    DenseColumn::Integer((0..rows).map(|row| (row % 3) as i64 - 1).collect())
+}
+
+/// Rules whose cache is filled for some rows and then extended to the rest.
+/// `pick` reads `small` only where `a` is positive, and `out` reads it on
+/// every row afterwards; `chosen` reads `positive` only where `a` is
+/// nonzero, and `either` reads it on the rows `chosen` leaves.
+fn extended_caches() -> Vec<(&'static str, Vec<Value>)> {
+    vec![
+        (
+            "scalar cache extended to more rows",
+            vec![
+                scalar_rule(
+                    "small",
+                    "integer",
+                    items("add", vec![input("a"), integer(1)]),
+                ),
+                scalar_rule(
+                    "pick",
+                    "integer",
+                    if_then_else(
+                        compare(input("a"), "gt", integer(0)),
+                        derived("small"),
+                        integer(0),
+                    ),
+                ),
+                scalar_rule(
+                    "out",
+                    "integer",
+                    items("add", vec![derived("pick"), derived("small")]),
+                ),
+            ],
+        ),
+        (
+            "judgment cache extended to more rows",
+            vec![
+                judgment_rule("positive", compare(input("a"), "gt", integer(0))),
+                judgment_rule(
+                    "chosen",
+                    items(
+                        "and",
+                        vec![compare(input("a"), "ne", integer(0)), derived("positive")],
+                    ),
+                ),
+                judgment_rule(
+                    "out",
+                    items("or", vec![derived("chosen"), derived("positive")]),
+                ),
+            ],
+        ),
+    ]
+}
+
+/// Each lifetime leaf with no single period outside a reduction, evaluated
+/// before the reduction beside it, so its placeholder is the first buffer
+/// for its rows. The relation leaves need the relation's batches.
+fn ambiguous_leaves(relations: bool) -> Vec<(&'static str, Value)> {
+    let start = || json!({ "kind": "period_start" });
+    let end = || json!({ "kind": "period_end" });
+    let reduction = || over_periods("sum", integer(5), None);
+    let dated = |leaf: Value| if_then_else(compare(leaf, "lte", end()), reduction(), integer(0));
+    let counted = |leaf: Value| items("add", vec![leaf, reduction()]);
+    let mut leaves = vec![
+        ("period start first", dated(start())),
+        (
+            "period end first",
+            if_then_else(compare(end(), "gte", start()), reduction(), integer(0)),
+        ),
+        (
+            "date add days first",
+            dated(date_shift("date_add_days", start(), integer(1))),
+        ),
+        (
+            "date add months first",
+            dated(date_shift("date_add_months", start(), integer(1))),
+        ),
+        (
+            "date add years first",
+            dated(date_shift("date_add_years", start(), integer(1))),
+        ),
+        ("days between first", counted(days_between(start(), end()))),
+    ];
+    if relations {
+        leaves.push((
+            "count over a relation first",
+            counted(count_related("member", None)),
+        ));
+        leaves.push((
+            "sum over a relation first",
+            counted(sum_related("member", "income", None)),
+        ));
+    }
+    leaves
+}
+
+/// `rows` households of `members` members each, with an alternating root
+/// input `a`. Related columns are supplied, or the count is stated.
+fn sweep_batch(rows: usize, members: usize, related_columns: bool) -> DenseBatchSpec {
+    let related = rows * members;
+    let inputs = if related_columns {
+        HashMap::from([
+            (
+                "income".to_string(),
+                DenseColumn::Decimal(vec![Decimal::new(125, 2); related]),
+            ),
+            ("age".to_string(), alternating(related)),
+        ])
+    } else {
+        HashMap::new()
+    };
+    DenseBatchSpec {
+        row_count: rows,
+        inputs: HashMap::from([("a".to_string(), alternating(rows))]),
+        relations: HashMap::from([(
+            member_key(),
+            DenseRelationBatchSpec {
+                offsets: (0..=rows).map(|row| row * members).collect(),
+                inputs,
+                related_row_count: (!related_columns).then_some(related),
+                ..Default::default()
+            },
+        )]),
+    }
+}
+
+/// Every case the deterministic tests list, run once per large allocation
+/// with that allocation refused. A random program reaches a node kind only
+/// by chance; this reaches each listed one every run.
+#[test]
+fn every_listed_case_refuses_each_large_allocation() {
+    let _serial = serial();
+    let check = |case: &str, result: Result<(), TestCaseError>| {
+        if let Err(error) = result {
+            panic!("{case}: {error}");
+        }
+    };
+    let outputs = vec!["out".to_string()];
+    let root = sweep_batch(SWEEP_ROWS, 0, true);
+    let root_only = DenseBatchSpec {
+        relations: HashMap::new(),
+        ..root
+    };
+    for (case, rules) in root_cases().into_iter().chain(extended_caches()) {
+        let program =
+            compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
+        for mode in MODES {
+            check(
+                &format!("{case}, {mode:?}"),
+                check_every_refusal(&[SWEEP_ROWS], &root_only, |batch| {
+                    execute(&program, mode, batch, &outputs)
+                }),
+            );
+        }
+    }
+    for case in related_cases() {
+        let program = compile(&program(case.rules, Some(case.chosen)))
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        for related_columns in [false, true] {
+            let batch = sweep_batch(SWEEP_ROWS, 2, related_columns);
+            for mode in MODES {
+                check(
+                    &format!("{}, {mode:?}, related columns {related_columns}", case.name),
+                    check_every_refusal(&[SWEEP_ROWS, 2 * SWEEP_ROWS], &batch, |batch| {
+                        execute(&program, mode, batch, &outputs)
+                    }),
+                );
+            }
+        }
+    }
+    let lifetime = lifetime_cases().into_iter().chain(ambiguous_leaves(true));
+    for (case, expr) in lifetime {
+        let rules = vec![scalar_rule("out", "decimal", expr)];
+        let program = compile(&program(rules, Some(member_of("member"))))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let batches = vec![
+            sweep_batch(SWEEP_ROWS, 2, true),
+            sweep_batch(SWEEP_ROWS, 2, true),
+        ];
+        for mode in MODES {
+            check(
+                &format!("{case}, {mode:?}"),
+                check_every_refusal(&[SWEEP_ROWS, 2 * SWEEP_ROWS], &batches, |batches| {
+                    execute_lifetime(&program, mode, batches, &outputs)
+                }),
+            );
+        }
+    }
 }
