@@ -4,6 +4,48 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-14 — Python callers can state a dense batch's row count; it is never defaulted
+
+**Decision.** The Python dense surface takes an optional stated row count.
+`CompiledDenseProgram.execute` and `execute_f64` take a keyword `row_count`
+(keyword-only in the extension), and an `execute_lifetime_f64` batch may be an
+`(inputs, relations, row_count)` tuple. A stated count becomes
+`DenseBatchSpec::row_count`, so the engine checks it as it checks a Rust
+caller's: every supplied root column and every relation's offsets must agree
+with it, and a count above `MAX_DENSE_ROWS` is refused. With no stated count,
+the extension takes the count as before: from the first supplied root input
+column, in the program's order, else from the first relation's offsets. When
+neither gives one, it raises `ValueError` naming the program's root inputs and
+any supplied inputs that are not root inputs, and saying how to state the
+count. It never defaults to zero rows.
+
+**Why.** Rust callers set `row_count` directly; Python callers could not. An
+input-free program (a constant or a parameter lookup) could never run from
+Python. A program called without its root input, or with the key misspelt, got
+"dense compilation produced neither root inputs nor relations", which was
+false. Since #201 an absent input is a missing input on the rows that read it,
+so with a stated count the engine reports that. Defaulting to zero rows would
+instead turn a misspelt key into an empty result with no error, because no row
+would read the input.
+
+**Consequences.**
+
+- The extension checks only that a stated count is a non-negative integer that
+  fits `usize`: a Python or numpy integer, not a bool. Every such count reaches
+  the engine, so `MAX_DENSE_ROWS` alone decides which counts are too large.
+- A count under the bound but larger than memory aborts the process. For
+  example, `row_count=2**50` on a constant program fails with "memory
+  allocation of 9007199254740992 bytes failed". The executor's per-row buffers
+  are still allocated infallibly (see the entry below), and one Python integer
+  now reaches them, as a Rust caller's `row_count` already could.
+- `related_row_count` is read the same way: a bool is refused, and a count
+  above `i64::MAX` reaches the engine instead of raising `OverflowError`.
+- A program that reads a relation, called with no root column, no stated count
+  and no relations, now gets "missing dense relation batch `<key>`", naming the
+  key, instead of "dense execution requires relation data".
+- Supplied inputs that are not root inputs are still ignored when a row count
+  is found. They are named only in the error for a batch with no row count.
+
 ## 2026-10-14 — Dense batches justify every row count they claim
 
 **Decision.** Dense binding refuses a batch whose row counts nothing

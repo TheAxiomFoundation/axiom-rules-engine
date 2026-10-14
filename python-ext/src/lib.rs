@@ -12,9 +12,9 @@ use chrono::NaiveDate;
 use numpy::{
     PyArray1, PyArrayDescrMethods, PyReadonlyArray1, PyUntypedArray, PyUntypedArrayMethods,
 };
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOverflowError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyList};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
@@ -148,7 +148,12 @@ impl CompiledDenseProgramHandle {
             .collect()
     }
 
-    #[pyo3(signature = (period_kind, start, end, inputs, relations=None, outputs=None))]
+    /// `row_count` states how many root rows the batch has. It must agree with
+    /// every supplied root column and with the relations' offsets. Without it,
+    /// the first supplied root input column gives the count, else the first
+    /// relation's offsets; when neither does, the call raises.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (period_kind, start, end, inputs, relations=None, outputs=None, *, row_count=None))]
     fn execute<'py>(
         &self,
         py: Python<'py>,
@@ -158,6 +163,7 @@ impl CompiledDenseProgramHandle {
         inputs: Bound<'py, PyDict>,
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
+        row_count: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.run(
             py,
@@ -167,14 +173,17 @@ impl CompiledDenseProgramHandle {
             inputs,
             relations,
             outputs,
+            row_count,
             false,
         )
     }
 
     /// Execute in `f64` arithmetic: numeric outputs skip the Decimal
     /// round-trip entirely. Intended for microsimulation-style batch
-    /// workloads; exact legal determinations should use `execute`.
-    #[pyo3(signature = (period_kind, start, end, inputs, relations=None, outputs=None))]
+    /// workloads; exact legal determinations should use `execute`. `row_count`
+    /// is as for `execute`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (period_kind, start, end, inputs, relations=None, outputs=None, *, row_count=None))]
     fn execute_f64<'py>(
         &self,
         py: Python<'py>,
@@ -184,6 +193,7 @@ impl CompiledDenseProgramHandle {
         inputs: Bound<'py, PyDict>,
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
+        row_count: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.run(
             py,
@@ -193,6 +203,7 @@ impl CompiledDenseProgramHandle {
             inputs,
             relations,
             outputs,
+            row_count,
             true,
         )
     }
@@ -202,11 +213,13 @@ impl CompiledDenseProgramHandle {
     /// / `sum_top_n_over_periods`.
     ///
     /// `periods` is a list of `(period_kind, start, end)` triples and `batches`
-    /// a same-length list of `(inputs[, relations])` — each `inputs` a dict of
-    /// column arrays and each optional `relations` the dict shape `execute`
-    /// accepts. Row `i` must be the same entity in every batch (identical row
-    /// order and count). Every requested output's formula must contain an
-    /// over-periods reduction; period-specific outputs should use `execute_f64`.
+    /// a same-length list of `(inputs[, relations[, row_count]])` — each
+    /// `inputs` a dict of column arrays, each optional `relations` the dict
+    /// shape `execute` accepts, and each optional `row_count` that batch's
+    /// stated row count, as for `execute`. Row `i` must be the same entity in
+    /// every batch (identical row order and count). Every requested output's
+    /// formula must contain an over-periods reduction; period-specific outputs
+    /// should use `execute_f64`.
     #[pyo3(signature = (periods, batches, outputs=None))]
     fn execute_lifetime_f64<'py>(
         &self,
@@ -236,9 +249,16 @@ impl CompiledDenseProgramHandle {
 
         let built_batches = batches
             .into_iter()
-            .map(|batch| {
-                let (inputs, relations) = split_lifetime_batch(&batch)?;
-                build_batch(&self.compiled, inputs, relations)
+            .enumerate()
+            .map(|(index, batch)| {
+                let (inputs, relations, row_count) = split_lifetime_batch(&batch)?;
+                build_batch(
+                    &self.compiled,
+                    inputs,
+                    relations,
+                    row_count.as_ref(),
+                    BatchSite::Lifetime(index),
+                )
             })
             .collect::<PyResult<Vec<DenseBatchSpec>>>()?;
 
@@ -305,6 +325,7 @@ impl CompiledDenseProgramHandle {
         inputs: Bound<'py, PyDict>,
         relations: Option<Bound<'py, PyDict>>,
         outputs: Option<Vec<String>>,
+        row_count: Option<Bound<'py, PyAny>>,
         use_f64: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let period = Period {
@@ -312,7 +333,13 @@ impl CompiledDenseProgramHandle {
             start: parse_date(start)?,
             end: parse_date(end)?,
         };
-        let batch = build_batch(&self.compiled, inputs, relations)?;
+        let batch = build_batch(
+            &self.compiled,
+            inputs,
+            relations,
+            row_count.as_ref(),
+            BatchSite::Period,
+        )?;
         let output_names = outputs.unwrap_or_else(|| self.compiled.output_names());
         let execution = if use_f64 {
             self.compiled.execute_f64(&period, batch, &output_names)
@@ -384,20 +411,28 @@ fn execution_to_pydict(
     Ok(result)
 }
 
-/// Split one lifetime batch entry into its `(inputs, relations)` parts. A batch
-/// is either a bare inputs dict, or a `(inputs[, relations])` tuple/list — the
-/// same relation dict shape `build_batch` already consumes.
-fn split_lifetime_batch<'py>(
-    batch: &Bound<'py, PyAny>,
-) -> PyResult<(Bound<'py, PyDict>, Option<Bound<'py, PyDict>>)> {
+/// One lifetime batch entry's parts: its inputs, its relations, and its stated
+/// row count, if any.
+type LifetimeBatchParts<'py> = (
+    Bound<'py, PyDict>,
+    Option<Bound<'py, PyDict>>,
+    Option<Bound<'py, PyAny>>,
+);
+
+/// Split one lifetime batch entry into its `(inputs, relations, row_count)`
+/// parts. A batch is either a bare inputs dict, or an
+/// `(inputs[, relations[, row_count]])` tuple/list — the same relation dict
+/// shape and row count `execute` takes.
+fn split_lifetime_batch<'py>(batch: &Bound<'py, PyAny>) -> PyResult<LifetimeBatchParts<'py>> {
     if let Ok(inputs) = batch.cast::<PyDict>() {
-        return Ok((inputs.clone(), None));
+        return Ok((inputs.clone(), None, None));
     }
-    // Otherwise expect a sequence: (inputs,) or (inputs, relations).
+    // Otherwise expect a sequence: (inputs,), (inputs, relations) or
+    // (inputs, relations, row_count).
     let items = batch.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    if items.is_empty() || items.len() > 2 {
+    if items.is_empty() || items.len() > 3 {
         return Err(PyValueError::new_err(
-            "each lifetime batch must be an inputs dict or an (inputs[, relations]) tuple",
+            "each lifetime batch must be an inputs dict or an (inputs[, relations[, row_count]]) tuple",
         ));
     }
     let inputs = items[0].cast::<PyDict>()?.clone();
@@ -405,7 +440,7 @@ fn split_lifetime_batch<'py>(
         Some(value) if !value.is_none() => Some(value.cast::<PyDict>()?.clone()),
         _ => None,
     };
-    Ok((inputs, relations))
+    Ok((inputs, relations, items.get(2).cloned()))
 }
 
 #[pymodule]
@@ -416,55 +451,53 @@ fn axiom_rules_engine_dense(_py: Python<'_>, module: &Bound<'_, PyModule>) -> Py
     Ok(())
 }
 
+/// Which call a batch came from, so an error can say how to state its row
+/// count there.
+#[derive(Clone, Copy)]
+enum BatchSite {
+    /// The batch `execute` or `execute_f64` takes.
+    Period,
+    /// The batch at this index of `execute_lifetime_f64`'s `batches`.
+    Lifetime(usize),
+}
+
+impl BatchSite {
+    /// The name a stated row count goes by in errors.
+    fn row_count_name(self) -> String {
+        match self {
+            BatchSite::Period => "dense batch row_count".to_string(),
+            BatchSite::Lifetime(index) => format!("lifetime batch {index} row_count"),
+        }
+    }
+}
+
+/// Build the engine's batch from Python columns. The batch's row count is
+/// `stated_row_count` when the caller states one; otherwise the length of the first
+/// supplied root input column, in the program's order; otherwise one less
+/// than the length of the first relation's offsets. The engine checks a
+/// stated count against every supplied root column and every relation's
+/// offsets, and refuses one above its `MAX_DENSE_ROWS` bound. When nothing
+/// gives a count, this raises rather than default to zero rows: a misspelt
+/// input key would otherwise return an empty result with no error.
 fn build_batch(
     compiled: &DenseCompiledProgram,
     inputs: Bound<'_, PyDict>,
     relations: Option<Bound<'_, PyDict>>,
+    stated_row_count: Option<&Bound<'_, PyAny>>,
+    site: BatchSite,
 ) -> PyResult<DenseBatchSpec> {
-    // Row count comes from the first supplied input column. Optional inputs
-    // may legitimately be absent, so we scan until we find one that is.
-    let row_count = match compiled
-        .root_inputs()
-        .iter()
-        .find_map(|name| inputs.get_item(name).ok().flatten().map(|c| (name, c)))
-    {
-        Some((_, column)) => dense_column_from_python(&column)?.len(),
-        None => match compiled.relations().first() {
-            Some(schema) => {
-                let relation_batches = relations.as_ref().ok_or_else(|| {
-                    PyValueError::new_err("dense execution requires relation data")
-                })?;
-                let relation = relation_batches
-                    .get_item(relation_key(&schema.key))?
-                    .ok_or_else(|| {
-                        PyValueError::new_err(format!(
-                            "missing dense relation batch `{}`",
-                            relation_key(&schema.key)
-                        ))
-                    })?;
-                let relation_dict = relation.cast::<PyDict>()?;
-                let offsets = extract_index_vec(
-                    &relation_dict
-                        .get_item("offsets")?
-                        .ok_or_else(|| PyValueError::new_err("missing dense relation offsets"))?,
-                )?;
-                offsets.len().saturating_sub(1)
-            }
-            None => {
-                return Err(PyValueError::new_err(
-                    "dense compilation produced neither root inputs nor relations",
-                ));
-            }
-        },
-    };
+    let stated_row_count = extract_stated_count(stated_row_count, &site.row_count_name())?;
 
     // Only collect inputs the caller actually supplied. An absent input is a
     // missing input on every row: `input_or_else` reads its default, and a
     // plain read fails only the rows whose evaluation reaches it.
     let mut root_inputs = HashMap::new();
+    let mut first_column_len = None;
     for name in compiled.root_inputs() {
         if let Some(value) = inputs.get_item(name)? {
-            root_inputs.insert(name.clone(), dense_column_from_python(&value)?);
+            let column = dense_column_from_python(&value)?;
+            first_column_len.get_or_insert(column.len());
+            root_inputs.insert(name.clone(), column);
         }
     }
 
@@ -472,9 +505,7 @@ fn build_batch(
     // relation, so several schemas can share one key, each reading its own
     // related inputs. A key's batch carries the union of those inputs. In
     // this loop its offsets are read once, for the first schema keyed to it,
-    // and each column once, for the first schema that reads it. When no root
-    // input column is supplied, the row count above came from the first
-    // schema's offsets, so that key's offsets are extracted twice. Schemas are
+    // and each column once, for the first schema that reads it. Schemas are
     // walked in order, and a later schema skips only reads that already
     // succeeded, so a malformed batch fails with the first error that reading
     // each schema's batch afresh, in schema order, would raise.
@@ -526,6 +557,20 @@ fn build_batch(
             }
         }
     }
+
+    let row_count = match stated_row_count.or(first_column_len) {
+        Some(row_count) => row_count,
+        // Every relation's batch was found above, so the first one's offsets
+        // give a count whenever the program reads a relation.
+        None => match compiled.relations().first() {
+            Some(schema) => bound_relations[&schema.key]
+                .0
+                .offsets
+                .len()
+                .saturating_sub(1),
+            None => return Err(unknown_row_count(compiled, &inputs, site)),
+        },
+    };
 
     // Only the columns a schema reads are converted; the engine gets the
     // rest's lengths alone.
@@ -582,16 +627,106 @@ fn forward_unread_lengths(
 /// A relation dict's optional `related_row_count`. Absent or `None` leaves the
 /// related row count to be confirmed by the relation's columns.
 fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Option<usize>> {
-    let Some(value) = relation_dict.get_item("related_row_count")? else {
+    extract_stated_count(
+        relation_dict.get_item("related_row_count")?.as_ref(),
+        "dense relation related_row_count",
+    )
+}
+
+/// A count the caller states, named `name` in errors: absent or `None`, or a
+/// non-negative Python integer (a numpy integer included, a bool not) that
+/// fits in `usize`. Any count that fits is passed on: the engine's
+/// `MAX_DENSE_ROWS` bound decides which are too large to hold.
+fn extract_stated_count(value: Option<&Bound<'_, PyAny>>, name: &str) -> PyResult<Option<usize>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
         return Ok(None);
     };
-    if value.is_none() {
-        return Ok(None);
+    let not_an_integer = || match value.get_type().name() {
+        Ok(type_name) => {
+            PyTypeError::new_err(format!("{name} must be an integer, not {type_name}"))
+        }
+        Err(error) => error,
+    };
+    if value.is_instance_of::<PyBool>() {
+        return Err(not_an_integer());
     }
-    let count = value.extract::<i64>()?;
-    usize::try_from(count)
+    let count = match value.extract::<i128>() {
+        Ok(count) => Some(count),
+        // Too large for i128 either way; the sign says which error it is.
+        Err(error) if error.is_instance_of::<PyOverflowError>(value.py()) => None,
+        Err(_) => return Err(not_an_integer()),
+    };
+    let negative = match count {
+        Some(count) => count < 0,
+        None => value.lt(0)?,
+    };
+    if negative {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be non-negative, got {value}"
+        )));
+    }
+    count
+        .and_then(|count| usize::try_from(count).ok())
         .map(Some)
-        .map_err(|_| PyValueError::new_err("dense relation related_row_count must be non-negative"))
+        .ok_or_else(|| {
+            PyOverflowError::new_err(format!(
+                "{name} {value} is larger than {}, the largest count this platform can address",
+                usize::MAX
+            ))
+        })
+}
+
+/// The error for a batch nothing gives a row count to: the program reads no
+/// relation, and the caller stated no count and supplied no root input
+/// column. It names the program's root inputs, and any supplied inputs that
+/// are not among them, since a misspelt key is the likely cause.
+fn unknown_row_count(
+    compiled: &DenseCompiledProgram,
+    inputs: &Bound<'_, PyDict>,
+    site: BatchSite,
+) -> PyErr {
+    let (batch, remedy) = match site {
+        BatchSite::Period => ("the dense batch".to_string(), "pass row_count"),
+        BatchSite::Lifetime(index) => (
+            format!("lifetime batch {index}"),
+            "give the batch as an (inputs, relations, row_count) tuple",
+        ),
+    };
+    let root_inputs = compiled.root_inputs();
+    let mut message = if root_inputs.is_empty() {
+        format!(
+            "cannot tell how many rows {batch} has: the program reads no root inputs and no relations, so only a stated count can give it; {remedy}"
+        )
+    } else {
+        format!(
+            "cannot tell how many rows {batch} has: no column was supplied for any of the program's root inputs ({}), and the program reads no relations; supply one of those columns or {remedy}",
+            code_list(root_inputs.iter().map(String::to_string))
+        )
+    };
+    let unknown = inputs
+        .keys()
+        .iter()
+        .map(|key| key.to_string())
+        .filter(|name| !root_inputs.contains(name))
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        message.push_str(&format!(
+            ". Supplied inputs that are not root inputs: {}",
+            code_list(unknown)
+        ));
+    }
+    PyValueError::new_err(message)
+}
+
+/// Names sorted, in backticks, comma separated.
+fn code_list(names: impl IntoIterator<Item = String>) -> String {
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
