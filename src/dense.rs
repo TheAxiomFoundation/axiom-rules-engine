@@ -307,8 +307,10 @@ pub struct DenseRelationBatchSpec {
     /// the last offset. It is required when the offsets claim related rows but
     /// no related column is supplied (a `len` over the relation, or a filter
     /// that reads only the current entity), because nothing else confirms the
-    /// offsets. It is the caller's assertion, not a check: state the related
-    /// entity's actual row count, not a copy of the last offset.
+    /// offsets. It is the caller's assertion, not a check: count the related
+    /// rows the offsets index, one per root and member pair (a related entity
+    /// two roots share counts twice), independently of the offsets, rather
+    /// than copying the last offset.
     pub related_row_count: Option<usize>,
 }
 
@@ -1102,19 +1104,28 @@ impl DenseCompiledProgram {
         }
     }
 
-    /// Check a batch against this program and bind its columns. Every count
-    /// binding or execution sizes a buffer by is justified first:
+    /// Check a batch against this program, then bind its columns. Every count
+    /// binding or execution sizes a buffer by is justified before anything is
+    /// allocated from it:
     ///
     /// - `row_count` is at most [`MAX_DENSE_ROWS`], and every supplied root
     ///   column has that length.
     /// - Each relation's offsets hold `row_count + 1` non-decreasing entries
-    ///   starting at 0; the last is its related row count. That count must be
-    ///   confirmed by a supplied related column of that length or by a stated
-    ///   `related_row_count`, and every supplied related column must have it.
-    ///   See [`Self::bind_relation_key`].
+    ///   starting at 0; the last is its related row count, which a stated
+    ///   `related_row_count` must equal and each read column must have.
+    /// - A nonzero related count is confirmed by a supplied related column of
+    ///   that length or by a stated count, and is at most [`MAX_DENSE_ROWS`];
+    ///   every supplied related column, read or not, must have it.
     ///
-    /// Of several malformed columns, the one with the smallest name is
-    /// reported, so a batch reports the same error every run.
+    /// Relations are checked in two passes. The first walks the schemas in
+    /// order and reports what a per-schema binding reports first: a key's
+    /// offsets when its first schema reaches it, then each schema's read
+    /// columns in its input order. The second runs the checks above that a
+    /// per-schema binding never made (confirmation, the bound, and columns no
+    /// schema reads), key by key in the order the program first reads them.
+    /// Root columns, and the columns no schema reads within a key, are reported
+    /// smallest name first, so a malformed batch reports the same error every
+    /// run.
     fn bind_batch(&self, mut batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
         let row_count = batch.row_count;
         if row_count > MAX_DENSE_ROWS {
@@ -1131,99 +1142,101 @@ impl DenseCompiledProgram {
             )));
         }
 
-        // An absent input column is a missing input on every row. It fails
-        // only the rows whose evaluation reads it, as a missing record does on
-        // the explain path; a column read only on branches no row takes may be
-        // omitted. Root input names are distinct, so each column is moved out
-        // of the batch rather than copied.
+        // Every link of a derived-relation chain is keyed to the chain's base
+        // relation, so many schemas can share one key. A key's offsets are
+        // checked when the first schema keyed to it is reached, and every
+        // schema length-checks the columns it reads. A column's length and a
+        // key's related count never change, so checking a shared column again
+        // for a later schema reports nothing new; the first error is the one a
+        // per-schema binding reports.
+        let mut related_counts: HashMap<&DenseRelationKey, usize> = HashMap::new();
+        let mut key_order = Vec::new();
+        for relation in &self.relations {
+            let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
+                EvalError::UnknownRelation(format!(
+                    "{}::{}/{}/{}",
+                    relation.key.name,
+                    relation.key.current_slot,
+                    relation.key.related_slot,
+                    self.root_entity
+                ))
+            })?;
+            let related_count = match related_counts.get(&relation.key) {
+                Some(&related_count) => related_count,
+                None => {
+                    let related_count =
+                        Self::check_offsets(&relation.key, relation_batch, row_count)?;
+                    related_counts.insert(&relation.key, related_count);
+                    key_order.push(&relation.key);
+                    related_count
+                }
+            };
+            for input in &relation.related_inputs {
+                if let Some(column) = relation_batch.inputs.get(input)
+                    && column.len() != related_count
+                {
+                    return Err(related_length_mismatch(
+                        input,
+                        &relation.key.name,
+                        column.len(),
+                        related_count,
+                    ));
+                }
+            }
+        }
+        for &key in &key_order {
+            Self::confirm_related_count(key, &batch.relations[key], related_counts[key])?;
+        }
+
+        // The batch is valid. An absent input column is a missing input on
+        // every row. It fails only the rows whose evaluation reads it, as a
+        // missing record does on the explain path; a column read only on
+        // branches no row takes may be omitted. Root input names are distinct,
+        // so each column is moved out of the batch rather than copied.
         let bound_inputs = self
             .root_inputs
             .iter()
             .map(|name| batch.inputs.remove(name))
             .collect::<Vec<Option<DenseColumn>>>();
 
-        // Every link of a derived-relation chain is keyed to the chain's base
-        // relation, so many schemas can share one key. A key's offsets are
-        // validated, and its owners built, once, when the first schema keyed
-        // to it is reached; the schemas after it share them. Each supplied
-        // column is length-checked when a schema first reads it, then shared,
-        // and a later schema reading it gets the shared column unchecked (the
-        // first schema's columns are also pre-checked in `bind_relation_key`).
-        // Schemas are still walked in order, so the first error reported is
-        // the one a per-schema binding reports: a key's offsets, related count
-        // and shared columns never change once bound, so every check a later
-        // schema skips would pass.
+        // A key's owners are built once and every schema keyed to it shares
+        // them, its offsets and its columns; a column is wrapped for sharing
+        // when a schema first reads it.
         let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
-        let mut key_order = Vec::new();
+        for &key in &key_order {
+            let relation_batch = batch
+                .relations
+                .remove(key)
+                .expect("every key was checked above");
+            bound_keys.insert(
+                key,
+                Self::bind_relation_key(key, relation_batch, related_counts[key])?,
+            );
+        }
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for relation in &self.relations {
-            if !bound_keys.contains_key(&relation.key) {
-                let relation_batch = batch.relations.remove(&relation.key).ok_or_else(|| {
-                    EvalError::UnknownRelation(format!(
-                        "{}::{}/{}/{}",
-                        relation.key.name,
-                        relation.key.current_slot,
-                        relation.key.related_slot,
-                        self.root_entity
-                    ))
-                })?;
-                bound_keys.insert(
-                    &relation.key,
-                    Self::bind_relation_key(relation, relation_batch, row_count)?,
-                );
-                key_order.push(&relation.key);
-            }
             let key = bound_keys
                 .get_mut(&relation.key)
-                .expect("relation key was bound above");
-            let related_count = key.related_count;
-            let bound_inputs = relation
+                .expect("every key was bound above");
+            let inputs = relation
                 .related_inputs
                 .iter()
                 .map(|name| {
                     if let Some(column) = key.inputs.get(name) {
-                        return Ok(Some(Rc::clone(column)));
+                        return Some(Rc::clone(column));
                     }
-                    let Some((name, column)) = key.unbound_inputs.remove_entry(name) else {
-                        return Ok(None);
-                    };
-                    if column.len() != related_count {
-                        return Err(related_length_mismatch(
-                            &name,
-                            &relation.key.name,
-                            column.len(),
-                            related_count,
-                        ));
-                    }
+                    let (name, column) = key.unbound_inputs.remove_entry(name)?;
                     let column = Rc::new(column);
                     key.inputs.insert(name, Rc::clone(&column));
-                    Ok(Some(column))
+                    Some(column)
                 })
-                .collect::<Result<Vec<Option<Rc<DenseColumn>>>, EvalError>>()?;
-
+                .collect();
             bound_relations.push(DenseRelationBatch {
                 offsets: Rc::clone(&key.offsets),
-                related_count,
+                related_count: key.related_count,
                 owners: Rc::clone(&key.owners),
-                inputs: bound_inputs,
+                inputs,
             });
-        }
-
-        // The columns no schema reads were never checked above. Check them
-        // last, keys in the order the program first reads them, so every error
-        // a per-schema binding reports still comes first.
-        for key in key_order {
-            let bound = &bound_keys[key];
-            if let Some((name, column)) = first_by_name(&bound.unbound_inputs, |column| {
-                column.len() != bound.related_count
-            }) {
-                return Err(related_length_mismatch(
-                    name,
-                    &key.name,
-                    column.len(),
-                    bound.related_count,
-                ));
-            }
         }
 
         Ok(DenseBoundBatch {
@@ -1233,25 +1246,14 @@ impl DenseCompiledProgram {
         })
     }
 
-    /// Validate the key's offsets and the first schema's supplied columns,
-    /// then confirm the related count, before allocating owners from it.
-    /// Binding the views then length-checks each column on its first read, in
-    /// schema order, so a later schema checks only the columns no earlier one
-    /// read; `bind_batch` checks the columns no schema reads last.
-    ///
-    /// The offsets alone could claim any number of related rows, and binding
-    /// allocates one owner per related row. So a nonzero count must be
-    /// confirmed by a supplied column with one value per related row, or by
-    /// the caller's `related_row_count`. A stated count is trusted up to
-    /// [`MAX_DENSE_ROWS`]; owners are reserved fallibly, so a stated count
-    /// larger than memory is an error rather than an abort.
-    fn bind_relation_key(
-        schema: &DenseRelationSchema,
-        relation_batch: DenseRelationBatchSpec,
+    /// Check a key's offsets and stated count, returning its related count.
+    fn check_offsets(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
         row_count: usize,
-    ) -> Result<BoundRelationKey, EvalError> {
-        let name = &schema.key.name;
-        let offsets = relation_batch.offsets;
+    ) -> Result<usize, EvalError> {
+        let name = &key.name;
+        let offsets = &relation_batch.offsets;
         // `bind_batch` bounds `row_count` by `MAX_DENSE_ROWS`, so this cannot
         // overflow; it is checked rather than left to wrap to zero.
         let expected = row_count.checked_add(1).ok_or_else(|| {
@@ -1280,7 +1282,6 @@ impl DenseCompiledProgram {
                 offsets[index + 1]
             )));
         }
-
         let related_count = offsets[row_count];
         if let Some(stated) = relation_batch.related_row_count
             && stated != related_count
@@ -1289,48 +1290,66 @@ impl DenseCompiledProgram {
                 "dense relation `{name}` offsets end at {related_count} but related_row_count is {stated}"
             )));
         }
-        for input in &schema.related_inputs {
-            if let Some(column) = relation_batch.inputs.get(input)
-                && column.len() != related_count
-            {
-                return Err(related_length_mismatch(
-                    input,
-                    name,
-                    column.len(),
-                    related_count,
-                ));
-            }
-        }
-        if related_count > 0
-            && relation_batch.related_row_count.is_none()
-            && !relation_batch
+        Ok(related_count)
+    }
+
+    /// The offsets alone could claim any number of related rows, and binding
+    /// allocates one owner per related row. So a nonzero count must be
+    /// confirmed by a supplied column with one value per related row, or by
+    /// the caller's `related_row_count`, and must fit [`MAX_DENSE_ROWS`].
+    /// Every column the schemas read was length-checked already, so any
+    /// supplied column that disagrees here is one no schema reads.
+    fn confirm_related_count(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<(), EvalError> {
+        let name = &key.name;
+        let disagreeing = first_by_name(&relation_batch.inputs, |column| {
+            column.len() != related_count
+        });
+        let confirmed = related_count == 0
+            || relation_batch.related_row_count.is_some()
+            || relation_batch
                 .inputs
                 .values()
-                .any(|column| column.len() == related_count)
-        {
-            // A supplied column that disagrees confirms nothing: name it
-            // rather than say no column was supplied.
-            if let Some((input, column)) = first_by_name(&relation_batch.inputs, |_| true) {
-                return Err(related_length_mismatch(
-                    input,
-                    name,
-                    column.len(),
-                    related_count,
-                ));
-            }
+                .any(|column| column.len() == related_count);
+        if !confirmed && disagreeing.is_none() {
             return Err(EvalError::TypeMismatch(format!(
-                "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the related entity's row count"
+                "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the number of related rows the offsets index (one per root and member pair)"
             )));
         }
-        if related_count > MAX_DENSE_ROWS {
+        if confirmed && related_count > MAX_DENSE_ROWS {
             return Err(EvalError::TypeMismatch(format!(
                 "dense relation `{name}` claims {related_count} related rows, more than the {MAX_DENSE_ROWS} a dense batch can hold"
             )));
         }
+        // A supplied column that disagrees confirms nothing and is malformed.
+        if let Some((input, column)) = disagreeing {
+            return Err(related_length_mismatch(
+                input,
+                name,
+                column.len(),
+                related_count,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build a checked key's owners, reserved fallibly: a stated count is
+    /// trusted up to [`MAX_DENSE_ROWS`], so one larger than memory is an error
+    /// rather than an abort.
+    fn bind_relation_key(
+        key: &DenseRelationKey,
+        relation_batch: DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<BoundRelationKey, EvalError> {
+        let offsets = relation_batch.offsets;
         let mut owners = Vec::new();
         owners.try_reserve_exact(related_count).map_err(|_| {
             EvalError::TypeMismatch(format!(
-                "dense relation `{name}` claims {related_count} related rows, more than this process can allocate"
+                "dense relation `{}` claims {related_count} related rows, more than this process can allocate",
+                key.name
             ))
         })?;
         for (row, pair) in offsets.windows(2).enumerate() {

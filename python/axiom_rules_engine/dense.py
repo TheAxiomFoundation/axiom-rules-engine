@@ -54,8 +54,9 @@ class DenseRelationBatch:
     ``offsets[-1]``. It is required when the offsets claim related rows but
     ``inputs`` is empty (for example a ``len`` over the relation, or a filter
     that reads only the current entity), because nothing else confirms the
-    offsets. It is the caller's assertion, not a check: pass the related
-    entity's actual row count, such as the length of its table, not a copy of
+    offsets. It is the caller's assertion, not a check: count the related rows
+    the offsets index, one per root and member pair (a related entity two roots
+    share counts twice), independently of the offsets, rather than copying
     ``offsets[-1]``.
     """
 

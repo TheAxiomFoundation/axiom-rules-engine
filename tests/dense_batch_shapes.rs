@@ -367,11 +367,14 @@ fn count_only_relation_without_related_data_needs_a_stated_count() {
 #[test]
 fn unconfirmed_huge_offsets_are_refused_before_counting() {
     // #227, no related input: offsets [0, usize::MAX] used to panic with
-    // "capacity overflow" allocating owners, and [0, u32::MAX] to abort on a
-    // ~34 GB request. (Before owners existed, the unmasked count cast
-    // usize::MAX to -1.) No related column or stated count confirms either.
+    // "capacity overflow" allocating owners, and larger-than-memory counts
+    // ([0, u32::MAX] in the issue, 2^50 here) to abort on the failed request.
+    // (Before owners existed, the unmasked count cast usize::MAX to -1.) No
+    // related column or stated count confirms either. The test counts are ones
+    // no host can allocate, so a regression fails at once rather than paging
+    // through a 34 GB owners buffer.
     let program = compile(HOUSEHOLD_SIZE_RULESPEC, "Household");
-    for claimed in [usize::MAX, u32::MAX as usize] {
+    for claimed in [usize::MAX, 1_usize << 50] {
         let result = run(
             &program,
             DenseBatchSpec {
@@ -398,7 +401,7 @@ fn omitted_related_columns_do_not_confirm_huge_offsets() {
     // is a missing input on the rows that read it, not a confirmation of the
     // offsets. Binding refuses them before allocating owners.
     let program = compile(HOUSEHOLD_INCOME_RULESPEC, "Household");
-    for claimed in [usize::MAX, u32::MAX as usize] {
+    for claimed in [usize::MAX, 1_usize << 50] {
         let result = run(
             &program,
             DenseBatchSpec {
@@ -939,6 +942,41 @@ fn unrepresentable_value_is_reported_at_its_own_row() {
         } => {
             assert_eq!(first_value, "NaN");
             assert_eq!(second_value, "NaN");
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+}
+
+#[test]
+fn the_lowest_varying_row_is_reported_with_the_period_it_changes_in() {
+    // Row 0 changes in the second period; row 1 only in the third. The error
+    // names row 0's values and the second period.
+    let program = compile(LIFETIME_BASE_RULESPEC, "Worker");
+    let periods = vec![year(2001), year(2002), year(2003)];
+    let batches = [[0, 0], [1, 0], [1, 1]]
+        .into_iter()
+        .map(|base| {
+            lifetime_batch(vec![
+                ("earnings", DenseColumn::Float(vec![1.0, 1.0])),
+                ("base", DenseColumn::Integer(base.to_vec())),
+            ])
+        })
+        .collect();
+    let error = program
+        .execute_lifetime(&periods, batches, &["shifted_total".to_string()])
+        .expect_err("base varies across periods");
+    match error {
+        EvalError::LifetimePeriodVaryingInput {
+            first_period,
+            first_value,
+            second_period,
+            second_value,
+            ..
+        } => {
+            assert_eq!(first_period, "in 2001-01-01..2001-12-31");
+            assert_eq!(first_value, "0");
+            assert_eq!(second_period, "in 2002-01-01..2002-12-31");
+            assert_eq!(second_value, "1");
         }
         other => panic!("unexpected error {other:?}"),
     }

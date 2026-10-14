@@ -150,11 +150,12 @@ rules:
 @pytest.mark.parametrize("module", [HOUSEHOLD_SIZE_MODULE, HOUSEHOLD_INCOME_MODULE])
 def test_issue_227_unconfirmed_counts_raise(tmp_path, module) -> None:
     # #227: with no related input, or the one read input omitted, offsets
-    # claiming i64::MAX or u32::MAX related rows used to panic or abort while
-    # allocating owners.
+    # claiming i64::MAX or more related rows than memory (u32::MAX in the
+    # issue; 2^50 here, which no host can allocate) used to panic or abort
+    # while allocating owners.
     program = _compile(tmp_path, module, "Household")
     key = _only_relation_key(program)
-    for claimed in (2**63 - 1, 2**32 - 1):
+    for claimed in (2**63 - 1, 2**50):
         with pytest.raises(RuntimeError, match=f"offsets end at {claimed}.*no related column"):
             program.execute(
                 **MONTH,
@@ -222,11 +223,13 @@ def test_an_unread_column_of_the_right_length_confirms_the_offsets(tmp_path) -> 
 
 
 def test_an_unread_column_of_the_wrong_length_is_refused(tmp_path) -> None:
+    # The extension passes the engine a length-only stand-in for `age`, so the
+    # engine reports it as it would a Rust caller's column.
     program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
     for stated in (None, 5):
         with pytest.raises(
-            ValueError, match="`age` .* has length 2 but related row count is 5"
+            RuntimeError, match="`age` .* has length 2 but related row count is 5"
         ):
             program.execute(
                 **MONTH,
@@ -338,3 +341,93 @@ def test_an_empty_text_array_stays_text(tmp_path) -> None:
     assert result["outputs"]["label_copy"] == []
     result = program.execute(**MONTH, inputs={"label": np.array(["a", "b"])})
     assert result["outputs"]["label_copy"] == ["a", "b"]
+
+
+TWO_RELATION_MODULE = """\
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: pet_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Pet, Household]
+  - name: household_total
+    kind: derived
+    entity: Household
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(member_of_household.income) + sum(pet_of_household.cost)
+"""
+
+INTEGER_COPY_MODULE = """\
+format: rulespec/v1
+rules:
+  - name: x_copy
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: x
+"""
+
+
+def test_a_stated_count_mismatch_is_reported_before_an_unread_column(tmp_path) -> None:
+    # The engine checks a key's stated count before any column no schema
+    # reads; the extension no longer reports unread columns itself first.
+    program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
+    key = _only_relation_key(program)
+    with pytest.raises(RuntimeError, match="offsets end at 3 but related_row_count is 2"):
+        program.execute(
+            **MONTH,
+            inputs={},
+            relations={
+                key: DenseRelationBatch(
+                    offsets=np.array([0, 3]),
+                    inputs={"age": np.array([1])},
+                    related_row_count=2,
+                )
+            },
+        )
+
+
+def test_a_later_relations_read_column_is_reported_before_unread_ones(tmp_path) -> None:
+    # Pets' read column is short, and so is an unread column of the members
+    # relation the program reads first. A per-schema binding reports `cost`;
+    # unread columns come after every schema's checks.
+    program = _compile(tmp_path, TWO_RELATION_MODULE, "Household")
+    keys = [relation.key for relation in program.relations]
+    assert [key.rsplit(".", 1)[1].split(":")[0] for key in keys] == [
+        "member_of_household",
+        "pet_of_household",
+    ]
+    members, pets = keys
+    with pytest.raises(RuntimeError, match="`cost` .* has length 0 but related row count is 1"):
+        program.execute(
+            **MONTH,
+            inputs={},
+            relations={
+                members: DenseRelationBatch(
+                    offsets=np.array([0, 1]),
+                    inputs={"income": np.array([10]), "unused": np.array([], dtype=np.int64)},
+                ),
+                pets: DenseRelationBatch(
+                    offsets=np.array([0, 1]), inputs={"cost": np.array([], dtype=np.int64)}
+                ),
+            },
+        )
+
+
+def test_a_two_dimensional_empty_array_is_refused(tmp_path) -> None:
+    # A (2, 0) array has no elements, but it is not a column: it must not
+    # become a zero-row batch.
+    program = _compile(tmp_path, INTEGER_COPY_MODULE, "Person")
+    with pytest.raises(ValueError, match="dense columns must be"):
+        program.execute(**MONTH, inputs={"x": np.empty((2, 0), dtype=np.int64)})

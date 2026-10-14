@@ -32,16 +32,19 @@ already did for root columns.
 - A caller that passes offsets with related rows but no related column must
   state the count: `related_row_count` in Rust, or
   `DenseRelationBatch(related_row_count=...)` (the `"related_row_count"`
-  relation-dict key) in Python. It is the caller's assertion, so it should come
-  from the related entity's own row count, not from the last offset. Fixtures
-  in this repository that built such relations now state their counts.
+  relation-dict key) in Python. It is the caller's assertion, so it should be
+  counted independently of the offsets: one per root and member pair, so a
+  related entity two roots share counts twice. Fixtures in this repository
+  that built such relations now state the counts they built.
 - Missing input columns keep their lazy meaning: an absent root or related
   column fails only the rows that read it. A relation whose only related column
   is omitted that way still needs its count confirmed, by a stated count.
-- Columns no schema reads are length-checked after every per-schema check, so
-  the first error a per-schema binding reports is unchanged. The Python
-  extension does not convert them; it checks their lengths itself and lets one
-  of the right length confirm the count.
+- Binding first walks the schemas in order, checking each key's offsets when
+  its first schema reaches it and each schema's read columns, so the first
+  error a per-schema binding reports is unchanged. Confirmation, the bound and
+  the columns no schema reads are checked after that walk, key by key. The
+  Python extension does not convert unread columns; it passes the engine
+  length-only stand-ins for them, so the engine orders every error.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
   cleanly for a count no host can hold; a count that fits the owners buffer but
   not a later per-row buffer can still exhaust memory during execution.
@@ -49,8 +52,9 @@ already did for root columns.
   outside this crate; it now derives `Default`, so literals can end with
   `..Default::default()`. With the new refusal, that makes the next release a
   breaking one for 0.2.x users: cut it as 0.3.0.
-- Of several malformed columns, the one with the smallest name is reported, so
-  a batch reports the same error on every run.
+- Root columns, and the columns no schema reads within a key, are reported
+  smallest name first; read columns keep schema order. So a malformed batch
+  reports the same error on every run.
 
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 

@@ -15,7 +15,8 @@
 //!    the rows whose base value varies across periods or is not numeric, and
 //!    reports the lowest such row with the values it compared.
 //!
-//! Shapes start valid and small, then take at most one corruption. A huge
+//! Shapes start as small batches binding accepts (every nonzero related count
+//! confirmed), then take at most one corruption. A huge
 //! count is only ever written where the contract refuses it before anything
 //! is allocated from it, or as a stated count binding must fail to reserve
 //! (at least 2^50 owners), so no case asks the allocator for real memory.
@@ -231,6 +232,9 @@ fn valid_shape() -> impl Strategy<Value = Shape> {
                 offsets.push(offsets.last().copied().unwrap_or(0) + size);
             }
             let related = *offsets.last().expect("offsets are non-empty");
+            // Binding accepts the starting shape: with no column to confirm a
+            // nonzero related count, it is stated.
+            let state_count = state_count || !(supply_income || supply_note);
             Shape {
                 row_count: rows.len(),
                 active: rows.iter().map(|(_, active)| *active).collect(),
@@ -408,10 +412,8 @@ fn expected_refusal(shape: &Shape, reads_income: bool) -> Option<Refusal> {
     if related > MAX_ROWS {
         return Some(TypeMismatch("can hold"));
     }
-    if HUGE.contains(&related) {
-        return Some(TypeMismatch("more than this process can allocate"));
-    }
-    // Columns no schema reads are checked last.
+    // Columns no schema reads are checked after the schema walk, smallest
+    // name first.
     let unread = [
         (!reads_income).then_some(("input `income`", income_length)),
         Some(("input `note`", note_length)),
@@ -420,6 +422,10 @@ fn expected_refusal(shape: &Shape, reads_income: bool) -> Option<Refusal> {
         if length.is_some_and(|length| length != related) {
             return Some(TypeMismatch(fragment));
         }
+    }
+    // Then owners are reserved: a stated count of at least 2^50 cannot be.
+    if HUGE.contains(&related) {
+        return Some(TypeMismatch("more than this process can allocate"));
     }
     // A missing income fails the first row that reads one: an active
     // household with a member.
@@ -655,9 +661,13 @@ proptest! {
         // The lowest failing row decides the error: the first later period
         // that differs from the first, else a base `+` cannot read.
         let first = &bases[0];
+        let period_label = |index: usize| {
+            let year = 2001 + index;
+            format!("in {year}-01-01..{year}-12-31")
+        };
         let failure = (0..rows).find_map(|row| {
-            if let Some(later) = bases[1..].iter().find(|later| !same_at(first, later, row)) {
-                Some(Err((label(first, row), label(later, row))))
+            if let Some(later) = (1..bases.len()).find(|later| !same_at(first, &bases[*later], row)) {
+                Some(Err((label(first, row), period_label(later), label(&bases[later], row))))
             } else if !adds_at(first, row, f64_mode) {
                 Some(Ok(()))
             } else {
@@ -665,12 +675,48 @@ proptest! {
             }
         });
         match (result, failure) {
-            (Ok(result), None) => prop_assert_eq!(result.row_count, rows),
+            (Ok(result), None) => {
+                // One unit of earnings per period, plus the bound base.
+                let totals = match result.outputs.get("shifted_total") {
+                    Some(DenseOutputValue::Scalar(DenseColumn::Decimal(values))) => values
+                        .iter()
+                        .map(|value| value.to_string().parse::<f64>().expect("decimal"))
+                        .collect::<Vec<_>>(),
+                    Some(DenseOutputValue::Scalar(DenseColumn::Float(values))) => values.clone(),
+                    other => panic!("unexpected total column {other:?}"),
+                };
+                prop_assert_eq!(totals.len(), rows);
+                for (row, total) in totals.iter().enumerate() {
+                    let base = match first {
+                        Values::Integer(values) | Values::Decimal(values) => values[row] as f64,
+                        Values::Float(values) => values[row],
+                        _ => unreachable!("only numeric bases add"),
+                    };
+                    let expected = bases.len() as f64 + base;
+                    prop_assert!(
+                        *total == expected || (total.is_nan() && expected.is_nan()),
+                        "{:?} (f64 {}): row {} totals {} not {}",
+                        bases,
+                        f64_mode,
+                        row,
+                        total,
+                        expected
+                    );
+                }
+            }
             (
-                Err(EvalError::LifetimePeriodVaryingInput { first_value, second_value, .. }),
-                Some(Err((first_label, later_label))),
+                Err(EvalError::LifetimePeriodVaryingInput {
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                    ..
+                }),
+                Some(Err((first_label, later_period, later_label))),
             ) => {
+                prop_assert_eq!(first_period, period_label(0), "{:?}", bases);
                 prop_assert_eq!(first_value, first_label, "{:?}", bases);
+                prop_assert_eq!(second_period, later_period, "{:?}", bases);
                 prop_assert_eq!(second_value, later_label, "{:?}", bases);
             }
             (Err(EvalError::TypeMismatch(_)), Some(Ok(()))) => {}
