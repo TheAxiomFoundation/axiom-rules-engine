@@ -16,7 +16,9 @@ the bytes 0 and 1. A numpy array promises none of these:
 These tests build each layout and require the outputs numpy's own reading of
 the values gives. They cover root inputs, related inputs and relation offsets;
 ``execute``, ``execute_f64`` and ``execute_lifetime_f64``; and both the Python
-wrapper and the native extension, which callers can import directly.
+wrapper and the native extension, which callers can import directly. An
+ndarray subclass passed to the native extension must read as its storage, not
+through its own ``view`` or ``copy``.
 
 They exercise the native ``axiom_rules_engine_dense`` extension and skip when
 it is not built. Build locally with::
@@ -202,18 +204,21 @@ def relation_key(program) -> str:
 def _bits(array: np.ndarray) -> np.ndarray:
     """The same elements reinterpreted as unsigned integers of their width.
 
-    A same-width view works for any strides and copies exact bytes, so a bool
-    column keeps bytes other than 0 and 1, and a float keeps its bit pattern.
+    A same-width view works for any strides, and assigning through it copies
+    exact bytes: a bool keeps a byte other than 0 or 1, and a float keeps its
+    bit pattern.
     """
     return array.view(np.dtype(f"u{array.dtype.itemsize}"))
 
 
 def laid_out(values: np.ndarray, *, offset: int, stride: int) -> np.ndarray:
-    """``values`` in a fresh buffer, element ``i`` at byte ``offset + i * stride``.
+    """``values`` in a fresh buffer, ``abs(stride)`` bytes apart from ``offset`` on.
 
-    A negative ``stride`` stores the elements back to front. The buffer is a
-    fresh ``bytearray``, so an odd ``offset`` misaligns an 8-byte element; the
-    tests check each layout's numpy flags rather than assume it.
+    A positive ``stride`` puts element ``i`` at byte ``offset + i * stride``; a
+    negative one stores the elements back to front, the last at ``offset``.
+    The buffer is a fresh ``bytearray``, so an odd ``offset`` misaligns an
+    8-byte element; the tests check each layout's numpy flags rather than
+    assume it.
     """
     count = len(values)
     itemsize = values.dtype.itemsize
@@ -227,7 +232,9 @@ def laid_out(values: np.ndarray, *, offset: int, stride: int) -> np.ndarray:
     return array
 
 
-# Every layout but the first is one the old conversion misread or refused.
+# The first layout is the control. On main, the unaligned ones aborted a
+# debug build for int64 and float64 (a release build read through the
+# misaligned slice), and the non-contiguous ones were refused for every dtype.
 LAYOUTS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "aligned contiguous": lambda v: laid_out(
         v, offset=0, stride=v.dtype.itemsize
@@ -611,11 +618,77 @@ def test_lifetime_batches_read_every_layout(
     np.testing.assert_array_equal(outputs["lifetime_member_amount"], [1.5, 0.0, 14.0])
 
 
+# --- Subclasses ------------------------------------------------------------
+
+
+class ZeroView(np.ndarray):
+    """Reports every element as 0 to anything that calls its ``view``."""
+
+    def view(self, *args, **kwargs):
+        return np.zeros(len(self), dtype=np.uint8)
+
+
+class ListView(np.ndarray):
+    """Returns a list from ``view``."""
+
+    def view(self, *args, **kwargs):
+        return [1, 0, 1]
+
+
+class LyingCopy(np.ndarray):
+    """Returns zeros from ``copy``, which ``numpy.require`` calls."""
+
+    def copy(self, *args, **kwargs):
+        return np.zeros(len(self), dtype=self.dtype).view(type(self))
+
+
+class FinalizeRefusesCopies(np.ndarray):
+    """Raises when numpy finalizes a copy, as ``numpy.require`` makes."""
+
+    def __array_finalize__(self, obj):
+        if obj is not None and self.flags.owndata:
+            raise RuntimeError("finalize refuses copies")
+
+
+SUBCLASSES = [ZeroView, ListView, LyingCopy, FinalizeRefusesCopies]
+
+
+@pytest.mark.parametrize("subclass", SUBCLASSES, ids=lambda c: c.__name__)
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+@pytest.mark.parametrize("target", ["root", "related", "offsets"])
+def test_a_subclass_is_read_as_its_storage(
+    program, relation_key, subclass, layout, target
+) -> None:
+    # The wrapper's np.asarray turns a subclass into a plain ndarray, but the
+    # native extension takes the subclass itself. Its overrides must not
+    # decide what is read: an ndarray subclass reads as its storage, like a
+    # plain array over the same memory.
+    originals = {
+        "root": _root(),
+        "related": _related(),
+        "offsets": {"offsets": OFFSETS},
+    }[target]
+    shaped = {
+        name: LAYOUTS[layout](values).view(subclass)
+        for name, values in originals.items()
+    }
+    for name, column in shaped.items():
+        assert type(column) is subclass
+        assert column.tolist() == originals[name].tolist()
+    root = shaped if target == "root" else _root()
+    related = shaped if target == "related" else _related()
+    offsets = shaped["offsets"] if target == "offsets" else OFFSETS
+    for method in METHODS:
+        outputs = run(program, "native", method, relation_key, root, offsets, related)
+        assert_outputs(outputs, {k: np.array(v) for k, v in EXPECTED.items()})
+
+
 # --- Property: layout never changes an output ------------------------------
 
 
 def _random_layout(rng: np.random.Generator, values: np.ndarray) -> np.ndarray:
-    """``values`` at a random byte offset and stride, either direction."""
+    """``values`` at a random byte offset and stride, either direction, and
+    read-only one time in five."""
     itemsize = values.dtype.itemsize
     stride = itemsize * int(rng.integers(1, 4)) + int(rng.integers(0, 8))
     if rng.random() < 0.3:

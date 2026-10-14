@@ -9,7 +9,7 @@ use axiom_rules_engine::dense::{
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
 use axiom_rules_engine::spec::DTypeSpec;
 use chrono::NaiveDate;
-use numpy::{Element, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
+use numpy::{Element, PyArray1, PyArrayMethods, PyUntypedArray, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -535,6 +535,7 @@ fn build_batch(
 }
 
 fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
+    let value = &plain_ndarray(value)?;
     if let Ok(array) = value.cast::<PyArray1<bool>>() {
         return Ok(DenseColumn::Bool(bool_array_values(array)?));
     }
@@ -573,6 +574,21 @@ fn decimal_column_from_f64(values: &[f64]) -> PyResult<DenseColumn> {
         })
         .collect::<PyResult<Vec<Decimal>>>()
         .map(DenseColumn::Decimal)
+}
+
+/// An ndarray subclass as a plain `ndarray` over the same memory, which is
+/// what the wrapper's `np.asarray` passes; anything else, unchanged. The
+/// readers below call numpy's `view` and `numpy.require`, and on a subclass
+/// those would run its own `view`, `copy` and `__array_finalize__`, which
+/// could decide what is read. A subclass is read as its storage, so a masked
+/// array is read without its mask, as before.
+fn plain_ndarray<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if !value.is_instance_of::<PyUntypedArray>() || value.is_exact_instance_of::<PyUntypedArray>() {
+        return Ok(value.clone());
+    }
+    let py = value.py();
+    py.import(intern!(py, "numpy"))?
+        .call_method1(intern!(py, "asarray"), (value,))
 }
 
 /// A bool array's values by numpy's truth rule: every nonzero byte is True.
@@ -629,18 +645,23 @@ fn array_values<T: Element + Copy>(array: &Bound<'_, PyArray1<T>>) -> PyResult<V
 }
 
 /// The array's values through a slice, or `None` when its storage is not
-/// contiguous and aligned for `T`.
+/// contiguous, non-null and aligned for `T`. Fails if Rust code holds the
+/// array mutably.
 fn values_through_slice<T: Element + Copy>(
     array: &Bound<'_, PyArray1<T>>,
 ) -> PyResult<Option<Vec<T>>> {
+    // Borrow before checking: rust-numpy's first borrow imports numpy, which
+    // can run Python, and no Python may run between the checks and the slice.
+    let array = array.try_readonly()?;
     let data = array.data();
     if !array.is_c_contiguous() || data.is_null() || !data.is_aligned() {
         return Ok(None);
     }
-    Ok(Some(array.try_readonly()?.as_slice()?.to_vec()))
+    Ok(Some(array.as_slice()?.to_vec()))
 }
 
 fn extract_index_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    let value = &plain_ndarray(value)?;
     if let Ok(array) = value.cast::<PyArray1<i64>>() {
         return array_values(array)?
             .into_iter()
