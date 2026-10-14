@@ -4697,7 +4697,7 @@ fn assert_related_extremes_present(name: &str, stats: &Stats, present: u32) {
         return;
     }
     assert!(
-        present >= stats.cases / 4,
+        present >= stats.cases.div_ceil(4),
         "{name}: only {present} of {} programs contain min/max/only",
         stats.cases
     );
