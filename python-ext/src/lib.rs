@@ -9,8 +9,9 @@ use axiom_rules_engine::dense::{
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
 use axiom_rules_engine::spec::DTypeSpec;
 use chrono::NaiveDate;
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::{Element, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rust_decimal::Decimal;
@@ -534,14 +535,14 @@ fn build_batch(
 }
 
 fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, bool>>() {
-        return Ok(DenseColumn::Bool(array.as_slice()?.to_vec()));
+    if let Ok(array) = value.cast::<PyArray1<bool>>() {
+        return Ok(DenseColumn::Bool(bool_array_values(array)?));
     }
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, i64>>() {
-        return Ok(DenseColumn::Integer(array.as_slice()?.to_vec()));
+    if let Ok(array) = value.cast::<PyArray1<i64>>() {
+        return Ok(DenseColumn::Integer(array_values(array)?));
     }
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
-        return decimal_column_from_f64(array.as_slice()?);
+    if let Ok(array) = value.cast::<PyArray1<f64>>() {
+        return decimal_column_from_f64(&array_values(array)?);
     }
     if let Ok(values) = value.extract::<Vec<bool>>() {
         return Ok(DenseColumn::Bool(values));
@@ -574,13 +575,77 @@ fn decimal_column_from_f64(values: &[f64]) -> PyResult<DenseColumn> {
         .map(DenseColumn::Decimal)
 }
 
+/// A bool array's values by numpy's truth rule: every nonzero byte is True.
+/// numpy lets a bool hold any byte (`uint8_array.view(bool)` keeps them all),
+/// but a Rust `bool` must be 0 or 1, so a `&[bool]` over that storage is
+/// undefined behaviour. Read it through a `uint8` view instead.
+fn bool_array_values(array: &Bound<'_, PyArray1<bool>>) -> PyResult<Vec<bool>> {
+    let py = array.py();
+    let bytes = array
+        .call_method1(intern!(py, "view"), (numpy::dtype::<u8>(py),))?
+        .cast_into::<PyArray1<u8>>()?;
+    if bytes.len() != array.len() {
+        return Err(PyValueError::new_err(
+            "a uint8 view of a dense bool column must have one byte per value",
+        ));
+    }
+    Ok(array_values(&bytes)?
+        .into_iter()
+        .map(|byte| byte != 0)
+        .collect())
+}
+
+/// Copy a one-dimensional array's values. A `&[T]` over its storage is sound
+/// only when the storage is contiguous and aligned for `T`, and rust-numpy's
+/// `as_slice` checks contiguity alone. numpy allows strided, reversed and
+/// broadcast arrays, and arrays that start at any byte of their buffer. Any
+/// array that is not both goes through `numpy.require(requirements=("C",
+/// "A"))`, which copies it into new storage, and the result is checked again
+/// before it is read.
+fn array_values<T: Element + Copy>(array: &Bound<'_, PyArray1<T>>) -> PyResult<Vec<T>> {
+    // An empty array's data pointer can still be misaligned, which a
+    // zero-length slice may not be, so read no storage at all.
+    if array.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(values) = values_through_slice(array)? {
+        return Ok(values);
+    }
+    let py = array.py();
+    let requirements = PyDict::new(py);
+    requirements.set_item(intern!(py, "requirements"), ("C", "A"))?;
+    let copy = py
+        .import(intern!(py, "numpy"))?
+        .call_method(intern!(py, "require"), (array,), Some(&requirements))?
+        .cast_into::<PyArray1<T>>()?;
+    if copy.len() == array.len()
+        && let Some(values) = values_through_slice(&copy)?
+    {
+        return Ok(values);
+    }
+    Err(PyValueError::new_err(
+        "numpy could not copy a dense column into aligned, contiguous storage",
+    ))
+}
+
+/// The array's values through a slice, or `None` when its storage is not
+/// contiguous and aligned for `T`.
+fn values_through_slice<T: Element + Copy>(
+    array: &Bound<'_, PyArray1<T>>,
+) -> PyResult<Option<Vec<T>>> {
+    let data = array.data();
+    if !array.is_c_contiguous() || data.is_null() || !data.is_aligned() {
+        return Ok(None);
+    }
+    Ok(Some(array.try_readonly()?.as_slice()?.to_vec()))
+}
+
 fn extract_index_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, i64>>() {
-        return array
-            .as_slice()?
-            .iter()
+    if let Ok(array) = value.cast::<PyArray1<i64>>() {
+        return array_values(array)?
+            .into_iter()
             .map(|item| {
-                usize::try_from(*item).map_err(|_| {
+                usize::try_from(item).map_err(|_| {
                     PyValueError::new_err("dense relation offsets must be non-negative")
                 })
             })
