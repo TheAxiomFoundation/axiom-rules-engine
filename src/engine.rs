@@ -7,9 +7,10 @@ use std::collections::{HashMap, HashSet};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
+use crate::model::Determination::{self, Determined, Indeterminate};
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, JudgmentExpr, JudgmentOutcome, Period,
-    Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, JudgmentExpr, JudgmentOutcome,
+    MissingFacts, Need, Needs, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
 };
 
 /// Shift by calendar months, clamping a missing target day to month end.
@@ -128,6 +129,10 @@ pub enum EvalError {
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
     },
+    /// An evaluation under `MissingFacts::Indeterminate` ended unknown, at an
+    /// entry point whose result cannot say so ([`Engine::evaluate_scalar`]).
+    #[error("result is indeterminate: it needs {needs}")]
+    Indeterminate { needs: Needs },
     #[error(
         "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values; merge or split the spells so one value applies at each start date"
     )]
@@ -263,13 +268,27 @@ pub(crate) fn no_matching_arm(
     value: &ScalarValue,
     patterns: &[ScalarExpr],
 ) -> EvalError {
+    no_matching_arm_written(subject, value, patterns, false)
+}
+
+/// [`no_matching_arm`], with every decimal written normalized when
+/// `normalize` is set. Under `MissingFacts::Indeterminate` it is: two records
+/// with the same start whose decimals differ only in scale (`1.0`, `1.00`)
+/// are both admitted, and which one a lookup reads depends on record order,
+/// so a message that showed the scale would too.
+fn no_matching_arm_written(
+    subject: &ScalarExpr,
+    value: &ScalarValue,
+    patterns: &[ScalarExpr],
+    normalize: bool,
+) -> EvalError {
     EvalError::NoMatchingArm {
         rule: String::new(),
-        subject: describe_match_operand(subject),
-        value: describe_scalar_value(value),
+        subject: match_operand_text(subject, normalize),
+        value: scalar_value_text(value, normalize),
         patterns: patterns
             .iter()
-            .map(describe_match_operand)
+            .map(|pattern| match_operand_text(pattern, normalize))
             .collect::<Vec<_>>()
             .join(", "),
     }
@@ -285,22 +304,87 @@ pub(crate) fn relation_member_outside_derived_relation(relation: &str) -> EvalEr
 }
 
 pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
+    match_operand_text(expr, false)
+}
+
+fn match_operand_text(expr: &ScalarExpr, normalize: bool) -> String {
     match expr {
-        ScalarExpr::Literal(value) => describe_scalar_value(value),
+        ScalarExpr::Literal(value) => scalar_value_text(value, normalize),
         ScalarExpr::Input(name) | ScalarExpr::Derived(name) => name.clone(),
         ScalarExpr::InputOrElse { name, .. } => name.clone(),
         _ => "the match subject".to_string(),
     }
 }
 
-pub(crate) fn describe_scalar_value(value: &ScalarValue) -> String {
+fn scalar_value_text(value: &ScalarValue, normalize: bool) -> String {
     match value {
         ScalarValue::Bool(value) => value.to_string(),
         ScalarValue::Integer(value) => value.to_string(),
+        ScalarValue::Decimal(value) if normalize => value.normalize().to_string(),
         ScalarValue::Decimal(value) => value.to_string(),
         ScalarValue::Text(value) => format!("{value:?}"),
         ScalarValue::Date(value) => value.to_string(),
     }
+}
+
+/// How the refusal of a construct `MissingFacts::Indeterminate` does not
+/// support yet begins.
+const UNSUPPORTED_PREFIX: &str = "missing_facts=indeterminate does not yet support ";
+
+/// The refusal, under `MissingFacts::Indeterminate`, of a construct the #215
+/// series has not yet given three-valued semantics
+/// (`docs/three-valued-values.md`, section 10); each later PR of the series
+/// removes the uses it lifts. A refusal is not an evaluation failure: no
+/// `and`/`or` item catches it (see [`is_refusal`]), so the evaluation that
+/// reaches the construct is refused whatever the item's siblings hold, and
+/// nothing reads an unknown there as `not_holds`, zero or an absent member.
+fn unsupported_under_indeterminate(construct: &str) -> EvalError {
+    EvalError::TypeMismatch(format!("{UNSUPPORTED_PREFIX}{construct}"))
+}
+
+fn is_refusal(error: &EvalError) -> bool {
+    matches!(error, EvalError::TypeMismatch(message) if message.starts_with(UNSUPPORTED_PREFIX))
+}
+
+/// A determined value where a construct reads one that this series has not
+/// lifted yet. Only an evaluation under `MissingFacts::Indeterminate` can be
+/// indeterminate, and there it is refused.
+fn require_determined<T>(determination: Determination<T>, construct: &str) -> Eval<T> {
+    match determination {
+        Determined(value) => Ok(value),
+        Indeterminate(_) => Err(unsupported_under_indeterminate(construct).into()),
+    }
+}
+
+/// The order in which an `and`/`or`, and the program checks, choose among
+/// failures: by message, then by variant and every field, so that the choice
+/// depends on the errors and not on the position they were raised at. Two
+/// errors can render the same message and differ in a field: a `match`
+/// failure gains its rule's name only as it leaves that rule.
+fn failure_order(error: &EvalError) -> (String, String) {
+    (error.to_string(), format!("{error:?}"))
+}
+
+/// Keep the least of the failures seen so far under [`failure_order`].
+fn keep_least_failure(least: &mut Option<EvalError>, error: EvalError) {
+    let replace = match least {
+        Some(kept) => failure_order(&error) < failure_order(kept),
+        None => true,
+    };
+    if replace {
+        *least = Some(error);
+    }
+}
+
+fn relation_slots_out_of_range(
+    relation: &str,
+    arity: usize,
+    current_slot: usize,
+    related_slot: usize,
+) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "relation `{relation}` has arity {arity}, but slots {current_slot} and {related_slot} were requested"
+    ))
 }
 
 /// Validate the one unresolvable tie in the input-spell precedence contract.
@@ -374,7 +458,9 @@ pub(crate) struct CacheKey {
 }
 
 /// A derived-rule evaluation the interpreter deferred to its driver instead of
-/// recursing into it (see [`crate::depth`]).
+/// recursing into it (see [`crate::depth`]). Whether a scalar or a judgment
+/// was asked for is part of it: a reference of the wrong kind fails where one
+/// of the right kind would not.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Deferred {
     Scalar(CacheKey),
@@ -492,8 +578,41 @@ impl<'a> RelationEvalContext<'a> {
     }
 }
 
+/// How an [`Engine`] evaluates. The default is what [`Engine::new`] does.
+///
+/// Incomplete until the #215 series lands (`docs/three-valued-values.md`,
+/// section 14), and not yet reachable from a request.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EvaluationOptions {
+    pub missing_facts: MissingFacts,
+}
+
+/// Something the program checks walk: a rule's formula for the period, or a
+/// derived relation's source and predicate.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Checked {
+    Rule(String),
+    Relation(String),
+}
+
+/// What a reference to a rule asks for.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Scalar,
+    Judgment,
+}
+
 pub struct Engine<'a> {
     program: &'a Program,
+    options: EvaluationOptions,
+    /// Whether a public entry point runs the program checks under
+    /// `MissingFacts::Indeterminate`. Only a unit test turns them off, to
+    /// reach a wrong-kind reference the checks would refuse.
+    program_checks: bool,
+    /// What the program checks have passed, per period: each rule and
+    /// derived relation is walked once per period.
+    checked: HashMap<Period, HashSet<Checked>>,
     input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>>,
     relation_index: HashMap<(String, usize, String), Vec<&'a crate::model::RelationRecord>>,
     scalar_cache: HashMap<CacheKey, ScalarValue>,
@@ -502,6 +621,15 @@ pub struct Engine<'a> {
     /// the value; the trace uses it to show the rounding step for audit.
     pre_rounding_cache: HashMap<CacheKey, ScalarValue>,
     judgment_cache: HashMap<CacheKey, JudgmentOutcome>,
+    /// Scalar rule evaluations that ended indeterminate, with their needs,
+    /// keyed like `scalar_cache`. Only `MissingFacts::Indeterminate` fills it.
+    indeterminate_scalars: HashMap<CacheKey, Needs>,
+    /// Judgment rule evaluations that ended unknown, with their needs, keyed
+    /// like `judgment_cache`. Only `MissingFacts::Indeterminate` fills it.
+    undetermined_judgments: HashMap<CacheKey, Needs>,
+    /// Deferred rule evaluations that failed in the current drive, under
+    /// `MissingFacts::Indeterminate` (see [`Engine::run_tasks`]).
+    failed: HashMap<Deferred, EvalError>,
     execution_trace: HashMap<CacheKey, NodeExecutionTrace>,
     active_evaluations: Vec<CacheKey>,
     /// Whether to record the per-node trace. The bulk evaluator borrows this
@@ -641,11 +769,17 @@ impl<'a> Engine<'a> {
 
         Self {
             program,
+            options: EvaluationOptions::default(),
+            program_checks: true,
+            checked: HashMap::new(),
             input_index,
             relation_index,
             scalar_cache: HashMap::new(),
             pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
+            indeterminate_scalars: HashMap::new(),
+            undetermined_judgments: HashMap::new(),
+            failed: HashMap::new(),
             execution_trace: HashMap::new(),
             active_evaluations: Vec::new(),
             tracing,
@@ -657,21 +791,85 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// An interpreter that evaluates under `options`. Under
+    /// `MissingFacts::Error`, the default, it computes exactly what
+    /// [`Engine::new`] computes. Under `MissingFacts::Indeterminate`, an
+    /// input no record covers makes the result that reads it unknown, naming
+    /// the input (`docs/three-valued-values.md`, section 5), and each public
+    /// evaluation first checks the program for defects no dataset can change
+    /// (section 4).
+    ///
+    /// Fallible because later PRs of the #215 series validate the dataset
+    /// here; for now it always succeeds. Incomplete until that series lands,
+    /// and not yet reachable from a request.
+    #[doc(hidden)]
+    pub fn with_options(
+        program: &'a Program,
+        data: &'a DataSet,
+        options: EvaluationOptions,
+    ) -> Result<Self, EvalError> {
+        let mut engine = Self::with_tracing(program, data, true);
+        engine.options = options;
+        Ok(engine)
+    }
+
+    fn three_valued(&self) -> bool {
+        self.options.missing_facts == MissingFacts::Indeterminate
+    }
+
+    /// The value of a scalar rule. A result that is indeterminate, which only
+    /// an engine built with [`Engine::with_options`] can reach, is
+    /// [`EvalError::Indeterminate`]; [`Engine::scalar_determination`] returns
+    /// it as a value.
     pub fn evaluate_scalar(
         &mut self,
         derived_name: &str,
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        self.drive(|engine| engine.scalar_rule(derived_name, entity_id, period))
+        match self.scalar_determination(derived_name, entity_id, period)? {
+            Determined(value) => Ok(value),
+            Indeterminate(needs) => Err(EvalError::Indeterminate { needs }),
+        }
     }
 
+    /// The outcome of a judgment rule; an unknown one is
+    /// [`JudgmentOutcome::Undetermined`].
     pub fn evaluate_judgment(
         &mut self,
         derived_name: &str,
         entity_id: &str,
         period: &Period,
     ) -> Result<JudgmentOutcome, EvalError> {
+        Ok(
+            match self.judgment_determination(derived_name, entity_id, period)? {
+                Determined(outcome) => outcome,
+                Indeterminate(_) => JudgmentOutcome::Undetermined,
+            },
+        )
+    }
+
+    /// The value of a scalar rule, or the inputs it needs when it is
+    /// indeterminate.
+    pub fn scalar_determination(
+        &mut self,
+        derived_name: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Result<Determination<ScalarValue>, EvalError> {
+        self.check_rule(derived_name, Kind::Scalar, period)?;
+        self.drive(|engine| engine.scalar_rule(derived_name, entity_id, period))
+    }
+
+    /// The outcome of a judgment rule, or the inputs it needs when it is
+    /// unknown.
+    pub fn judgment_determination(
+        &mut self,
+        derived_name: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Result<Determination<JudgmentOutcome>, EvalError> {
+        self.check_rule(derived_name, Kind::Judgment, period)?;
         self.drive(|engine| engine.judgment_rule(derived_name, entity_id, period))
     }
 
@@ -680,7 +878,10 @@ impl<'a> Engine<'a> {
     /// Tasks form a stack: a task can defer a rule it reaches, which runs
     /// first. The first error ends the evaluation, as it would the recursive
     /// one: an error propagates unchanged from the rule it occurs in to the
-    /// root, so a task's error is the root's.
+    /// root, so a task's error is the root's. Under
+    /// `MissingFacts::Indeterminate` an error can instead be caught on its
+    /// way, by an `and`/`or` item, so a task's error is recorded and raised
+    /// again where the task was referenced (see [`Engine::run_tasks`]).
     fn drive<T>(&mut self, root: impl FnMut(&mut Self) -> Eval<T>) -> Result<T, EvalError> {
         let result = self.run_tasks(root);
         // Every retry reaches the loops its first attempt was interrupted in,
@@ -698,6 +899,7 @@ impl<'a> Engine<'a> {
         );
         self.folds.clear();
         self.members.clear();
+        self.failed.clear();
         crate::depth::add_visits(std::mem::take(&mut self.visits));
         result
     }
@@ -722,9 +924,26 @@ impl<'a> Engine<'a> {
                             .map(|_| ()),
                     };
                     match evaluated {
+                        // A task that ends unknown is finished too: its
+                        // result is cached.
                         Ok(()) => {
                             tasks.pop();
                             waiting.remove(&task);
+                            continue;
+                        }
+                        // The task cannot tell whether the reference that
+                        // deferred it sits in an `and`/`or` item, which
+                        // catches a failure under the mode. So the failure is
+                        // recorded against the deferred request and the
+                        // interrupted evaluation retried: it reaches the
+                        // reference again, finds the record instead of
+                        // deferring, and fails there, where an item can catch
+                        // it. A refusal is recorded the same way and, caught
+                        // nowhere, ends the evaluation as an error does.
+                        Err(Interrupt::Error(error)) if self.three_valued() => {
+                            tasks.pop();
+                            waiting.remove(&task);
+                            self.failed.insert(task, error);
                             continue;
                         }
                         Err(interrupt) => interrupt,
@@ -760,14 +979,24 @@ impl<'a> Engine<'a> {
         derived_name: &str,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<ScalarValue> {
+    ) -> Eval<Determination<ScalarValue>> {
         let key = CacheKey {
             derived: derived_name.to_string(),
             entity_id: entity_id.to_string(),
             period: period.clone(),
         };
         if let Some(value) = self.scalar_cache.get(&key) {
-            return Ok(value.clone());
+            return Ok(Determined(value.clone()));
+        }
+        if let Some(needs) = self.indeterminate_scalars.get(&key) {
+            return Ok(Indeterminate(needs.clone()));
+        }
+        // A failure the driver recorded for this request in the current drive
+        // is raised here, where the reference sits (see `run_tasks`).
+        if !self.failed.is_empty() {
+            if let Some(error) = self.failed.get(&Deferred::Scalar(key.clone())) {
+                return Err(error.clone().into());
+            }
         }
         if self.depth >= self.suspend_depth {
             return Err(Interrupt::Defer(Deferred::Scalar(key)));
@@ -798,9 +1027,15 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("scalar evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated.map_err(|interrupt| {
+        let value = match evaluated.map_err(|interrupt| {
             interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
-        })?;
+        })? {
+            Determined(value) => value,
+            Indeterminate(needs) => {
+                self.indeterminate_scalars.insert(key, needs.clone());
+                return Ok(Indeterminate(needs));
+            }
+        };
         // Apply the rule's opt-in output rounding before caching, so the
         // rounded value is what both direct queries and dependent rules
         // (`ScalarExpr::Derived`) observe. Absent `rounding` is a no-op. When
@@ -811,7 +1046,7 @@ impl<'a> Engine<'a> {
             self.pre_rounding_cache.insert(key.clone(), value);
         }
         self.scalar_cache.insert(key, rounded.clone());
-        Ok(rounded)
+        Ok(Determined(rounded))
     }
 
     fn judgment_rule(
@@ -819,14 +1054,22 @@ impl<'a> Engine<'a> {
         derived_name: &str,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<JudgmentOutcome> {
+    ) -> Eval<Determination<JudgmentOutcome>> {
         let key = CacheKey {
             derived: derived_name.to_string(),
             entity_id: entity_id.to_string(),
             period: period.clone(),
         };
         if let Some(value) = self.judgment_cache.get(&key) {
-            return Ok(*value);
+            return Ok(Determined(*value));
+        }
+        if let Some(needs) = self.undetermined_judgments.get(&key) {
+            return Ok(Indeterminate(needs.clone()));
+        }
+        if !self.failed.is_empty() {
+            if let Some(error) = self.failed.get(&Deferred::Judgment(key.clone())) {
+                return Err(error.clone().into());
+            }
         }
         if self.depth >= self.suspend_depth {
             return Err(Interrupt::Defer(Deferred::Judgment(key)));
@@ -857,11 +1100,17 @@ impl<'a> Engine<'a> {
             .pop()
             .expect("judgment evaluation pushed an active trace key");
         debug_assert_eq!(finished, key);
-        let value = evaluated.map_err(|interrupt| {
+        let value = match evaluated.map_err(|interrupt| {
             interrupt.within_rule(derived.id.as_deref().unwrap_or(derived_name))
-        })?;
+        })? {
+            Determined(value) => value,
+            Indeterminate(needs) => {
+                self.undetermined_judgments.insert(key, needs.clone());
+                return Ok(Indeterminate(needs));
+            }
+        };
         self.judgment_cache.insert(key, value);
-        Ok(value)
+        Ok(Determined(value))
     }
 
     pub(crate) fn evaluated_trace_instances(
@@ -957,6 +1206,19 @@ impl<'a> Engine<'a> {
                 period: period.clone(),
             })
             .copied()
+    }
+
+    /// The needs of a rule evaluation that ended unknown, scalar or judgment.
+    pub fn needs(&self, derived: &str, entity_id: &str, period: &Period) -> Option<Needs> {
+        let key = CacheKey {
+            derived: derived.to_string(),
+            entity_id: entity_id.to_string(),
+            period: period.clone(),
+        };
+        self.indeterminate_scalars
+            .get(&key)
+            .or_else(|| self.undetermined_judgments.get(&key))
+            .cloned()
     }
 
     fn record_evaluated_dependency(&mut self, key: CacheKey) {
@@ -1095,14 +1357,19 @@ impl<'a> Engine<'a> {
     }
 
     /// Evaluate an expression outside any rule, for the bulk evaluator's
-    /// per-entity relation aggregations.
+    /// per-entity relation aggregations. Like [`Engine::evaluate_scalar`], an
+    /// indeterminate result is [`EvalError::Indeterminate`].
     pub(crate) fn eval_scalar_expr(
         &mut self,
         expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
     ) -> Result<ScalarValue, EvalError> {
-        self.drive(|engine| engine.eval_scalar_expr_inner(expr, entity_id, period, None))
+        self.check_expression(expr, period)?;
+        match self.drive(|engine| engine.eval_scalar_expr_inner(expr, entity_id, period, None))? {
+            Determined(value) => Ok(value),
+            Indeterminate(needs) => Err(EvalError::Indeterminate { needs }),
+        }
     }
 
     fn eval_scalar_expr_inner(
@@ -1111,25 +1378,33 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Eval<ScalarValue> {
+    ) -> Eval<Determination<ScalarValue>> {
         self.nested(|engine| engine.scalar_node(expr, entity_id, period, relation_context))
     }
 
+    /// One scalar node. Operands, conversions and checked arithmetic run in
+    /// the reference order. Once an operand is indeterminate the node still
+    /// evaluates and converts the rest, raising what they raise, but does no
+    /// more arithmetic: the result is indeterminate with the needs of every
+    /// indeterminate operand (`Determination::zip`). Only
+    /// `MissingFacts::Indeterminate` makes an operand indeterminate, so
+    /// without it each node computes what it always has.
     fn scalar_node(
         &mut self,
         expr: &'a ScalarExpr,
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Eval<ScalarValue> {
+    ) -> Eval<Determination<ScalarValue>> {
         match expr {
-            ScalarExpr::Literal(value) => Ok(value.clone()),
-            ScalarExpr::Input(name) => Ok(self.lookup_input(name, entity_id, period)?),
+            ScalarExpr::Literal(value) => Ok(Determined(value.clone())),
+            ScalarExpr::Input(name) => Ok(self.read_input(name, entity_id, period)?),
             ScalarExpr::InputOrElse { name, default } => {
-                match self.lookup_input(name, entity_id, period) {
-                    Ok(value) => Ok(value),
-                    Err(EvalError::MissingInput { .. }) => Ok(default.clone()),
-                    Err(other) => Err(other.into()),
+                // Under the mode a missing cell is indeterminate, never the
+                // default: a default would turn absence into a value.
+                match self.read_input(name, entity_id, period) {
+                    Err(EvalError::MissingInput { .. }) => Ok(Determined(default.clone())),
+                    read => Ok(read?),
                 }
             }
             ScalarExpr::Derived(name) => {
@@ -1137,51 +1412,66 @@ impl<'a> Engine<'a> {
                 let target_entity_id = relation_context
                     .and_then(|context| context.entity_id_for(&derived.entity))
                     .unwrap_or(entity_id);
+                let value = self.scalar_rule(name, target_entity_id, period)?;
+                // Recorded once the rule returns, so a rule whose failure an
+                // `and`/`or` item catches has no edge. Without the mode this
+                // changes nothing: a failure is never caught, and a parent
+                // records nothing while the rule runs.
                 self.record_evaluated_dependency(CacheKey {
                     derived: name.clone(),
                     entity_id: target_entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.scalar_rule(name, target_entity_id, period)
+                Ok(value)
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 let lookup_key = self
                     .eval_scalar_expr_inner(index, entity_id, period, relation_context)?
-                    .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(format!(
-                            "parameter key for `{parameter}` must be an integer"
-                        ))
+                    .try_map(|key| {
+                        key.as_index().ok_or_else(|| {
+                            EvalError::TypeMismatch(format!(
+                                "parameter key for `{parameter}` must be an integer"
+                            ))
+                        })
                     })?;
-                Ok(self.lookup_parameter(parameter, lookup_key, period)?)
+                Ok(lookup_key.try_map(|key| self.lookup_parameter(parameter, key, period))?)
             }
             ScalarExpr::Add(items) => {
-                let mut total = Decimal::ZERO;
+                let mut total = Determined(Decimal::ZERO);
                 for item in items {
-                    total = checked_add(
-                        total,
-                        self.eval_decimal(item, entity_id, period, relation_context)?,
-                    )?;
+                    let operand = self.eval_decimal(item, entity_id, period, relation_context)?;
+                    total = total
+                        .zip(operand)
+                        .try_map(|(total, operand)| checked_add(total, operand))?;
                 }
-                Ok(ScalarValue::Decimal(total))
+                Ok(total.map(ScalarValue::Decimal))
             }
-            ScalarExpr::Sub(left, right) => Ok(ScalarValue::Decimal(checked_sub(
-                self.eval_decimal(left, entity_id, period, relation_context)?,
-                self.eval_decimal(right, entity_id, period, relation_context)?,
-            )?)),
-            ScalarExpr::Mul(left, right) => Ok(ScalarValue::Decimal(checked_mul(
-                self.eval_decimal(left, entity_id, period, relation_context)?,
-                self.eval_decimal(right, entity_id, period, relation_context)?,
-            )?)),
+            ScalarExpr::Sub(left, right) => {
+                let left = self.eval_decimal(left, entity_id, period, relation_context)?;
+                let right = self.eval_decimal(right, entity_id, period, relation_context)?;
+                Ok(left
+                    .zip(right)
+                    .try_map(|(left, right)| checked_sub(left, right))?
+                    .map(ScalarValue::Decimal))
+            }
+            ScalarExpr::Mul(left, right) => {
+                let left = self.eval_decimal(left, entity_id, period, relation_context)?;
+                let right = self.eval_decimal(right, entity_id, period, relation_context)?;
+                Ok(left
+                    .zip(right)
+                    .try_map(|(left, right)| checked_mul(left, right))?
+                    .map(ScalarValue::Decimal))
+            }
             ScalarExpr::Div(left, right) => {
                 let divisor = self.eval_decimal(right, entity_id, period, relation_context)?;
-                if divisor.is_zero() {
+                if matches!(divisor, Determined(divisor) if divisor.is_zero()) {
                     return Err(EvalError::DivisionByZero.into());
                 }
-                Ok(ScalarValue::Decimal(checked_div(
-                    self.eval_decimal(left, entity_id, period, relation_context)?,
-                    divisor,
-                )?))
+                let dividend = self.eval_decimal(left, entity_id, period, relation_context)?;
+                Ok(dividend
+                    .zip(divisor)
+                    .try_map(|(dividend, divisor)| checked_div(dividend, divisor))?
+                    .map(ScalarValue::Decimal))
             }
             ScalarExpr::Max(items) => {
                 let mut iter = items.iter();
@@ -1194,11 +1484,13 @@ impl<'a> Engine<'a> {
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
                     let candidate = self.eval_decimal(item, entity_id, period, relation_context)?;
-                    if candidate > best {
-                        best = candidate;
-                    }
+                    best = best.zip(candidate).map(
+                        |(best, candidate)| {
+                            if candidate > best { candidate } else { best }
+                        },
+                    );
                 }
-                Ok(ScalarValue::Decimal(best))
+                Ok(best.map(ScalarValue::Decimal))
             }
             ScalarExpr::Min(items) => {
                 let mut iter = items.iter();
@@ -1211,96 +1503,115 @@ impl<'a> Engine<'a> {
                 let mut best = self.eval_decimal(first, entity_id, period, relation_context)?;
                 for item in iter {
                     let candidate = self.eval_decimal(item, entity_id, period, relation_context)?;
-                    if candidate < best {
-                        best = candidate;
-                    }
+                    best = best.zip(candidate).map(
+                        |(best, candidate)| {
+                            if candidate < best { candidate } else { best }
+                        },
+                    );
                 }
-                Ok(ScalarValue::Decimal(best))
+                Ok(best.map(ScalarValue::Decimal))
             }
-            ScalarExpr::Ceil(value) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(value, entity_id, period, relation_context)?
-                    .ceil(),
-            )),
-            ScalarExpr::Floor(value) => Ok(ScalarValue::Decimal(
-                self.eval_decimal(value, entity_id, period, relation_context)?
-                    .floor(),
-            )),
-            ScalarExpr::PeriodStart => Ok(ScalarValue::Date(period.start)),
-            ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(period.end)),
+            ScalarExpr::Ceil(value) => Ok(self
+                .eval_decimal(value, entity_id, period, relation_context)?
+                .map(|value| ScalarValue::Decimal(value.ceil()))),
+            ScalarExpr::Floor(value) => Ok(self
+                .eval_decimal(value, entity_id, period, relation_context)?
+                .map(|value| ScalarValue::Decimal(value.floor()))),
+            ScalarExpr::PeriodStart => Ok(Determined(ScalarValue::Date(period.start))),
+            ScalarExpr::PeriodEnd => Ok(Determined(ScalarValue::Date(period.end))),
             ScalarExpr::DateAddDays { date, days } => {
                 let base = self
                     .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
-                    .as_date()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_days expects a date on the left".to_string(),
-                        )
+                    .try_map(|base| {
+                        base.as_date().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_days expects a date on the left".to_string(),
+                            )
+                        })
                     })?;
                 let offset = self
                     .eval_scalar_expr_inner(days, entity_id, period, relation_context)?
-                    .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_days expects an integer day count on the right".to_string(),
-                        )
+                    .try_map(|offset| {
+                        offset.as_index().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_days expects an integer day count on the right"
+                                    .to_string(),
+                            )
+                        })
                     })?;
-                Ok(ScalarValue::Date(shift_calendar_days(base, offset)?))
+                Ok(base.zip(offset).try_map(|(base, offset)| {
+                    shift_calendar_days(base, offset).map(ScalarValue::Date)
+                })?)
             }
             ScalarExpr::DateAddMonths { date, months } => {
                 let base = self
                     .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
-                    .as_date()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_months expects a date on the left".to_string(),
-                        )
+                    .try_map(|base| {
+                        base.as_date().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_months expects a date on the left".to_string(),
+                            )
+                        })
                     })?;
                 let offset = self
                     .eval_scalar_expr_inner(months, entity_id, period, relation_context)?
-                    .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_months expects an integer month count on the right"
-                                .to_string(),
-                        )
+                    .try_map(|offset| {
+                        offset.as_index().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_months expects an integer month count on the right"
+                                    .to_string(),
+                            )
+                        })
                     })?;
-                Ok(ScalarValue::Date(shift_calendar_months(base, offset)?))
+                Ok(base.zip(offset).try_map(|(base, offset)| {
+                    shift_calendar_months(base, offset).map(ScalarValue::Date)
+                })?)
             }
             ScalarExpr::DateAddYears { date, years } => {
                 let base = self
                     .eval_scalar_expr_inner(date, entity_id, period, relation_context)?
-                    .as_date()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_years expects a date on the left".to_string(),
-                        )
+                    .try_map(|base| {
+                        base.as_date().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_years expects a date on the left".to_string(),
+                            )
+                        })
                     })?;
                 let offset = self
                     .eval_scalar_expr_inner(years, entity_id, period, relation_context)?
-                    .as_index()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "date_add_years expects an integer year count on the right".to_string(),
-                        )
+                    .try_map(|offset| {
+                        offset.as_index().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "date_add_years expects an integer year count on the right"
+                                    .to_string(),
+                            )
+                        })
                     })?;
-                Ok(ScalarValue::Date(shift_calendar_years(base, offset)?))
+                Ok(base.zip(offset).try_map(|(base, offset)| {
+                    shift_calendar_years(base, offset).map(ScalarValue::Date)
+                })?)
             }
             ScalarExpr::DaysBetween { from, to } => {
                 let a = self
                     .eval_scalar_expr_inner(from, entity_id, period, relation_context)?
-                    .as_date()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch(
-                            "days_between expects a date for `from`".to_string(),
-                        )
+                    .try_map(|from| {
+                        from.as_date().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "days_between expects a date for `from`".to_string(),
+                            )
+                        })
                     })?;
                 let b = self
                     .eval_scalar_expr_inner(to, entity_id, period, relation_context)?
-                    .as_date()
-                    .ok_or_else(|| {
-                        EvalError::TypeMismatch("days_between expects a date for `to`".to_string())
+                    .try_map(|to| {
+                        to.as_date().ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "days_between expects a date for `to`".to_string(),
+                            )
+                        })
                     })?;
-                Ok(ScalarValue::Integer(b.signed_duration_since(a).num_days()))
+                Ok(a.zip(b)
+                    .map(|(a, b)| ScalarValue::Integer(b.signed_duration_since(a).num_days())))
             }
             ScalarExpr::CountRelated {
                 relation,
@@ -1308,6 +1619,9 @@ impl<'a> Engine<'a> {
                 related_slot,
                 where_clause,
             } => {
+                if self.three_valued() {
+                    return Err(unsupported_under_indeterminate("`count` over a relation").into());
+                }
                 let (count, _) = self.fold_related(
                     expr,
                     (relation, *current_slot, *related_slot),
@@ -1317,7 +1631,7 @@ impl<'a> Engine<'a> {
                     period,
                 )?;
                 // A count of collected ids fits in i64 on every supported target.
-                Ok(ScalarValue::Integer(count as i64))
+                Ok(Determined(ScalarValue::Integer(count as i64)))
             }
             ScalarExpr::SumRelated {
                 relation,
@@ -1326,6 +1640,9 @@ impl<'a> Engine<'a> {
                 value,
                 where_clause,
             } => {
+                if self.three_valued() {
+                    return Err(unsupported_under_indeterminate("`sum` over a relation").into());
+                }
                 let (_, total) = self.fold_related(
                     expr,
                     (relation, *current_slot, *related_slot),
@@ -1334,15 +1651,16 @@ impl<'a> Engine<'a> {
                     entity_id,
                     period,
                 )?;
-                Ok(ScalarValue::Decimal(total))
+                Ok(Determined(ScalarValue::Decimal(total)))
             }
             ScalarExpr::If {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                if self
-                    .eval_judgment_expr_inner(condition, entity_id, period, relation_context)?
+                let condition =
+                    self.eval_judgment_expr_inner(condition, entity_id, period, relation_context)?;
+                if require_determined(condition, "an `if` whose condition is undetermined")?
                     .is_holds()
                 {
                     self.record_skipped_scalar_dependencies(
@@ -1365,9 +1683,19 @@ impl<'a> Engine<'a> {
                 }
             }
             ScalarExpr::NoMatch { subject, patterns } => {
+                // The patterns only label the error; they are never evaluated,
+                // and an indeterminate subject never reaches the error.
                 let value =
                     self.eval_scalar_expr_inner(subject, entity_id, period, relation_context)?;
-                Err(no_matching_arm(subject, &value, patterns).into())
+                match value {
+                    Determined(value) => {
+                        Err(
+                            no_matching_arm_written(subject, &value, patterns, self.three_valued())
+                                .into(),
+                        )
+                    }
+                    Indeterminate(needs) => Ok(Indeterminate(needs)),
+                }
             }
             // Cross-period reductions are only defined when a batch is supplied
             // per period (the dense lifetime surface). The sparse single-period
@@ -1383,7 +1711,7 @@ impl<'a> Engine<'a> {
         expr: &'a JudgmentExpr,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<JudgmentOutcome> {
+    ) -> Eval<Determination<JudgmentOutcome>> {
         self.eval_judgment_expr_inner(expr, entity_id, period, None)
     }
 
@@ -1393,7 +1721,7 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Eval<JudgmentOutcome> {
+    ) -> Eval<Determination<JudgmentOutcome>> {
         self.nested(|engine| engine.judgment_node(expr, entity_id, period, relation_context))
     }
 
@@ -1403,41 +1731,47 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Eval<JudgmentOutcome> {
+    ) -> Eval<Determination<JudgmentOutcome>> {
         match expr {
             JudgmentExpr::Comparison { left, op, right } => {
                 let left_value =
                     self.eval_scalar_expr_inner(left, entity_id, period, relation_context)?;
                 let right_value =
                     self.eval_scalar_expr_inner(right, entity_id, period, relation_context)?;
-                Ok(
-                    if self.compare_scalar_values(&left_value, *op, &right_value)? {
-                        JudgmentOutcome::Holds
-                    } else {
-                        JudgmentOutcome::NotHolds
-                    },
-                )
+                Ok(left_value.zip(right_value).try_map(|(left, right)| {
+                    self.compare_scalar_values(&left, *op, &right).map(|holds| {
+                        if holds {
+                            JudgmentOutcome::Holds
+                        } else {
+                            JudgmentOutcome::NotHolds
+                        }
+                    })
+                })?)
             }
             JudgmentExpr::Derived(name) => {
                 let derived = self.get_derived(name)?;
                 let target_entity_id = relation_context
                     .and_then(|context| context.entity_id_for(&derived.entity))
                     .unwrap_or(entity_id);
+                let outcome = self.judgment_rule(name, target_entity_id, period)?;
                 self.record_evaluated_dependency(CacheKey {
                     derived: name.clone(),
                     entity_id: target_entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.judgment_rule(name, target_entity_id, period)
+                Ok(outcome)
             }
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
                 related_slot,
             } => {
+                if self.three_valued() {
+                    return Err(unsupported_under_indeterminate("`relation_member`").into());
+                }
                 let context = relation_context
                     .ok_or_else(|| relation_member_outside_derived_relation(relation))?;
-                Ok(
+                Ok(Determined(
                     if self.relation_contains(
                         relation,
                         *current_slot,
@@ -1450,78 +1784,97 @@ impl<'a> Engine<'a> {
                     } else {
                         JudgmentOutcome::NotHolds
                     },
-                )
+                ))
             }
-            JudgmentExpr::And(items) => {
-                let mut saw_undetermined = false;
-                for (index, item) in items.iter().enumerate() {
-                    match self.eval_judgment_expr_inner(
-                        item,
-                        entity_id,
-                        period,
-                        relation_context,
-                    )? {
-                        JudgmentOutcome::Holds => {}
-                        JudgmentOutcome::NotHolds => {
-                            for skipped in &items[index + 1..] {
-                                self.record_skipped_judgment_dependencies(
-                                    skipped,
-                                    entity_id,
-                                    period,
-                                    relation_context,
-                                    TraceSkipReason::ShortCircuit,
-                                );
-                            }
-                            return Ok(JudgmentOutcome::NotHolds);
-                        }
-                        JudgmentOutcome::Undetermined => saw_undetermined = true,
-                    }
-                }
-                Ok(if saw_undetermined {
-                    JudgmentOutcome::Undetermined
-                } else {
-                    JudgmentOutcome::Holds
-                })
-            }
-            JudgmentExpr::Or(items) => {
-                let mut saw_undetermined = false;
-                for (index, item) in items.iter().enumerate() {
-                    match self.eval_judgment_expr_inner(
-                        item,
-                        entity_id,
-                        period,
-                        relation_context,
-                    )? {
-                        JudgmentOutcome::Holds => {
-                            for skipped in &items[index + 1..] {
-                                self.record_skipped_judgment_dependencies(
-                                    skipped,
-                                    entity_id,
-                                    period,
-                                    relation_context,
-                                    TraceSkipReason::ShortCircuit,
-                                );
-                            }
-                            return Ok(JudgmentOutcome::Holds);
-                        }
-                        JudgmentOutcome::NotHolds => {}
-                        JudgmentOutcome::Undetermined => saw_undetermined = true,
-                    }
-                }
-                Ok(if saw_undetermined {
-                    JudgmentOutcome::Undetermined
-                } else {
-                    JudgmentOutcome::NotHolds
-                })
-            }
-            JudgmentExpr::Not(item) => Ok(
-                match self.eval_judgment_expr_inner(item, entity_id, period, relation_context)? {
+            JudgmentExpr::And(items) => self.connective(
+                items,
+                JudgmentOutcome::NotHolds,
+                entity_id,
+                period,
+                relation_context,
+            ),
+            JudgmentExpr::Or(items) => self.connective(
+                items,
+                JudgmentOutcome::Holds,
+                entity_id,
+                period,
+                relation_context,
+            ),
+            JudgmentExpr::Not(item) => Ok(self
+                .eval_judgment_expr_inner(item, entity_id, period, relation_context)?
+                .map(|outcome| match outcome {
                     JudgmentOutcome::Holds => JudgmentOutcome::NotHolds,
                     JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
                     JudgmentOutcome::Undetermined => JudgmentOutcome::Undetermined,
-                },
-            ),
+                })),
         }
+    }
+
+    /// `and` (`decisive` is `NotHolds`) or `or` (`decisive` is `Holds`). The
+    /// items run left to right and stop at the first decisive one, whose
+    /// skipped siblings the trace records.
+    ///
+    /// Under `MissingFacts::Indeterminate` they also run past an unknown item
+    /// and past one that fails (`docs/three-valued-values.md` 5.4): an item's
+    /// evaluation error is caught here, the only place this series catches
+    /// one, so a decisive item decides whatever its siblings did, in either
+    /// order. With no decisive item the result is unknown with every unknown
+    /// item's needs; else the least caught failure (see [`failure_order`]),
+    /// raised again from here; else the other outcome. A deferral and a
+    /// refusal pass through uncaught. Nothing about catching reaches a
+    /// referenced rule's body, so a rule's result does not depend on where
+    /// it is referenced from. Without the mode no error is caught, so this
+    /// short-circuits and fails exactly as it always has.
+    fn connective(
+        &mut self,
+        items: &'a [JudgmentExpr],
+        decisive: JudgmentOutcome,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<Determination<JudgmentOutcome>> {
+        let mut needs: Option<Needs> = None;
+        let mut failure: Option<EvalError> = None;
+        let mut saw_undetermined = false;
+        for (index, item) in items.iter().enumerate() {
+            match self.eval_judgment_expr_inner(item, entity_id, period, relation_context) {
+                Ok(Determined(outcome)) if outcome == decisive => {
+                    for skipped in &items[index + 1..] {
+                        self.record_skipped_judgment_dependencies(
+                            skipped,
+                            entity_id,
+                            period,
+                            relation_context,
+                            TraceSkipReason::ShortCircuit,
+                        );
+                    }
+                    return Ok(Determined(decisive));
+                }
+                Ok(Determined(JudgmentOutcome::Undetermined)) => saw_undetermined = true,
+                Ok(Determined(_)) => {}
+                Ok(Indeterminate(item_needs)) => match &mut needs {
+                    Some(needs) => needs.extend(item_needs),
+                    None => needs = Some(item_needs),
+                },
+                Err(Interrupt::Error(error)) if self.three_valued() && !is_refusal(&error) => {
+                    keep_least_failure(&mut failure, error);
+                }
+                Err(interrupt) => return Err(interrupt),
+            }
+        }
+        if let Some(needs) = needs {
+            return Ok(Indeterminate(needs));
+        }
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        Ok(Determined(if saw_undetermined {
+            JudgmentOutcome::Undetermined
+        } else if decisive == JudgmentOutcome::NotHolds {
+            JudgmentOutcome::Holds
+        } else {
+            JudgmentOutcome::NotHolds
+        }))
     }
 
     /// Count the related entities of `entity_id` that `where_clause` selects,
@@ -1622,15 +1975,19 @@ impl<'a> Engine<'a> {
         period: &Period,
     ) -> Eval<Option<Decimal>> {
         if let Some(predicate) = where_clause {
-            if !self
-                .eval_judgment_expr(predicate, related_id, period)?
-                .is_holds()
-            {
+            let selected = self.eval_judgment_expr(predicate, related_id, period)?;
+            if !require_determined(selected, "an undetermined `where` clause")?.is_holds() {
                 return Ok(None);
             }
         }
         match value {
-            Some(value) => Ok(Some(self.eval_related_value(value, related_id, period)?)),
+            Some(value) => {
+                let value = self.eval_related_value(value, related_id, period)?;
+                Ok(Some(require_determined(
+                    value,
+                    "an indeterminate value in a `sum`",
+                )?))
+            }
             None => Ok(Some(Decimal::ZERO)),
         }
     }
@@ -1640,20 +1997,23 @@ impl<'a> Engine<'a> {
         value: &'a RelatedValueRef,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<Decimal> {
+    ) -> Eval<Determination<Decimal>> {
         let scalar = match value {
-            RelatedValueRef::Input(name) => self.lookup_input(name, entity_id, period)?,
+            RelatedValueRef::Input(name) => self.read_input(name, entity_id, period)?,
             RelatedValueRef::Derived(name) => {
+                let value = self.scalar_rule(name, entity_id, period)?;
                 self.record_evaluated_dependency(CacheKey {
                     derived: name.clone(),
                     entity_id: entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.scalar_rule(name, entity_id, period)?
+                value
             }
         };
-        Ok(scalar.as_decimal().ok_or_else(|| {
-            EvalError::TypeMismatch("related aggregation requires numeric values".to_string())
+        Ok(scalar.try_map(|scalar| {
+            scalar.as_decimal().ok_or_else(|| {
+                EvalError::TypeMismatch("related aggregation requires numeric values".to_string())
+            })
         })?)
     }
 
@@ -1663,11 +2023,36 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
         relation_context: Option<RelationEvalContext<'_>>,
-    ) -> Eval<Decimal> {
+    ) -> Eval<Determination<Decimal>> {
         Ok(self
             .eval_scalar_expr_inner(expr, entity_id, period, relation_context)?
-            .as_decimal()
-            .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))?)
+            .try_map(|value| {
+                value
+                    .as_decimal()
+                    .ok_or_else(|| EvalError::TypeMismatch("expected numeric scalar".to_string()))
+            })?)
+    }
+
+    /// Read an input cell. Under `MissingFacts::Indeterminate` a cell no
+    /// record covers is indeterminate, with that cell as its need; without
+    /// the mode it is `MissingInput`, as [`Engine::lookup_input`] reports it.
+    fn read_input(
+        &self,
+        name: &str,
+        entity_id: &str,
+        period: &Period,
+    ) -> Result<Determination<ScalarValue>, EvalError> {
+        match self.lookup_input(name, entity_id, period) {
+            Ok(value) => Ok(Determined(value)),
+            Err(EvalError::MissingInput { .. }) if self.three_valued() => {
+                Ok(Indeterminate(Needs::one(Need::Input {
+                    name: name.to_string(),
+                    entity_id: entity_id.to_string(),
+                    period: period.clone(),
+                })))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn lookup_input(
@@ -1779,6 +2164,12 @@ impl<'a> Engine<'a> {
         entity_id: &str,
         period: &Period,
     ) -> Eval<Vec<String>> {
+        // Relations are closed-world here: an absent tuple is no member. The
+        // mode must never read one that way, so until the series gives
+        // relations open-world semantics every read is refused.
+        if self.three_valued() {
+            return Err(unsupported_under_indeterminate("reading a relation's members").into());
+        }
         self.nested(|engine| {
             engine.related_entity_ids_at_level(
                 relation,
@@ -1806,10 +2197,12 @@ impl<'a> Engine<'a> {
             .get(relation)
             .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
         if current_slot >= schema.arity || related_slot >= schema.arity {
-            return Err(EvalError::TypeMismatch(format!(
-                "relation `{relation}` has arity {}, but slots {current_slot} and {related_slot} were requested",
-                schema.arity
-            ))
+            return Err(relation_slots_out_of_range(
+                relation,
+                schema.arity,
+                current_slot,
+                related_slot,
+            )
             .into());
         }
         let key = self.step(
@@ -1880,7 +2273,9 @@ impl<'a> Engine<'a> {
                     Some(context),
                 ) {
                     Ok(outcome) => {
-                        if outcome.is_holds() {
+                        if require_determined(outcome, "an undetermined relation predicate")?
+                            .is_holds()
+                        {
                             selected.push(related_id.clone());
                         }
                     }
@@ -1959,6 +2354,301 @@ impl<'a> Engine<'a> {
         right: &ScalarValue,
     ) -> Result<bool, EvalError> {
         compare_scalar_values(left, op, right)
+    }
+
+    /// Check what a reference to rule `name`, asking for `kind`, can reach
+    /// (see [`Engine::check_program`]).
+    fn check_rule(&mut self, name: &str, kind: Kind, period: &Period) -> Result<(), EvalError> {
+        self.check_program(period, |walk| walk.rule_reference(name, kind))
+    }
+
+    /// Check what `expr`, evaluated outside any rule, can reach (see
+    /// [`Engine::check_program`]).
+    fn check_expression(&mut self, expr: &ScalarExpr, period: &Period) -> Result<(), EvalError> {
+        self.check_program(period, |walk| walk.scalar(expr, false))
+    }
+
+    /// Under `MissingFacts::Indeterminate`, refuse before anything is
+    /// evaluated a program defect that no dataset can change
+    /// (`docs/three-valued-values.md`, section 4), with the error evaluation
+    /// would raise for it. Today such a defect fails only an evaluation that
+    /// reaches it; under the mode an `and`/`or` item catches failures, so
+    /// one behind a decisive item would otherwise disappear. A refusal here
+    /// is not an evaluation failure, and nothing catches it.
+    ///
+    /// The checks cover everything `root` can reach by reference, using the
+    /// formula each rule has for `period`. What they pass is remembered per
+    /// period, so each rule is walked once; a run that finds a defect
+    /// remembers nothing, and the next call finds the same one.
+    fn check_program(
+        &mut self,
+        period: &Period,
+        root: impl FnOnce(&mut ProgramWalk<'_>),
+    ) -> Result<(), EvalError> {
+        if !self.three_valued() || !self.program_checks {
+            return Ok(());
+        }
+        let mut walk = ProgramWalk {
+            program: self.program,
+            period,
+            checked: self.checked.get(period),
+            seen: HashSet::new(),
+            pending: Vec::new(),
+            defect: None,
+        };
+        root(&mut walk);
+        while let Some(item) = walk.pending.pop() {
+            walk.walk(&item);
+        }
+        if let Some(defect) = walk.defect {
+            return Err(defect);
+        }
+        let seen = walk.seen;
+        self.checked.entry(period.clone()).or_default().extend(seen);
+        Ok(())
+    }
+}
+
+/// One run of the program checks (see [`Engine::check_program`]). It walks
+/// what evaluation can execute, and only that: a `no_match`'s patterns only
+/// label its error and are never evaluated, so they are not walked. Rules
+/// and derived relations are walked from a worklist rather than by recursion
+/// across references, so a long chain of rules does not deepen the stack;
+/// within one formula the walk recurses, as evaluation does.
+struct ProgramWalk<'p> {
+    program: &'p Program,
+    period: &'p Period,
+    /// What earlier runs passed for this period.
+    checked: Option<&'p HashSet<Checked>>,
+    /// What this run has queued.
+    seen: HashSet<Checked>,
+    pending: Vec<Checked>,
+    /// The least defect found (see [`failure_order`]), so that the one
+    /// reported does not depend on the order of the walk.
+    defect: Option<EvalError>,
+}
+
+impl ProgramWalk<'_> {
+    fn defect(&mut self, error: EvalError) {
+        keep_least_failure(&mut self.defect, error);
+    }
+
+    fn queue(&mut self, item: Checked) {
+        if self.checked.is_some_and(|checked| checked.contains(&item)) {
+            return;
+        }
+        if self.seen.insert(item.clone()) {
+            self.pending.push(item);
+        }
+    }
+
+    /// A reference to rule `name` asking for `kind`, which fails as evaluating
+    /// it would: for an unknown rule, an undeclared unit, then, when the rule
+    /// has a formula for the period, the wrong kind. A rule with no formula
+    /// for the period is no defect: it fails if evaluation reaches it, as it
+    /// always has.
+    fn rule_reference(&mut self, name: &str, kind: Kind) {
+        let Some(derived) = self.program.derived.get(name) else {
+            return self.defect(EvalError::UnknownDerived(name.to_string()));
+        };
+        if let Some(unit) = &derived.unit {
+            if !self.program.units.contains_key(unit) {
+                return self.defect(EvalError::UnknownUnit(unit.clone()));
+            }
+        }
+        let Some(semantics) = derived.semantics_at(self.period) else {
+            return;
+        };
+        match (kind, semantics) {
+            (Kind::Scalar, DerivedSemantics::Judgment(_)) => {
+                self.defect(EvalError::ExpectedScalar(name.to_string()))
+            }
+            (Kind::Judgment, DerivedSemantics::Scalar(_)) => {
+                self.defect(EvalError::ExpectedJudgment(name.to_string()))
+            }
+            _ => self.queue(Checked::Rule(name.to_string())),
+        }
+    }
+
+    /// A read of `relation` from `current_slot` to `related_slot`, which
+    /// reaches a derived relation's source and predicate.
+    fn relation_read(&mut self, relation: &str, current_slot: usize, related_slot: usize) {
+        let Some(schema) = self.program.relations.get(relation) else {
+            return self.defect(EvalError::UnknownRelation(relation.to_string()));
+        };
+        if current_slot >= schema.arity || related_slot >= schema.arity {
+            return self.defect(relation_slots_out_of_range(
+                relation,
+                schema.arity,
+                current_slot,
+                related_slot,
+            ));
+        }
+        if schema.derivation.is_some() {
+            self.queue(Checked::Relation(relation.to_string()));
+        }
+    }
+
+    fn walk(&mut self, item: &Checked) {
+        let program = self.program;
+        match item {
+            Checked::Rule(name) => {
+                match program
+                    .derived
+                    .get(name)
+                    .and_then(|derived| derived.semantics_at(self.period))
+                {
+                    Some(DerivedSemantics::Scalar(expr)) => self.scalar(expr, false),
+                    Some(DerivedSemantics::Judgment(expr)) => self.judgment(expr, false),
+                    // Queued only for a rule with a formula for the period.
+                    None => {}
+                }
+            }
+            Checked::Relation(name) => {
+                if let Some(derivation) = program
+                    .relations
+                    .get(name)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    self.relation_read(
+                        &derivation.source_relation,
+                        derivation.current_slot,
+                        derivation.related_slot,
+                    );
+                    self.judgment(&derivation.predicate, true);
+                }
+            }
+        }
+    }
+
+    /// `in_predicate`: whether `expr` is part of a derived relation's own
+    /// predicate, the only place evaluation gives a `relation_member` the
+    /// relation context it needs. A rule the predicate references, and a
+    /// `count`/`sum` `where` clause or summed value, are evaluated without it.
+    fn scalar(&mut self, expr: &ScalarExpr, in_predicate: bool) {
+        match expr {
+            ScalarExpr::Literal(_)
+            | ScalarExpr::Input(_)
+            | ScalarExpr::InputOrElse { .. }
+            | ScalarExpr::PeriodStart
+            | ScalarExpr::PeriodEnd => {}
+            ScalarExpr::Derived(name) => self.rule_reference(name, Kind::Scalar),
+            ScalarExpr::ParameterLookup { parameter, index } => {
+                self.scalar(index, in_predicate);
+                if !self.program.parameters.contains_key(parameter) {
+                    self.defect(EvalError::UnknownParameter(parameter.clone()));
+                }
+            }
+            ScalarExpr::Add(items) => {
+                for item in items {
+                    self.scalar(item, in_predicate);
+                }
+            }
+            ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+                if items.is_empty() {
+                    let call = if matches!(expr, ScalarExpr::Max(_)) {
+                        "max"
+                    } else {
+                        "min"
+                    };
+                    self.defect(EvalError::TypeMismatch(format!(
+                        "{call}() requires at least one operand"
+                    )));
+                }
+                for item in items {
+                    self.scalar(item, in_predicate);
+                }
+            }
+            ScalarExpr::Sub(left, right)
+            | ScalarExpr::Mul(left, right)
+            | ScalarExpr::Div(left, right) => {
+                self.scalar(left, in_predicate);
+                self.scalar(right, in_predicate);
+            }
+            ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => self.scalar(value, in_predicate),
+            ScalarExpr::DateAddDays { date, days: offset }
+            | ScalarExpr::DateAddMonths {
+                date,
+                months: offset,
+            }
+            | ScalarExpr::DateAddYears {
+                date,
+                years: offset,
+            } => {
+                self.scalar(date, in_predicate);
+                self.scalar(offset, in_predicate);
+            }
+            ScalarExpr::DaysBetween { from, to } => {
+                self.scalar(from, in_predicate);
+                self.scalar(to, in_predicate);
+            }
+            ScalarExpr::CountRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+            } => {
+                self.relation_read(relation, *current_slot, *related_slot);
+                if let Some(where_clause) = where_clause {
+                    self.judgment(where_clause, false);
+                }
+            }
+            ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                self.relation_read(relation, *current_slot, *related_slot);
+                if let Some(where_clause) = where_clause {
+                    self.judgment(where_clause, false);
+                }
+                if let RelatedValueRef::Derived(name) = value {
+                    self.rule_reference(name, Kind::Scalar);
+                }
+            }
+            ScalarExpr::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.judgment(condition, in_predicate);
+                self.scalar(then_expr, in_predicate);
+                self.scalar(else_expr, in_predicate);
+            }
+            ScalarExpr::NoMatch { subject, .. } => self.scalar(subject, in_predicate),
+            ScalarExpr::OverPeriods { kind, .. } => {
+                self.defect(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
+            }
+        }
+    }
+
+    fn judgment(&mut self, expr: &JudgmentExpr, in_predicate: bool) {
+        match expr {
+            JudgmentExpr::Comparison { left, right, .. } => {
+                self.scalar(left, in_predicate);
+                self.scalar(right, in_predicate);
+            }
+            JudgmentExpr::Derived(name) => self.rule_reference(name, Kind::Judgment),
+            JudgmentExpr::RelationMember {
+                relation,
+                current_slot,
+                related_slot,
+            } => {
+                if in_predicate {
+                    self.relation_read(relation, *current_slot, *related_slot);
+                } else {
+                    self.defect(relation_member_outside_derived_relation(relation));
+                }
+            }
+            JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+                for item in items {
+                    self.judgment(item, in_predicate);
+                }
+            }
+            JudgmentExpr::Not(item) => self.judgment(item, in_predicate),
+        }
     }
 }
 
@@ -2161,5 +2851,244 @@ pub fn expect_dtype(derived: &Derived, expected: DType) -> Result<(), EvalError>
             "derived `{}` has dtype {:?}, expected {:?}",
             derived.name, derived.dtype, expected
         )))
+    }
+}
+
+/// Cases of `MissingFacts::Indeterminate` that only the engine's internals
+/// reach; `tests/three_valued.rs` has the rest.
+#[cfg(test)]
+mod three_valued_tests {
+    use super::*;
+    use crate::depth::with_suspend_depth;
+    use crate::model::{DerivedVersion, Interval};
+
+    fn period() -> Period {
+        Period::month(2026, 1)
+    }
+
+    fn rule(name: &str, dtype: DType, semantics: DerivedSemantics) -> Derived {
+        Derived {
+            id: None,
+            name: name.to_string(),
+            entity: "Case".to_string(),
+            dtype,
+            unit: None,
+            rounding: None,
+            source: None,
+            source_url: None,
+            corpus_citation_path: None,
+            semantics,
+            versions: Vec::<DerivedVersion>::new(),
+        }
+    }
+
+    fn program(rules: Vec<Derived>) -> Program {
+        let mut program = Program::default();
+        for rule in rules {
+            program.add_derived(rule).expect("distinct rule names");
+        }
+        program
+    }
+
+    fn int(value: i64) -> ScalarExpr {
+        ScalarExpr::Literal(ScalarValue::Integer(value))
+    }
+
+    fn comparison(left: ScalarExpr, op: ComparisonOp, right: ScalarExpr) -> JudgmentExpr {
+        JudgmentExpr::Comparison { left, op, right }
+    }
+
+    fn three_valued<'a>(program: &'a Program, data: &'a DataSet) -> Engine<'a> {
+        Engine::with_options(
+            program,
+            data,
+            EvaluationOptions {
+                missing_facts: MissingFacts::Indeterminate,
+            },
+        )
+        .expect("the options are accepted")
+    }
+
+    /// The failure the driver records for a deferred rule is keyed by the
+    /// kind of value asked for as well as by rule, entity and period. The
+    /// program checks refuse a wrong-kind reference, so only an engine that
+    /// skips them can show the key matters: at threshold 1 the judgment
+    /// reference to the scalar rule `s` defers, fails and is recorded, and the
+    /// scalar reference to `s` later in the same drive still evaluates it.
+    #[test]
+    fn a_failed_wrong_kind_reference_does_not_fail_a_right_kind_one() {
+        let program = program(vec![
+            rule("s", DType::Integer, DerivedSemantics::Scalar(int(5))),
+            rule(
+                "root",
+                DType::Judgment,
+                DerivedSemantics::Judgment(JudgmentExpr::Or(vec![
+                    JudgmentExpr::And(vec![
+                        JudgmentExpr::Derived("s".to_string()),
+                        comparison(int(0), ComparisonOp::Eq, int(1)),
+                    ]),
+                    comparison(
+                        ScalarExpr::Derived("s".to_string()),
+                        ComparisonOp::Gt,
+                        int(0),
+                    ),
+                ])),
+            ),
+        ]);
+        let data = DataSet::default();
+
+        let refused = three_valued(&program, &data).judgment_determination("root", "c1", &period());
+        assert!(
+            matches!(&refused, Err(EvalError::ExpectedJudgment(name)) if name == "s"),
+            "the program checks refuse the wrong-kind reference: {refused:?}"
+        );
+
+        for threshold in [usize::MAX, 1, 2] {
+            with_suspend_depth(threshold, || {
+                let mut engine = three_valued(&program, &data);
+                engine.program_checks = false;
+                let result = engine.judgment_determination("root", "c1", &period());
+                assert!(
+                    matches!(result, Ok(Determined(JudgmentOutcome::Holds))),
+                    "threshold {threshold}: {result:?}"
+                );
+            });
+        }
+
+        // The record is what made the difference at threshold 1: drive the
+        // same evaluation by hand and look at it before the drive clears it.
+        with_suspend_depth(1, || {
+            let mut engine = three_valued(&program, &data);
+            engine.program_checks = false;
+            let result = engine.run_tasks(|engine| engine.judgment_rule("root", "c1", &period()));
+            assert!(matches!(result, Ok(Determined(JudgmentOutcome::Holds))));
+            let key = CacheKey {
+                derived: "s".to_string(),
+                entity_id: "c1".to_string(),
+                period: period(),
+            };
+            assert!(
+                matches!(
+                    engine.failed.get(&Deferred::Judgment(key.clone())),
+                    Some(EvalError::ExpectedJudgment(_))
+                ),
+                "the wrong-kind reference deferred and failed: {:?}",
+                engine.failed
+            );
+            assert!(!engine.failed.contains_key(&Deferred::Scalar(key)));
+            assert_eq!(
+                engine.cached_scalar("s", "c1", &period()),
+                Some(ScalarValue::Integer(5))
+            );
+        });
+    }
+
+    /// Two `match` failures with the same message, one raised in the
+    /// expression and one inside a rule whose name makes the messages
+    /// coincide, are chosen between by their fields, so the choice is the
+    /// same in either order before the error leaves any rule.
+    /// `tests/three_valued.rs` checks the same pair after it leaves one.
+    #[test]
+    fn equal_messages_are_chosen_between_by_their_fields_before_leaving_a_rule() {
+        let inner = "` covers `a";
+        let subject = "a` covers `x";
+        let program = program(vec![rule(
+            inner,
+            DType::Integer,
+            DerivedSemantics::Scalar(ScalarExpr::NoMatch {
+                subject: Box::new(ScalarExpr::Input("x".to_string())),
+                patterns: vec![int(2)],
+            }),
+        )]);
+        let mut data = DataSet::default();
+        for slot in ["x", subject] {
+            data.add_input(
+                slot,
+                "Case",
+                "c1",
+                Interval::covering(&period()),
+                ScalarValue::Integer(1),
+            );
+        }
+        let inline = comparison(
+            ScalarExpr::NoMatch {
+                subject: Box::new(ScalarExpr::Input(subject.to_string())),
+                patterns: vec![int(2)],
+            },
+            ComparisonOp::Gt,
+            int(0),
+        );
+        let referenced = comparison(
+            ScalarExpr::Derived(inner.to_string()),
+            ComparisonOp::Gt,
+            int(0),
+        );
+        let expressions = [
+            JudgmentExpr::And(vec![inline.clone(), referenced.clone()]),
+            JudgmentExpr::And(vec![referenced, inline]),
+        ]
+        .map(|condition| ScalarExpr::If {
+            condition: Box::new(condition),
+            then_expr: Box::new(int(1)),
+            else_expr: Box::new(int(0)),
+        });
+        let errors: Vec<EvalError> = expressions
+            .iter()
+            .map(|expr| {
+                three_valued(&program, &data)
+                    .eval_scalar_expr(expr, "c1", &period())
+                    .expect_err("both items fail and neither decides")
+            })
+            .collect();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages[0],
+            "no `match` arm in `` covers `a` covers `x` = 1 (arms: 2); add an arm for it or a final `_ =>` arm"
+        );
+        assert_eq!(format!("{:?}", errors[0]), format!("{:?}", errors[1]));
+        assert!(
+            matches!(&errors[0], EvalError::NoMatchingArm { rule, subject: chosen, .. }
+                if rule.is_empty() && chosen == subject),
+            "the error raised in the expression is the least: {:?}",
+            errors[0]
+        );
+    }
+
+    /// What the program checks pass is remembered per period; a run that
+    /// finds a defect remembers nothing.
+    #[test]
+    fn program_checks_remember_only_what_passed() {
+        let program = program(vec![
+            rule("a", DType::Integer, DerivedSemantics::Scalar(int(1))),
+            rule(
+                "b",
+                DType::Decimal,
+                DerivedSemantics::Scalar(ScalarExpr::Add(vec![
+                    ScalarExpr::Derived("a".to_string()),
+                    int(1),
+                ])),
+            ),
+            rule(
+                "bad",
+                DType::Decimal,
+                DerivedSemantics::Scalar(ScalarExpr::Add(vec![
+                    ScalarExpr::Derived("b".to_string()),
+                    ScalarExpr::Derived("missing_rule".to_string()),
+                ])),
+            ),
+        ]);
+        let data = DataSet::default();
+        let mut engine = three_valued(&program, &data);
+        let refused = engine.scalar_determination("bad", "c1", &period());
+        assert!(matches!(refused, Err(EvalError::UnknownDerived(_))));
+        assert!(engine.checked.is_empty());
+        assert!(matches!(
+            engine.scalar_determination("b", "c1", &period()),
+            Ok(Determined(_))
+        ));
+        let passed = &engine.checked[&period()];
+        assert_eq!(passed.len(), 2);
+        assert!(passed.contains(&Checked::Rule("a".to_string())));
+        assert!(passed.contains(&Checked::Rule("b".to_string())));
     }
 }
