@@ -335,24 +335,31 @@ fn rounded(mut rule: Value) -> Value {
     rule
 }
 
-/// A program over `rules`. `member` relates households to people, and
-/// `adult` is the members whose `age` is at least 18.
-fn program(rules: Vec<Value>, relations: bool) -> Value {
+/// A relation derived from `member` by `predicate`.
+fn derived_relation(name: &str, predicate: Value) -> Value {
     let pair = json!(["Household", "Person"]);
-    let relations = if relations {
-        json!([
-            { "name": "member", "arity": 2, "slot_entities": pair },
-            {
-                "name": "adult", "arity": 2, "slot_entities": pair,
-                "derivation": {
-                    "source_relation": "member", "current_slot": 0, "related_slot": 1,
-                    "slot_entities": pair,
-                    "predicate": compare(input("age"), "gte", integer(18)),
-                },
-            },
-        ])
-    } else {
-        json!([])
+    json!({
+        "name": name, "arity": 2, "slot_entities": pair,
+        "derivation": {
+            "source_relation": "member", "current_slot": 0, "related_slot": 1,
+            "slot_entities": pair, "predicate": predicate,
+        },
+    })
+}
+
+/// A program over `rules`. With `chosen`, it relates households to people:
+/// `member` is the base relation, `adult` the members whose `age` is at
+/// least 18, and `chosen` the members its predicate holds for. Only a
+/// derived relation's predicate can read the household's own rules, which
+/// it evaluates on the household's rows and projects to its members.
+fn program(rules: Vec<Value>, chosen: Option<Value>) -> Value {
+    let relations = match chosen {
+        Some(chosen) => json!([
+            { "name": "member", "arity": 2, "slot_entities": ["Household", "Person"] },
+            derived_relation("adult", compare(input("age"), "gte", integer(18))),
+            derived_relation("chosen", chosen),
+        ]),
+        None => json!([]),
     };
     let table = |values: Value| json!([{ "effective_from": "2000-01-01", "values": values }]);
     json!({
@@ -563,7 +570,11 @@ fn root_cases() -> Vec<(&'static str, Vec<Value>)> {
             "no match",
             scalar(
                 "integer",
-                no_match(integer(5), vec![integer(1), integer(2)]),
+                if_then_else(
+                    compare(integer(5), "lt", integer(3)),
+                    integer(1),
+                    no_match(integer(5), vec![integer(1), integer(2)]),
+                ),
             ),
         ),
         (
@@ -652,7 +663,7 @@ fn a_huge_root_row_count_is_refused_by_every_node_kind() {
     let _serial = serial();
     for (case, rules) in root_cases() {
         let program =
-            compile(&program(rules, false)).unwrap_or_else(|error| panic!("{case}: {error}"));
+            compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
         let outputs = vec!["out".to_string()];
         for mode in MODES {
             for rows in HUGE_ROWS {
@@ -729,7 +740,7 @@ fn a_huge_lifetime_row_count_is_refused_by_every_reduction() {
     for (case, expr) in lifetime_cases() {
         let rules = vec![scalar_rule("out", "decimal", expr)];
         let program =
-            compile(&program(rules, false)).unwrap_or_else(|error| panic!("{case}: {error}"));
+            compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
         let outputs = vec!["out".to_string()];
         for mode in MODES {
             for periods in [1, 3] {
@@ -777,6 +788,8 @@ fn stated_relation_batch(related: usize) -> DenseBatchSpec {
 struct RelatedCase {
     name: &'static str,
     rules: Vec<Value>,
+    /// The predicate of the derived relation `chosen`.
+    chosen: Value,
     /// Decimal mode, then `f64` mode: `true` when a buffer is wider than 8
     /// bytes a row, so the cap refuses it.
     wider: [bool; 2],
@@ -790,57 +803,50 @@ fn related_cases() -> Vec<RelatedCase> {
             count_related("member", Some(where_clause)),
         )]
     };
+    let count_chosen = || scalar_rule("out", "integer", count_related("chosen", None));
+    let anyone = || member_of("member");
     vec![
         RelatedCase {
             name: "text literal on related rows",
             rules: count_where(compare(text("a"), "eq", text("a"))),
+            chosen: anyone(),
             wider: [true, true],
         },
         RelatedCase {
             name: "decimal literal on related rows",
             rules: count_where(compare(decimal("1.5"), "gt", integer(1))),
+            chosen: anyone(),
             wider: [true, false],
         },
         RelatedCase {
             // Decimal mode compares integers as decimals.
             name: "integer literal on related rows",
             rules: count_where(compare(integer(2), "gt", integer(1))),
+            chosen: anyone(),
             wider: [true, false],
         },
         RelatedCase {
             name: "decimal root rule projected to related rows",
             rules: vec![
                 scalar_rule("rate", "decimal", decimal("1.5")),
-                scalar_rule(
-                    "out",
-                    "integer",
-                    count_related("member", Some(compare(derived("rate"), "gt", integer(1)))),
-                ),
+                count_chosen(),
             ],
+            chosen: compare(derived("rate"), "gt", integer(1)),
             wider: [true, false],
         },
         RelatedCase {
             name: "text root rule projected to related rows",
-            rules: vec![
-                scalar_rule("label", "text", text("a")),
-                scalar_rule(
-                    "out",
-                    "integer",
-                    count_related("member", Some(compare(derived("label"), "eq", text("a")))),
-                ),
-            ],
+            rules: vec![scalar_rule("label", "text", text("a")), count_chosen()],
+            chosen: compare(derived("label"), "eq", text("a")),
             wider: [true, true],
         },
         RelatedCase {
             name: "root judgment projected to related rows",
             rules: vec![
                 judgment_rule("eligible", compare(integer(5), "gt", integer(3))),
-                scalar_rule(
-                    "out",
-                    "integer",
-                    count_related("member", Some(derived("eligible"))),
-                ),
+                count_chosen(),
             ],
+            chosen: derived("eligible"),
             wider: [false, false],
         },
         RelatedCase {
@@ -850,11 +856,19 @@ fn related_cases() -> Vec<RelatedCase> {
                 "decimal",
                 sum_related("member", "income", None),
             )],
+            chosen: anyone(),
             wider: [true, false],
+        },
+        RelatedCase {
+            name: "membership of the source in a derived relation",
+            rules: vec![count_chosen()],
+            chosen: anyone(),
+            wider: [false, false],
         },
         RelatedCase {
             name: "relation member outside a derived relation",
             rules: count_where(member_of("member")),
+            chosen: anyone(),
             wider: [false, false],
         },
         RelatedCase {
@@ -868,6 +882,7 @@ fn related_cases() -> Vec<RelatedCase> {
                 "gt",
                 json!({ "kind": "period_start" }),
             )),
+            chosen: anyone(),
             wider: [false, false],
         },
     ]
@@ -879,7 +894,7 @@ fn a_stated_related_count_that_fits_the_owners_but_not_a_wider_buffer_is_refused
     // The owners fit, so binding accepts the count; no wider buffer does.
     assert!(STATED_RELATED * 8 <= RELATED_CAP && STATED_RELATED * 16 > RELATED_CAP);
     for case in related_cases() {
-        let program = compile(&program(case.rules, true))
+        let program = compile(&program(case.rules, Some(case.chosen)))
             .unwrap_or_else(|error| panic!("{}: {error}", case.name));
         let outputs = vec!["out".to_string()];
         for (mode, wider) in MODES.into_iter().zip(case.wider) {
@@ -917,7 +932,7 @@ fn a_root_column_backs_its_count_but_not_a_wider_buffer() {
             scalar_rule("doubled", "integer", binary("mul", input("a"), integer(2))),
             judgment_rule("named", compare(text("a"), "eq", text("a"))),
         ],
-        false,
+        None,
     ))
     .expect("program compiles");
     let batch = || DenseBatchSpec {
@@ -989,10 +1004,11 @@ fn number(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         );
     }
     if scope.relations {
-        let predicate = related_judgment(scope, 1);
+        // A `where` clause reads only the related row.
+        let predicate = related_judgment(&Scope::default(), 1);
         leaves.push(
             (
-                select(vec!["member", "adult"]),
+                select(vec!["member", "adult", "chosen"]),
                 prop::option::of(predicate.clone()),
             )
                 .prop_map(|(relation, predicate)| count_related(relation, predicate))
@@ -1000,7 +1016,7 @@ fn number(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         );
         leaves.push(
             (
-                select(vec!["member", "adult"]),
+                select(vec!["member", "adult", "chosen"]),
                 select(vec!["income", "age"]),
                 prop::option::of(predicate),
             )
@@ -1026,8 +1042,17 @@ fn number(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         2 => (condition, inner.clone(), inner.clone())
             .prop_map(|(condition, then_expr, else_expr)| if_then_else(condition, then_expr, else_expr)),
         1 => (dates.clone(), dates).prop_map(|(from, to)| days_between(from, to)),
-        1 => (inner.clone(), prop::collection::vec((-3_i64..=5).prop_map(integer), 1..=2))
-            .prop_map(|(subject, patterns)| no_match(subject, patterns)),
+        // Dense compiles a `match` with no matching arm only as an `if`'s
+        // `else`.
+        1 => (
+            judgment(scope, depth - 1),
+            inner.clone(),
+            inner.clone(),
+            prop::collection::vec((-3_i64..=5).prop_map(integer), 1..=2),
+        )
+            .prop_map(|(condition, then_expr, subject, patterns)| {
+                if_then_else(condition, then_expr, no_match(subject, patterns))
+            }),
         1 => (select(vec!["p", "q"]), inner).prop_map(|(parameter, index)| lookup(parameter, index)),
     ]
     .boxed()
@@ -1205,71 +1230,77 @@ fn finish(rule: Value, from: Option<&str>, round: bool) -> Value {
     }
 }
 
-/// Six rules, each reading only earlier ones: numbers `r0`, `r3` and `r5`,
-/// judgments `r1` and `r4`, and the date `r2`.
-fn rules(relations: bool) -> impl Strategy<Value = Vec<Value>> {
-    let scopes = [
-        Scope {
-            relations,
-            ..Scope::default()
-        },
-        Scope {
-            numbers: vec!["r0".into()],
-            relations,
-            ..Scope::default()
-        },
-        Scope {
-            numbers: vec!["r0".into()],
-            judgments: vec!["r1".into()],
-            relations,
-            ..Scope::default()
-        },
-        Scope {
-            numbers: vec!["r0".into()],
-            dates: vec!["r2".into()],
-            judgments: vec!["r1".into()],
-            relations,
-        },
-        Scope {
-            numbers: vec!["r0".into(), "r3".into()],
-            dates: vec!["r2".into()],
-            judgments: vec!["r1".into()],
-            relations,
-        },
-        Scope {
-            numbers: vec!["r0".into(), "r3".into()],
-            dates: vec!["r2".into()],
-            judgments: vec!["r1".into(), "r4".into()],
-            relations,
-        },
-    ];
+/// A generated program's rules and, when it has relations, the predicate
+/// of `chosen`.
+type Rules = (Vec<Value>, Option<Value>);
+
+/// Eight rules, each reading only earlier ones. `h` (a number) and `hj` (a
+/// judgment) read no relation, so `chosen`'s predicate can read them on the
+/// household's rows. Then the numbers `r0`, `r3` and `r5`, the judgments `r1`
+/// and `r4`, and the date `r2`, which may count or sum over any relation.
+fn rules(relations: bool) -> impl Strategy<Value = Rules> {
+    let names = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+    };
+    let helpers = Scope {
+        numbers: names(&["h"]),
+        judgments: names(&["hj"]),
+        ..Scope::default()
+    };
+    let scope = |numbers: &[&str], dates: &[&str], judgments: &[&str]| Scope {
+        numbers: names(numbers),
+        dates: names(dates),
+        judgments: names(judgments),
+        relations,
+    };
     let expressions = (
-        number(&scopes[0], 2),
-        judgment(&scopes[1], 2),
-        date_expr(&scopes[2], 2),
-        number(&scopes[3], 2),
-        judgment(&scopes[4], 2),
-        number(&scopes[5], 2),
+        number(&Scope::default(), 1),
+        judgment(
+            &Scope {
+                numbers: names(&["h"]),
+                ..Scope::default()
+            },
+            1,
+        ),
+        number(&scope(&["h"], &[], &["hj"]), 2),
+        judgment(&scope(&["h", "r0"], &[], &["hj"]), 2),
+        date_expr(&scope(&["h", "r0"], &[], &["hj", "r1"]), 2),
+        number(&scope(&["h", "r0"], &["r2"], &["hj", "r1"]), 2),
+        judgment(&scope(&["h", "r0", "r3"], &["r2"], &["hj", "r1"]), 2),
+        number(&scope(&["h", "r0", "r3"], &["r2"], &["hj", "r1", "r4"]), 2),
     );
-    let finishing = prop::collection::vec((commencement(), any::<bool>()), 6);
-    (expressions, finishing).prop_map(|((r0, r1, r2, r3, r4, r5), finishing)| {
-        [
-            scalar_rule("r0", "decimal", r0),
-            judgment_rule("r1", r1),
-            scalar_rule("r2", "date", r2),
-            scalar_rule("r3", "decimal", r3),
-            judgment_rule("r4", r4),
-            scalar_rule("r5", "decimal", r5),
-        ]
-        .into_iter()
-        .zip(finishing)
-        .map(|(rule, (from, round))| finish(rule, from, round))
-        .collect()
-    })
+    let chosen = if relations {
+        related_judgment(&helpers, 2).prop_map(Some).boxed()
+    } else {
+        Just(None).boxed()
+    };
+    let finishing = prop::collection::vec((commencement(), any::<bool>()), 8);
+    (expressions, chosen, finishing).prop_map(
+        |((h, hj, r0, r1, r2, r3, r4, r5), chosen, finishing)| {
+            let rules = [
+                scalar_rule("h", "decimal", h),
+                judgment_rule("hj", hj),
+                scalar_rule("r0", "decimal", r0),
+                judgment_rule("r1", r1),
+                scalar_rule("r2", "date", r2),
+                scalar_rule("r3", "decimal", r3),
+                judgment_rule("r4", r4),
+                scalar_rule("r5", "decimal", r5),
+            ]
+            .into_iter()
+            .zip(finishing)
+            .map(|(rule, (from, round))| finish(rule, from, round))
+            .collect();
+            (rules, chosen)
+        },
+    )
 }
 
 /// A lifetime output: a reduction of a generated number, with a leaf
-/// beside it, over helper rules `r0` to `r5`.
+/// beside it, over the rules `rules` generates without relations.
 fn lifetime_rules() -> impl Strategy<Value = Vec<Value>> {
     let scope = Scope {
         numbers: vec!["r0".into(), "r3".into()],
@@ -1294,7 +1325,7 @@ fn lifetime_rules() -> impl Strategy<Value = Vec<Value>> {
         Just(Some(derived("r0"))),
         Just(Some(json!({ "kind": "period_start" }))),
     ];
-    (rules(false), reduction, beside).prop_map(|(mut rules, reduction, beside)| {
+    (rules(false), reduction, beside).prop_map(|((mut rules, _), reduction, beside)| {
         let expr = match beside {
             Some(beside) => items("add", vec![reduction, beside]),
             None => reduction,
@@ -1517,11 +1548,9 @@ fn every_generated_program_refuses_a_huge_root_row_count() {
         select(HUGE_ROWS.to_vec()),
     );
     runner(512)
-        .run(&strategy, |(rules, mode, rows)| {
+        .run(&strategy, |((rules, _), mode, rows)| {
             let outputs = names(&rules);
-            let Ok(program) = compile(&program(rules, false)) else {
-                return Err(TestCaseError::reject("dense does not compile this program"));
-            };
+            let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let result = execute(&program, mode, empty_batch(rows), &outputs);
             match &result {
                 Err(error) => prop_assert_eq!(refused_count(error), Some(rows), "{:?}", error),
@@ -1543,9 +1572,7 @@ fn every_generated_lifetime_program_refuses_a_huge_root_row_count() {
     );
     runner(256)
         .run(&strategy, |(rules, mode, rows, periods)| {
-            let Ok(program) = compile(&program(rules, false)) else {
-                return Err(TestCaseError::reject("dense does not compile this program"));
-            };
+            let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let batches = (0..periods).map(|_| empty_batch(rows)).collect();
             let result = execute_lifetime(&program, mode, batches, &["life".to_string()]);
             match &result {
@@ -1560,23 +1587,18 @@ fn every_generated_lifetime_program_refuses_a_huge_root_row_count() {
 #[test]
 fn a_cap_changes_a_result_only_by_refusing_a_count() {
     let _serial = serial();
-    let strategy = (any::<bool>())
-        .prop_flat_map(|relations| (rules(relations), batch(relations), Just(relations)))
-        .prop_flat_map(|(rules, batch, relations)| {
-            (
-                Just(rules),
-                Just(batch),
-                Just(relations),
-                select(MODES.to_vec()),
-                cap(),
-            )
-        });
+    let strategy = (any::<bool>()).prop_flat_map(|relations| {
+        (
+            rules(relations),
+            batch(relations),
+            select(MODES.to_vec()),
+            cap(),
+        )
+    });
     runner(512)
-        .run(&strategy, |(rules, batch, relations, mode, cap)| {
+        .run(&strategy, |((rules, chosen), batch, mode, cap)| {
             let outputs = names(&rules);
-            let Ok(program) = compile(&program(rules, relations)) else {
-                return Err(TestCaseError::reject("dense does not compile this program"));
-            };
+            let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
             let counts = counts(&batch);
             let uncapped = execute(&program, mode, batch.clone(), &outputs);
             let result = capped(cap.unwrap_or(usize::MAX), || {
@@ -1603,9 +1625,7 @@ fn a_cap_changes_a_lifetime_result_only_by_refusing_a_count() {
     );
     runner(256)
         .run(&strategy, |(rules, batches, mode, cap)| {
-            let Ok(program) = compile(&program(rules, false)) else {
-                return Err(TestCaseError::reject("dense does not compile this program"));
-            };
+            let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let counts = vec![batches[0].row_count];
             let outputs = vec!["life".to_string()];
             let uncapped = execute_lifetime(&program, mode, batches.clone(), &outputs);
