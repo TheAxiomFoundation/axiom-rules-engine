@@ -128,6 +128,43 @@ def test_unconfirmed_offsets_raise_instead_of_aborting(tmp_path) -> None:
         )
 
 
+HOUSEHOLD_INCOME_MODULE = """\
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: household_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(member_of_household.income)
+"""
+
+
+@pytest.mark.parametrize("module", [HOUSEHOLD_SIZE_MODULE, HOUSEHOLD_INCOME_MODULE])
+def test_issue_227_unconfirmed_counts_raise(tmp_path, module) -> None:
+    # #227: with no related input, or the one read input omitted, offsets
+    # claiming i64::MAX or u32::MAX related rows used to panic or abort while
+    # allocating owners.
+    program = _compile(tmp_path, module, "Household")
+    key = _only_relation_key(program)
+    for claimed in (2**63 - 1, 2**32 - 1):
+        with pytest.raises(RuntimeError, match=f"offsets end at {claimed}.*no related column"):
+            program.execute(
+                **MONTH,
+                inputs={},
+                relations={
+                    key: DenseRelationBatch(offsets=np.array([0, claimed]), inputs={})
+                },
+            )
+
+
 def test_stated_count_larger_than_memory_raises(tmp_path) -> None:
     # A stated count is trusted, but binding reserves its owners fallibly, so
     # one no host can allocate raises instead of aborting.

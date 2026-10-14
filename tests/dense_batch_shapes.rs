@@ -366,20 +366,57 @@ fn count_only_relation_without_related_data_needs_a_stated_count() {
 
 #[test]
 fn unconfirmed_huge_offsets_are_refused_before_counting() {
-    // Offsets [0, usize::MAX] used to report a household size of -1 (the
-    // unmasked count was cast with `as i64`). Binding now refuses them: no
-    // related column or stated count confirms usize::MAX related rows.
+    // #227, no related input: offsets [0, usize::MAX] used to panic with
+    // "capacity overflow" allocating owners, and [0, u32::MAX] to abort on a
+    // ~34 GB request. (Before owners existed, the unmasked count cast
+    // usize::MAX to -1.) No related column or stated count confirms either.
     let program = compile(HOUSEHOLD_SIZE_RULESPEC, "Household");
-    let result = run(
-        &program,
-        DenseBatchSpec {
-            row_count: 1,
-            inputs: HashMap::new(),
-            relations: relation(&program, vec![0, usize::MAX], vec![]),
-        },
-        "household_size",
-    );
-    assert_type_mismatch(result, &["member_of_household", "no related column"]);
+    for claimed in [usize::MAX, u32::MAX as usize] {
+        let result = run(
+            &program,
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: relation(&program, vec![0, claimed], vec![]),
+            },
+            "household_size",
+        );
+        assert_type_mismatch(
+            result,
+            &[
+                "member_of_household",
+                &format!("offsets end at {claimed}"),
+                "no related column",
+            ],
+        );
+    }
+}
+
+#[test]
+fn omitted_related_columns_do_not_confirm_huge_offsets() {
+    // #227, omitted column: the program reads `income`, but an absent column
+    // is a missing input on the rows that read it, not a confirmation of the
+    // offsets. Binding refuses them before allocating owners.
+    let program = compile(HOUSEHOLD_INCOME_RULESPEC, "Household");
+    for claimed in [usize::MAX, u32::MAX as usize] {
+        let result = run(
+            &program,
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: relation(&program, vec![0, claimed], vec![]),
+            },
+            "household_income",
+        );
+        assert_type_mismatch(
+            result,
+            &[
+                "member_of_household",
+                &format!("offsets end at {claimed}"),
+                "no related column",
+            ],
+        );
+    }
 }
 
 #[test]
