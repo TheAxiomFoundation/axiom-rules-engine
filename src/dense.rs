@@ -1220,6 +1220,132 @@ fn cyclic_dependency(name: &str) -> DenseCompileError {
     ))
 }
 
+/// A source graph is a forest directed from each source to its derived
+/// relations. DFS intervals let a membership query find the first edge below
+/// its tested ancestor without walking or retaining every intervening pair.
+struct CandidateAncestry<'a> {
+    scopes: HashMap<&'a str, CandidateScope>,
+    #[cfg(test)]
+    visits: usize,
+}
+
+struct CandidateScope {
+    start: usize,
+    end: usize,
+    /// Direct children, in DFS order; their intervals are disjoint.
+    children: Vec<CandidateBranch>,
+}
+
+struct CandidateBranch {
+    start: usize,
+    end: usize,
+    current_slot: usize,
+    related_slot: usize,
+}
+
+impl<'a> CandidateAncestry<'a> {
+    fn new(program: &'a Program) -> Self {
+        let mut children: HashMap<&str, Vec<(&str, usize, usize)>> = HashMap::new();
+        let mut derived = HashSet::new();
+        for (name, schema) in &program.relations {
+            children.entry(name).or_default();
+            if let Some(derivation) = &schema.derivation {
+                derived.insert(name.as_str());
+                children
+                    .entry(&derivation.source_relation)
+                    .or_default()
+                    .push((name, derivation.current_slot, derivation.related_slot));
+            }
+        }
+        let mut intervals: HashMap<&str, (usize, usize)> = HashMap::new();
+        let mut next = 0;
+        for root in children
+            .keys()
+            .copied()
+            .filter(|name| !derived.contains(name))
+        {
+            let mut stack = vec![(root, false)];
+            while let Some((name, exiting)) = stack.pop() {
+                if exiting {
+                    intervals.get_mut(name).expect("entered before exiting").1 = next;
+                } else {
+                    intervals.insert(name, (next, next));
+                    next += 1;
+                    stack.push((name, true));
+                    for &(child, _, _) in children[name].iter().rev() {
+                        stack.push((child, false));
+                    }
+                }
+            }
+        }
+        // Cyclic components have no root and receive no interval. The
+        // compilation walk still refuses them with its existing diagnostic.
+        let scopes = intervals
+            .iter()
+            .map(|(&name, &(start, end))| {
+                let branches = children[name]
+                    .iter()
+                    .filter_map(|&(child, current_slot, related_slot)| {
+                        let &(start, end) = intervals.get(child)?;
+                        Some(CandidateBranch {
+                            start,
+                            end,
+                            current_slot,
+                            related_slot,
+                        })
+                    })
+                    .collect();
+                (
+                    name,
+                    CandidateScope {
+                        start,
+                        end,
+                        children: branches,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            scopes,
+            #[cfg(test)]
+            visits: next,
+        }
+    }
+
+    fn holds(
+        &mut self,
+        scope: &str,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> bool {
+        #[cfg(test)]
+        {
+            self.visits += 1;
+        }
+        let (Some(scope), Some(relation)) = (self.scopes.get(scope), self.scopes.get(relation))
+        else {
+            return false;
+        };
+        if scope.start <= relation.start || scope.start >= relation.end {
+            return false;
+        }
+        let child = relation.children.partition_point(|child| {
+            #[cfg(test)]
+            {
+                self.visits += 1;
+            }
+            child.start <= scope.start
+        });
+        child.checked_sub(1).is_some_and(|child| {
+            let child = &relation.children[child];
+            scope.start < child.end
+                && child.current_slot == current_slot
+                && child.related_slot == related_slot
+        })
+    }
+}
+
 struct DenseCompiler<'a> {
     program: &'a Program,
     root_entity: String,
@@ -1249,9 +1375,10 @@ struct DenseCompiler<'a> {
     /// `where` clauses, in `sum` values and in the rules a predicate reads,
     /// which explain evaluates without that scope.
     membership_scope: Option<String>,
-    /// Answers of [`Self::holds_for_every_candidate`] by chain relation and
-    /// tested relation and slots.
+    /// Only explicitly requested membership answers, rather than every
+    /// intermediate scope/target pair along their source paths.
     candidate_membership: HashMap<(String, String, usize, usize), bool>,
+    candidate_ancestry: Option<CandidateAncestry<'a>>,
     /// Expression levels on the stack since the driver's current task began.
     depth: usize,
     /// The level at which a rule not yet compiled is deferred to the driver
@@ -1312,6 +1439,7 @@ impl<'a> DenseCompiler<'a> {
             related_rules: Vec::new(),
             membership_scope: None,
             candidate_membership: HashMap::new(),
+            candidate_ancestry: None,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             inline_depth: 0,
@@ -2448,9 +2576,10 @@ impl<'a> DenseCompiler<'a> {
     /// slots of a derived relation, and dense declines it rather than rely on
     /// that.
     ///
-    /// Every relation the walk passes gets the same answer, so answers are
-    /// kept: when each link of a long chain tests the same relation, each
-    /// walk stops at the link below instead of re-walking the chain.
+    /// The source forest is indexed once. A query checks the target's direct
+    /// child whose subtree contains `scope`, then that child's source slots.
+    /// This takes constant work per query on chains, including when every
+    /// link tests a different ancestor, and retains only linear forest state.
     fn holds_for_every_candidate(
         &mut self,
         scope: &str,
@@ -2458,43 +2587,20 @@ impl<'a> DenseCompiler<'a> {
         current_slot: usize,
         related_slot: usize,
     ) -> bool {
-        let program = self.program;
-        let mut walked = Vec::new();
-        let mut name = scope;
-        let holds = loop {
-            let key = (
-                name.to_string(),
-                relation.to_string(),
-                current_slot,
-                related_slot,
-            );
-            if let Some(&holds) = self.candidate_membership.get(&key) {
-                break holds;
-            }
-            let Some(derivation) = program
-                .relations
-                .get(name)
-                .and_then(|schema| schema.derivation.as_ref())
-            else {
-                break false;
-            };
-            // A validated chain names each relation once; the bound only ends
-            // a cyclic chain in a program that skipped validation.
-            if walked.len() >= program.relations.len() {
-                break false;
-            }
-            walked.push(key);
-            if derivation.source_relation == relation
-                && derivation.current_slot == current_slot
-                && derivation.related_slot == related_slot
-            {
-                break true;
-            }
-            name = &derivation.source_relation;
-        };
-        for key in walked {
-            self.candidate_membership.insert(key, holds);
+        let key = (
+            scope.to_string(),
+            relation.to_string(),
+            current_slot,
+            related_slot,
+        );
+        if let Some(&holds) = self.candidate_membership.get(&key) {
+            return holds;
         }
+        let ancestry = self
+            .candidate_ancestry
+            .get_or_insert_with(|| CandidateAncestry::new(self.program));
+        let holds = ancestry.holds(scope, relation, current_slot, related_slot);
+        self.candidate_membership.insert(key, holds);
         holds
     }
 
@@ -3638,7 +3744,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             if schema.parent_relation.is_some() {
                 members = self.without_failed_roots(link, &members, &root_errors);
             }
-            if let Some(filter) = &schema.filter {
+            if let Some(filter) = &schema.filter
+                && !members.is_empty()
+            {
                 let (holds, filter_errors) = self.eval_related_predicate(link, filter, &members)?;
                 let live = members.without(&filter_errors);
                 root_errors.absorb(self.lift_errors(link, &filter_errors));

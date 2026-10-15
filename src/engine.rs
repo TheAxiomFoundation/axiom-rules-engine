@@ -499,8 +499,11 @@ struct DerivedMembers {
     /// The records resolving these members made, in order, for replay on
     /// each rule evaluation that asks for them.
     effects: Vec<TraceEffect>,
-    /// Rule evaluations the effects are already recorded on.
-    recorded_on: HashSet<CacheKey>,
+    /// The most recent rule evaluation these effects were recorded on.
+    /// Keeping one caller bounds replay bookkeeping independently of the
+    /// number of callers. Older callers already deduplicate the records in
+    /// their trace index if they ask for these effects again.
+    recorded_on: Vec<CacheKey>,
 }
 
 /// A derived relation's predicate part-way through its candidates, stopped
@@ -584,7 +587,7 @@ pub struct Engine<'a> {
     /// each with the number of active evaluations when it began: only records
     /// made at that depth belong to the relation rather than to a rule its
     /// predicate evaluates.
-    member_captures: Vec<(usize, Vec<TraceEffect>)>,
+    member_captures: Vec<(DerivedMembersKey, usize, Vec<TraceEffect>)>,
     /// Derived-relation resolutions running on the native stack, and how
     /// many may ([`RELATION_NESTING_LIMIT`] outside tests).
     relation_depth: usize,
@@ -629,13 +632,18 @@ pub struct Engine<'a> {
 /// (`parent`) as well as by what it evaluates: a loop's trace records go to
 /// that evaluation, and the retry of the same evaluation already holds them
 /// (records are deduplicated by first occurrence), while any other evaluation
-/// walks the loop itself and records them there, as recursion does.
+/// walks the loop itself and records them there, as recursion does. A fold
+/// inside a relation predicate is also keyed by the owning resolution, since
+/// separate owners must each capture a shared candidate's trace effects.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Step {
     site: Site,
     entity_id: String,
     period: Period,
     parent: Option<CacheKey>,
+    /// A predicate's folds belong to the relation resolution capturing their
+    /// effects. Two owners can test the same candidate in the same rule.
+    owner: Option<DerivedMembersKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1093,7 +1101,7 @@ impl<'a> Engine<'a> {
             return;
         }
         let depth = self.active_evaluations.len();
-        if let Some((capture_depth, effects)) = self.member_captures.last_mut()
+        if let Some((_, capture_depth, effects)) = self.member_captures.last_mut()
             && *capture_depth == depth
         {
             effects.push(effect);
@@ -1139,10 +1147,22 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// A compact reference to these members' trace effects. Empty resolutions
+    /// contribute nothing; a resolution that only forwards its source shares
+    /// that source's summary directly. Source edges are canonicalized as they
+    /// are captured, so arbitrarily long forwarding chains take one lookup.
+    fn member_effect(&self, key: &DerivedMembersKey) -> Option<TraceEffect> {
+        match self.derived_members.get(key)?.effects.as_slice() {
+            [] => None,
+            [TraceEffect::Members(source)] => Some(TraceEffect::Members(source.clone())),
+            _ => Some(TraceEffect::Members(key.clone())),
+        }
+    }
+
     /// Record on `parent` everything resolving `key` recorded, in order,
-    /// expanding the members it read in place. Members already replayed on
-    /// `parent` are skipped whole: their records are there already. The walk
-    /// keeps its own stack, since a relation chain nests members per link.
+    /// expanding the members it read in place. A summary most recently
+    /// replayed on `parent` is skipped whole. The walk keeps its own stack,
+    /// since an effectful relation chain can nest summaries per link.
     fn replay_members(&mut self, parent: &CacheKey, key: DerivedMembersKey) {
         if !self.mark_replayed(&key, parent) {
             return;
@@ -1170,9 +1190,15 @@ impl<'a> Engine<'a> {
     }
 
     fn mark_replayed(&mut self, key: &DerivedMembersKey, parent: &CacheKey) -> bool {
-        self.derived_members
-            .get_mut(key)
-            .is_some_and(|members| members.recorded_on.insert(parent.clone()))
+        let Some(members) = self.derived_members.get_mut(key) else {
+            return false;
+        };
+        if members.recorded_on.first() == Some(parent) {
+            return false;
+        }
+        members.recorded_on.clear();
+        members.recorded_on.push(parent.clone());
+        true
     }
 
     fn record_skipped_scalar_dependencies(
@@ -1788,6 +1814,9 @@ impl<'a> Engine<'a> {
             entity_id: entity_id.to_string(),
             period: period.clone(),
             parent: self.active_evaluations.last().cloned(),
+            owner: self.member_captures.last().and_then(|(owner, depth, _)| {
+                (*depth == self.active_evaluations.len()).then(|| owner.clone())
+            }),
         }
     }
 
@@ -2216,7 +2245,9 @@ impl<'a> Engine<'a> {
             }
             self.resolve_members(key.clone())?;
         }
-        self.record_effect(TraceEffect::Members(key.clone()));
+        if let Some(effect) = self.member_effect(&key) {
+            self.record_effect(effect);
+        }
         self.derived_members
             .get(&key)
             .expect("resolution memoizes the members it was asked for")
@@ -2254,7 +2285,7 @@ impl<'a> Engine<'a> {
                     DerivedMembers {
                         result: Err(cyclic_relation_error(&needed.relation)),
                         effects: Vec::new(),
-                        recorded_on: HashSet::new(),
+                        recorded_on: Vec::new(),
                     },
                 );
             } else {
@@ -2332,7 +2363,7 @@ impl<'a> Engine<'a> {
                             DerivedMembers {
                                 result: Err(error.clone()),
                                 effects: Vec::new(),
-                                recorded_on: HashSet::new(),
+                                recorded_on: Vec::new(),
                             },
                         );
                     }
@@ -2362,7 +2393,7 @@ impl<'a> Engine<'a> {
                             DerivedMembers {
                                 result: Err(error),
                                 effects,
-                                recorded_on: HashSet::new(),
+                                recorded_on: Vec::new(),
                             },
                         );
                         chain.pop();
@@ -2410,7 +2441,9 @@ impl<'a> Engine<'a> {
                 .expect("a source's members resolve before the relation's")
                 .result
                 .clone();
-            effects.push(TraceEffect::Members(source_key));
+            if let Some(effect) = self.member_effect(&source_key) {
+                effects.push(effect);
+            }
             match result {
                 Ok(ids) => candidates.extend(ids.iter().cloned()),
                 Err(error) => return Err((error, effects)),
@@ -2442,7 +2475,7 @@ impl<'a> Engine<'a> {
             effects,
         } = pending;
         self.member_captures
-            .push((self.active_evaluations.len(), effects));
+            .push((level.clone(), self.active_evaluations.len(), effects));
         let current_entity = derivation
             .slot_entities
             .get(derivation.current_slot)
@@ -2478,7 +2511,7 @@ impl<'a> Engine<'a> {
                     // A finished aggregation is reused on retry and makes
                     // no trace records again. Keep the records it already
                     // made; replay deduplicates repeated records in order.
-                    let (_, effects) = self
+                    let (_, _, effects) = self
                         .member_captures
                         .pop()
                         .expect("the capture pushed above");
@@ -2500,7 +2533,7 @@ impl<'a> Engine<'a> {
                 Err(Interrupt::Defer(_)) => unreachable!("deferrals are saved for retry above"),
             }
         }
-        let (_, effects) = self
+        let (_, _, effects) = self
             .member_captures
             .pop()
             .expect("the capture pushed above");
@@ -2509,7 +2542,7 @@ impl<'a> Engine<'a> {
             DerivedMembers {
                 result: failure.map_or_else(|| Ok(kept.into()), Err),
                 effects,
-                recorded_on: HashSet::new(),
+                recorded_on: Vec::new(),
             },
         );
         Ok(())
@@ -3168,6 +3201,241 @@ mod relation_resolution_tests {
             );
         }
         (program, dataset)
+    }
+
+    #[test]
+    fn review_shared_candidate_fold_preserves_cached_relation_trace() {
+        let (mut program, _) = deep_chain(1, DeepLink::Source, false);
+        for name in ["owners", "items"] {
+            program.relations.insert(
+                name.to_string(),
+                RelationSchema {
+                    name: name.to_string(),
+                    arity: 2,
+                    slot_entities: vec!["Node".to_string(), "Node".to_string()],
+                    derivation: None,
+                },
+            );
+        }
+        program.derived.insert(
+            "p".to_string(),
+            rule("p", ScalarExpr::Literal(ScalarValue::Integer(1))),
+        );
+        program
+            .derived
+            .insert("other".to_string(), rule("other", count("r0".to_string())));
+        program.derived.get_mut("head").unwrap().semantics =
+            DerivedSemantics::Scalar(ScalarExpr::CountRelated {
+                relation: "owners".to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                where_clause: Some(Box::new(JudgmentExpr::Comparison {
+                    left: count("r0".to_string()),
+                    op: ComparisonOp::Gt,
+                    right: ScalarExpr::Literal(ScalarValue::Integer(0)),
+                })),
+            });
+        program
+            .relations
+            .get_mut("r0")
+            .unwrap()
+            .derivation
+            .as_mut()
+            .unwrap()
+            .predicate = JudgmentExpr::Comparison {
+            left: ScalarExpr::CountRelated {
+                relation: "items".to_string(),
+                current_slot: 0,
+                related_slot: 1,
+                where_clause: Some(Box::new(JudgmentExpr::Comparison {
+                    left: ScalarExpr::Derived("p".to_string()),
+                    op: ComparisonOp::Eq,
+                    right: ScalarExpr::Literal(ScalarValue::Integer(1)),
+                })),
+            },
+            op: ComparisonOp::Eq,
+            right: ScalarExpr::Literal(ScalarValue::Integer(1)),
+        };
+        let period = Period::month(2026, 1);
+        let interval = Interval::covering(&period);
+        let mut dataset = DataSet::default();
+        for (name, left, right) in [
+            ("owners", "root", "A"),
+            ("owners", "root", "B"),
+            ("base", "A", "X"),
+            ("base", "B", "X"),
+            ("items", "X", "Y"),
+        ] {
+            dataset.add_relation(
+                name,
+                vec![left.to_string(), right.to_string()],
+                interval.clone(),
+            );
+        }
+        let run = |recursive| {
+            let mut engine = Engine::new(&program, &dataset);
+            engine.recursive_relation_oracle = recursive;
+            engine.suspend_depth = usize::MAX;
+            assert_eq!(
+                engine.evaluate_scalar("head", "root", &period).unwrap(),
+                ScalarValue::Integer(2)
+            );
+            assert_eq!(
+                engine.evaluate_scalar("other", "B", &period).unwrap(),
+                ScalarValue::Integer(1)
+            );
+            let key = super::CacheKey {
+                derived: "other".to_string(),
+                entity_id: "B".to_string(),
+                period: period.clone(),
+            };
+            engine
+                .execution_trace
+                .get(&key)
+                .unwrap()
+                .dependencies
+                .clone()
+        };
+        let recursive = run(true);
+        let iterative = run(false);
+        assert_eq!(recursive.len(), 1, "oracle must read p(Y)");
+        assert_eq!(
+            iterative, recursive,
+            "cached relation r0(B) must retain the p(Y) dependency its fold reused"
+        );
+    }
+
+    #[test]
+    fn review_empty_chain_trace_replay_bookkeeping_is_linear() {
+        let mut measurements = Vec::new();
+        for links in [64, 256] {
+            let (mut program, dataset) = deep_chain(links, DeepLink::Source, false);
+            for index in 0..links {
+                let name = format!("out{index}");
+                program
+                    .derived
+                    .insert(name.clone(), rule(&name, count(format!("r{index}"))));
+            }
+            let period = Period::month(2026, 1);
+            let mut engine = Engine::new(&program, &dataset);
+            for index in 0..links {
+                assert_eq!(
+                    engine
+                        .evaluate_scalar(&format!("out{index}"), "a", &period)
+                        .unwrap(),
+                    ScalarValue::Integer(2)
+                );
+            }
+            assert!(
+                engine
+                    .execution_trace
+                    .values()
+                    .all(|trace| trace.dependencies.is_empty()
+                        && trace.not_evaluated_dependencies.is_empty()
+                        && trace.parameter_reads.is_empty())
+            );
+            let marks: usize = engine
+                .derived_members
+                .values()
+                .map(|members| members.recorded_on.len())
+                .sum();
+            let effects: usize = engine
+                .derived_members
+                .values()
+                .map(|members| members.effects.len())
+                .sum();
+            eprintln!(
+                "review empty trace chain: {links} links/output rules, {marks} retained replay marks, {effects} retained effects"
+            );
+            measurements.push((links, marks, effects));
+        }
+        for (links, marks, effects) in measurements {
+            assert_eq!(marks, 0, "no replay marks for {links} effect-free links");
+            assert_eq!(effects, 0, "no replay edges for {links} effect-free links");
+        }
+    }
+
+    #[test]
+    fn many_callers_share_effectful_chain_trace_summaries() {
+        let mut measurements = Vec::new();
+        for links in [64, 256] {
+            let (mut program, dataset) = deep_chain(links, DeepLink::Source, false);
+            program.derived.insert(
+                "p".to_string(),
+                rule("p", ScalarExpr::Literal(ScalarValue::Integer(1))),
+            );
+            program.derived.get_mut("p").unwrap().entity = "Candidate".to_string();
+            for relation in program.relations.values_mut() {
+                relation.slot_entities[1] = "Candidate".to_string();
+                if let Some(derivation) = relation.derivation.as_mut() {
+                    derivation.slot_entities[1] = "Candidate".to_string();
+                }
+            }
+            program
+                .relations
+                .get_mut(&format!("r{}", links - 1))
+                .unwrap()
+                .derivation
+                .as_mut()
+                .unwrap()
+                .predicate = JudgmentExpr::Comparison {
+                left: ScalarExpr::Derived("p".to_string()),
+                op: ComparisonOp::Eq,
+                right: ScalarExpr::Literal(ScalarValue::Integer(1)),
+            };
+            for index in 0..links {
+                let name = format!("out{index}");
+                program
+                    .derived
+                    .insert(name.clone(), rule(&name, count(format!("r{index}"))));
+            }
+            let period = Period::month(2026, 1);
+            let mut engine = Engine::new(&program, &dataset);
+            for index in 0..links {
+                let output = format!("out{index}");
+                assert_eq!(
+                    engine.evaluate_scalar(&output, "a", &period).unwrap(),
+                    ScalarValue::Integer(2)
+                );
+                let key = super::CacheKey {
+                    derived: output,
+                    entity_id: "a".to_string(),
+                    period: period.clone(),
+                };
+                let dependencies = &engine.execution_trace[&key].dependencies;
+                assert_eq!(
+                    dependencies
+                        .iter()
+                        .map(|key| (key.derived.as_str(), key.entity_id.as_str()))
+                        .collect::<Vec<_>>(),
+                    [("p", "a"), ("p", "b")]
+                );
+            }
+            let marks: usize = engine
+                .derived_members
+                .values()
+                .map(|members| members.recorded_on.len())
+                .sum();
+            let effects: usize = engine
+                .derived_members
+                .values()
+                .map(|members| members.effects.len())
+                .sum();
+            eprintln!(
+                "effectful trace chain: {links} links/callers, {marks} retained replay marks, {effects} retained effects"
+            );
+            measurements.push((links, marks, effects));
+        }
+        for (links, marks, effects) in measurements {
+            assert_eq!(
+                marks, 1,
+                "all forwarding links share one summary with one recent caller ({links} links)"
+            );
+            assert!(
+                effects <= 2 * links,
+                "{effects} retained effects for {links} links"
+            );
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ struct Link {
     parent: Option<usize>,
     threshold: i64,
     test_base: bool,
+    test_ancestor: Option<usize>,
     divide: bool,
 }
 
@@ -68,6 +69,13 @@ fn program(links: &[Link], outputs: &[usize], masked: bool) -> Program {
         if link.test_base {
             predicates.push(JudgmentExpr::RelationMember {
                 relation: "base".to_string(),
+                current_slot: 0,
+                related_slot: 1,
+            });
+        }
+        if let Some(ancestor) = link.test_ancestor {
+            predicates.push(JudgmentExpr::RelationMember {
+                relation: format!("link{ancestor}"),
                 current_slot: 0,
                 related_slot: 1,
             });
@@ -178,6 +186,7 @@ fn chain(length: usize) -> Vec<Link> {
             parent: index.checked_sub(1),
             threshold: 0,
             test_base: true,
+            test_ancestor: (index > 0).then_some(index / 2),
             divide: false,
         })
         .collect()
@@ -188,6 +197,104 @@ fn dense_compiler_walks_20_000_source_links_directly() {
     let program = program(&chain(LINKS), &[LINKS - 1], false);
     let dense = compile(&program).expect("a deep source chain compiles");
     assert_eq!(dense.relations.len(), LINKS);
+}
+
+#[test]
+fn review_dense_candidate_membership_cache_is_linear_in_source_links() {
+    let mut measurements = Vec::new();
+    for length in [128_usize, 512] {
+        let mut links = chain(length);
+        for link in &mut links {
+            link.test_base = false;
+        }
+        let candidate = program(&links, &[length - 1], false);
+        let mut compiler = DenseCompiler::new(&candidate, "Household".to_string()).unwrap();
+        compiler
+            .compile_derived(&format!("count{}", length - 1))
+            .expect("all queried membership relations are source ancestors");
+        let retained = compiler.candidate_membership.len();
+        let (index_entries, visits) =
+            compiler
+                .candidate_ancestry
+                .as_ref()
+                .map_or((0, usize::MAX), |ancestry| {
+                    let branches = ancestry
+                        .scopes
+                        .values()
+                        .map(|scope| scope.children.len())
+                        .sum::<usize>();
+                    (ancestry.scopes.len() + branches, ancestry.visits)
+                });
+        eprintln!(
+            "membership-cache links={length} entries={retained} ancestry_entries={index_entries} visits={visits}"
+        );
+        measurements.push((length, retained, index_entries, visits));
+    }
+    for (length, retained, index_entries, visits) in measurements {
+        assert!(
+            retained <= length,
+            "retain only actual queries: {retained} entries for {length} links"
+        );
+        assert!(
+            index_entries <= 2 * length + 1,
+            "linear source index: {index_entries} entries for {length} links"
+        );
+        assert!(
+            visits <= 4 * length,
+            "linear indexing and query work: {visits} visits for {length} links"
+        );
+    }
+}
+
+#[test]
+fn empty_dense_source_chains_share_masks_and_skip_later_filters() {
+    let length = 1_000;
+    let width = 1_000;
+    let mut dense = compile(&program(&chain(length), &[length - 1], false)).unwrap();
+    dense.relations[0].filter = Some(CompiledRelatedJudgmentExpr::Literal(false));
+    // A root expression still traverses compiled nodes for an empty mask
+    // unless relation resolution skips filters after the source empties.
+    for relation in &mut dense.relations[1..] {
+        relation.filter = Some(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
+            CompiledJudgmentExpr::Comparison {
+                left: CompiledScalarExpr::Literal(ScalarValue::Integer(1)),
+                op: ComparisonOp::Eq,
+                right: CompiledScalarExpr::Literal(ScalarValue::Integer(1)),
+            },
+        )));
+    }
+    let bound = dense.bind_batch(batch(&[vec![-1; width]])).unwrap();
+    let period = Period::month(2026, 1);
+    let mut executor = DenseExecutor::<Decimal>::new(&dense, &period, bound, false);
+    let (members, errors) = executor
+        .relation_members(length - 1, &RowMask::all(width))
+        .unwrap();
+    assert!(members.is_empty());
+    assert!(errors.is_empty());
+    let cached = executor
+        .relation_members
+        .iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(cached.len(), length);
+    let backing_masks = 1 + cached
+        .windows(2)
+        .filter(|pair| !pair[0].members.shares_storage_with(&pair[1].members))
+        .count();
+    eprintln!(
+        "empty-chain links={length} width={width} cached_masks={} backing_masks={backing_masks} predicate_visits={}",
+        cached.len(),
+        executor.visits
+    );
+    assert!(
+        cached
+            .iter()
+            .all(|entry| entry.members.shares_storage_with(&members))
+    );
+    assert_eq!(
+        executor.visits, 0,
+        "no later predicate expression is reached"
+    );
 }
 
 #[test]
@@ -273,14 +380,50 @@ proptest! {
 
     #[test]
     fn dense_chains_and_shared_parent_dags_match_recursive_semantics(
-        raw in prop::collection::vec((any::<usize>(), -4_i64..6, any::<bool>(), 0_u8..8), 1..12),
+        raw in prop::collection::vec((any::<usize>(), -4_i64..6, any::<bool>(), any::<usize>(), 0_u8..8), 1..12),
         households in prop::collection::vec(prop::collection::vec(-4_i64..6, 0..6), 1..7),
         use_chain in any::<bool>(),
     ) {
-        let links = raw.into_iter().enumerate().map(|(index, (parent, threshold, test_base, divide))| {
+        let mut links = Vec::<Link>::new();
+        for (index, (parent, threshold, test_base, ancestor, divide)) in raw.into_iter().enumerate() {
             let parent = if use_chain { index } else { parent % (index + 1) };
-            Link { parent: parent.checked_sub(1), threshold, test_base, divide: divide == 0 }
-        }).collect::<Vec<_>>();
+            let parent = parent.checked_sub(1);
+            let mut ancestors = Vec::new();
+            let mut next = parent;
+            while let Some(index) = next {
+                ancestors.push(index);
+                next = links[index].parent;
+            }
+            let test_ancestor = (!ancestors.is_empty()).then(|| ancestors[ancestor % ancestors.len()]);
+            links.push(Link { parent, threshold, test_base, test_ancestor, divide: divide == 0 });
+        }
+        // Compare interval lookup with the original source walk for sibling,
+        // descendant and ancestor queries, including different edge slots.
+        let mut oriented = program(&links, &[], false);
+        for index in 0..links.len() {
+            let derivation = oriented.relations.get_mut(&format!("link{index}"))
+                .unwrap().derivation.as_mut().unwrap();
+            derivation.current_slot = index % 2;
+            derivation.related_slot = 1 - index % 2;
+        }
+        let mut compiler = DenseCompiler::new(&oriented, "Household".to_string()).unwrap();
+        for scope in 0..links.len() {
+            for target in std::iter::once("base".to_string()).chain((0..links.len()).map(|index| format!("link{index}"))) {
+                for current_slot in 0..2 {
+                    let related_slot = 1 - current_slot;
+                    let scope = format!("link{scope}");
+                    let mut name = scope.as_str();
+                    let expected = loop {
+                        let Some(derivation) = oriented.relations.get(name).and_then(|relation| relation.derivation.as_ref()) else { break false; };
+                        if derivation.source_relation == target {
+                            break derivation.current_slot == current_slot && derivation.related_slot == related_slot;
+                        }
+                        name = &derivation.source_relation;
+                    };
+                    prop_assert_eq!(compiler.holds_for_every_candidate(&scope, &target, current_slot, related_slot), expected);
+                }
+            }
+        }
         let outputs = (0..links.len()).collect::<Vec<_>>();
         let dense = compile(&program(&links, &outputs, true)).expect("an acyclic graph compiles");
         let requested = outputs.iter().map(|index| format!("count{index}"))
