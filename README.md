@@ -111,9 +111,12 @@ cargo run -- compile-composed \
 
 `compile-composed` requires exact `format: rulespec/v1` and
 `module.kind: composition`, keeps the composition's synthesized root rules
-originless, and permits only canonical atomic imports resolved through the
-explicit roots. Atomic files, declarative ProgramSpecs, relative dependencies,
-and composition files inside a RuleSpec checkout are rejected.
+originless, and permits only canonical imports resolved through the explicit
+roots. Imported compositions are recursively merged on this surface and keep
+their canonical rule origins and source citations; the ordinary atomic loader
+continues to reject them. Atomic entry files, declarative ProgramSpecs,
+relative dependencies, and composition entry files inside a RuleSpec checkout
+are rejected.
 
 Every compiled artifact publishes `metadata.input_catalog`. Each entry records
 the internal runtime `slot`, one deterministic `canonical_request_name`, and all
@@ -125,6 +128,18 @@ loading recomputes the catalog, evaluation order, and fast-path metadata as a
 derived-metadata consistency check against the embedded program. This does not
 provide source-tamper evidence; that belongs to the signed-corpus-release and
 supervisor chain.
+
+`metadata.fast_path` is advisory: it lists the compiling engine's static view
+of which rules contain a construct bulk fast mode declines, and execution never
+reads it (fast mode decides per request and reports any fallback in
+`metadata.fallback_reason`). Because it describes an engine as well as a
+program, loading also accepts the value an earlier engine computed under a
+retired rule set, keeps it byte for byte, and reports a
+`stale_fast_path_metadata` diagnostic; recompiling refreshes it. Since fast
+mode began answering `sum_related` over related derived values, a fresh compile
+no longer lists that blocker. Engines v0.2.0 through v0.2.2 still require it, so
+they reject a newly compiled artifact containing that shape; recompile for them
+or upgrade them.
 
 Run a compiled artifact:
 
@@ -144,6 +159,7 @@ axiom-rules-engine capabilities
 ```json
 {
   "artifact_format_version": 2,
+  "capabilities": ["relation_entity_typing"],
   "engine_version": "0.2.2"
 }
 ```
@@ -151,10 +167,16 @@ axiom-rules-engine capabilities
 Compare that number against the publisher's
 `programs[].compat.requires_engine.artifact_format_version` in the artifact
 manifest. If they differ the artifact will not load, whatever the versions say.
+Its `capabilities` list names contracts beyond the format version: an engine
+listing `relation_entity_typing` refuses a format-2 artifact that executes a
+relation with no declared slot kinds (`axiom-rules-engine migrate artifact`
+types one; see [docs/rulespec.md](docs/rulespec.md#migrating-compiled-artifacts)).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
-name. Queried atomic outputs and relations still use their legal RuleSpec IDs:
+name. Queried atomic outputs and relations still use their legal RuleSpec IDs.
+Relation tuples list entity ids in the relation's declared slot order
+(`program.relations[].slot_entities`; here `[Person, Household]`):
 
 ```json
 {
@@ -179,7 +201,7 @@ name. Queried atomic outputs and relations still use their legal RuleSpec IDs:
     "relations": [
       {
         "name": "us:statutes/7/2012/j#relation.member_of_household",
-        "tuple": ["household:1", "person:1"],
+        "tuple": ["person:1", "household:1"],
         "interval": { "start": "2026-01-01", "end": "2026-02-01" }
       }
     ]

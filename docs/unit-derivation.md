@@ -1,11 +1,15 @@
 # Unit derivation: semantics RFC
 
-**Status: RFC v2 — semantics only, no implementation.** This document is stage 1
-of [#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134):
-the contract a `kind: unit` rule must satisfy before any code exists. Nothing in
-it changes the release line. Supplied membership remains the default and
-continues to work; derivation, when it eventually exists, is opt-in per program
-and off by default. The concrete case worked throughout is 7 CFR 273.1 (SNAP
+**Status: superseded in part, 2026-10-10.** Tiers A and D were ratified on
+2026-08-15 ([ratification](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-5299498361)).
+On 2026-10-10 decision d1265
+([record](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-6102806776))
+replaced the construct this document specifies: a legal unit is now a
+`derived_relation` from an anchor to persons, not a partition that creates
+new entities. § 15 lists which parts of this contract still hold. Read the
+rest as the record of the partition design and of the 7 CFR 273.1 analysis,
+which still applies. Nothing in it changes the release line; supplied
+membership remains the default. What is built is in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
 household composition), from the eCFR text as of 2026-07-01, with
 7 CFR 273.11(c) read for the excluded-member treatment it prescribes.
 
@@ -29,8 +33,9 @@ whose semantics this contract is written to survive.
 RuleSpec can encode what a household gets, but not what a household is.
 Entities and their membership relations arrive as dataset inputs. The law that
 constitutes them — 7 CFR 273.1's purchase-and-prepare rules for SNAP, filing
-units for tax, benefit units elsewhere — cannot be encoded, so every consumer
-computes unit membership outside the engine, in uncited, unversioned code. The
+units for tax, benefit units elsewhere — cannot be encoded in RuleSpec, so a
+consumer of ordinary RuleSpec computes unit membership outside the engine, in
+uncited, unversioned code. The
 single most contested determination in benefits administration happens outside
 the audited, traced machinery.
 
@@ -546,10 +551,15 @@ supplied-wins or derived-wins are both rejected.
   Unknown/Conflict makes the candidate's membership in the view unresolved,
   and complete-list reductions (count, sum) over unresolved candidates are
   Indeterminate with reasons. The current v2 filter pushes a candidate only
-  on `is_holds()`, so an Undetermined predicate silently drops it and a
-  count returns a confident smaller number — precisely the unknown-as-absence
-  behavior this contract forbids. That behavior stays quarantined in v2
-  semantics; the constitution path requires the lifted semantics. Direct
+  on `is_holds()`, so an Undetermined predicate would drop it and a count
+  would return a confident smaller number — precisely the unknown-as-absence
+  behavior this contract forbids. In v2 execution nothing originates
+  Undetermined (it only propagates through `and`, `or` and `not`, and a
+  missing input is an error), so the drop is latent; it becomes live the
+  moment Knowledge states enter the ordinary engine, so the lift
+  ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215))
+  must precede them. `if` conditions and `where` clauses test `is_holds()`
+  the same way. The constitution path requires the lifted semantics. Direct
   records supplied under a derived relation's own name — accepted and
   unioned by the current engine — are likewise excluded from the
   constitution path outside the shadow channel.
@@ -707,7 +717,8 @@ Constitution rules run before unit-scoped rules. Precisely:
   (b)(3)–(b)(6) — classification candidates, bars, attachments, request
   actors — but their full decomposition (thresholds' size keys, provider
   candidates, carry-along nuances, the institution exceptions' children/
-  spouse clauses) requires legal review and is validated in stage 2. The
+  spouse clauses) requires legal review and is validated when 7 CFR 273.1
+  is encoded. The
   earlier draft's claim that these semantics were "complete now" is
   withdrawn; what is fixed now is the operation kinds and their composition
   rules, so that no (b)(3)–(b)(6) provision requires a *new* operation kind.
@@ -721,9 +732,9 @@ Constitution rules run before unit-scoped rules. Precisely:
 The earlier draft listed four decisions and called the rest settled; the
 cross-model audit showed that undercounts. The matrix below is the complete
 set of result-affecting choices, tiered by who resolves them. Tier A is
-ratified now and freezes the contract; tier B entries are resolved during
-stage 2 with cited legal authority, each with conformance tests for the
-chosen branch; tier C entries are per-jurisdiction parameters encoded with
+ratified and freezes the contract; tier B entries are resolved when
+7 CFR 273.1 is encoded, with cited legal authority and conformance tests for
+the chosen branch; tier C entries are per-jurisdiction parameters encoded with
 citations, never engine defaults; tier D are interface decisions ratified
 with tier A. No legal reading may be selected after comparison results are
 observed.
@@ -751,8 +762,8 @@ observed.
 6. **Scoped completeness semantics** for roster and every constitution
    relation family (§ 5.1).
 
-**Tier B — legal interpretation (stage 2, cited authority, both branches
-testable):**
+**Tier B — legal interpretation (when 7 CFR 273.1 is encoded; cited
+authority, both branches testable):**
 
 7. (b)(1)/(b)(2) precedence — does the elderly-disabled separation cross a
    mandatory combination? (§ 3 anchor 1; worked example shows both.)
@@ -799,7 +810,133 @@ testable):**
     emitter's compile-resolved-id boundary, Knowledge normalization at the
     constitution binder, and the lifted `derived_relation` semantics (§ 8).
 
-Ratifying tier A and D fixes the contract; stage 2 of #134 (off-by-default
-prototype, SNAP household pilot in rulespec-us, shadow-channel comparison on
-fixtures satisfying entry 16) then proceeds, resolving tier B with legal
-review as it encodes and parameterizing tier C per jurisdiction.
+Tiers A and D were ratified on 2026-08-15 and fix the contract. Tier B is
+resolved when 7 CFR 273.1 is encoded
+([rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428)),
+with legal review; tier C is parameterized per jurisdiction.
+
+## 14. Implementation status
+
+As of 2026-10-10. Everything below sits behind the off-by-default
+`unit-derivation` Cargo feature; the runtime switch
+(`UnitDerivationConfig.enabled`) is also off by default, and CI runs the
+unit-derivation tests with the feature on (`cargo test --features "schema
+unit-derivation"`).
+
+**Built.**
+
+- **Stage 2 ([#159](https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/159)):**
+  the tier A and D semantics as a Rust library in `src/unit_derivation/`.
+  Plans are the Rust `ConstitutionPlan` type; guards are boolean expressions
+  over supplied facts. Candidate worlds are enumerated exhaustively up to a
+  default cap of 4,096, counted before integrity constraints are applied; a
+  larger space is the named error `UncheckableWorldSpace`, never a sampled
+  answer. No tier-B reading is decided: the (b)(1)/(b)(2)
+  precedence can be declared either way or left unresolved, and every other
+  tier-B term is an explicit plan input. Coverage is synthetic 7 CFR 273.1
+  and 273.11 household shapes plus named tests for each ratified entry.
+- **Stage 3 ([#161](https://github.com/TheAxiomFoundation/axiom-rules-engine/pull/161)):**
+  a typed aggregation-plan grammar (`axiom/unit-aggregation-plan-stage3/1`)
+  and two experimental commands, `compile-unit-aggregation` and
+  `run-unit-aggregation` (the second requires
+  `--enable-experimental-unit-derivation`). Its consumer is the NZ
+  IncomeExplorer comparison: one Family unit derived from explicit, complete
+  partner and dependent-child relation facts, member projections, and
+  Knowledge-lifted family and child reductions. With aggregation moved
+  engine-side, the pinned comparison is byte-identical to the host-side run
+  (`comparison.csv` SHA-256 `ccaa4dcb…4bf2`, receipt in
+  `stage3-nz/parity-proof.json`). That comparison agrees with Treasury to the
+  cent in 1,454 of 1,976 amount and control cells; 416 of those cells echo
+  inputs (wages and hours), so rule outputs agree in 1,038 of 1,560. The
+  other 522 are dispositioned: 520 forecast-vintage against enacted law and
+  2 convention. The NZ consumer came before the SNAP pilot because the NZ
+  certificates in axiom-oracles name this capability as a blocker: six list
+  a host-side aggregation pin and the seventh an unproven person-locality.
+  Stage 3 is the engine side of that blocker. It has not cleared it: on
+  axiom-oracles main (2026-10-10) all seven certificates are still
+  `certified: false` and still list those blockers, and regenerating them is
+  draft [axiom-oracles#493](https://github.com/TheAxiomFoundation/axiom-oracles/pull/493).
+
+**What that covers.** Stage 3 exercises derivation from supplied
+relationship facts, projections, and reductions that keep Unknown and
+Conflict. Constitution from purchase-and-prepare facts (elective cuts,
+blocking, attachments, bars) has met synthetic plans only. An encoding of
+7 CFR 273.1 would be its first real law.
+
+**Not built.**
+
+- RuleSpec has no `kind: unit`. Constitution plans exist only as Rust types
+  and the stage-3 plan grammar, so the NZ family plan lives in
+  `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` and not in a
+  jurisdiction repo.
+- The ordinary engine has no unknown. A missing input is an error unless the
+  rule declares a default, and no expression originates `Undetermined`.
+- Artifacts remain format 2 and do not mark a relation derived or supplied.
+- `run-compiled`, the dense path and the execution trace know nothing of
+  derived units.
+- No SNAP household has been derived from encoded law, and no tier B reading
+  is resolved.
+
+**Direction decided (2026-10-10).** See § 15. The stage-4 plan filed on
+2026-09-27 is withdrawn; its issues are rewritten to the new plan or closed.
+
+## 15. Decision of 2026-10-10
+
+[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134)
+records the design review and decision d1265.
+
+**Why the construct changed.** 42 CFR 435.603(f) defines the Medicaid
+household per individual. For a child and her two unmarried, non-filing
+parents, (f)(3) gives the child a household of all three and each parent a
+household of themselves and the child. The households overlap, so no
+partition of the home expresses them. A relation from an anchor (the
+applicant, return or person the claim is about) to persons does, and covers
+SNAP as the case where the units happen to be disjoint.
+
+**The decision.**
+
+1. A legal unit is a `derived_relation` from an anchor to persons, with
+   membership that can be known in, known out, or unknown.
+2. Tier A entry 1 is amended. Missing facts give sound, conservative bounds:
+   the engine never returns a wrong unit, and it may ask for a fact that
+   would not change the answer. Exact case analysis may be added later.
+3. The surface extends `derived_relation`. A dedicated `kind: unit` may later
+   become shorthand that compiles down to it.
+4. The first pilot is 7 CFR 273.1 for the common case: the meal group, the
+   direct (b)(1) combinations and the (b)(7) filter are derived, and the
+   exceptions are inputs with no default.
+
+Choosing the best lawful composition belongs to the simulation layer. The
+engine evaluates one set of choices and marks which inputs are elections, and
+who makes each one, in the artifact interface block
+([#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155)).
+
+**What still holds from this contract.** Entry numbers refer to the
+ratification matrix in § 13. Scoped completeness (entry 6); separate unknown
+and conflict states; elections with named actors, defaulted only with cited
+authority and otherwise unknown (entry 3); composition kept apart from
+participation (entry 4); refusal of a supplied tuple for a relation the
+program derives (entry 5); the comparison protocol with a ledger frozen
+before results (entry 16); whole-period coverage; no engine default for a
+contested reading; and the 7 CFR 273.1 decomposition in § 3 with its tier B
+and tier C entries (7–15).
+
+**What no longer applies.** The partition pipeline in § 4 (cuts, blocking,
+attachments as set operations), cut discipline (entry 2), the
+content-derived unit ids of entry 17 (its canonical ordering of tuples and
+trace nodes still applies), the entity registry and materialization barrier in
+§§ 8 and 10 (part of entry 18), and admissible-world enumeration as the
+semantics of § 5, which remains a test oracle.
+
+**Plan.**
+
+| Step | Issue |
+|---|---|
+| Artifact interface block, relation provenance, election inputs | [#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155) |
+| Unknown values in the ordinary engine | [#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215) |
+| Endpoint roles, pair-scoped facts, bounded joins | [#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214) |
+| Encoder support | [axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715) |
+| 7 CFR 273.1 common-case pilot | [rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428) |
+| Positive, monotone recursion | [#231](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/231) |
+| NZ family into ordinary RuleSpec; retire `src/unit_derivation` | [#232](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/232) |
+| Dense refusal, trace, output | [#218](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/218), [#219](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/219), [#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220) |

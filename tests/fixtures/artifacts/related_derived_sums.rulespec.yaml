@@ -1,0 +1,55 @@
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: member_income
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: earned_income + unearned_income
+  - name: member_counts
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_income > 0
+  - name: days_in_period
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: days_between(period_start, period_end)
+  - name: household_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: sum(member_of_household.member_income)
+  - name: counted_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: 2025-01-01
+        effective_to: 2025-12-31
+        formula: sum_where(member_of_household, member_income, member_counts)
+      - effective_from: 2026-01-01
+        formula: |-
+          if days_between(period_start, period_end) > 27: sum_where(member_of_household, member_income, member_counts) + household_income
+          else: 0

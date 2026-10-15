@@ -36,8 +36,19 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 pub enum RuleSpecError {
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// A module reached through the import walk failed to deserialize. Names
+    /// the module the YAML belongs to, which may be an import several levels
+    /// below the root a caller asked to load: line and column refer to it.
+    #[error("RuleSpec module `{target}`: yaml parse error: {error}")]
+    ModuleYaml {
+        target: String,
+        error: serde_yaml::Error,
+    },
     #[error("RuleSpec requires exact `format: rulespec/v1`")]
     MissingDiscriminator,
+    /// A module reached through the import walk lacks the discriminator.
+    #[error("RuleSpec module `{target}` requires exact `format: rulespec/v1`")]
+    ModuleMissingDiscriminator { target: String },
     #[error(
         "RuleSpec module `{path}` declares removed top-level `extends`; use `imports` for atomic dependencies and axiom-compose for program composition"
     )]
@@ -80,6 +91,28 @@ pub enum RuleSpecError {
     Source(#[from] crate::source::SourceError),
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
+    /// `name` and `entity` are copied into the generated formula source
+    /// unquoted, so each must lex as exactly one token.
+    #[error("RuleSpec rule {name:?} has {field} {value:?}; it must be exactly one {expected}")]
+    InvalidFormulaField {
+        name: String,
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    /// The generated formula source indents every formula line, which would
+    /// change the value of a string literal that spans a line feed.
+    #[error(
+        "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
+    )]
+    MultilineStringLiteral {
+        name: String,
+        line: usize,
+        col: usize,
+    },
+    /// An unclosed `"""` block would hide the rest of the generated source.
+    #[error("RuleSpec rule `{name}` has a formula whose `\"\"\"` block is never closed")]
+    UnterminatedFormulaBlock { name: String },
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
     UnsupportedRuleKind { name: String, kind: String },
     #[error("RuleSpec rule `{name}` must declare `kind`")]
@@ -252,6 +285,22 @@ pub enum RuleSpecError {
         name: String,
         existing: Vec<String>,
         new: Vec<String>,
+    },
+    #[error(
+        "`{citing}` aggregates relation `{relation}` from entity `{entity}`, but every slot of the relation ({slot_entities:?}) holds `{entity}`, so the aggregation direction is ambiguous. Wrap the relation in a `derived_relation` whose explicit `current_slot` and `related_slot` say which side the rule aggregates from"
+    )]
+    AmbiguousRelationDirection {
+        relation: String,
+        citing: String,
+        entity: String,
+        slot_entities: Vec<String>,
+    },
+    #[error(
+        "derived relation `{relation}` omits `current_slot` or `related_slot`, and the slots its source would default to both hold the same kind ({slot_entities:?}), so its direction cannot be read from the kinds. State `current_slot` and `related_slot` explicitly"
+    )]
+    AmbiguousDerivedRelationSlots {
+        relation: String,
+        slot_entities: Vec<String>,
     },
     #[error(
         "RuleSpec program declares unit `{name}` with conflicting kinds `{first}` and `{second}`; keep one declaration or make repeated declarations identical"
@@ -804,6 +853,33 @@ fn reject_atomic_metadata_declarations(source: &str, path: &str) -> Result<(), R
     Ok(())
 }
 
+#[cfg(feature = "fs")]
+fn validate_composed_dependency_metadata(source: &str, path: &str) -> Result<(), RuleSpecError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let Some(module) = value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("module".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+    let field = |name: &str| module.get(serde_yaml::Value::String(name.to_string()));
+    if field("id").is_some() {
+        return Err(RuleSpecError::ModuleIdUnsupported {
+            path: path.to_string(),
+        });
+    }
+    if let Some(kind) = field("kind")
+        && kind.as_str() != Some("composition")
+    {
+        return Err(RuleSpecError::InvalidComposedProgram {
+            path: path.to_string(),
+            message: "imported module.kind must be exactly `composition` when present".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
     let value: serde_yaml::Value = serde_yaml::from_str(source)?;
     validate_recursive_corpus_value(&value, path)
@@ -963,8 +1039,9 @@ pub fn load_rulespec_file_with_options(
 ///
 /// Unlike an atomic module, the root document is deliberately originless and
 /// may live outside the RuleSpec checkout. It must be an exact composition
-/// document and every dependency directive must already be a canonical atomic
-/// target resolved exclusively through `roots`.
+/// document and every dependency directive must already be a canonical module
+/// target resolved exclusively through `roots`. Dependencies may themselves
+/// be compositions; only this composed-program surface admits them.
 #[cfg(feature = "fs")]
 pub fn load_composed_rulespec_file(
     path: impl AsRef<Path>,
@@ -1007,7 +1084,12 @@ pub fn load_composed_rulespec_file_with_options(
 
     for import in &document.imports {
         let target = canonical_composed_dependency(path, import, "import")?;
-        let imported = load_rulespec_document_from_source(&target, &module_source, &mut context)?;
+        let imported = load_rulespec_document_from_source(
+            &target,
+            &module_source,
+            &mut context,
+            ModuleSurface::Composed,
+        )?;
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
@@ -1043,7 +1125,12 @@ pub fn load_rulespec_with_source_with_options(
 ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
     let root_target = validate_module_target(root_target)?;
     let mut context = SourceLoadContext::default();
-    let document = load_rulespec_document_from_source(&root_target, source, &mut context)?;
+    let document = load_rulespec_document_from_source(
+        &root_target,
+        source,
+        &mut context,
+        ModuleSurface::Atomic,
+    )?;
     document.to_program_spec_with_options(options)
 }
 
@@ -1059,10 +1146,18 @@ struct SourceLoadContext {
     loaded: HashSet<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ModuleSurface {
+    Atomic,
+    #[cfg(feature = "fs")]
+    Composed,
+}
+
 fn load_rulespec_document_from_source(
     target: &str,
     source: &dyn ModuleSource,
     context: &mut SourceLoadContext,
+    surface: ModuleSurface,
 ) -> Result<RulesDocument, RuleSpecError> {
     if context.stack.iter().any(|loading| loading == target) {
         return Err(RuleSpecError::ImportCycle {
@@ -1077,22 +1172,45 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    // Parse once up front so a syntax error names this module and keeps its
+    // position, instead of surfacing as a missing discriminator.
+    if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        return Err(RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        });
+    }
     if !looks_like_rulespec_yaml(&text) {
-        return Err(RuleSpecError::MissingDiscriminator);
+        return Err(RuleSpecError::ModuleMissingDiscriminator {
+            target: target.to_string(),
+        });
     }
     reject_removed_extends(&text, target)?;
     reject_removed_schema_discriminator(&text, target)?;
-    reject_atomic_metadata_declarations(&text, target)?;
+    match surface {
+        ModuleSurface::Atomic => reject_atomic_metadata_declarations(&text, target)?,
+        #[cfg(feature = "fs")]
+        ModuleSurface::Composed => validate_composed_dependency_metadata(&text, target)?,
+    }
     validate_recursive_corpus_contract(&text, target)?;
     context.stack.push(target.to_string());
-    let mut document: RulesDocument = serde_yaml::from_str(&text)?;
-    document.validate_atomic_module_metadata(target)?;
+    let mut document: RulesDocument =
+        serde_yaml::from_str(&text).map_err(|error| RuleSpecError::ModuleYaml {
+            target: target.to_string(),
+            error,
+        })?;
+    match surface {
+        ModuleSurface::Atomic => document.validate_atomic_module_metadata(target)?,
+        #[cfg(feature = "fs")]
+        ModuleSurface::Composed => document.validate_module_metadata(target)?,
+    }
     document.assign_origin_target(Some(target.to_string()));
     let mut combined = RulesDocument::default();
 
     for import in &document.imports {
         let import_target = resolve_import_target(target, import)?;
-        let imported = load_rulespec_document_from_source(&import_target, source, context)?;
+        let imported =
+            load_rulespec_document_from_source(&import_target, source, context, surface)?;
         combined = merge_rules_documents(combined, imported);
     }
 
@@ -2063,7 +2181,39 @@ impl RulesDocument {
         append_missing_units(&mut program, &self.units);
         apply_source_relation_sets(&mut program, &self.rules)?;
         rewrite_filtered_entity_member_aliases(&mut program);
-        crate::relation_direction::resolve(&mut program);
+        let defaulted_slots = self
+            .rules
+            .iter()
+            .filter(|rule| matches!(rule.kind, Some(RuleKind::DerivedRelation)))
+            .filter(|rule| {
+                rule.derived_relation.as_ref().is_some_and(|derived| {
+                    derived.current_slot.is_none() || derived.related_slot.is_none()
+                })
+            })
+            .map(|rule| rule.canonical_relation_id())
+            .collect::<HashSet<_>>();
+        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
+            match error {
+                crate::relation_direction::DirectionError::Aggregate {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousRelationDirection {
+                    relation,
+                    citing,
+                    entity,
+                    slot_entities,
+                },
+                crate::relation_direction::DirectionError::DerivedSlots {
+                    relation,
+                    slot_entities,
+                } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                    relation,
+                    slot_entities,
+                },
+            }
+        })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2293,15 +2443,22 @@ impl RulesDocument {
         let Some(module) = &self.module else {
             return;
         };
+        // A `#` comment ends at a line feed and the text after it would be
+        // lexed as formula source, so every line of a header field goes behind
+        // its own prefix. A value without a line feed is written as before.
         if let Some(title) = &module.title {
-            out.push_str("# title: ");
-            out.push_str(title);
-            out.push('\n');
+            for line in title.split('\n') {
+                out.push_str("# title: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(status) = &module.status {
-            out.push_str("# status: ");
-            out.push_str(status);
-            out.push('\n');
+            for line in status.split('\n') {
+                out.push_str("# status: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(summary) = &module.summary {
             for line in summary.lines() {
@@ -2317,6 +2474,101 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    /// `name` and `entity` are written into the formula source unquoted, so
+    /// the lexer must read each as exactly one token: more tokens could
+    /// declare other rules, and a comment or `"""` block would silently drop
+    /// the rest of the value. A name must also match exactly, because later
+    /// stages find each rule's parameter or output by its YAML name.
+    fn validate_source_name(&self) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(&self.name, true) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "name",
+            value: self.name.clone(),
+            expected: "identifier or path",
+        })
+    }
+
+    /// Surrounding whitespace in an entity lexes to nothing and has always
+    /// been accepted, so only the text inside it must be one identifier.
+    fn validate_source_entity(&self, entity: &str) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(
+            entity.trim_matches(|c: char| c.is_ascii_whitespace()),
+            false,
+        ) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "entity",
+            value: entity.to_string(),
+            expected: "identifier",
+        })
+    }
+
+    /// `write_formula_definition` splits each formula at line feeds, indents
+    /// every line and trims its trailing whitespace. Between tokens that
+    /// changes only whitespace. Reject the two cases where it changes the
+    /// program: a string literal containing a line feed, whose value the
+    /// rewrite would change, and an unclosed `"""` block, which ends at the end
+    /// of the formula's own parse but would hide every later rule in the
+    /// generated source. `written` is the formula as written; it is trimmed
+    /// here as the writer trims it, and error positions refer to `written`.
+    fn validate_formula_source(&self, written: &str) -> Result<(), RuleSpecError> {
+        use crate::formula::{Lexer, TokType};
+
+        let formula = written.trim();
+        if !formula.contains('\n') && !formula.contains("\"\"\"") {
+            return Ok(());
+        }
+        // Lex with a sentinel on a line of its own after the formula. It is
+        // only read as a token at that line, column 1 if every `"""` block in
+        // the formula was closed.
+        const END: &str = "__rulespec_formula_end__";
+        let mut line_offsets = vec![0];
+        line_offsets.extend(formula.match_indices('\n').map(|(offset, _)| offset + 1));
+        let tokens = Lexer::new(&format!("{formula}\n{END}")).tokenise()?;
+        if !tokens.iter().any(|token| {
+            token.ty == TokType::Ident
+                && token.value == END
+                && token.line == line_offsets.len() + 1
+                && token.col == 1
+        }) {
+            return Err(RuleSpecError::UnterminatedFormulaBlock {
+                name: self.name.clone(),
+            });
+        }
+        // Token columns count bytes, so each string's opening quote is at a
+        // known byte offset. Scan its raw bytes to the closing quote.
+        let bytes = formula.as_bytes();
+        for token in tokens.iter().filter(|token| token.ty == TokType::String) {
+            let start = line_offsets[token.line - 1] + token.col - 1;
+            let quote = bytes[start];
+            let mut offset = start + 1;
+            while offset < bytes.len() && bytes[offset] != quote {
+                // Check before skipping an escape: a backslash followed by a
+                // raw line feed is also changed by the rewrite.
+                if bytes[offset] == b'\n'
+                    || (bytes[offset] == b'\\' && bytes.get(offset + 1) == Some(&b'\n'))
+                {
+                    // Point at the opening quote in the formula as written,
+                    // counting characters.
+                    let at = written.len() - written.trim_start().len() + start;
+                    let line_start = written[..at].rfind('\n').map_or(0, |index| index + 1);
+                    return Err(RuleSpecError::MultilineStringLiteral {
+                        name: self.name.clone(),
+                        line: written[..at].matches('\n').count() + 1,
+                        col: written[line_start..at].chars().count() + 1,
+                    });
+                }
+                offset += if bytes[offset] == b'\\' { 2 } else { 1 };
+            }
+        }
+        Ok(())
+    }
+
     fn source_path(&self) -> String {
         self.origin_target
             .clone()
@@ -2698,6 +2950,10 @@ impl RuleDefinition {
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
+        if let Some(entity) = self.entity.as_deref().filter(|value| !value.is_empty()) {
+            self.validate_source_entity(entity)?;
+        }
         let versions = self.effective_versions();
         if versions.is_empty() {
             return Err(RuleSpecError::MissingFormula {
@@ -2734,6 +2990,7 @@ impl RuleDefinition {
                 .ok_or_else(|| RuleSpecError::MissingFormula {
                     name: self.name.clone(),
                 })?;
+            self.validate_formula_source(version.formula.as_deref().unwrap_or(formula))?;
             out.push_str("    from ");
             out.push_str(&start.to_string());
             if let Some(end) = version.effective_to {
@@ -2752,6 +3009,7 @@ impl RuleDefinition {
     }
 
     fn write_formula_stub_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
         let effective_from = self
             .versions
             .iter()
@@ -4035,6 +4293,27 @@ fn write_metadata_raw(out: &mut String, key: &str, value: Option<&str>) {
     out.push('\n');
 }
 
+/// Whether the formula lexer reads `text` as exactly one identifier (or path,
+/// when allowed) spelled exactly `text`. Only identifier bytes reach the
+/// lexer, so quotes and backslashes in a malformed value are never lexed.
+fn is_single_formula_token(text: &str, allow_path: bool) -> bool {
+    use crate::formula::{Lexer, TokType};
+
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'/'))
+        && Lexer::new(text).tokenise().is_ok_and(|tokens| {
+            matches!(
+                tokens.as_slice(),
+                [token, end] if (token.ty == TokType::Ident
+                    || (allow_path && token.ty == TokType::Path))
+                    && token.value == text
+                    && end.ty == TokType::Eof
+            )
+        })
+}
+
 fn quote_formula_string(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -4129,5 +4408,47 @@ fn scalar_value_from_yaml<E: serde::de::Error>(
         other => Err(serde::de::Error::custom(format!(
             "expected scalar parameter value, got {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod source_integrity_properties {
+    use super::{ModuleMetadata, RulesDocument};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+    #[test]
+    fn single_line_title_and_status_keep_the_historical_header_bytes() {
+        let value = || {
+            proptest::collection::vec(
+                any::<char>().prop_filter("no line feed", |character| *character != '\n'),
+                0..64,
+            )
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+        };
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[247; 32]),
+        );
+        runner
+            .run(&(value(), value()), |(title, status)| {
+                let document = RulesDocument {
+                    module: Some(ModuleMetadata {
+                        title: Some(title.clone()),
+                        status: Some(status.clone()),
+                        ..ModuleMetadata::default()
+                    }),
+                    ..RulesDocument::default()
+                };
+                let mut actual = String::new();
+                document.write_header(&mut actual);
+                prop_assert_eq!(actual, format!("# title: {title}\n# status: {status}\n\n"));
+                Ok(())
+            })
+            .expect("a header value without a line feed must keep its exact bytes");
     }
 }

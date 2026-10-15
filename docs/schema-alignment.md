@@ -49,7 +49,7 @@ schema/runtime gaps are explicit:
 
 - `derived_relation` lowers into `ProgramSpec` and executes in explain mode,
   bulk fast mode, and the generic dense compiler for related-input predicates,
-  current/root predicates, membership tests of the relation's own sources
+  current-entity predicates, membership tests of the relation's own sources
   read with their derivation's slots, and composed derived-relation source
   chains. The dense compiler rejects a predicate with any other membership
   test.

@@ -15,6 +15,11 @@ module:
     (reg 20(2) of the 2012 Act) are excluded from the liable count —
     caller pre-applies `is_not_student` on each liable Person.
 rules:
+  - name: liable_person
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Dwelling]
   - name: days_in_fy
     kind: derived
     entity: Dwelling

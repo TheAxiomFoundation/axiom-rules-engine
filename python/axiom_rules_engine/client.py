@@ -12,6 +12,7 @@ from .models import (
     ExecutionRequest,
     ExecutionResponse,
     Program,
+    RelationBinding,
 )
 
 
@@ -137,6 +138,7 @@ class AxiomRulesEngine:
         program: Program,
         dataset: Dataset,
         queries: list[ExecutionQuery],
+        relation_binding: RelationBinding = "strict",
     ) -> ExecutionResponse:
         return self.execute(
             ExecutionRequest(
@@ -144,6 +146,7 @@ class AxiomRulesEngine:
                 program=program,
                 dataset=dataset,
                 queries=queries,
+                relation_binding=relation_binding,
             )
         )
 
@@ -154,6 +157,7 @@ class AxiomRulesEngine:
         artifact_path: str | Path,
         dataset: Dataset,
         queries: list[ExecutionQuery],
+        relation_binding: RelationBinding = "strict",
     ) -> ExecutionResponse:
         return self.execute_compiled(
             artifact_path=artifact_path,
@@ -161,5 +165,6 @@ class AxiomRulesEngine:
                 mode=mode,
                 dataset=dataset,
                 queries=queries,
+                relation_binding=relation_binding,
             ),
         )

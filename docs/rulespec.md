@@ -56,16 +56,16 @@ Supported rule kinds in the current Rust loader:
   every `values` table. Formulas reference them with `table_name[index_expr]`.
 - `derived`: entity-scoped scalar or judgment outputs.
 - `data_relation`: executable runtime predicate declarations with
-  `data_relation.arity`. An optional `data_relation.arguments` list declares
-  one proposed entity kind per tuple slot, in source position order. The list
-  length must equal the arity; that mismatch is always a compile error.
-  Usable entity-kind labels are ASCII UpperCamelCase/alphanumeric. A
-  shape-failing declaration warns in compatibility mode and is treated as
-  undeclared (`slot_entities` remains empty). A well-shaped kind absent from
+  `data_relation.arity` and a `data_relation.arguments` list declaring one
+  entity kind per tuple slot, in tuple order. The list length must equal the
+  arity; that mismatch is always a compile error. The list is required for any
+  relation a rule executes (see [Relation entity typing](#relation-entity-typing));
+  a relation no rule executes may omit it. Usable entity-kind labels are ASCII
+  UpperCamelCase/alphanumeric. A shape-failing declaration warns and is treated
+  as undeclared (`slot_entities` remains empty). A well-shaped kind absent from
   the import-merged program closure also warns, but remains carried verbatim
-  because published modules legitimately declare relation-only kinds.
-  Omitting the list leaves a legacy relation untyped. Dataset relation records
-  use durable ids such as
+  because published modules legitimately declare relation-only kinds. Dataset
+  relation records use durable ids such as
   `us:statutes/7/2012/j#relation.member_of_household`.
 - `derived_relation`: executable runtime predicates computed by filtering a
   source relation with a judgment formula. This supports filtered membership
@@ -109,15 +109,55 @@ rules:
       arguments: [Person, Household]
 ```
 
-Compiled artifacts carry declared argument kinds as
-`program.relations[].slot_entities`. The compiler separately derives the
-orientation that executable `count_related`, `sum_related`, and membership
-nodes use. If that orientation disagrees with the declaration, compilation
-emits `warning[relation_orientation_mismatch]` naming both orders and a citing
-rule. The serialized declaration remains verbatim for source fidelity.
+### Relation entity typing
 
-Rust callers can promote relation argument shape/closure/orientation warnings
-to errors at compile time with:
+Entity ids are opaque strings, and an aggregate reads a relation by looking
+up `(relation, current slot, id)`. Without declared slot kinds, a tuple stored
+in the other orientation matches nothing and the aggregate silently returns
+zero. Relation entity typing is therefore mandatory:
+
+- **Compile.** Every relation that a `count_related`, `sum_related`, or
+  membership node executes, directly or as a derived relation's source, must
+  have one entity kind per slot: declared with `data_relation.arguments`
+  (lowered to `program.relations[].slot_entities`), or, for a derived
+  relation, inherited from its source. The slot a node keys on must hold the
+  evaluating entity (a filtered entity, a derived relation's `entity` such as
+  `SnapUnit`, counts as its source's current kind), rules evaluated on the
+  related ids must have the related slot's kind, and rules a derived
+  relation's predicate reads must run on an id of their own entity. A
+  derived relation's kinds must match its source's, a chain of derived
+  relations must keep one direction, and derived relations filtering to the
+  same entity must agree on its kind. Violations are compile errors listing
+  each relation and citing rule: `untyped_relation`, `unknown_relation`,
+  `relation_slot_entity_count`, `relation_slot_out_of_range`,
+  `relation_current_slot_entity_mismatch`,
+  `relation_related_slot_entity_mismatch`,
+  `relation_membership_slot_entity_mismatch`,
+  `relation_predicate_entity_mismatch`, `derived_relation_source_slot_conflict`,
+  `derived_relation_slots_diverge`, `filtered_entity_kind_conflict`, and
+  `relation_slot_kind_is_filtered_entity` (a slot declares a filtered entity
+  such as `SnapUnit` rather than the kind of the ids it is queried with).
+- **Load and request.** The same check runs when a compiled artifact loads
+  (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
+  carries a raw `ProgramSpec`, and when the dense compiler builds from a
+  program or artifact. `Engine::new` evaluates a `Program` exactly as given;
+  Rust callers that build one themselves must call
+  `relation_typing::check_program` first.
+- **Bind.** Dataset tuples are checked against the declared kinds. An id's
+  kind comes from input records that carry both `entity_id` and `entity`, and
+  from queries: a query evaluates its output rules on its `entity_id`, so a
+  queried household is a `Household` even with no household-level inputs. A
+  filtered entity's evidence (a `SnapUnit` query) counts as its source kind.
+  Ids with no evidence, or evidence of more than one kind, are skipped. A
+  known mismatch is an error by default and a warning under lenient binding
+  (see [Binding policy](#binding-policy)). A tuple whose length differs from the
+  relation's arity is always an error.
+
+Declared-kind labels must be UpperCamelCase entity kinds. A label that fails
+that shape, or names a kind no rule in the import-merged closure uses, is a
+warning (`invalid_relation_argument_entity_shape`,
+`unknown_relation_argument_entity`) that `strict_relation_entities` promotes to
+an error:
 
 ```rust
 CompiledProgramArtifact::from_rulespec_str_with_options(
@@ -129,22 +169,105 @@ CompiledProgramArtifact::from_rulespec_str_with_options(
 )
 ```
 
-This compile option is independent of binding strictness. During dataset
-binding, the engine derives an opaque entity id's kind from dataset input
-records that carry both `entity_id` and `entity`. For a relation used by the
-program, expected tuple positions come from executable usage; unresolved or
-conflicting positions are skipped. Only an unused relation falls back to its
-declared position order. This prevents validation from recommending an order
-that the engine indexes as an empty lookup. A known mismatch emits
-`warning[relation_slot_entity_mismatch]` by default; ids absent from input
-records, or ids used with more than one kind, remain unknown and are skipped.
-Rust callers can promote these warnings to errors with
-`DatasetSpec::to_dataset_for_program_with_options(program,
-DatasetBindingOptions::strict())`. The existing
-`DatasetSpec::to_dataset_for_program` entry point retains compatibility mode.
-This strict knob is intentionally on the program-aware binder; lower-level
-callers that construct a `DataSet` or `Engine` directly bypass wire-dataset
-validation.
+A shape-failing declaration leaves the relation untyped, so executing it is
+still an `untyped_relation` error.
+
+#### Binding policy
+
+Dataset binding is strict by default: a known mismatch between a tuple slot's expected entity kind
+and the supplied entity id's kind is an error before execution. The error names
+the relation, slot, entity id, and expected and supplied kinds so callers can
+correct the tuple and input entity labels.
+
+Expected tuple positions are the relation's declared slot kinds (typing makes
+them agree with every executed use). Kind evidence is described under **Bind**
+above: input records and queries. Ids with no evidence, or ids used with more
+than one kind, remain unknown and are skipped. `Entity` is an ordinary supplied
+kind, not a wildcard for `Person`, `TaxUnit`, or another expected kind.
+
+Both `ExecutionRequest` and `CompiledExecutionRequest` accept a top-level
+`"relation_binding": "strict"` or `"relation_binding": "lenient"` field; omitting
+it selects `strict`. This applies to `api::execute_request`,
+`api::execute_compiled_request`, CLI execution, and wasm `execute`. Successful
+responses echo the selected policy in `metadata.relation_binding`.
+The [self-contained request](../schemas/execution-request.v1.schema.json),
+[compiled request](../schemas/compiled-execution-request.v1.schema.json), and
+[response](../schemas/execution-response.v1.schema.json) schemas describe this
+wire contract.
+
+New served responses always echo the binding policy. When reading a historical
+response without `metadata.relation_binding`, the policy remains unknown; the
+reader must not infer that strict validation occurred. Lower-level bulk execution
+that bypasses dataset binding likewise omits the policy.
+
+Callers migrating an existing dataset can explicitly select lenient binding:
+
+```sh
+axiom-rules-engine run --relation-binding lenient < request.json
+axiom-rules-engine run-compiled --artifact compiled.json --relation-binding lenient < request.json
+```
+
+The CLI flag overrides the request field. Requests supplied directly on stdin
+without a subcommand can select the same policy through the JSON field.
+The CLI emits a stderr notice for lenient binding and retains
+`warning[relation_slot_entity_mismatch]` diagnostics. It does not reorder tuples
+or correct their kinds: a reversed relation can still return a zero count or
+credit. Correcting the dataset lets callers return to the strict default.
+
+Rust callers using `DatasetSpec::to_dataset_for_program` also get strict
+binding. An explicit `DatasetBindingOptions::lenient()` passed to
+`to_dataset_for_program_with_options` opts out. Lower-level callers that
+construct a `DataSet` or `Engine` directly bypass wire-dataset validation. The
+Python extension's dense execution methods take arrays rather than a wire
+`DatasetSpec`, so this request policy does not apply to those methods.
+
+When upgrading or recompiling RuleSpec, ensure tuple order follows declared
+arguments and that input records carry the correct kinds. An old compiled
+artifact that executes relations without `program.relations[].slot_entities`
+no longer loads; see the next section.
+
+#### Migrating compiled artifacts
+
+Artifacts compiled before typing became mandatory keep format version 2.
+Those whose executed relations pass the typing check (or that execute none)
+load as before. One that executes an untyped relation, or reads a typed one
+against its declared kinds, fails to load with a message naming the
+migration. Recompiling from typed source is the durable fix; for an
+artifact whose source cannot be recompiled yet:
+
+```bash
+axiom-rules-engine migrate artifact --artifact old.json
+axiom-rules-engine migrate artifact --artifact old.json --output typed.json \
+  --relation-entities 'us:statutes/7/2012/j#relation.member_of_household=Person,Household'
+```
+
+Without `--output` the command reports what it would change and writes
+nothing. It stamps each untyped relation with the kinds execution
+establishes, and only those:
+
+- the slot an aggregate keys on holds ids of the evaluating rule's entity;
+- the other slot holds ids of the entity of the rules its `where` clause and
+  summed value read, when they agree;
+- an aggregate over a derived relation is evidence about its data source only
+  when every link of the chain keeps the same slots;
+- a filtered entity counts as its source's kind only when every derivation
+  defining that name is consistent with its source chain and they agree.
+
+Declarations never vouch for a kind, and derived-relation predicates and
+membership tests give no evidence. A slot this leaves open (for example
+`len(relation)` with no related rule, or a rule whose entity is a filter over
+an untyped source) needs `--relation-entities <relation>=<Kind>,<Kind>` in
+tuple order; the relation may be named by its full id or a unique short name.
+The command never moves an aggregate's slots, so datasets that bound
+correctly before still bind, and datasets in the other orientation now get
+`relation_slot_entity_mismatch` at binding (an error by default, a warning
+under lenient binding) instead of aggregating nothing silently. An override
+that contradicts what execution establishes is refused. A typed declaration
+that contradicts it (artifacts compiled between the declaration carry and
+declared-order resolution) is refused unless an override in executed order
+retypes it; to change an orientation, recompile. The rewritten
+artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
+capabilities` lists `relation_entity_typing` for engines that enforce this.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides
@@ -160,6 +283,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
 
   - name: snap_member_eligible
     kind: derived
@@ -201,17 +325,20 @@ entity id, so a SNAP unit backed by `household-1` is queried with
 Derived relations execute in explain mode, bulk fast mode (which evaluates each
 row's relation aggregations on the explain interpreter), and the generic dense
 compiler for predicates that can be evaluated from related inputs, related
-judgment rules, current/root entity judgment or scalar rules, and membership of
-the relation's own source (`member_of_household` in `snap_unit` above). A
-`source_relation` may also point at another `derived_relation`; the runtime
-applies the parent filter before the child filter, and a predicate may then
+judgment rules, judgment or scalar rules of the relation's current slot entity,
+entity-free `Scalar` rules, and membership of the relation's own source
+(`member_of_household` in `snap_unit` above). A `source_relation` may also
+point at another `derived_relation`; the runtime applies the parent filter
+before the child filter, and a predicate may then
 also test membership of a source further up that chain. Each such test must
 read the relation with the slots its derivation reads it with, as a bare
 relation name in a formula does unless the derivation sets `current_slot` or
 `related_slot`. The dense compiler rejects a predicate with any other
-membership test, because a dense batch carries no tuples for it, and may still
-reject membership predicates that aggregate another relation from inside a
-current/root predicate.
+membership test, because a dense batch carries no tuples for it, rejects a
+predicate that reads a rule of an entity that is neither of the relation's
+declared slot entities (explain evaluates such a rule for the related record),
+and may still reject membership predicates that aggregate another relation from
+inside a current-entity rule.
 
 Inside a derived-relation predicate, a referenced scalar rule uses its declared
 entity to select the current or related record, just as a referenced judgment
@@ -221,6 +348,15 @@ preserved through arithmetic, parameter indices, date expressions and scalar
 conditionals, including dependency traces. Bare input references still read the
 related record; use an entity-scoped scalar rule for a current-record value.
 Conditional scalar membership operands evaluate in every mode.
+
+Only a derived relation's own predicate selects a record this way. A
+`count`/`sum` `where` clause, a summed value and the body of every rule are
+evaluated with no relation context, so each rule they reference is evaluated
+for the related record, whatever entity it declares: a `Household` rule in a
+`where` clause over household members is evaluated for each member, not for
+the household, and a `Person` rule in a `where` clause over a
+person-to-person relation is evaluated for each related person. See
+[execution-semantics.md](execution-semantics.md).
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach
@@ -275,12 +411,15 @@ not an atomic module. The CLI built from current `main` compiles that output
 with the separate `compile-composed` command. Its input must be an absolute,
 real, unaliased `.yaml` outside every RuleSpec checkout with exact
 `module.kind: composition`; it still requires one or more explicit
-`--rulespec-root` arguments. Only fragmentless canonical atomic imports are
-allowed, and synthesized root rules remain originless. The removed top-level
-`extends` directive is rejected on both surfaces. On current `main`, the
-ordinary `compile` command rejects the ephemeral file, while `compile-composed`
-rejects atomic modules and declarative ProgramSpecs. Release v0.1.1 does not
-provide `compile-composed`.
+`--rulespec-root` arguments. Only fragmentless canonical module imports are
+allowed; those targets may declare `module.kind: composition` and
+are recursively merged only on the composed-program surface. Their rules keep
+their canonical module origins and source citations, while synthesized root
+rules remain originless. The removed top-level `extends` directive is rejected
+on both surfaces. On current `main`, the ordinary `compile` command rejects
+composition modules at any depth, while `compile-composed` rejects atomic entry
+modules and declarative ProgramSpecs. Release v0.1.1 does not provide
+`compile-composed`.
 
 Compiled artifacts make the input boundary explicit in
 `metadata.input_catalog`. Each runtime slot has a deterministic

@@ -2501,6 +2501,7 @@ fn execute_engine_computation(
     interval: &crate::model::Interval,
 ) -> Result<String, UnitDerivationError> {
     let request = crate::api::CompiledExecutionRequest {
+        relation_binding: Default::default(),
         mode: crate::api::ExecutionMode::Explain,
         dataset: recipe.dataset.clone(),
         queries: vec![crate::api::ExecutionQuery {

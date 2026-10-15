@@ -4,6 +4,95 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
+
+**Decision.** A fresh compile no longer lists "fast mode does not yet support
+sum_related over related derived values": since #201, fast mode runs relation
+aggregations row by row on the explain interpreter and answers that shape.
+Artifact loading still requires `evaluation_order` and `input_catalog` to equal
+what the embedded program yields. `fast_path` must equal this engine's
+analysis or the analysis under a retired rule set
+(`RETIRED_FAST_PATH_RULES` in `src/compile.rs`). The first retired set is the
+one every v2 engine before this change used: v0.1.1, v0.1.2, v0.2.0
+through v0.2.2, and main before this change. A retired value is kept byte for byte and reported as a
+`stale_fast_path_metadata` diagnostic. `ARTIFACT_FORMAT_VERSION` stays 2.
+
+**Why.**
+
+- `fast_path` describes the compiling engine's fast mode as well as the
+  program. Exact equality therefore turned every improvement to fast mode into
+  a load failure for artifacts already published.
+- Rewriting the value on load was rejected. Unit aggregation digests the
+  serialization of the source artifact it loads (`source_artifact_digest`), so
+  a rewrite would invalidate every stage-3 aggregation artifact embedding a
+  stale one.
+- Ignoring `fast_path` was rejected too. Accepting only values some engine
+  actually computed for the embedded program keeps the consistency check's
+  meaning: a hand-edited or tampered `fast_path` is still refused.
+- A format bump would reject every published v2 artifact over a field
+  execution never reads. The 2026-06-09 policy reserves bumps for changes
+  that break the IR.
+
+**Consequences.**
+
+- Old to new: every published v2 artifact still loads.
+- New to old: v0.2.0 through v0.2.2, and main before this change, reject a
+  newly compiled artifact containing `sum_related` over a related derived
+  value ("metadata does not match the compiled program"). Recompile for those
+  engines, or upgrade them. v0.1.1, v0.1.2 and engines that predate the
+  metadata check (such as the `c8e8db1` pin in axiom-api) never compare it. An engine cannot
+  know a later engine's analysis, so each future retirement repeats this
+  new-to-old refusal, as a new expression variant does (#186).
+- Retiring a blocker, or changing its message or the scan order, means adding
+  an entry to `RETIRED_FAST_PATH_RULES` that reproduces the old output exactly.
+  `tests/fast_path_metadata.rs` holds the unmodified output of the pre-change
+  engine as fixtures: a compiled artifact and a stage-3 aggregation artifact. `tests/execution_mode_parity.rs` checks generated
+  programs against an independent reconstruction of the retired analysis.
+
+## 2026-09-25 — Relation entity typing is mandatory
+
+**Decision.** Every relation that a `count_related`, `sum_related`, or
+membership node executes must have one entity kind per slot (declared, or
+inherited by a derived relation from its source), and the slot a node keys
+on must hold the entity evaluating it. The check (`relation_typing`) runs at
+compile, at artifact load, on raw-program requests, and in the dense
+compiler; there is no opt-out (`Engine::new` evaluates a `Program` as given
+and documents that its callers check). RuleSpec lowering refuses a direction
+it would have to guess (every slot holds the rule's entity), aggregates and
+membership tests over a derived relation use the derivation's slots, and an
+undeclared short-name relation stays untyped, so executing it is an error
+that names its same-named declarations.
+Binding uses queries as kind evidence alongside input records and rejects
+tuples whose length differs from the arity. The artifact format stays 2:
+artifacts that pass the typing check (including relation-free ones) load as
+before, an artifact executing an untyped relation is refused with a pointer
+to `migrate artifact`, and
+`capabilities` lists `relation_entity_typing` so publishers can tell engines
+apart.
+
+**Why.** Entity ids are untyped strings and aggregation looks tuples up by
+`(relation, current_slot, id)`. With an untyped relation, a tuple stored in
+the other orientation matched nothing: rulespec-us `us/statutes/7/2012/j`'s
+`member_of_household` returned `not_holds` for a household with an elderly
+member, in explain and fast, exit 0, no warning (reproduced 2026-09-24 at
+6e709eb). The orientation checks were warnings behind an opt-in strict mode
+the CLI never set, and every backend shares the lookup, so differential
+testing between modes could not see it. Four commits in two weeks (78e9442,
+3edeab4, bbf9d3b, 6e709eb) fixed bugs in this area.
+
+**Alternatives.** Bumping the artifact format to 3 would force recompiling
+artifacts that are already safe and move engine, rulespec-us, the Python
+package, and axiom-api in lockstep; the capability string carries the same
+signal without that. A legacy load flag would reintroduce the silent zero the
+change exists to remove. Giving an undeclared short name the kinds of its
+same-named imported declarations (as an earlier head of this change did)
+would type a relation that is still separate from that declaration, so
+tuples supplied under the declaration's id would leave it empty: a silent
+zero the error now exposes. Whether such a name should alias the imported
+relation is #226; until axiom-compose can emit `arguments`, composition roots
+that aggregate an undeclared `member_of_household` fail to compile. #190
+separately made dataset binding strict by default.
+
 ## 2026-07-21 — Artifact v2 makes `effective_to` executable and fail-closed
 
 **Decision.** Parameter and derived versions carry an optional inclusive

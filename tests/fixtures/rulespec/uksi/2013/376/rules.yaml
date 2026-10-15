@@ -19,6 +19,16 @@ module:
     `non_dep_deductions_total` are pre-computed inputs), two-child-limit
     exceptions (`qualifies_for_child_element` is pre-applied on each Child).
 rules:
+  - name: adult_of_benefit_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Adult, BenefitUnit]
+  - name: child_of_benefit_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Child, BenefitUnit]
   - name: uc_standard_allowance_single_under_25
     kind: parameter
     dtype: Money

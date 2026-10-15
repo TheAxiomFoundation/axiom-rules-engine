@@ -1,18 +1,11 @@
 //! Long chains of derived relations.
 //!
-//! A review on 2026-09-25 timed an inline request carrying a chain
-//! `rel0 <- rel1 <- ... <- base`, each relation's `source_relation` the next,
-//! with nothing querying it: 0.8 s at 500 links, 34.6 s at 2,000, over a
-//! minute at 4,000, and a stack overflow at 50,000. Binding walked the chain
-//! from every relation, each walk recursing once per link; validation and
-//! every evaluator recursed once per link too, and a chain linked through
-//! predicates (`relation_member`, `count_related`) re-resolved each link for
-//! every candidate, which is exponential in the chain length.
-//!
-//! The invariant these tests hold: binding, validation and evaluation are
-//! linear in the number of relations and never recurse once per link. Each
-//! case runs a 20,000-link chain in a debug build on the 2 MiB stack a test
-//! thread gets, where the recursive walks overflowed at a few thousand links.
+//! Validation and evaluation visit each relation once without recursing per
+//! link. Source chains, membership predicates and nested counts retain the
+//! recursive evaluator's values and errors. These end-to-end tests also cover
+//! the linear typing and binding supplied independently by the typing walker.
+//! Direct evaluator and cycle-search tests isolate this change from those
+//! earlier pipeline stages.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -79,7 +72,12 @@ enum Link {
 /// A chain of `LINKS` derived relations over the data relation `base`, typed
 /// `[Household, Person]` throughout when `typed`.
 fn chain_relations(link: Link, typed: bool) -> Vec<Value> {
-    let slots = json!(["Household", "Person"]);
+    let slots = if matches!(link, Link::Counted) {
+        // Nested counts run on the candidate, so both sides have the same kind.
+        json!(["Household", "Household"])
+    } else {
+        json!(["Household", "Person"])
+    };
     let mut base = json!({"name": "base", "arity": 2});
     if typed {
         base["slot_entities"] = slots.clone();
@@ -213,7 +211,7 @@ fn an_unqueried_chain_binds_and_validates_in_linear_time() {
 
 #[test]
 fn a_queried_typed_chain_evaluates_in_linear_time() {
-    // Typed slots make binding orient every link; querying the head makes
+    // Declared slots let typing and binding check every link; querying the head makes
     // every evaluator resolve the whole chain.
     let program = program(
         chain_relations(Link::Source, true),
@@ -274,7 +272,7 @@ fn a_chain_through_count_related_predicates_is_linear_not_exponential() {
     // Each link counts the next at its candidate, a different entity, so the
     // resolutions nest across entities as well as links.
     let program = program(
-        chain_relations(Link::Counted, false),
+        chain_relations(Link::Counted, true),
         vec![rule("head", count_related(&relation_name(0)))],
     );
     let tuples = [("n1", "n1"), ("n1", "n2"), ("n2", "n1"), ("n2", "n2")];
@@ -304,8 +302,8 @@ fn a_chain_closed_into_a_cycle_is_refused_without_recursing() {
 
 #[test]
 fn a_compiled_chain_loads_and_runs_in_linear_time() {
-    // Loading an artifact runs the orientation diagnostic and the cycle
-    // search over the whole chain.
+    // Loading an artifact runs mandatory entity typing and the cycle search
+    // over the whole chain.
     let program = program(
         chain_relations(Link::Source, true),
         vec![rule("head", count_related(&relation_name(0)))],

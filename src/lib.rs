@@ -5,12 +5,14 @@ pub mod api;
 mod bulk;
 pub mod compile;
 pub mod dense;
+pub mod depth;
 pub mod engine;
 mod formula;
 mod lazy;
 pub mod migrate;
 pub mod model;
 mod relation_direction;
+pub mod relation_typing;
 pub mod rulespec;
 #[cfg(feature = "schema")]
 pub mod schema;
