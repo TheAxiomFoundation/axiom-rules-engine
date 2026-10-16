@@ -328,6 +328,12 @@ pub enum ScalarExpr {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -818,6 +824,11 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         ScalarExpr::DaysBetween { from, to } => {
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
+        }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
         }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {

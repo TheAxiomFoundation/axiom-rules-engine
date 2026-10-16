@@ -1555,6 +1555,47 @@
               "type": "integer"
             },
             "kind": {
+              "const": "only_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
               "const": "count_related",
               "type": "string"
             },

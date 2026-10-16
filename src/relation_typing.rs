@@ -15,6 +15,7 @@ use crate::model::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelationTypingCode {
+    OnlyRelatedShape,
     /// An executed relation declares no slot entity kinds.
     UntypedRelation,
     /// A declared slot entity list does not have one kind per slot.
@@ -48,6 +49,7 @@ pub enum RelationTypingCode {
 impl RelationTypingCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::OnlyRelatedShape => "only_related_shape",
             Self::UntypedRelation => "untyped_relation",
             Self::SlotEntityCount => "relation_slot_entity_count",
             Self::SlotOutOfRange => "relation_slot_out_of_range",
@@ -992,6 +994,34 @@ impl<'a> Checker<'a> {
 
     fn scalar(&mut self, expr: &ScalarExpr, context: Context<'_>) {
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if current_slot == related_slot
+                    || *current_slot > 1
+                    || *related_slot > 1
+                    || !matches!(value, RelatedValueRef::Input(_))
+                    || self
+                        .program
+                        .relations
+                        .get(relation)
+                        .is_some_and(|schema| schema.arity != 2)
+                {
+                    self.push(RelationTypingCode::OnlyRelatedShape, relation, context.citing,
+                        "only_related requires an input reference and distinct slots of a binary relation".into());
+                }
+                self.aggregation(
+                    relation,
+                    *current_slot,
+                    *related_slot,
+                    Some(value),
+                    None,
+                    context,
+                );
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1216,6 +1246,7 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
                 collect_scalar_derived(n, out);
             }
         }
+        ScalarExpr::OnlyRelated { .. } => {}
         ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
         | ScalarExpr::Literal(_)

@@ -1660,6 +1660,26 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             //
             //   count_where(relation, predicate_field)
             //   sum_where(relation, amount_field_or_derived, predicate_field)
+            "only_related" => {
+                if args.len() != 2 {
+                    return Err(FormulaError::lower("only_related takes 2 args"));
+                }
+                let relation = expect_var(&args[0], "only_related relation")?;
+                let field = expect_var(&args[1], "only_related Boolean input")?;
+                if ctx.derived.contains(&field) {
+                    return Err(FormulaError::lower(
+                        "only_related requires an input, not a derived rule",
+                    ));
+                }
+                ctx.relations.borrow_mut().insert(relation.clone());
+                let (current_slot, related_slot) = infer_slots(&relation);
+                ScalarExprSpec::OnlyRelated {
+                    relation,
+                    current_slot,
+                    related_slot,
+                    value: RelatedValueRefSpec::Input { name: field },
+                }
+            }
             "count_where" => {
                 if args.len() != 2 {
                     return Err(FormulaError::lower("count_where takes 2 args".to_string()));
