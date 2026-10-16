@@ -34,6 +34,14 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
+    #[error(
+        "only_related in `{citing}` requires one declared Boolean input `{input}` owned by the related entity: {message}"
+    )]
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -408,6 +416,15 @@ pub struct RuleSpecLoweringOutcome {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
+    /// Retained for validation of only_related; other operators keep their existing input contract.
+    #[serde(default)]
+    pub inputs: serde_yaml::Value,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub imported_input_declarations: Vec<(Option<String>, serde_yaml::Value)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub input_origin: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
@@ -1300,6 +1317,10 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     if extension.module.is_some() {
         base.module = extension.module;
     }
+    base.imported_input_declarations
+        .push((extension.input_origin, extension.inputs));
+    base.imported_input_declarations
+        .extend(extension.imported_input_declarations);
     base.units.extend(extension.units);
     base.relations.extend(extension.relations);
     base.rules.extend(extension.rules);
@@ -2030,6 +2051,7 @@ impl RulesDocument {
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        self.input_origin = origin_target.clone();
         // The module-level corpus citation path rides onto every rule here,
         // because `merge_rules_documents` keeps only the root module's
         // metadata: without stamping, an imported module's join key would be
@@ -2192,27 +2214,41 @@ impl RulesDocument {
             })
             .map(|rule| rule.canonical_relation_id())
             .collect::<HashSet<_>>();
-        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
-            match error {
-                crate::relation_direction::DirectionError::Aggregate {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousRelationDirection {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                },
-                crate::relation_direction::DirectionError::DerivedSlots {
-                    relation,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousDerivedRelationSlots {
-                    relation,
-                    slot_entities,
-                },
-            }
+        crate::relation_direction::resolve(
+            &mut program,
+            &defaulted_slots,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(|error| match error {
+            crate::relation_direction::DirectionError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            } => RuleSpecError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            },
+            crate::relation_direction::DirectionError::Aggregate {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            } => RuleSpecError::AmbiguousRelationDirection {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            },
+            crate::relation_direction::DirectionError::DerivedSlots {
+                relation,
+                slot_entities,
+            } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                relation,
+                slot_entities,
+            },
         })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
@@ -3430,6 +3466,11 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(from, alias, relation_name);
             rewrite_relation_alias_in_scalar(to, alias, relation_name);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3744,6 +3785,9 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(from, names);
             collect_scalar_relation_names(to, names);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            names.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3930,6 +3974,9 @@ fn rewrite_scalar_relation_references(
                 unambiguous_short_rewrites,
                 derived_origin_targets,
             );
+        }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            rewrite_relation_name(relation, origin_target, rewrites);
         }
         ScalarExprSpec::CountRelated {
             relation,
@@ -4216,6 +4263,7 @@ fn scalar_uses_imported_derived(
             scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(to, origin_target, derived_origin_targets)
         }
+        ScalarExprSpec::OnlyRelated { .. } => false,
         ScalarExprSpec::CountRelated { where_clause, .. } => where_clause
             .as_deref()
             .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))

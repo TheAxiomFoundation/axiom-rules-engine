@@ -291,6 +291,11 @@ fn collect_scalar_dependencies(
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,

@@ -1402,6 +1402,7 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
@@ -1681,6 +1682,9 @@ fn collect_scalar_dependencies(
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -1837,6 +1841,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_scalar(from, relations);
             collect_relation_members_from_scalar(to, relations);
         }
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,

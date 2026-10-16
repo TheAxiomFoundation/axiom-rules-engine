@@ -436,6 +436,10 @@ enum CompiledScalarExpr {
         from: Box<CompiledScalarExpr>,
         to: Box<CompiledScalarExpr>,
     },
+    OnlyRelated {
+        relation: usize,
+        input: usize,
+    },
     CountRelated {
         relation: usize,
         predicate: Option<CompiledRelatedJudgmentExpr>,
@@ -1017,9 +1021,9 @@ impl DenseCompiledProgram {
                 self.scalar_reduces_over_periods(from, reduces)
                     || self.scalar_reduces_over_periods(to, reduces)
             }
-            CompiledScalarExpr::CountRelated { .. } | CompiledScalarExpr::SumRelated { .. } => {
-                false
-            }
+            CompiledScalarExpr::OnlyRelated { .. }
+            | CompiledScalarExpr::CountRelated { .. }
+            | CompiledScalarExpr::SumRelated { .. } => false,
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -1731,6 +1735,22 @@ impl<'a> DenseCompiler<'a> {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
             }),
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                let RelatedValueRef::Input(name) = value else {
+                    return Err(DenseCompileError::Unsupported(
+                        "only_related requires a Boolean input".into(),
+                    )
+                    .into());
+                };
+                let relation = self.relation(relation, *current_slot, *related_slot)?;
+                let input = self.related_input(relation, name);
+                Ok(CompiledScalarExpr::OnlyRelated { relation, input })
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -2148,7 +2168,9 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
+            ScalarExpr::OnlyRelated { relation, .. }
+            | ScalarExpr::CountRelated { relation, .. }
+            | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
                 )))
@@ -2318,12 +2340,12 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                Err(DenseCompileError::Unsupported(
-                    "current-entity derived relation predicates cannot aggregate another relation"
-                        .to_string(),
-                ))
-            }
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. } => Err(DenseCompileError::Unsupported(
+                "current-entity derived relation predicates cannot aggregate another relation"
+                    .to_string(),
+            )),
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a current-entity related expression",
                 kind.as_call_name()
@@ -3582,6 +3604,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledScalarExpr::DaysBetween { from, to } => {
                 eval_days_between::<N, _, _>(self, from, to, mask)
             }
+            CompiledScalarExpr::OnlyRelated { relation, input } => {
+                self.eval_only_related(*relation, *input, mask)
+            }
             CompiledScalarExpr::CountRelated {
                 relation,
                 predicate,
@@ -3781,6 +3806,62 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             .without(&where_errors)
             .filter(|related| holds[related]);
         Ok((kept, where_errors, root_errors))
+    }
+
+    fn eval_only_related(
+        &mut self,
+        relation: usize,
+        input: usize,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let (members, _, mut errors) = self.filtered_members(relation, None, mask)?;
+        let owners = self.batch.relations[relation].owners.clone();
+        let mut counts = vec![0; self.batch.row_count];
+        for related in members.rows() {
+            counts[owners[related]] += 1;
+        }
+        let schema = &self.program.relations[relation];
+        for row in mask.without(&errors).rows() {
+            let error = match counts[row] {
+                0 => Some(EvalError::MissingRelation {
+                    relation: schema.key.name.clone(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                }),
+                1 => None,
+                count => Some(EvalError::AmbiguousRelation {
+                    relation: schema.key.name.clone(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                    count,
+                }),
+            };
+            if let Some(error) = error {
+                errors.record(row, error);
+            }
+        }
+        let selected = members.filter(|related| !errors.contains(owners[related]));
+        let (values, value_errors) = self.resolve_related_scalar(
+            relation,
+            &CompiledRelatedScalarExpr::Input(input),
+            &selected,
+        )?;
+        errors.absorb(self.lift_errors(relation, &value_errors));
+        let mut result = vec![false; self.batch.row_count];
+        for related in selected.without(&value_errors).rows() {
+            let row = owners[related];
+            if let DenseColumn::Bool(values) = &values {
+                result[row] = values[related];
+            } else {
+                errors.record(
+                    row,
+                    EvalError::TypeMismatch("only_related requires a Boolean input".into()),
+                );
+            }
+        }
+        Ok((DenseColumn::Bool(result), errors))
     }
 
     fn eval_count_related(
@@ -4562,6 +4643,10 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 DenseColumn::Integer(vec![0; len]),
                 "days_between",
             )),
+            CompiledScalarExpr::OnlyRelated { .. } => Ok(ambiguous(
+                DenseColumn::Bool(vec![false; len]),
+                "only_related over a relation",
+            )),
             CompiledScalarExpr::CountRelated { .. } => Ok(ambiguous(
                 DenseColumn::Integer(vec![0; len]),
                 "count/len over a relation",
@@ -4922,6 +5007,7 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Derived(_)
         | CompiledScalarExpr::PeriodStart
         | CompiledScalarExpr::PeriodEnd
+        | CompiledScalarExpr::OnlyRelated { .. }
         | CompiledScalarExpr::CountRelated { .. }
         | CompiledScalarExpr::SumRelated { .. } => None,
         CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),

@@ -770,6 +770,15 @@ fn format_scalar_expression(
 ) -> String {
     use crate::model::{RelatedValueRef, ScalarExpr};
     match expr {
+        ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+        } => format!(
+            "only_related({}, {current_slot}, {related_slot}, {value:?})",
+            json_string(relation)
+        ),
         ScalarExpr::Literal(value) => format_scalar_value(value),
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
         ScalarExpr::InputOrElse { name, default } => {
