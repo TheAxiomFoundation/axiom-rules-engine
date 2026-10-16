@@ -297,18 +297,73 @@ pub struct DenseRelationSchema {
     filter: Option<CompiledRelatedJudgmentExpr>,
 }
 
-#[derive(Clone, Debug)]
+/// One relation's rows for a batch: root row `r`'s related rows are
+/// `offsets[r]..offsets[r + 1]` of every related column.
+#[derive(Clone, Debug, Default)]
 pub struct DenseRelationBatchSpec {
+    /// `row_count + 1` non-decreasing boundaries starting at 0. The last is the
+    /// relation's related row count.
     pub offsets: Vec<usize>,
+    /// Related columns by input name, one value per related row, whether or
+    /// not the program reads them.
     pub inputs: HashMap<String, DenseColumn>,
+    /// The related row count, stated by the caller. When given it must equal
+    /// the last offset. It is required when the offsets claim related rows but
+    /// no related column is supplied (a `len` over the relation, or a filter
+    /// that reads only the current entity), because nothing else confirms the
+    /// offsets. It is the caller's assertion, not a check: count the related
+    /// rows the offsets index, one per root and member pair (a related entity
+    /// two roots share counts twice), independently of the offsets, rather
+    /// than copying the last offset.
+    pub related_row_count: Option<usize>,
+    /// Related columns supplied by length alone, without their values. Each
+    /// is checked like a column in `inputs` (it must have the related row
+    /// count, and one that does confirms the count), but no rule can read
+    /// one. A binding layer that does not convert the columns no rule reads,
+    /// as the PyO3 extension does not, passes their lengths here.
+    pub input_lengths: HashMap<String, usize>,
 }
 
+/// One period's dense input: `row_count` root rows, root columns of that
+/// length, and a batch for every relation the program reads. Batches under
+/// other relation keys are ignored.
 #[derive(Clone, Debug)]
 pub struct DenseBatchSpec {
     pub row_count: usize,
     pub inputs: HashMap<String, DenseColumn>,
     pub relations: HashMap<DenseRelationKey, DenseRelationBatchSpec>,
 }
+
+/// The most rows a dense batch or relation may claim. A dense buffer holds one
+/// element per row and a `Vec` holds at most `isize::MAX` bytes, so a larger
+/// count would panic with "capacity overflow" when a buffer of the widest
+/// element is allocated; binding refuses it instead.
+const MAX_DENSE_ROWS: usize = isize::MAX as usize / WIDEST_DENSE_ELEMENT;
+
+/// The size of the widest element a dense buffer holds per row. List any new
+/// per-row element type here.
+const WIDEST_DENSE_ELEMENT: usize = {
+    let sizes = [
+        size_of::<bool>(),
+        size_of::<i64>(),
+        size_of::<f64>(),
+        size_of::<usize>(),
+        size_of::<Decimal>(),
+        size_of::<String>(),
+        size_of::<NaiveDate>(),
+        size_of::<JudgmentOutcome>(),
+        size_of::<ScalarValue>(),
+    ];
+    let mut widest = 1;
+    let mut index = 0;
+    while index < sizes.len() {
+        if sizes[index] > widest {
+            widest = sizes[index];
+        }
+        index += 1;
+    }
+    widest
+};
 
 /// One relation schema's view of its batch. Every link of a derived-relation
 /// chain is keyed to the chain's base relation, so the schemas that share a
@@ -1059,146 +1114,260 @@ impl DenseCompiledProgram {
         }
     }
 
+    /// Check a batch against this program, then bind its columns. Every count
+    /// binding or execution sizes a buffer by is justified before anything is
+    /// allocated from it:
+    ///
+    /// - `row_count` is at most [`MAX_DENSE_ROWS`], and every supplied root
+    ///   column has that length.
+    /// - Each relation's offsets hold `row_count + 1` non-decreasing entries
+    ///   starting at 0; the last is its related row count, which a stated
+    ///   `related_row_count` must equal and each read column must have.
+    /// - A nonzero related count is confirmed by a supplied related column of
+    ///   that length or by a stated count, and is at most [`MAX_DENSE_ROWS`];
+    ///   every supplied related column, read or not, must have it.
+    ///
+    /// Relations are checked in two passes. The first walks the schemas in
+    /// order and reports what a per-schema binding reports first: a key's
+    /// offsets when its first schema reaches it, then each schema's read
+    /// columns in its input order. The second runs the checks above that a
+    /// per-schema binding never made (confirmation, the bound, and columns no
+    /// schema reads), key by key in the order the program first reads them.
+    /// Root columns, and the columns no schema reads within a key, are reported
+    /// smallest name first, so a malformed batch reports the same error every
+    /// run.
     fn bind_batch(&self, mut batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
-        for (name, column) in &batch.inputs {
-            if column.len() != batch.row_count {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense root input `{name}` has length {} but row_count is {}",
-                    column.len(),
-                    batch.row_count
-                )));
-            }
+        let row_count = batch.row_count;
+        if row_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} exceeds {MAX_DENSE_ROWS}, the most rows a dense batch can hold"
+            )));
+        }
+        if let Some((name, column)) =
+            first_by_name(&batch.inputs, |column| column.len() != row_count)
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense root input `{name}` has length {} but row_count is {row_count}",
+                column.len()
+            )));
         }
 
-        // An absent input column is a missing input on every row. It fails
-        // only the rows whose evaluation reads it, as a missing record does on
-        // the explain path; a column read only on branches no row takes may be
-        // omitted. Root input names are distinct, so each column is moved out
-        // of the batch rather than copied.
+        // Every link of a derived-relation chain is keyed to the chain's base
+        // relation, so many schemas can share one key. A key's offsets are
+        // checked when the first schema keyed to it is reached, and every
+        // schema length-checks the columns it reads. A column's length and a
+        // key's related count never change, so checking a shared column again
+        // for a later schema reports nothing new; the first error is the one a
+        // per-schema binding reports.
+        let mut related_counts: HashMap<&DenseRelationKey, usize> = HashMap::new();
+        let mut key_order = Vec::new();
+        for relation in &self.relations {
+            let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
+                EvalError::UnknownRelation(format!(
+                    "{}::{}/{}/{}",
+                    relation.key.name,
+                    relation.key.current_slot,
+                    relation.key.related_slot,
+                    self.root_entity
+                ))
+            })?;
+            let related_count = match related_counts.get(&relation.key) {
+                Some(&related_count) => related_count,
+                None => {
+                    let related_count =
+                        Self::check_offsets(&relation.key, relation_batch, row_count)?;
+                    related_counts.insert(&relation.key, related_count);
+                    key_order.push(&relation.key);
+                    related_count
+                }
+            };
+            for input in &relation.related_inputs {
+                if let Some(column) = relation_batch.inputs.get(input)
+                    && column.len() != related_count
+                {
+                    return Err(related_length_mismatch(
+                        input,
+                        &relation.key.name,
+                        column.len(),
+                        related_count,
+                    ));
+                }
+            }
+        }
+        for &key in &key_order {
+            Self::confirm_related_count(key, &batch.relations[key], related_counts[key])?;
+        }
+
+        // The batch is valid. An absent input column is a missing input on
+        // every row. It fails only the rows whose evaluation reads it, as a
+        // missing record does on the explain path; a column read only on
+        // branches no row takes may be omitted. Root input names are distinct,
+        // so each column is moved out of the batch rather than copied.
         let bound_inputs = self
             .root_inputs
             .iter()
             .map(|name| batch.inputs.remove(name))
             .collect::<Vec<Option<DenseColumn>>>();
 
-        // Every link of a derived-relation chain is keyed to the chain's base
-        // relation, so many schemas can share one key. A key's offsets are
-        // validated, and its owners built, once, when the first schema keyed
-        // to it is reached; the schemas after it share them. Each supplied
-        // column is length-checked when a schema first reads it, then shared,
-        // and a later schema reading it gets the shared column unchecked (the
-        // first schema's columns are also pre-checked in `bind_relation_key`).
-        // Schemas are still walked in order, so the first error reported is
-        // the one a per-schema binding reports: a key's offsets, related count
-        // and shared columns never change once bound, so every check a later
-        // schema skips would pass.
+        // A key's owners are built once and every schema keyed to it shares
+        // them, its offsets and its columns; a column is wrapped for sharing
+        // when a schema first reads it.
         let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
+        for &key in &key_order {
+            let relation_batch = batch
+                .relations
+                .remove(key)
+                .expect("every key was checked above");
+            bound_keys.insert(
+                key,
+                Self::bind_relation_key(key, relation_batch, related_counts[key])?,
+            );
+        }
         let mut bound_relations = Vec::with_capacity(self.relations.len());
         for relation in &self.relations {
-            if !bound_keys.contains_key(&relation.key) {
-                let relation_batch = batch.relations.remove(&relation.key).ok_or_else(|| {
-                    EvalError::UnknownRelation(format!(
-                        "{}::{}/{}/{}",
-                        relation.key.name,
-                        relation.key.current_slot,
-                        relation.key.related_slot,
-                        self.root_entity
-                    ))
-                })?;
-                bound_keys.insert(
-                    &relation.key,
-                    Self::bind_relation_key(relation, relation_batch, batch.row_count)?,
-                );
-            }
             let key = bound_keys
                 .get_mut(&relation.key)
-                .expect("relation key was bound above");
-            let related_count = key.related_count;
-            let bound_inputs = relation
+                .expect("every key was bound above");
+            let inputs = relation
                 .related_inputs
                 .iter()
                 .map(|name| {
                     if let Some(column) = key.inputs.get(name) {
-                        return Ok(Some(Rc::clone(column)));
+                        return Some(Rc::clone(column));
                     }
-                    let Some((name, column)) = key.unbound_inputs.remove_entry(name) else {
-                        return Ok(None);
-                    };
-                    if column.len() != related_count {
-                        return Err(EvalError::TypeMismatch(format!(
-                            "dense relation input `{}` for `{}` has length {} but related row count is {}",
-                            name,
-                            relation.key.name,
-                            column.len(),
-                            related_count
-                        )));
-                    }
+                    let (name, column) = key.unbound_inputs.remove_entry(name)?;
                     let column = Rc::new(column);
                     key.inputs.insert(name, Rc::clone(&column));
-                    Ok(Some(column))
+                    Some(column)
                 })
-                .collect::<Result<Vec<Option<Rc<DenseColumn>>>, EvalError>>()?;
-
+                .collect();
             bound_relations.push(DenseRelationBatch {
                 offsets: Rc::clone(&key.offsets),
-                related_count,
+                related_count: key.related_count,
                 owners: Rc::clone(&key.owners),
-                inputs: bound_inputs,
+                inputs,
             });
         }
 
         Ok(DenseBoundBatch {
-            row_count: batch.row_count,
+            row_count,
             inputs: bound_inputs,
             relations: bound_relations,
         })
     }
 
-    /// Validate the key's offsets and the first schema's supplied columns
-    /// before allocating owners from the caller's related count. Binding the
-    /// views then length-checks each column on its first read, in schema
-    /// order, so a later schema checks only the columns no earlier one read.
-    fn bind_relation_key(
-        schema: &DenseRelationSchema,
-        relation_batch: DenseRelationBatchSpec,
+    /// Check a key's offsets and stated count, returning its related count.
+    fn check_offsets(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
         row_count: usize,
-    ) -> Result<BoundRelationKey, EvalError> {
-        let key = &schema.key;
-        let offsets = relation_batch.offsets;
-        if offsets.len() != row_count + 1 {
+    ) -> Result<usize, EvalError> {
+        let name = &key.name;
+        let offsets = &relation_batch.offsets;
+        // `bind_batch` bounds `row_count` by `MAX_DENSE_ROWS`, so this cannot
+        // overflow; it is checked rather than left to wrap to zero.
+        let expected = row_count.checked_add(1).ok_or_else(|| {
+            EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} leaves no room for relation `{name}`'s offsets, which need row_count + 1 entries"
+            ))
+        })?;
+        if offsets.len() != expected {
             return Err(EvalError::TypeMismatch(format!(
-                "dense relation `{}` offsets must have length {}",
-                key.name,
-                row_count + 1
+                "dense relation `{name}` offsets must have length {expected} (row_count + 1) but has {}",
+                offsets.len()
             )));
         }
-        if offsets.first().copied().unwrap_or_default() != 0 {
+        // `expected` is at least 1, so the offsets are non-empty from here on.
+        if offsets[0] != 0 {
             return Err(EvalError::TypeMismatch(format!(
-                "dense relation `{}` offsets must start at 0",
-                key.name
+                "dense relation `{name}` offsets must start at 0 but starts at {}",
+                offsets[0]
             )));
         }
-        if !offsets.windows(2).all(|pair| pair[0] <= pair[1]) {
+        if let Some(index) = offsets.windows(2).position(|pair| pair[0] > pair[1]) {
             return Err(EvalError::TypeMismatch(format!(
-                "dense relation `{}` offsets must be non-decreasing",
-                key.name
+                "dense relation `{name}` offsets must be non-decreasing, but offsets[{index}] = {} is greater than offsets[{}] = {}",
+                offsets[index],
+                index + 1,
+                offsets[index + 1]
             )));
         }
+        let related_count = offsets[row_count];
+        if let Some(stated) = relation_batch.related_row_count
+            && stated != related_count
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count} but related_row_count is {stated}"
+            )));
+        }
+        Ok(related_count)
+    }
 
-        let related_count = *offsets.last().unwrap_or(&0);
-        for name in &schema.related_inputs {
-            if let Some(column) = relation_batch.inputs.get(name) {
-                if column.len() != related_count {
-                    return Err(EvalError::TypeMismatch(format!(
-                        "dense relation input `{name}` for `{}` has length {} but related row count is {}",
-                        key.name,
-                        column.len(),
-                        related_count
-                    )));
-                }
-            }
+    /// The offsets alone could claim any number of related rows, and binding
+    /// allocates one owner per related row. So a nonzero count must be
+    /// confirmed by a supplied column with one value per related row, or by
+    /// the caller's `related_row_count`, and must fit [`MAX_DENSE_ROWS`].
+    /// Every column the schemas read was length-checked already, so any
+    /// supplied column that disagrees here is one no schema reads.
+    fn confirm_related_count(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<(), EvalError> {
+        let name = &key.name;
+        // Every supplied column's length: the columns with values, then the
+        // ones supplied by length alone.
+        let lengths = || {
+            relation_batch
+                .inputs
+                .iter()
+                .map(|(input, column)| (input, column.len()))
+                .chain(
+                    relation_batch
+                        .input_lengths
+                        .iter()
+                        .map(|(input, length)| (input, *length)),
+                )
+        };
+        let disagreeing = lengths()
+            .filter(|(_, length)| *length != related_count)
+            .min_by_key(|(input, _)| *input);
+        let confirmed = related_count == 0
+            || relation_batch.related_row_count.is_some()
+            || lengths().any(|(_, length)| length == related_count);
+        if !confirmed && disagreeing.is_none() {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the number of related rows the offsets index (one per root and member pair)"
+            )));
         }
-        let mut owners = Vec::with_capacity(related_count);
+        if confirmed && related_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` claims {related_count} related rows, more than the {MAX_DENSE_ROWS} a dense batch can hold"
+            )));
+        }
+        // A supplied column that disagrees confirms nothing and is malformed.
+        if let Some((input, length)) = disagreeing {
+            return Err(related_length_mismatch(input, name, length, related_count));
+        }
+        Ok(())
+    }
+
+    /// Build a checked key's owners, reserved fallibly: a stated count is
+    /// trusted up to [`MAX_DENSE_ROWS`], so one larger than memory is an error
+    /// rather than an abort.
+    fn bind_relation_key(
+        key: &DenseRelationKey,
+        relation_batch: DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<BoundRelationKey, EvalError> {
+        let offsets = relation_batch.offsets;
+        let mut owners = Vec::new();
+        owners.try_reserve_exact(related_count).map_err(|_| {
+            EvalError::TypeMismatch(format!(
+                "dense relation `{}` claims {related_count} related rows, more than this process can allocate",
+                key.name
+            ))
+        })?;
         for (row, pair) in offsets.windows(2).enumerate() {
             owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
         }
@@ -1210,6 +1379,30 @@ impl DenseCompiledProgram {
             inputs: HashMap::new(),
         })
     }
+}
+
+/// Among the columns `pick` selects, the one with the smallest name, found in
+/// one pass without allocating, so a malformed batch reports the same column
+/// whatever the map's iteration order.
+fn first_by_name<'a>(
+    columns: &'a HashMap<String, DenseColumn>,
+    pick: impl Fn(&DenseColumn) -> bool,
+) -> Option<(&'a String, &'a DenseColumn)> {
+    columns
+        .iter()
+        .filter(|(_, column)| pick(column))
+        .min_by_key(|(name, _)| *name)
+}
+
+fn related_length_mismatch(
+    input: &str,
+    relation: &str,
+    length: usize,
+    related_count: usize,
+) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "dense relation input `{input}` for `{relation}` has length {length} but related row count is {related_count}"
+    ))
 }
 
 /// The refusal of a rule or derived relation reached again while it is being
@@ -3797,15 +3990,22 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         for related in members.rows() {
             counts[owners[related]] += 1;
         }
-        Ok((
-            DenseColumn::Integer(
-                counts
-                    .into_iter()
-                    .map(|count| i64::try_from(count).unwrap_or(i64::MAX))
-                    .collect(),
-            ),
-            errors,
-        ))
+        // Binding bounds every related count by `MAX_DENSE_ROWS`, far below
+        // `i64::MAX`, so no count fails to convert; one that did would be an
+        // error on its row, not a clamped count.
+        let mut values = vec![0_i64; counts.len()];
+        for (row, count) in counts.into_iter().enumerate() {
+            match i64::try_from(count) {
+                Ok(count) => values[row] = count,
+                Err(_) => errors.record(
+                    row,
+                    EvalError::TypeMismatch(format!(
+                        "dense relation count {count} does not fit in an integer column"
+                    )),
+                ),
+            }
+        }
+        Ok((DenseColumn::Integer(values), errors))
     }
 
     /// For each member (in batch order) the `where` clause and then the
@@ -4894,16 +5094,32 @@ fn period_label(period: &Period) -> String {
 }
 
 /// Format the value at `row` of a dense column for an error message, in the
-/// column's own dtype (so an integer year reads `1985`, not `1985.0`).
+/// column's own dtype (so an integer year reads `1985`, not `1985.0`). A row
+/// the column lacks is described by the column's dtype and length instead, so
+/// building an error never panics.
 fn dense_value_label(column: &DenseColumn, row: usize) -> String {
-    match column {
-        DenseColumn::Bool(values) => values[row].to_string(),
-        DenseColumn::Integer(values) => values[row].to_string(),
-        DenseColumn::Decimal(values) => values[row].to_string(),
-        DenseColumn::Float(values) => values[row].to_string(),
-        DenseColumn::Text(values) => format!("{:?}", values[row]),
-        DenseColumn::Date(values) => values[row].to_string(),
-    }
+    let value = match column {
+        DenseColumn::Bool(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Integer(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Decimal(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Float(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Text(values) => values.get(row).map(|value| format!("{value:?}")),
+        DenseColumn::Date(values) => values.get(row).map(ToString::to_string),
+    };
+    value.unwrap_or_else(|| {
+        let dtype = match column {
+            DenseColumn::Bool(_) => "bool",
+            DenseColumn::Integer(_) => "integer",
+            DenseColumn::Decimal(_) => "decimal",
+            DenseColumn::Float(_) => "float",
+            DenseColumn::Text(_) => "text",
+            DenseColumn::Date(_) => "date",
+        };
+        format!(
+            "no value (row {row} of a {}-row {dtype} column)",
+            column.len()
+        )
+    })
 }
 
 /// Find a directly-nested over-periods reduction inside a compiled scalar

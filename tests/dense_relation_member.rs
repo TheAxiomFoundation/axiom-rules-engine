@@ -320,6 +320,13 @@ fn dense_for(
                 DenseRelationBatchSpec {
                     offsets: offsets.clone(),
                     inputs,
+                    related_row_count: Some(
+                        households
+                            .iter()
+                            .map(|household| household.members.len())
+                            .sum(),
+                    ),
+                    ..Default::default()
                 },
             )
         })
@@ -681,6 +688,7 @@ fn dense_answers_when_no_row_reaches_a_where_clause_relation_member() {
                             DenseRelationBatchSpec {
                                 offsets: vec![0, 0],
                                 inputs: HashMap::new(),
+                                ..Default::default()
                             },
                         )
                     })
@@ -1144,7 +1152,12 @@ fn link_answers(
                         let offsets = vec![0, related.len()];
                         (
                             schema.key.clone(),
-                            DenseRelationBatchSpec { offsets, inputs },
+                            DenseRelationBatchSpec {
+                                offsets,
+                                inputs,
+                                related_row_count: Some(related.len()),
+                                ..Default::default()
+                            },
                         )
                     })
                     .collect();
