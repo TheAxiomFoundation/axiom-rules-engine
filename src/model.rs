@@ -328,6 +328,12 @@ pub enum ScalarExpr {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -951,6 +957,25 @@ fn collect_scalar_relation_usages(
             collect_scalar_relation_usages(program, from, entity, citing_rule, usages);
             collect_scalar_relation_usages(program, to, entity, citing_rule, usages);
         }
+        ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            ..
+        } => {
+            let current_kind = executable_current_kind(program, relation, *current_slot, entity);
+            add_relation_usage(
+                program,
+                relation,
+                *current_slot,
+                *related_slot,
+                current_kind,
+                None,
+                citing_rule,
+                usages,
+                &mut Vec::new(),
+            );
+        }
         ScalarExpr::CountRelated {
             relation,
             current_slot,
@@ -1208,7 +1233,9 @@ fn collect_scalar_derived_entities(
         // related ID, not on the enclosing predicate's entity. Its own usage
         // traversal handles those references after the enclosing orientation
         // is established.
-        ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {}
+        ScalarExpr::OnlyRelated { .. }
+        | ScalarExpr::CountRelated { .. }
+        | ScalarExpr::SumRelated { .. } => {}
         ScalarExpr::If {
             condition,
             then_expr,
@@ -1387,6 +1414,11 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         ScalarExpr::DaysBetween { from, to } => {
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
+        }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
         }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {

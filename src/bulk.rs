@@ -82,6 +82,11 @@ pub fn try_execute(
     data: &DataSet,
     queries: &[ExecutionQuery],
 ) -> Result<FastPathResult, EvalError> {
+    if crate::only_related::program_contains(program) {
+        return Ok(FastPathResult::Unsupported {
+            reason: "only_related uses the explain backend".into(),
+        });
+    }
     if queries.is_empty() {
         return Ok(FastPathResult::Executed(empty_response()));
     }
@@ -369,6 +374,9 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_scalar_expr(&mut self, expr: &ScalarExpr) -> Result<ScalarColumn, EvalError> {
         match expr {
+            ScalarExpr::OnlyRelated { .. } => Err(EvalError::TypeMismatch(
+                "only_related requires explain capability selection".into(),
+            )),
             ScalarExpr::Literal(value) => Ok(match value {
                 ScalarValue::Bool(value) => ScalarColumn::Bool(vec![*value; self.entity_ids.len()]),
                 ScalarValue::Integer(value) => {
@@ -1138,7 +1146,8 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::OverPeriods { kind, .. } => {
                 Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
             }
-            ScalarExpr::DateAddDays { .. }
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::DateAddDays { .. }
             | ScalarExpr::DateAddMonths { .. }
             | ScalarExpr::DateAddYears { .. }
             | ScalarExpr::DaysBetween { .. }

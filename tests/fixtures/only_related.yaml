@@ -1,0 +1,19 @@
+format: rulespec/v1
+inputs:
+  - name: decision
+    entity: Subject
+    dtype: Boolean
+rules:
+  - name: determination_subject
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Determination, Subject]
+  - name: projected
+    kind: derived
+    entity: Determination
+    dtype: Boolean
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: only_related(determination_subject, decision)

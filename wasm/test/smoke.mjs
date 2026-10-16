@@ -166,3 +166,6 @@ assert.throws(
 );
 
 console.log("smoke test passed");
+
+// Exercise the compatibility operation through the actual WASM JSON boundary.
+await import("./only-related.mjs");

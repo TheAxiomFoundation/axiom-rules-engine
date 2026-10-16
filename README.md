@@ -259,3 +259,5 @@ The Rust tests cover parsing, lowering, execution, dense compilation, traces,
 and RuleSpec import/ID behavior using fixtures under `tests/fixtures/rulespec/`.
 The `--features schema` run adds the JSON Schema golden-file, fidelity, and
 `rulespec-us` conformance tests.
+
+The compatibility-branch `only_related` contract and publication limits are documented in [docs/only-related-compatibility.md](docs/only-related-compatibility.md).

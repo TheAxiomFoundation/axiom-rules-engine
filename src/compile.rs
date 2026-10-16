@@ -1089,6 +1089,11 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
+        ScalarExprSpec::OnlyRelated { .. } => {
+            blockers.push(format!(
+                "{derived_name}: only_related uses the explain backend"
+            ));
+        }
         ScalarExprSpec::CountRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, index, blockers);
@@ -1316,6 +1321,11 @@ fn collect_scalar_dependencies(
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if let Some(dependencies_for_relation) = relation_dependencies.get(relation) {
+                dependencies.extend(dependencies_for_relation.iter().cloned());
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -1470,6 +1480,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_scalar(from, relations);
             collect_relation_members_from_scalar(to, relations);
         }
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
