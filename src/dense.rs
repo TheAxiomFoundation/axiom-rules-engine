@@ -1253,6 +1253,9 @@ impl<'a> DenseCompiler<'a> {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
             }),
+            ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
+                "only_related uses the explain backend".into(),
+            )),
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1584,6 +1587,9 @@ impl<'a> DenseCompiler<'a> {
                 then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
                 else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
             }),
+            ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
+                "only_related uses the explain backend".into(),
+            )),
             ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
@@ -1719,6 +1725,9 @@ impl<'a> DenseCompiler<'a> {
                     else_expr,
                 )?),
             }),
+            ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
+                "only_related uses the explain backend".into(),
+            )),
             ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
                 Err(DenseCompileError::Unsupported(
                     "current-entity derived relation predicates cannot aggregate another relation"

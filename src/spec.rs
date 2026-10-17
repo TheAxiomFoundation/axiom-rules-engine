@@ -16,6 +16,12 @@ use crate::model::{
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid only_related contract: {0}")]
+    InvalidOnlyRelatedContract(String),
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
     #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
@@ -171,6 +177,7 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        crate::only_related::validate(self).map_err(SpecError::InvalidOnlyRelatedContract)?;
         let mut program = Program::default();
 
         for unit in &self.units {
@@ -1006,6 +1013,12 @@ pub enum ScalarExprSpec {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -1133,6 +1146,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,

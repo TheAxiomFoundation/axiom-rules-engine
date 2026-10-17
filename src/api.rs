@@ -283,7 +283,12 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             // bulk will report Unsupported and the ordinary Explain path will
             // select independently for each query period.
             let resolved_dataset;
-            let fast_dataset = if let Some(first_query) = request.queries.first()
+            let fast_dataset = if crate::only_related::program_contains(&program) {
+                // Capability refusal must retain fact ownership and tied records.
+                // The existing Unsupported branch below selects Explain before
+                // evaluation; old programs retain their existing normalization.
+                &dataset
+            } else if let Some(first_query) = request.queries.first()
                 && request
                     .queries
                     .iter()
@@ -666,6 +671,15 @@ fn format_scalar_expression(
 ) -> String {
     use crate::model::{RelatedValueRef, ScalarExpr};
     match expr {
+        ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+        } => format!(
+            "only_related({}, {current_slot}, {related_slot}, {value:?})",
+            json_string(relation)
+        ),
         ScalarExpr::Literal(value) => format_scalar_value(value),
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
         ScalarExpr::InputOrElse { name, default } => {

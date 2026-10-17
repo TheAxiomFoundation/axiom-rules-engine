@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/issue233-runtime-compatibility-base]
   pull_request:
-    branches: [main]
+    branches: [main, codex/issue233-runtime-compatibility-base]
 
 jobs:
   rust:
@@ -207,6 +207,9 @@ jobs:
 
       - name: Verify native dense extension import
         run: .venv/bin/python -c "import axiom_rules_engine_dense"
+
+      - name: Build CLI for Python integration tests
+        run: cargo build --locked --bin axiom-rules-engine
 
       - name: Run Python tests
         run: .venv/bin/python -m pytest -q python/tests

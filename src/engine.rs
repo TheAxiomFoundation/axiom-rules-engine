@@ -52,6 +52,25 @@ pub enum EvalError {
     UnknownParameter(String),
     #[error("unknown relation: {0}")]
     UnknownRelation(String),
+    #[error(
+        "missing related entity for `{relation}` from `{entity_id}` over {period_start}..{period_end}"
+    )]
+    MissingRelation {
+        relation: String,
+        entity_id: String,
+        period_start: chrono::NaiveDate,
+        period_end: chrono::NaiveDate,
+    },
+    #[error(
+        "ambiguous relation `{relation}` from `{entity_id}` over {period_start}..{period_end}: {count} distinct targets"
+    )]
+    AmbiguousRelation {
+        relation: String,
+        entity_id: String,
+        period_start: chrono::NaiveDate,
+        period_end: chrono::NaiveDate,
+        count: usize,
+    },
     #[error("missing input `{name}` for entity `{entity_id}` over {period_start}..{period_end}")]
     MissingInput {
         name: String,
@@ -838,6 +857,81 @@ impl<'a> Engine<'a> {
                     })?;
                 Ok(ScalarValue::Integer((b - a).num_days()))
             }
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                let ids = self.related_entity_ids(
+                    relation,
+                    *current_slot,
+                    *related_slot,
+                    entity_id,
+                    period,
+                )?;
+                let related = match ids.as_slice() {
+                    [] => {
+                        return Err(EvalError::MissingRelation {
+                            relation: relation.clone(),
+                            entity_id: entity_id.into(),
+                            period_start: period.start,
+                            period_end: period.end,
+                        }
+                        .into());
+                    }
+                    [id] => id,
+                    _ => {
+                        return Err(EvalError::AmbiguousRelation {
+                            relation: relation.clone(),
+                            entity_id: entity_id.into(),
+                            period_start: period.start,
+                            period_end: period.end,
+                            count: ids.len(),
+                        }
+                        .into());
+                    }
+                };
+                let RelatedValueRef::Input(name) = value else {
+                    return Err(EvalError::TypeMismatch(
+                        "only_related requires a Boolean input".into(),
+                    )
+                    .into());
+                };
+                let result = self.lookup_input(name, related, period)?;
+                let expected =
+                    crate::only_related::related_kind(self.program, relation, *related_slot)
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch(
+                                "only_related requires a typed related slot".into(),
+                            )
+                        })?;
+                let covering: Vec<_> = self
+                    .input_index
+                    .get(&(name.clone(), related.clone()))
+                    .into_iter()
+                    .flatten()
+                    .filter(|record| record.interval.contains_period(period))
+                    .collect();
+                let latest = covering.first().map(|record| record.interval.start);
+                if covering
+                    .iter()
+                    .take_while(|record| Some(record.interval.start) == latest)
+                    .any(|record| record.entity != expected)
+                {
+                    return Err(EvalError::TypeMismatch(
+                        "only_related input entity does not match the declared related slot".into(),
+                    )
+                    .into());
+                }
+                if !matches!(result, ScalarValue::Bool(_)) {
+                    return Err(EvalError::TypeMismatch(
+                        "only_related requires a Boolean input".into(),
+                    )
+                    .into());
+                }
+                Ok(result)
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1383,6 +1477,7 @@ fn collect_scalar_trace_references(
             collect_scalar_trace_references(from, derived, parameters);
             collect_scalar_trace_references(to, derived, parameters);
         }
+        ScalarExpr::OnlyRelated { .. } => {}
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(predicate) = where_clause {
                 collect_judgment_trace_references(predicate, derived, parameters);
