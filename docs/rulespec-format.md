@@ -464,15 +464,20 @@ objects (snake_case). This is the vocabulary downstream consumers — compiled
 artifacts, the graph viewer, wasm hosts — actually traverse; the generated
 JSON Schemas give exact field shapes.
 
-Scalar kinds: `literal`, `input`, `input_or_else`, `derived`,
+Scalar kinds: `literal`, `input`, `input_for_year`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
 `floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
-`date_add_years`, `days_between`,
+`date_add_years`, `days_between`, `only_related`,
 `count_related`, `sum_related`, `if`, `no_match`, `over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
 `eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`,
 `exactly_one`.
+
+The wire schemas (execution requests, compiled artifacts) also admit
+`input_or_else`, an input read with a fallback value, for hand-built
+ProgramSpec programs. No RuleSpec construct lowers to it, and RuleSpec
+refuses rule-level defaults.
 
 Literal values carry their own `kind`: `bool`, `integer`, `decimal`, `text`,
 or `date`.
