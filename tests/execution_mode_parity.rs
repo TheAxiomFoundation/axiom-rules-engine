@@ -2171,6 +2171,7 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
+        ScalarExprSpec::InputForYear { input, .. } => visit(Ref::Input(input)),
         ScalarExprSpec::Input { name } | ScalarExprSpec::InputOrElse { name, .. } => {
             visit(Ref::Input(name))
         }
@@ -4098,6 +4099,7 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
             usize::from(matches!(value, RelatedValueRefSpec::Derived { .. }))
         }
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }

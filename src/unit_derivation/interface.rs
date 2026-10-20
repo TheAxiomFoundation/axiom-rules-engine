@@ -263,6 +263,7 @@ impl<'a> PhaseTwoEngine<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::PeriodStart

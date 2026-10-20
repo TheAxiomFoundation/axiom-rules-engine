@@ -1654,6 +1654,10 @@ impl<'a> DenseCompiler<'a> {
     ) -> Compiling<CompiledScalarExpr> {
         match expr {
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),
@@ -2017,6 +2021,10 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(CompiledRelatedScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => {
                 let input_index = self.related_input(relation_index, name);
                 Ok(CompiledRelatedScalarExpr::Input(input_index))
@@ -2201,6 +2209,10 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledScalarExpr, DenseCompileError> {
         match expr {
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),

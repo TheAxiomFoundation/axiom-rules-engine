@@ -16,6 +16,7 @@ pub mod relation_typing;
 pub mod rulespec;
 #[cfg(feature = "schema")]
 pub mod schema;
+pub mod selected_year;
 pub mod source;
 pub mod spec;
 #[cfg(feature = "unit-derivation")]

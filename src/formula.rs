@@ -1660,6 +1660,29 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             //
             //   count_where(relation, predicate_field)
             //   sum_where(relation, amount_field_or_derived, predicate_field)
+            "input_for_year" => {
+                if args.len() != 2 {
+                    return Err(FormulaError::lower("input_for_year takes 2 args"));
+                }
+                let input = expect_var(&args[0], "input_for_year primitive input")?;
+                if ctx.derived.contains(&input) || ctx.scalars.contains(&input) {
+                    return Err(FormulaError::lower(
+                        "input_for_year requires a declared primitive",
+                    ));
+                }
+                let Expr::LitInt(year) = args[1] else {
+                    return Err(FormulaError::lower(
+                        "input_for_year initially requires an integer year literal",
+                    ));
+                };
+                if !(1..=9999).contains(&year) {
+                    return Err(FormulaError::lower("input_for_year year must be 1..9999"));
+                }
+                ScalarExprSpec::InputForYear {
+                    input,
+                    year: year as i32,
+                }
+            }
             "only_related" => {
                 if args.len() != 2 {
                     return Err(FormulaError::lower("only_related takes 2 args"));

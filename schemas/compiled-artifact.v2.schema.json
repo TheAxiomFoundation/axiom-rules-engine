@@ -1127,6 +1127,12 @@
           },
           "type": "array"
         },
+        "selected_year_inputs": {
+          "items": {
+            "$ref": "#/$defs/SelectedYearInput"
+          },
+          "type": "array"
+        },
         "units": {
           "default": [],
           "items": {
@@ -1346,6 +1352,36 @@
           "required": [
             "kind",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "properties": {
+            "input": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "input_for_year",
+              "type": "string"
+            },
+            "year": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "input",
+            "year"
           ],
           "type": "object"
         },
@@ -2196,6 +2232,51 @@
           "type": "object"
         }
       ]
+    },
+    "SelectedYearInput": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "corpus_citation_paths"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "dtype": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        "period": {
+          "type": "string"
+        },
+        "slot": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "slot",
+        "entity",
+        "dtype",
+        "period"
+      ],
+      "type": "object"
     },
     "SourceVerification": {
       "additionalProperties": false,

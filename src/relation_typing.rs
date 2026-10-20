@@ -1112,6 +1112,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
@@ -1250,6 +1251,7 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
         ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
         | ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::PeriodStart
