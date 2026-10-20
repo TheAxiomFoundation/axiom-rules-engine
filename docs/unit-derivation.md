@@ -1,13 +1,15 @@
 # Unit derivation: semantics RFC
 
-**Status: RFC v2, ratified 2026-08-15** ([ratification](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-5299498361):
-tiers A and D as written, tier B deferred to cited authority, tier C per
-jurisdiction with no engine default). This document is the contract for
-[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134): the
-semantics a `kind: unit` rule must satisfy. Nothing in it changes the release
-line. Supplied membership remains the default and continues to work; derivation
-is opt-in per program and off by default. What is built so far, what is
-not, and a design review now in progress are in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
+**Status: superseded in part, 2026-10-10.** Tiers A and D were ratified on
+2026-08-15 ([ratification](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-5299498361)).
+On 2026-10-10 decision d1265
+([record](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134#issuecomment-6102806776))
+replaced the construct this document specifies: a legal unit is now a
+`derived_relation` from an anchor to persons, not a partition that creates
+new entities. § 15 lists which parts of this contract still hold. Read the
+rest as the record of the partition design and of the 7 CFR 273.1 analysis,
+which still applies. Nothing in it changes the release line; supplied
+membership remains the default. What is built is in § 14. The concrete case worked throughout is 7 CFR 273.1 (SNAP
 household composition), from the eCFR text as of 2026-07-01, with
 7 CFR 273.11(c) read for the excluded-member treatment it prescribes.
 
@@ -875,16 +877,66 @@ blocking, attachments, bars) has met synthetic plans only. An encoding of
 - No SNAP household has been derived from encoded law, and no tier B reading
   is resolved.
 
-**Direction under review (2026-10-10).** A stage-4 plan was filed on
-2026-09-27 ([#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214)
-to [#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220),
-[axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715),
-[rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428))
-and is on hold. A design review found that 42 CFR 435.603(f) defines the
-Medicaid household per individual, so the households of people in one home
-can overlap, which the partition in this contract cannot express. The review
-recommends deriving membership as a relation anchored on a claimant. Its
-result and the pending decision are on
-[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134).
-Until that decision is recorded, this document is the ratified contract for
-the partition construct and no more.
+**Direction decided (2026-10-10).** See § 15. The stage-4 plan filed on
+2026-09-27 is withdrawn; its issues are rewritten to the new plan or closed.
+
+## 15. Decision of 2026-10-10
+
+[#134](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/134)
+records the design review and decision d1265.
+
+**Why the construct changed.** 42 CFR 435.603(f) defines the Medicaid
+household per individual. For a child and her two unmarried, non-filing
+parents, (f)(3) gives the child a household of all three and each parent a
+household of themselves and the child. The households overlap, so no
+partition of the home expresses them. A relation from an anchor (the
+applicant, return or person the claim is about) to persons does, and covers
+SNAP as the case where the units happen to be disjoint.
+
+**The decision.**
+
+1. A legal unit is a `derived_relation` from an anchor to persons, with
+   membership that can be known in, known out, or unknown.
+2. Tier A entry 1 is amended. Missing facts give sound, conservative bounds:
+   the engine never returns a wrong unit, and it may ask for a fact that
+   would not change the answer. Exact case analysis may be added later.
+3. The surface extends `derived_relation`. A dedicated `kind: unit` may later
+   become shorthand that compiles down to it.
+4. The first pilot is 7 CFR 273.1 for the common case: the meal group, the
+   direct (b)(1) combinations and the (b)(7) filter are derived, and the
+   exceptions are inputs with no default.
+
+Choosing the best lawful composition belongs to the simulation layer. The
+engine evaluates one set of choices and marks which inputs are elections, and
+who makes each one, in the artifact interface block
+([#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155)).
+
+**What still holds from this contract.** Entry numbers refer to the
+ratification matrix in § 13. Scoped completeness (entry 6); separate unknown
+and conflict states; elections with named actors, defaulted only with cited
+authority and otherwise unknown (entry 3); composition kept apart from
+participation (entry 4); refusal of a supplied tuple for a relation the
+program derives (entry 5); the comparison protocol with a ledger frozen
+before results (entry 16); whole-period coverage; no engine default for a
+contested reading; and the 7 CFR 273.1 decomposition in § 3 with its tier B
+and tier C entries (7–15).
+
+**What no longer applies.** The partition pipeline in § 4 (cuts, blocking,
+attachments as set operations), cut discipline (entry 2), the
+content-derived unit ids of entry 17 (its canonical ordering of tuples and
+trace nodes still applies), the entity registry and materialization barrier in
+§§ 8 and 10 (part of entry 18), and admissible-world enumeration as the
+semantics of § 5, which remains a test oracle.
+
+**Plan.**
+
+| Step | Issue |
+|---|---|
+| Artifact interface block, relation provenance, election inputs | [#155](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/155) |
+| Unknown values in the ordinary engine | [#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215) |
+| Endpoint roles, pair-scoped facts, bounded joins | [#214](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/214) |
+| Encoder support | [axiom-encode#1715](https://github.com/TheAxiomFoundation/axiom-encode/issues/1715) |
+| 7 CFR 273.1 common-case pilot | [rulespec-us#1428](https://github.com/TheAxiomFoundation/rulespec-us/issues/1428) |
+| Positive, monotone recursion | [#231](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/231) |
+| NZ family into ordinary RuleSpec; retire `src/unit_derivation` | [#232](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/232) |
+| Dense refusal, trace, output | [#218](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/218), [#219](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/219), [#220](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/220) |

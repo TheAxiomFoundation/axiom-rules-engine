@@ -2164,6 +2164,10 @@ fn lower_program_reading(
 
 fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
     match expr {
+        ScalarExprSpec::OnlyRelated { value, .. } => match value {
+            RelatedValueRefSpec::Input { name } => visit(Ref::Input(name)),
+            RelatedValueRefSpec::Derived { name } => visit(Ref::Derived(name)),
+        },
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
@@ -4098,6 +4102,7 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::CountRelated { .. }
+        | ScalarExprSpec::OnlyRelated { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => 0,
         ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),

@@ -97,6 +97,14 @@ pub enum RuleSpecError {
         id: String,
         names: Vec<String>,
     },
+    #[error(
+        "only_related in `{citing}` requires one declared Boolean input `{input}` owned by the related entity: {message}"
+    )]
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -154,6 +162,28 @@ pub enum RuleSpecError {
     Source(#[from] crate::source::SourceError),
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
+    /// `name` and `entity` are copied into the generated formula source
+    /// unquoted, so each must lex as exactly one token.
+    #[error("RuleSpec rule {name:?} has {field} {value:?}; it must be exactly one {expected}")]
+    InvalidFormulaField {
+        name: String,
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    /// The generated formula source indents every formula line, which would
+    /// change the value of a string literal that spans a line feed.
+    #[error(
+        "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
+    )]
+    MultilineStringLiteral {
+        name: String,
+        line: usize,
+        col: usize,
+    },
+    /// An unclosed `"""` block would hide the rest of the generated source.
+    #[error("RuleSpec rule `{name}` has a formula whose `\"\"\"` block is never closed")]
+    UnterminatedFormulaBlock { name: String },
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
     UnsupportedRuleKind { name: String, kind: String },
     #[error("RuleSpec rule `{name}` must declare `kind`")]
@@ -449,6 +479,15 @@ pub struct RuleSpecLoweringOutcome {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
+    /// Retained for validation of only_related; other operators keep their existing input contract.
+    #[serde(default)]
+    pub inputs: serde_yaml::Value,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub imported_input_declarations: Vec<(Option<String>, serde_yaml::Value)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub input_origin: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
@@ -1613,6 +1652,10 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     if extension.module.is_some() {
         base.module = extension.module;
     }
+    base.imported_input_declarations
+        .push((extension.input_origin, extension.inputs));
+    base.imported_input_declarations
+        .extend(extension.imported_input_declarations);
     base.units.extend(extension.units);
     base.relations.extend(extension.relations);
     base.rules.extend(extension.rules);
@@ -2362,6 +2405,7 @@ impl RulesDocument {
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        self.input_origin = origin_target.clone();
         // The module-level corpus citation path rides onto every rule here,
         // because `merge_rules_documents` keeps only the root module's
         // metadata: without stamping, an imported module's join key would be
@@ -2524,27 +2568,41 @@ impl RulesDocument {
             })
             .map(|rule| rule.canonical_relation_id())
             .collect::<HashSet<_>>();
-        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
-            match error {
-                crate::relation_direction::DirectionError::Aggregate {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousRelationDirection {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                },
-                crate::relation_direction::DirectionError::DerivedSlots {
-                    relation,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousDerivedRelationSlots {
-                    relation,
-                    slot_entities,
-                },
-            }
+        crate::relation_direction::resolve(
+            &mut program,
+            &defaulted_slots,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(|error| match error {
+            crate::relation_direction::DirectionError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            } => RuleSpecError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            },
+            crate::relation_direction::DirectionError::Aggregate {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            } => RuleSpecError::AmbiguousRelationDirection {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            },
+            crate::relation_direction::DirectionError::DerivedSlots {
+                relation,
+                slot_entities,
+            } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                relation,
+                slot_entities,
+            },
         })?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
@@ -2775,15 +2833,22 @@ impl RulesDocument {
         let Some(module) = &self.module else {
             return;
         };
+        // A `#` comment ends at a line feed and the text after it would be
+        // lexed as formula source, so every line of a header field goes behind
+        // its own prefix. A value without a line feed is written as before.
         if let Some(title) = &module.title {
-            out.push_str("# title: ");
-            out.push_str(title);
-            out.push('\n');
+            for line in title.split('\n') {
+                out.push_str("# title: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(status) = &module.status {
-            out.push_str("# status: ");
-            out.push_str(status);
-            out.push('\n');
+            for line in status.split('\n') {
+                out.push_str("# status: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(summary) = &module.summary {
             for line in summary.lines() {
@@ -2799,6 +2864,101 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    /// `name` and `entity` are written into the formula source unquoted, so
+    /// the lexer must read each as exactly one token: more tokens could
+    /// declare other rules, and a comment or `"""` block would silently drop
+    /// the rest of the value. A name must also match exactly, because later
+    /// stages find each rule's parameter or output by its YAML name.
+    fn validate_source_name(&self) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(&self.name, true) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "name",
+            value: self.name.clone(),
+            expected: "identifier or path",
+        })
+    }
+
+    /// Surrounding whitespace in an entity lexes to nothing and has always
+    /// been accepted, so only the text inside it must be one identifier.
+    fn validate_source_entity(&self, entity: &str) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(
+            entity.trim_matches(|c: char| c.is_ascii_whitespace()),
+            false,
+        ) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "entity",
+            value: entity.to_string(),
+            expected: "identifier",
+        })
+    }
+
+    /// `write_formula_definition` splits each formula at line feeds, indents
+    /// every line and trims its trailing whitespace. Between tokens that
+    /// changes only whitespace. Reject the two cases where it changes the
+    /// program: a string literal containing a line feed, whose value the
+    /// rewrite would change, and an unclosed `"""` block, which ends at the end
+    /// of the formula's own parse but would hide every later rule in the
+    /// generated source. `written` is the formula as written; it is trimmed
+    /// here as the writer trims it, and error positions refer to `written`.
+    fn validate_formula_source(&self, written: &str) -> Result<(), RuleSpecError> {
+        use crate::formula::{Lexer, TokType};
+
+        let formula = written.trim();
+        if !formula.contains('\n') && !formula.contains("\"\"\"") {
+            return Ok(());
+        }
+        // Lex with a sentinel on a line of its own after the formula. It is
+        // only read as a token at that line, column 1 if every `"""` block in
+        // the formula was closed.
+        const END: &str = "__rulespec_formula_end__";
+        let mut line_offsets = vec![0];
+        line_offsets.extend(formula.match_indices('\n').map(|(offset, _)| offset + 1));
+        let tokens = Lexer::new(&format!("{formula}\n{END}")).tokenise()?;
+        if !tokens.iter().any(|token| {
+            token.ty == TokType::Ident
+                && token.value == END
+                && token.line == line_offsets.len() + 1
+                && token.col == 1
+        }) {
+            return Err(RuleSpecError::UnterminatedFormulaBlock {
+                name: self.name.clone(),
+            });
+        }
+        // Token columns count bytes, so each string's opening quote is at a
+        // known byte offset. Scan its raw bytes to the closing quote.
+        let bytes = formula.as_bytes();
+        for token in tokens.iter().filter(|token| token.ty == TokType::String) {
+            let start = line_offsets[token.line - 1] + token.col - 1;
+            let quote = bytes[start];
+            let mut offset = start + 1;
+            while offset < bytes.len() && bytes[offset] != quote {
+                // Check before skipping an escape: a backslash followed by a
+                // raw line feed is also changed by the rewrite.
+                if bytes[offset] == b'\n'
+                    || (bytes[offset] == b'\\' && bytes.get(offset + 1) == Some(&b'\n'))
+                {
+                    // Point at the opening quote in the formula as written,
+                    // counting characters.
+                    let at = written.len() - written.trim_start().len() + start;
+                    let line_start = written[..at].rfind('\n').map_or(0, |index| index + 1);
+                    return Err(RuleSpecError::MultilineStringLiteral {
+                        name: self.name.clone(),
+                        line: written[..at].matches('\n').count() + 1,
+                        col: written[line_start..at].chars().count() + 1,
+                    });
+                }
+                offset += if bytes[offset] == b'\\' { 2 } else { 1 };
+            }
+        }
+        Ok(())
+    }
+
     fn source_path(&self) -> String {
         self.origin_target
             .clone()
@@ -3180,6 +3340,10 @@ impl RuleDefinition {
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
+        if let Some(entity) = self.entity.as_deref().filter(|value| !value.is_empty()) {
+            self.validate_source_entity(entity)?;
+        }
         let versions = self.effective_versions();
         if versions.is_empty() {
             return Err(RuleSpecError::MissingFormula {
@@ -3216,6 +3380,7 @@ impl RuleDefinition {
                 .ok_or_else(|| RuleSpecError::MissingFormula {
                     name: self.name.clone(),
                 })?;
+            self.validate_formula_source(version.formula.as_deref().unwrap_or(formula))?;
             out.push_str("    from ");
             out.push_str(&start.to_string());
             if let Some(end) = version.effective_to {
@@ -3234,6 +3399,7 @@ impl RuleDefinition {
     }
 
     fn write_formula_stub_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
         let effective_from = self
             .versions
             .iter()
@@ -3654,6 +3820,11 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(from, alias, relation_name);
             rewrite_relation_alias_in_scalar(to, alias, relation_name);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3968,6 +4139,9 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(from, names);
             collect_scalar_relation_names(to, names);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            names.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -4154,6 +4328,9 @@ fn rewrite_scalar_relation_references(
                 unambiguous_short_rewrites,
                 derived_origin_targets,
             );
+        }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            rewrite_relation_name(relation, origin_target, rewrites);
         }
         ScalarExprSpec::CountRelated {
             relation,
@@ -4440,6 +4617,7 @@ fn scalar_uses_imported_derived(
             scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(to, origin_target, derived_origin_targets)
         }
+        ScalarExprSpec::OnlyRelated { .. } => false,
         ScalarExprSpec::CountRelated { where_clause, .. } => where_clause
             .as_deref()
             .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
@@ -4515,6 +4693,27 @@ fn write_metadata_raw(out: &mut String, key: &str, value: Option<&str>) {
     out.push_str(": ");
     out.push_str(value);
     out.push('\n');
+}
+
+/// Whether the formula lexer reads `text` as exactly one identifier (or path,
+/// when allowed) spelled exactly `text`. Only identifier bytes reach the
+/// lexer, so quotes and backslashes in a malformed value are never lexed.
+fn is_single_formula_token(text: &str, allow_path: bool) -> bool {
+    use crate::formula::{Lexer, TokType};
+
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'/'))
+        && Lexer::new(text).tokenise().is_ok_and(|tokens| {
+            matches!(
+                tokens.as_slice(),
+                [token, end] if (token.ty == TokType::Ident
+                    || (allow_path && token.ty == TokType::Path))
+                    && token.value == text
+                    && end.ty == TokType::Eof
+            )
+        })
 }
 
 fn quote_formula_string(value: &str) -> String {
@@ -4628,5 +4827,47 @@ fn scalar_value_from_yaml<E: serde::de::Error>(
         other => Err(serde::de::Error::custom(format!(
             "expected scalar parameter value, got {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod source_integrity_properties {
+    use super::{ModuleMetadata, RulesDocument};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+    #[test]
+    fn single_line_title_and_status_keep_the_historical_header_bytes() {
+        let value = || {
+            proptest::collection::vec(
+                any::<char>().prop_filter("no line feed", |character| *character != '\n'),
+                0..64,
+            )
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+        };
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[247; 32]),
+        );
+        runner
+            .run(&(value(), value()), |(title, status)| {
+                let document = RulesDocument {
+                    module: Some(ModuleMetadata {
+                        title: Some(title.clone()),
+                        status: Some(status.clone()),
+                        ..ModuleMetadata::default()
+                    }),
+                    ..RulesDocument::default()
+                };
+                let mut actual = String::new();
+                document.write_header(&mut actual);
+                prop_assert_eq!(actual, format!("# title: {title}\n# status: {status}\n\n"));
+                Ok(())
+            })
+            .expect("a header value without a line feed must keep its exact bytes");
     }
 }

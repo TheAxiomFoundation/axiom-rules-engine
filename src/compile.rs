@@ -1003,6 +1003,11 @@ pub(crate) fn validate_dependency_graph(program: &ProgramSpec) -> Result<(), Com
     evaluation_order(program).map(|_| ())
 }
 
+#[cfg(test)]
+mod evaluation_order_reference;
+#[cfg(test)]
+mod evaluation_order_tests;
+
 fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> {
     let mut derived_names = HashSet::new();
     for derived in &program.derived {
@@ -1015,62 +1020,112 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
     validate_relation_derivation_graph(program)?;
     let relation_dependencies = relation_derivation_dependencies(program, &derived_names)?;
 
-    let mut incoming_counts = HashMap::new();
-    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    // Kahn's algorithm over the rules and the derived relations they count or
+    // sum over. A rule waits for each rule it reads and for each such
+    // relation; a relation waits for the rules its predicate reads. One node
+    // per relation keeps the graph linear in the program: copying the
+    // relation's predicate rules into every rule that aggregates over it cost
+    // (aggregating rules) x (predicate rules) edges.
+    let rule_positions = program
+        .derived
+        .iter()
+        .enumerate()
+        .map(|(position, derived)| (derived.name.as_str(), position))
+        .collect::<HashMap<_, _>>();
+    // rule_readers[x]: the rules that read rule x directly.
+    let mut rule_readers = vec![Vec::new(); program.derived.len()];
+    // predicate_readers[x]: the relations whose predicate reads rule x.
+    let mut predicate_readers = vec![Vec::new(); program.derived.len()];
+    let mut rule_waiting = vec![0_usize; program.derived.len()];
+    // A relation whose predicate reads no rule never waits, so it gets no node.
+    let mut relation_nodes = HashMap::new();
+    let mut relation_waiting = Vec::new();
+    for (relation, rules) in &relation_dependencies {
+        if rules.is_empty() {
+            continue;
+        }
+        let node = relation_waiting.len();
+        relation_nodes.insert(relation.as_str(), node);
+        relation_waiting.push(rules.len());
+        for rule in rules {
+            // Every rule a predicate reads exists: checked above.
+            predicate_readers[rule_positions[rule.as_str()]].push(node);
+        }
+    }
+    // relation_aggregators[r]: the rules that count or sum over relation r.
+    let mut relation_aggregators = vec![Vec::new(); relation_waiting.len()];
 
-    for derived in &program.derived {
-        // Sorted, so a rule with several unknown dependencies always reports
-        // the same one.
-        let dependencies = derived_dependencies(derived, &relation_dependencies)
-            .into_iter()
-            .collect::<BTreeSet<String>>();
-        incoming_counts.insert(derived.name.clone(), dependencies.len());
-
-        for dependency in dependencies {
-            if !derived_names.contains(&dependency) {
-                return Err(CompileError::UnknownDerivedDependency {
-                    derived: derived.name.clone(),
-                    dependency,
-                });
+    for (position, derived) in program.derived.iter().enumerate() {
+        let (dependencies, aggregated_relations) = derived_dependencies(derived);
+        // The smallest, so a rule with several unknown dependencies always
+        // reports the same one. The rules a relation's predicate reads were
+        // checked above, so they cannot be it.
+        if let Some(dependency) = dependencies
+            .iter()
+            .filter(|dependency| !derived_names.contains(*dependency))
+            .min()
+        {
+            return Err(CompileError::UnknownDerivedDependency {
+                derived: derived.name.clone(),
+                dependency: dependency.clone(),
+            });
+        }
+        for dependency in &dependencies {
+            rule_readers[rule_positions[dependency.as_str()]].push(position);
+        }
+        rule_waiting[position] = dependencies.len();
+        // Base and unknown relations wait for nothing.
+        for relation in &aggregated_relations {
+            if let Some(&node) = relation_nodes.get(relation.as_str()) {
+                relation_aggregators[node].push(position);
+                rule_waiting[position] += 1;
             }
-            dependents
-                .entry(dependency)
-                .or_default()
-                .push(derived.name.clone());
         }
     }
 
-    for next in dependents.values_mut() {
-        next.sort();
-    }
-
-    let mut ready = incoming_counts
+    let mut ready = program
+        .derived
         .iter()
-        .filter_map(|(name, count)| (*count == 0).then_some(name.clone()))
-        .collect::<BTreeSet<String>>();
+        .zip(&rule_waiting)
+        .filter_map(|(derived, waiting)| (*waiting == 0).then_some(derived.name.as_str()))
+        .collect::<BTreeSet<&str>>();
     let mut order = Vec::with_capacity(program.derived.len());
 
     while let Some(name) = ready.pop_first() {
-        order.push(name.clone());
-        if let Some(next) = dependents.get(&name) {
-            for dependent in next {
-                if let Some(count) = incoming_counts.get_mut(dependent) {
-                    *count -= 1;
-                    if *count == 0 {
-                        ready.insert(dependent.clone());
-                    }
+        order.push(name.to_string());
+        let position = rule_positions[name];
+        let mut satisfy = |rule: usize| {
+            rule_waiting[rule] -= 1;
+            if rule_waiting[rule] == 0 {
+                ready.insert(program.derived[rule].name.as_str());
+            }
+        };
+        for &reader in &rule_readers[position] {
+            satisfy(reader);
+        }
+        // A relation is satisfied the moment its last predicate rule is
+        // ordered, so each rule becomes ready exactly when the last rule it
+        // waits on, directly or through a relation, is ordered: the ready set,
+        // and so the order, is the one the rule-to-rule graph gave.
+        for &relation in &predicate_readers[position] {
+            relation_waiting[relation] -= 1;
+            if relation_waiting[relation] == 0 {
+                for &aggregator in &relation_aggregators[relation] {
+                    satisfy(aggregator);
                 }
             }
         }
     }
 
     if order.len() != program.derived.len() {
-        let cycle = incoming_counts
+        let cycle = program
+            .derived
+            .iter()
+            .zip(&rule_waiting)
+            .filter_map(|(derived, waiting)| (*waiting > 0).then_some(derived.name.as_str()))
+            .collect::<BTreeSet<&str>>()
             .into_iter()
-            .filter_map(|(name, count)| (count > 0).then_some(name))
-            .collect::<BTreeSet<String>>()
-            .into_iter()
-            .collect::<Vec<String>>()
+            .collect::<Vec<&str>>()
             .join(", ");
         return Err(CompileError::CyclicDependency { cycle });
     }
@@ -1078,7 +1133,7 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
     // The order above is stored in artifact metadata and compared exactly
     // when an artifact is loaded, so it stays as computed; this further check
     // only refuses programs, never reorders them.
-    reject_relation_routed_cycles(program, &dependents)?;
+    reject_relation_routed_cycles(program, &rule_readers)?;
     Ok(order)
 }
 
@@ -1092,13 +1147,14 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
 /// does above. Base relations depend on nothing, so a program without derived
 /// relations has no such cycle.
 ///
-/// `rule_dependents` is the rule graph the order above was sorted from. Each
-/// edge there is a rule another rule reads, or a rule read by the predicate of
-/// a relation another rule aggregates over; the second kind is also a path
-/// through that relation here, so reusing the edges changes no verdict.
+/// `rule_readers[x]` lists, by position, the rules that read rule `x`
+/// directly: the rule-to-rule edges of the order above. That order also makes
+/// a rule wait for the rules read by the predicate of a relation it counts or
+/// sums over; each such wait is a path through that relation here, so
+/// leaving it out changes no verdict.
 fn reject_relation_routed_cycles(
     program: &ProgramSpec,
-    rule_dependents: &HashMap<String, Vec<String>>,
+    rule_readers: &[Vec<usize>],
 ) -> Result<(), CompileError> {
     if program
         .relations
@@ -1138,14 +1194,11 @@ fn reject_relation_routed_cycles(
             incoming[dependent] += 1;
         }
     };
-    for (dependency, dependents) in rule_dependents {
-        for dependent in dependents {
-            if let Some(dependent) = rule_index(dependent) {
-                add_edge(rule_index(dependency), dependent);
-            }
+    for (dependency, readers) in rule_readers.iter().enumerate() {
+        for &reader in readers {
+            add_edge(Some(dependency), reader);
         }
     }
-    let no_relation_dependencies = HashMap::new();
     for (index, derived) in program.derived.iter().enumerate() {
         let mut relations = HashSet::new();
         for semantics in std::iter::once(&derived.semantics)
@@ -1168,7 +1221,7 @@ fn reject_relation_routed_cycles(
         let index = program.derived.len() + offset;
         let derivation = relation.derivation.as_ref().expect("derived relation");
         let mut rules = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut rules, &no_relation_dependencies);
+        collect_judgment_dependencies(&derivation.predicate, &mut rules, &mut HashSet::new());
         for rule in rules {
             add_edge(rule_index(&rule), index);
         }
@@ -1349,6 +1402,7 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
@@ -1495,39 +1549,69 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         graph.insert(relation.name.clone(), dependencies);
     }
 
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    for relation in graph.keys() {
-        detect_relation_cycle(relation, &graph, &mut visiting, &mut visited)?;
-    }
-    Ok(())
+    detect_relation_cycle(&graph)
 }
 
-fn detect_relation_cycle(
-    relation: &str,
-    graph: &BTreeMap<String, BTreeSet<String>>,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-) -> Result<(), CompileError> {
-    if visited.contains(relation) {
-        return Ok(());
-    }
-    if !visiting.insert(relation.to_string()) {
-        let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
-        cycle.sort();
-        return Err(CompileError::CyclicRelationDependency {
-            cycle: cycle.join(", "),
-        });
-    }
-    if let Some(dependencies) = graph.get(relation) {
-        for dependency in dependencies {
-            if graph.contains_key(dependency) {
-                detect_relation_cycle(dependency, graph, visiting, visited)?;
+/// Depth-first search of the derived-relation graph for a cycle, with an
+/// explicit stack so a long chain of relations cannot overflow the call
+/// stack. Relations are visited in name order and each relation's
+/// dependencies in name order; on meeting a relation already on the current
+/// path, the error names every relation on that path, sorted.
+fn detect_relation_cycle(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+    // Nodes are derived relations by position in name order; each keeps its
+    // dependencies that are themselves derived relations, in name order.
+    let index = graph
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.as_str(), position))
+        .collect::<HashMap<_, _>>();
+    let dependencies = graph
+        .values()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter_map(|dependency| index.get(dependency.as_str()).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let names = graph.keys().collect::<Vec<_>>();
+
+    let mut on_path = vec![false; names.len()];
+    let mut finished = vec![false; names.len()];
+    // The current path: each relation with the next dependency to follow.
+    let mut path = Vec::<(usize, usize)>::new();
+    for root in 0..names.len() {
+        if finished[root] {
+            continue;
+        }
+        on_path[root] = true;
+        path.push((root, 0));
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&dependency) = dependencies[node].get(*next) else {
+                on_path[node] = false;
+                finished[node] = true;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            if finished[dependency] {
+                continue;
             }
+            if on_path[dependency] {
+                let mut cycle = path
+                    .iter()
+                    .map(|&(member, _)| names[member].as_str())
+                    .collect::<Vec<_>>();
+                cycle.sort_unstable();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            on_path[dependency] = true;
+            path.push((dependency, 0));
         }
     }
-    visiting.remove(relation);
-    visited.insert(relation.to_string());
     Ok(())
 }
 
@@ -1541,7 +1625,11 @@ fn relation_derivation_dependencies(
             continue;
         };
         let mut dependencies = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut dependencies, &HashMap::new());
+        collect_judgment_dependencies(
+            &derivation.predicate,
+            &mut dependencies,
+            &mut HashSet::new(),
+        );
         // The smallest name, so a predicate naming several unknown rules
         // always reports the same one.
         if let Some(dependency) = dependencies
@@ -1559,91 +1647,92 @@ fn relation_derivation_dependencies(
     Ok(dependencies_by_relation)
 }
 
-fn derived_dependencies(
-    derived: &crate::spec::DerivedSpec,
-    relation_dependencies: &HashMap<String, HashSet<String>>,
-) -> HashSet<String> {
+/// The rules a derived rule reads, and the relations it counts or sums over,
+/// across its semantics and every version's.
+fn derived_dependencies(derived: &crate::spec::DerivedSpec) -> (HashSet<String>, HashSet<String>) {
     let mut dependencies = HashSet::new();
+    let mut aggregated_relations = HashSet::new();
     match &derived.semantics {
         DerivedSemanticsSpec::Scalar { expr } => {
-            collect_scalar_dependencies(expr, &mut dependencies, relation_dependencies);
+            collect_scalar_dependencies(expr, &mut dependencies, &mut aggregated_relations);
         }
         DerivedSemanticsSpec::Judgment { expr } => {
-            collect_judgment_dependencies(expr, &mut dependencies, relation_dependencies);
+            collect_judgment_dependencies(expr, &mut dependencies, &mut aggregated_relations);
         }
     }
     for version in &derived.versions {
         match &version.semantics {
             DerivedSemanticsSpec::Scalar { expr } => {
-                collect_scalar_dependencies(expr, &mut dependencies, relation_dependencies);
+                collect_scalar_dependencies(expr, &mut dependencies, &mut aggregated_relations);
             }
             DerivedSemanticsSpec::Judgment { expr } => {
-                collect_judgment_dependencies(expr, &mut dependencies, relation_dependencies);
+                collect_judgment_dependencies(expr, &mut dependencies, &mut aggregated_relations);
             }
         }
     }
-    dependencies
+    (dependencies, aggregated_relations)
 }
 
 fn collect_scalar_dependencies(
     expr: &ScalarExprSpec,
     dependencies: &mut HashSet<String>,
-    relation_dependencies: &HashMap<String, HashSet<String>>,
+    aggregated_relations: &mut HashSet<String>,
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
             ..
         } => {
-            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
-                dependencies.extend(relation_dependencies.iter().cloned());
-            }
+            aggregated_relations.insert(relation.clone());
             if let Some(predicate) = where_clause {
-                collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
+                collect_judgment_dependencies(predicate, dependencies, aggregated_relations);
             }
         }
         ScalarExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
         }
         ScalarExprSpec::ParameterLookup { index, .. } => {
-            collect_scalar_dependencies(index, dependencies, relation_dependencies);
+            collect_scalar_dependencies(index, dependencies, aggregated_relations);
         }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Max { items }
         | ScalarExprSpec::Min { items } => {
             for item in items {
-                collect_scalar_dependencies(item, dependencies, relation_dependencies);
+                collect_scalar_dependencies(item, dependencies, aggregated_relations);
             }
         }
         ScalarExprSpec::Sub { left, right }
         | ScalarExprSpec::Mul { left, right }
         | ScalarExprSpec::Div { left, right } => {
-            collect_scalar_dependencies(left, dependencies, relation_dependencies);
-            collect_scalar_dependencies(right, dependencies, relation_dependencies);
+            collect_scalar_dependencies(left, dependencies, aggregated_relations);
+            collect_scalar_dependencies(right, dependencies, aggregated_relations);
         }
         ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => {
-            collect_scalar_dependencies(value, dependencies, relation_dependencies);
+            collect_scalar_dependencies(value, dependencies, aggregated_relations);
         }
         ScalarExprSpec::PeriodStart | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::DateAddDays { date, days } => {
-            collect_scalar_dependencies(date, dependencies, relation_dependencies);
-            collect_scalar_dependencies(days, dependencies, relation_dependencies);
+            collect_scalar_dependencies(date, dependencies, aggregated_relations);
+            collect_scalar_dependencies(days, dependencies, aggregated_relations);
         }
         ScalarExprSpec::DateAddMonths { date, months } => {
-            collect_scalar_dependencies(date, dependencies, relation_dependencies);
-            collect_scalar_dependencies(months, dependencies, relation_dependencies);
+            collect_scalar_dependencies(date, dependencies, aggregated_relations);
+            collect_scalar_dependencies(months, dependencies, aggregated_relations);
         }
         ScalarExprSpec::DateAddYears { date, years } => {
-            collect_scalar_dependencies(date, dependencies, relation_dependencies);
-            collect_scalar_dependencies(years, dependencies, relation_dependencies);
+            collect_scalar_dependencies(date, dependencies, aggregated_relations);
+            collect_scalar_dependencies(years, dependencies, aggregated_relations);
         }
         ScalarExprSpec::DaysBetween { from, to } => {
-            collect_scalar_dependencies(from, dependencies, relation_dependencies);
-            collect_scalar_dependencies(to, dependencies, relation_dependencies);
+            collect_scalar_dependencies(from, dependencies, aggregated_relations);
+            collect_scalar_dependencies(to, dependencies, aggregated_relations);
         }
         ScalarExprSpec::SumRelated {
             value,
@@ -1651,14 +1740,12 @@ fn collect_scalar_dependencies(
             where_clause,
             ..
         } => {
-            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
-                dependencies.extend(relation_dependencies.iter().cloned());
-            }
+            aggregated_relations.insert(relation.clone());
             if let RelatedValueRefSpec::Derived { name } = value {
                 dependencies.insert(name.clone());
             }
             if let Some(predicate) = where_clause {
-                collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
+                collect_judgment_dependencies(predicate, dependencies, aggregated_relations);
             }
         }
         ScalarExprSpec::If {
@@ -1666,20 +1753,20 @@ fn collect_scalar_dependencies(
             then_expr,
             else_expr,
         } => {
-            collect_judgment_dependencies(condition, dependencies, relation_dependencies);
-            collect_scalar_dependencies(then_expr, dependencies, relation_dependencies);
-            collect_scalar_dependencies(else_expr, dependencies, relation_dependencies);
+            collect_judgment_dependencies(condition, dependencies, aggregated_relations);
+            collect_scalar_dependencies(then_expr, dependencies, aggregated_relations);
+            collect_scalar_dependencies(else_expr, dependencies, aggregated_relations);
         }
         ScalarExprSpec::NoMatch { subject, patterns } => {
-            collect_scalar_dependencies(subject, dependencies, relation_dependencies);
+            collect_scalar_dependencies(subject, dependencies, aggregated_relations);
             for pattern in patterns {
-                collect_scalar_dependencies(pattern, dependencies, relation_dependencies);
+                collect_scalar_dependencies(pattern, dependencies, aggregated_relations);
             }
         }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
-            collect_scalar_dependencies(value, dependencies, relation_dependencies);
+            collect_scalar_dependencies(value, dependencies, aggregated_relations);
             if let Some(n) = n {
-                collect_scalar_dependencies(n, dependencies, relation_dependencies);
+                collect_scalar_dependencies(n, dependencies, aggregated_relations);
             }
         }
     }
@@ -1688,12 +1775,12 @@ fn collect_scalar_dependencies(
 fn collect_judgment_dependencies(
     expr: &JudgmentExprSpec,
     dependencies: &mut HashSet<String>,
-    relation_dependencies: &HashMap<String, HashSet<String>>,
+    aggregated_relations: &mut HashSet<String>,
 ) {
     match expr {
         JudgmentExprSpec::Comparison { left, right, .. } => {
-            collect_scalar_dependencies(left, dependencies, relation_dependencies);
-            collect_scalar_dependencies(right, dependencies, relation_dependencies);
+            collect_scalar_dependencies(left, dependencies, aggregated_relations);
+            collect_scalar_dependencies(right, dependencies, aggregated_relations);
         }
         JudgmentExprSpec::Derived { name } => {
             dependencies.insert(name.clone());
@@ -1703,11 +1790,11 @@ fn collect_judgment_dependencies(
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
-                collect_judgment_dependencies(item, dependencies, relation_dependencies);
+                collect_judgment_dependencies(item, dependencies, aggregated_relations);
             }
         }
         JudgmentExprSpec::Not { item } => {
-            collect_judgment_dependencies(item, dependencies, relation_dependencies);
+            collect_judgment_dependencies(item, dependencies, aggregated_relations);
         }
     }
 }
@@ -1754,6 +1841,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_scalar(from, relations);
             collect_relation_members_from_scalar(to, relations);
         }
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -2144,5 +2232,132 @@ rules:
             conflict_error,
             CompileError::ConflictingParameterDeclarations { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod relation_cycle_tests {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    use proptest::collection::{btree_set, vec};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+
+    use super::{CompileError, detect_relation_cycle};
+
+    /// The recursive search [`detect_relation_cycle`] replaced, kept as the
+    /// reference for which cycle is reported.
+    fn reference_detect(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+        fn visit(
+            relation: &str,
+            graph: &BTreeMap<String, BTreeSet<String>>,
+            visiting: &mut HashSet<String>,
+            visited: &mut HashSet<String>,
+        ) -> Result<(), CompileError> {
+            if visited.contains(relation) {
+                return Ok(());
+            }
+            if !visiting.insert(relation.to_string()) {
+                let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
+                cycle.sort();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            if let Some(dependencies) = graph.get(relation) {
+                for dependency in dependencies {
+                    if graph.contains_key(dependency) {
+                        visit(dependency, graph, visiting, visited)?;
+                    }
+                }
+            }
+            visiting.remove(relation);
+            visited.insert(relation.to_string());
+            Ok(())
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        for relation in graph.keys() {
+            visit(relation, graph, &mut visiting, &mut visited)?;
+        }
+        Ok(())
+    }
+
+    /// A derived-relation graph over up to nine relations whose dependencies
+    /// name other relations or a data relation outside the graph.
+    fn graph() -> impl Strategy<Value = BTreeMap<String, BTreeSet<String>>> {
+        (1_usize..10).prop_flat_map(|size| {
+            let dependency = prop_oneof![
+                6 => (0..size).prop_map(|index| format!("r{index}")),
+                1 => Just("base".to_string()),
+            ];
+            vec(btree_set(dependency, 0..3), size).prop_map(|dependencies| {
+                dependencies
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, dependencies)| (format!("r{index}"), dependencies))
+                    .collect()
+            })
+        })
+    }
+
+    fn outcome(result: Result<(), CompileError>) -> Result<(), String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn iterative_search_reports_what_the_recursive_search_reported() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 4000,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[11; 32]),
+        );
+        let cycles = std::cell::Cell::new(0_usize);
+        runner
+            .run(&graph(), |graph| {
+                let expected = outcome(reference_detect(&graph));
+                cycles.set(cycles.get() + usize::from(expected.is_err()));
+                let actual = outcome(detect_relation_cycle(&graph));
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "iterative {actual:?}, recursive {expected:?}, graph {graph:?}"
+                    )));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(cycles.get() > 1000, "only {} cyclic graphs", cycles.get());
+    }
+
+    #[test]
+    fn a_long_chain_is_searched_without_recursing_per_link() {
+        // Names ascend toward the data relation, so the first relation in name
+        // order heads the whole chain; 50,000 links overflowed the recursion.
+        let links = 50_000;
+        let mut graph = (0..links)
+            .map(|link| {
+                let source = if link + 1 < links {
+                    format!("rel{:07}", link + 1)
+                } else {
+                    "base".to_string()
+                };
+                (format!("rel{link:07}"), BTreeSet::from([source]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(detect_relation_cycle(&graph).is_ok());
+
+        // Closing the chain into a loop reports every relation on it.
+        graph.insert(
+            format!("rel{:07}", links - 1),
+            BTreeSet::from(["rel0000000".to_string()]),
+        );
+        let Err(CompileError::CyclicRelationDependency { cycle }) = detect_relation_cycle(&graph)
+        else {
+            panic!("a closed chain is a cycle");
+        };
+        assert_eq!(cycle.split(", ").count(), links);
     }
 }

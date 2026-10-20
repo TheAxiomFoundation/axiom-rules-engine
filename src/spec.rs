@@ -15,6 +15,10 @@ use crate::model::{
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
     #[error(transparent)]
     InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
     #[error(transparent)]
@@ -506,7 +510,10 @@ fn relation_slot_entity_diagnostics(
     // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
-    let filtered_kinds = crate::relation_typing::filtered_entity_kinds(program);
+    // Resolved once for the program: asking per tuple would follow a chain of
+    // derived relations again for every tuple naming one.
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
     let canonical = |entity: &str| {
         filtered_kinds
             .get(entity)
@@ -540,9 +547,7 @@ fn relation_slot_entity_diagnostics(
         // execution reads each slot by its declared kind, so the declaration
         // is the expected tuple order. An untyped relation no rule executes
         // has no expectation to check.
-        let Some(expected_entities) =
-            crate::relation_typing::effective_slot_entities(program, &record.name)
-        else {
+        let Some(expected_entities) = slot_kinds.get(&record.name) else {
             continue;
         };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
@@ -1142,6 +1147,12 @@ pub enum ScalarExprSpec {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -1281,6 +1292,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,
