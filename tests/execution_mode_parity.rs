@@ -2730,6 +2730,8 @@ fn lower_dense_batch(
         DenseRelationBatchSpec {
             offsets,
             inputs: person_inputs,
+            related_row_count: Some(case.rows.iter().map(|row| row.members.len()).sum()),
+            ..Default::default()
         },
     )]);
     if profile.linked_relation {
@@ -2746,6 +2748,8 @@ fn lower_dense_batch(
             DenseRelationBatchSpec {
                 offsets,
                 inputs: linked_inputs,
+                related_row_count: Some(targets.iter().map(Vec::len).sum()),
+                ..Default::default()
             },
         );
     }

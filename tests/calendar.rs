@@ -335,6 +335,7 @@ rules:
                                 "base_date".into(),
                                 DenseColumn::Date(dates.to_vec()),
                             )]),
+                            ..Default::default()
                         },
                     )]),
                 },
@@ -449,6 +450,7 @@ rules:
                             "base_date".into(),
                             DenseColumn::Date(vec![NaiveDate::MAX]),
                         )]),
+                        ..Default::default()
                     },
                 )]),
             },
