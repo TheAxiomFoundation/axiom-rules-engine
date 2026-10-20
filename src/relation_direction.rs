@@ -27,7 +27,7 @@ fn semantics(expr: &mut DerivedSemanticsSpec, entity: &str, slots: &Slots) {
 }
 fn scalar(expr: &mut ScalarExprSpec, entity: &str, slots: &Slots) {
     match expr {
-        ScalarExprSpec::OnlyRelated { .. } => {}
+        ScalarExprSpec::InputForYear { .. } | ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             current_slot,

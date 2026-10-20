@@ -243,6 +243,7 @@ impl CompiledProgramArtifact {
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
+        crate::selected_year::validate(&program)?;
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
         let mut diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
@@ -279,6 +280,7 @@ impl CompiledProgramArtifact {
             });
         }
         self.program.validate_provenance()?;
+        crate::selected_year::validate(&self.program)?;
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
         self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
@@ -1085,6 +1087,9 @@ fn collect_fast_blockers_from_scalar_expr(
     blockers: &mut Vec<String>,
 ) {
     match expr {
+        ScalarExprSpec::InputForYear { .. } => blockers.push(format!(
+            "{derived_name}: selected-year input requires Explain"
+        )),
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
@@ -1319,6 +1324,7 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
         ScalarExprSpec::OnlyRelated { relation, .. } => {
@@ -1441,6 +1447,7 @@ fn collect_judgment_dependencies(
 fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }

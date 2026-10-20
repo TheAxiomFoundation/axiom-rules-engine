@@ -34,6 +34,8 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
     #[error(
         "only_related in `{citing}` requires one declared Boolean input `{input}` owned by the related entity: {message}"
     )]
@@ -2097,6 +2099,13 @@ impl RulesDocument {
             input: error.input,
             message: error.message,
         })?;
+        crate::selected_year::bind(
+            &mut program,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(RuleSpecError::SelectedYearInput)?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -3166,6 +3175,7 @@ fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
 fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, relation_name: &str) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3479,6 +3489,7 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
 fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3591,6 +3602,7 @@ fn rewrite_scalar_relation_references(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3933,6 +3945,7 @@ fn scalar_uses_imported_derived(
 ) -> bool {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::PeriodStart

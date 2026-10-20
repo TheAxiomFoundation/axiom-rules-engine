@@ -16,6 +16,8 @@ use crate::model::{
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
     #[error("invalid only_related contract: {0}")]
     InvalidOnlyRelatedContract(String),
     #[error("only_related requires a Boolean input reference")]
@@ -71,6 +73,8 @@ pub enum SpecError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
     /// validation status) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
@@ -178,7 +182,13 @@ impl ProgramSpec {
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
         crate::only_related::validate(self).map_err(SpecError::InvalidOnlyRelatedContract)?;
+        crate::selected_year::validate(self)?;
         let mut program = Program::default();
+        program.selected_year_inputs = self
+            .selected_year_inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.clone()))
+            .collect();
 
         for unit in &self.units {
             program.add_unit(unit.to_model())?;
@@ -203,6 +213,20 @@ impl ProgramSpec {
             program.add_derived(model)?;
         }
 
+        if !program.selected_year_inputs.is_empty() {
+            let catalog = program.input_catalog();
+            for input in program.selected_year_inputs.values() {
+                if catalog
+                    .get(&input.slot)
+                    .is_none_or(|names| names.as_slice() != [input.id.as_str()])
+                {
+                    return Err(SpecError::SelectedYearInput(format!(
+                        "{} shares a runtime slot across module identities",
+                        input.id
+                    )));
+                }
+            }
+        }
         Ok(program)
     }
 }
@@ -957,6 +981,10 @@ pub enum ScalarExprSpec {
     Input {
         name: String,
     },
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     InputOrElse {
         name: String,
         default: ScalarValueSpec,
@@ -1086,6 +1114,10 @@ impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
+            Self::InputForYear { input, year } => Ok(ScalarExpr::InputForYear {
+                input: input.clone(),
+                year: *year,
+            }),
             Self::Input { name } => Ok(ScalarExpr::Input(name.clone())),
             Self::InputOrElse { name, default } => Ok(ScalarExpr::InputOrElse {
                 name: name.clone(),

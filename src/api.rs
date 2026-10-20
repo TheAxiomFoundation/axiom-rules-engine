@@ -119,6 +119,16 @@ pub enum OutputValue {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TraceSelectedYearRead {
+    pub input: String,
+    pub entity_id: String,
+    pub selected_start: chrono::NaiveDate,
+    pub selected_end: chrono::NaiveDate,
+    pub value: ScalarValueSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DerivedTraceNode {
     Scalar {
@@ -157,6 +167,8 @@ pub enum DerivedTraceNode {
         /// Exact temporal parameter cells read while executing this node.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         /// Derived edges actually traversed. Every key resolves in this trace.
         dependencies: Vec<String>,
         /// Parent-specific edges that were present in the selected expression
@@ -181,6 +193,8 @@ pub enum DerivedTraceNode {
         executed_expression: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         dependencies: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         not_evaluated_dependencies: Vec<NotEvaluatedDependency>,
@@ -283,7 +297,9 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             // bulk will report Unsupported and the ordinary Explain path will
             // select independently for each query period.
             let resolved_dataset;
-            let fast_dataset = if crate::only_related::program_contains(&program) {
+            let fast_dataset = if crate::only_related::program_contains(&program)
+                || !program.selected_year_inputs.is_empty()
+            {
                 // Capability refusal must retain fact ownership and tied records.
                 // The existing Unsupported branch below selects Explain before
                 // evaluation; old programs retain their existing normalization.
@@ -579,6 +595,18 @@ fn collect_trace(
             })
             .collect();
 
+        let selected_year_reads = instance
+            .execution
+            .selected_year_reads
+            .iter()
+            .map(|read| TraceSelectedYearRead {
+                input: read.input.clone(),
+                entity_id: read.entity_id.clone(),
+                selected_start: read.selected_period.start,
+                selected_end: read.selected_period.end,
+                value: ScalarValueSpec::from_model(read.value.clone()),
+            })
+            .collect();
         let node = match (&instance.value, semantics) {
             (
                 crate::engine::EvaluatedTraceValue::Scalar {
@@ -601,6 +629,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_scalar_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -621,6 +650,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_judgment_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -681,6 +711,9 @@ fn format_scalar_expression(
             json_string(relation)
         ),
         ScalarExpr::Literal(value) => format_scalar_value(value),
+        ScalarExpr::InputForYear { input, year } => {
+            format!("input_for_year({}, {year})", json_string(input))
+        }
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
         ScalarExpr::InputOrElse { name, default } => {
             format!(

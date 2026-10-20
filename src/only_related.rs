@@ -304,6 +304,7 @@ fn visit_x<E>(
             }
         }
         X::Literal { .. }
+        | X::InputForYear { .. }
         | X::Input { .. }
         | X::InputOrElse { .. }
         | X::Derived { .. }
