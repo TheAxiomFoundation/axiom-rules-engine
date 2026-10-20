@@ -20,6 +20,8 @@ pub enum SpecError {
     #[error("only_related requires distinct binary relation slots 0 and 1")]
     InvalidOnlyRelatedSlots,
     #[error(transparent)]
+    InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
+    #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
     InvalidDecimal { literal: String },
@@ -99,7 +101,7 @@ pub enum SpecError {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
     /// Module-level metadata (source pinning, encoding provenance,
-    /// validation status) carried through RuleSpec lowering for tooling and
+    /// validation status, interpretations) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
     /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,14 @@ impl ProgramSpec {
                     value: digest.to_string(),
                 });
             }
+        }
+        if let Some(module) = &self.module {
+            // The compiled IR preserves root metadata but no longer records
+            // each document's rules. Validate entry shape here; local affects
+            // resolution belongs to RuleSpec loading before imports merge.
+            module
+                .validate("program.module")
+                .map_err(|error| SpecError::InvalidModuleMetadata(Box::new(error)))?;
         }
         for parameter in &self.parameters {
             if let Some(id) = parameter.id.as_deref() {

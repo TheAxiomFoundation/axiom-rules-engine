@@ -16,7 +16,7 @@ examples cannot drift from the grammar they document.
 ## Module shape
 
 A module is one YAML document: a `format` marker, an optional `module` block
-(proof requirements, source verification, summary — see
+(source verification, interpretations, summary — see
 [rulespec.md](rulespec.md)), and a `rules` list.
 
 ```yaml
@@ -57,6 +57,117 @@ Rule records share these fields:
 - `versions` — dated entries. Each version has `effective_from`, an optional
   inclusive `effective_to`, and either a `formula` (expression source) or,
   for indexed parameters, a `values` table.
+
+## Interpretations
+
+`module.interpretations` records each reading an encoding adopts when its
+source is ambiguous, contradicts itself, or is read other than literally.
+Encoders and reviewers require an entry for a conflict between provisions,
+including a conflict between operative text and a summary table; a departure
+from literal text, such as supplying a missing multiplier or restoring a
+dropped qualifier; and any question put to the publisher, whatever reading
+is encoded while awaiting the reply.
+
+The block is descriptive and inert: it never changes lowered output names,
+compiled rules, or execution results. Provenance hashes that cover the whole
+source artifact do change when entries are added: the experimental aggregation
+response's `plan_digest` and `trace_root`, for example, while every computed
+value stays the same. The root module's entries survive lowering
+on `program.module` and round-trip through compiled-artifact JSON. The list
+defaults to empty and is omitted when empty.
+
+This complete synthetic example illustrates a ruled reading for the invented
+Lantern Supply Scheme in the fictional Lantern jurisdiction. Its excerpts,
+organisation, and record are invented for this example.
+
+```yaml
+format: rulespec/v1
+module:
+  interpretations:
+    - id: weekly-review
+      question: >-
+        Does the Lantern Supply Scheme require a review at each weekly boundary
+        or at each daily boundary?
+      texts:
+        - corpus_citation_path: zz-fictional-lantern/manual/lantern-supply-scheme/review-schedule
+          excerpt: "Review supplies at the start of each period."
+      reading: Review supplies at each weekly boundary.
+      alternatives:
+        - id: daily-review
+          reading: Review supplies at each daily boundary.
+          effect: Reviews would occur more often.
+      basis: >-
+        The synthetic guide's review calendar describes a weekly review,
+        so its use of "period" is read as a week.
+      status: ruled
+      ruling:
+        by: Fictional Lantern Scheme Office
+        date: '2024-10-10'
+        record: https://example.org/fictional-lantern/weekly-review
+      affects:
+        - lantern_weekly_review_required
+rules:
+  - name: lantern_weekly_review_required
+    kind: parameter
+    dtype: Boolean
+    versions:
+      - effective_from: '2024-04-01'
+        formula: "true"
+```
+
+Each entry has these fields. Every mapping in an entry rejects unknown keys.
+
+| Field | Shape and meaning |
+|---|---|
+| `id` | Required string, unique within the module; matches `^[a-z0-9]+(-[a-z0-9]+)*$`. |
+| `question` | Required non-blank string; one question in plain words. |
+| `texts` | Required non-empty list of mappings with `corpus_citation_path` and non-blank `excerpt`; the provisions in tension, verbatim. |
+| `reading` | Required non-blank string describing the adopted reading. |
+| `alternatives` | Required non-empty list of mappings with required string `id`, non-blank `reading`, and optional string `effect` describing what changes. Each alternative id matches `^[a-z0-9]+(-[a-z0-9]+)*$` and is unique within its interpretation. |
+| `basis` | Required non-blank string explaining why this reading was adopted. |
+| `status` | Required string: `open`, `ruled`, `confirmed`, or `contradicted`. Objects and YAML enum tags are rejected. |
+| `ruling` | Status-dependent mapping with required `by`, `date`, and `record`. |
+| `confirmation` | Status-dependent mapping with required `by`, `date`, and non-blank `excerpt`, plus optional `record`; quotes the publisher's confirming or contradicting words. |
+| `affects` | Required non-empty list of names defined by `rules[].name` in this document. |
+
+The engine requires or forbids the status-dependent mappings as follows:
+
+| Status | `ruling` | `confirmation` |
+|---|---|---|
+| `open` | Forbidden | Forbidden |
+| `ruled` | Required | Forbidden |
+| `confirmed` | Required | Required |
+| `contradicted` | Required | Required |
+
+At load time, the engine checks all required fields and types, both id patterns
+and their respective uniqueness scopes, non-empty lists, and the non-blank
+strings listed above.
+`ruling.by` and `confirmation.by` must also be non-blank. Each
+`texts[].corpus_citation_path` must pass the same canonical corpus citation
+path check as source verification. Dates must have exact `YYYY-MM-DD` shape
+and identify real calendar dates. `ruling.record`, and `confirmation.record`
+when present, must start with `https://`.
+
+`affects` resolves against this document's rule names before imports merge or
+runtime names are assigned. An imported name or a name listed only in
+`deferred_outputs` is insufficient. An error reports all unresolved names
+for the entry together. Compiled-artifact loading checks entry structure;
+the document-local resolution check occurs while loading RuleSpec, where the
+original document's rules are available.
+
+Public records name organisations in `ruling.by` and `confirmation.by`, never
+individuals. `confirmation.by` names the publisher. A ruling links a public
+PR, issue, or comment; omit people’s names, decision-queue ids, session ids,
+and local paths. These are authoring and review requirements: the engine
+checks non-blank organisation fields and the HTTPS prefix, rather than
+identifying organisations or checking public access.
+
+The engine does not retrieve or match corpus text, so these are requirements
+on the encoder: it must verify each excerpt verbatim against corpus text at
+its citation, must not count interpretation excerpts toward its
+complete-source coverage gate, and must treat `contradicted` as a blocking
+finding requiring repair of the adopted reading. Model-generated entries may be `open` only: a human
+ruling or publisher reply supplies `ruling` or `confirmation`.
 
 ## Data types
 
