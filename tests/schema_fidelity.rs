@@ -226,33 +226,38 @@ fn schema_requires_exact_discriminator_and_rejects_removed_directives() {
     }
 }
 
+/// Every attribution and excerpt in this Lantern fixture is invented.
 fn interpretation_document(status: &str) -> Value {
     let mut entry = serde_json::json!({
-        "id": "daily-twenty-per-cent",
-        "question": "Does the percentage apply once a week or each day?",
+        "id": "weekly-review",
+        "question": "Does the fictional Lantern Supply Scheme require weekly or daily reviews?",
         "texts": [{
-            "corpus_citation_path": "uk-babergh/manual/council-tax-reduction-scheme-2026-2027/page-87",
-            "excerpt": "The prescribed daily percentage"
+            "corpus_citation_path": "zz-fictional-lantern/manual/lantern-supply-scheme/review-schedule",
+            "excerpt": "Review supplies at the start of each period."
         }],
-        "reading": "Apply 20% of the weekly excess once a week.",
-        "alternatives": [{"reading": "Apply 20% of the weekly excess each day.", "effect": "Support ends sooner."}],
-        "basis": "The scheme's weekly table supplies the intended taper.",
+        "reading": "Review supplies at each weekly boundary.",
+        "alternatives": [{
+            "id": "daily-review",
+            "reading": "Review supplies at each daily boundary.",
+            "effect": "Reviews would occur more often."
+        }],
+        "basis": "The fictional Lantern guide's review calendar describes a weekly review.",
         "status": status,
         "affects": ["p"]
     });
     if status != "open" {
         entry["ruling"] = serde_json::json!({
-            "by": "Axiom Foundation",
-            "date": "2026-10-10",
-            "record": "https://github.com/TheAxiomFoundation/rulespec-uk/pull/449"
+            "by": "Fictional Lantern Scheme Office",
+            "date": "2020-01-10",
+            "record": "https://example.org/fictional-lantern/weekly-review"
         });
     }
     if matches!(status, "confirmed" | "contradicted") {
         entry["confirmation"] = serde_json::json!({
-            "by": "Babergh District Council",
-            "date": "2026-10-20",
-            "excerpt": "The percentage applies once a week.",
-            "record": "https://example.org/publisher-reply"
+            "by": "Fictional Lantern Publisher",
+            "date": "2020-01-20",
+            "excerpt": "Review supplies at each weekly boundary.",
+            "record": "https://example.org/fictional-lantern/publisher-reply"
         });
     }
     serde_json::json!({
@@ -425,7 +430,7 @@ proptest! {
         id in "[a-z0-9]{1,10}(-[a-z0-9]{1,8}){0,3}",
         prose in "[A-Za-z][A-Za-z0-9 ]{0,40}",
         status_index in 0usize..4,
-        year in 1900u16..2101,
+        year in 1900u16..2021,
         month in 1u8..13,
         day in 1u8..29,
         mutation_index in 0usize..128,
@@ -438,8 +443,9 @@ proptest! {
             entry[field] = serde_json::json!(prose);
         }
         entry["texts"][0]["corpus_citation_path"] =
-            serde_json::json!(format!("uk/manual/scheme/{id}"));
+            serde_json::json!(format!("zz-fictional-lantern/manual/lantern-supply-scheme/{id}"));
         entry["texts"][0]["excerpt"] = serde_json::json!(prose);
+        entry["alternatives"][0]["id"] = serde_json::json!(format!("alternative-{id}"));
         entry["alternatives"][0]["reading"] = serde_json::json!(prose);
         for field in ["ruling", "confirmation"] {
             if let Some(block) = entry.get_mut(field) {
@@ -456,7 +462,7 @@ proptest! {
         // nested-block mutations to blocks present for its generated status.
         let root = "/module/interpretations/0";
         let mut mutations = Vec::new();
-        for field in ["id", "question", "texts", "reading", "alternatives", "basis", "status", "affects"] {
+        for field in ["id", "question", "texts", "reading", "alternatives", "alternatives/0/id", "basis", "status", "affects"] {
             mutations.push((format!("{root}/{field}"), None));
         }
         for field in ["texts", "alternatives", "affects"] {
@@ -470,7 +476,10 @@ proptest! {
         }
         mutations.push((format!("{root}/id"), Some(serde_json::json!("Invalid_ID"))));
         mutations.push((format!("{root}/status"), Some(serde_json::json!("uncertain"))));
-        mutations.push((format!("{root}/texts/0/corpus_citation_path"), Some(serde_json::json!("uk/manual"))));
+        mutations.push((format!("{root}/status"), Some(serde_json::json!({(status): null}))));
+        mutations.push((format!("{root}/alternatives/0/id"), Some(serde_json::json!("Invalid_ID"))));
+        mutations.push((format!("{root}/alternatives/0/id"), Some(serde_json::json!(42))));
+        mutations.push((format!("{root}/texts/0/corpus_citation_path"), Some(serde_json::json!("zz-fictional-lantern/manual"))));
         let supplied = interpretation_document("confirmed");
         for field in ["ruling", "confirmation"] {
             let block = entry.get(field);
@@ -482,8 +491,8 @@ proptest! {
             mutations.push((format!("{root}/{field}"), replacement));
             if block.is_some() {
                 for (nested, replacement) in [
-                    ("date", "2026-2-01"),
-                    ("date", "2026-02-29"),
+                    ("date", "2020-2-01"),
+                    ("date", "2019-02-29"),
                     ("record", "http://example.org/record"),
                     ("by", " \n\t"),
                     ("unknown", "extra"),
@@ -547,6 +556,180 @@ fn interpretations_validate_in_module_and_current_artifact_schemas() {
                 .map(|error| error.to_string())
                 .collect::<Vec<_>>();
             assert!(errors.is_empty(), "status {status}: {}", errors.join("\n"));
+        }
+    }
+}
+
+fn assert_interpretation_loader_and_schemas_reject(label: &str, document: &Value) {
+    assert!(
+        axiom_rules_engine::rulespec::lower_rulespec_str(&serde_yaml::to_string(document).unwrap())
+            .is_err(),
+        "loader must reject {label}"
+    );
+    let surfaces = interpretation_schema_surfaces(document);
+    assert!(
+        axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(
+            &serde_json::to_string(&surfaces[1]).unwrap()
+        )
+        .is_err(),
+        "compiled loader must reject {label}"
+    );
+    for (kind, validators) in [
+        ("generated", GENERATED_INTERPRETATION_VALIDATORS.as_slice()),
+        ("published", PUBLISHED_INTERPRETATION_VALIDATORS.as_slice()),
+    ] {
+        for (index, (validator, surface)) in validators.iter().zip(&surfaces).enumerate() {
+            assert!(
+                !validator.is_valid(surface),
+                "{kind} schema {index} must reject {label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn interpretation_status_unit_variant_objects_fail_loader_and_schemas() {
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        let mut document = interpretation_document(status);
+        document["module"]["interpretations"][0]["status"] = serde_json::json!({(status): null});
+        assert!(
+            !engine_deserializes(&serde_json::to_string(&document).unwrap()),
+            "unit-variant object for status {status} must fail deserialization"
+        );
+        assert_interpretation_loader_and_schemas_reject(status, &document);
+    }
+}
+
+#[test]
+fn interpretation_status_yaml_enum_tags_fail_deserialization() {
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        let source = serde_yaml::to_string(&interpretation_document(status)).unwrap();
+        for tagged_status in [format!("!{status} null"), format!("!{status} {status}")] {
+            let tagged = source.replace(
+                &format!("status: {status}\n"),
+                &format!("status: {tagged_status}\n"),
+            );
+            assert_ne!(tagged, source, "fixture status must be replaced");
+            assert!(
+                !engine_deserializes(&tagged),
+                "YAML enum tag {tagged_status} must fail deserialization"
+            );
+            for (kind, validators) in [
+                ("generated", GENERATED_INTERPRETATION_VALIDATORS.as_slice()),
+                ("published", PUBLISHED_INTERPRETATION_VALIDATORS.as_slice()),
+            ] {
+                assert!(
+                    !schema_validates(&validators[0], &tagged),
+                    "{kind} module schema must reject YAML enum tag {tagged_status}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn interpretation_alternative_id_is_required() {
+    let mut document = interpretation_document("open");
+    document["module"]["interpretations"][0]["alternatives"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("id");
+    assert!(
+        !engine_deserializes(&serde_yaml::to_string(&document).unwrap()),
+        "missing alternative id must fail deserialization"
+    );
+    assert_interpretation_loader_and_schemas_reject("missing alternative id", &document);
+}
+
+#[test]
+fn interpretation_alternative_id_is_a_strict_string() {
+    for id in [
+        serde_json::json!(42),
+        serde_json::json!(true),
+        Value::Null,
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let mut document = interpretation_document("open");
+        document["module"]["interpretations"][0]["alternatives"][0]["id"] = id.clone();
+        assert!(
+            !engine_deserializes(&serde_yaml::to_string(&document).unwrap()),
+            "non-string alternative id {id} must fail deserialization"
+        );
+        assert_interpretation_loader_and_schemas_reject("non-string alternative id", &document);
+    }
+}
+
+#[test]
+fn interpretation_alternative_id_is_kebab_case() {
+    for id in [
+        "",
+        "Daily-review",
+        "daily_review",
+        "daily review",
+        "-daily",
+        "daily-",
+        "daily--review",
+        "dailý",
+    ] {
+        let mut document = interpretation_document("open");
+        document["module"]["interpretations"][0]["alternatives"][0]["id"] = serde_json::json!(id);
+        assert_interpretation_loader_and_schemas_reject("non-kebab alternative id", &document);
+    }
+    for id in ["a", "1", "daily-review", "review-2-times"] {
+        let mut document = interpretation_document("open");
+        document["module"]["interpretations"][0]["alternatives"][0]["id"] = serde_json::json!(id);
+        assert!(
+            axiom_rules_engine::rulespec::lower_rulespec_str(
+                &serde_yaml::to_string(&document).unwrap()
+            )
+            .is_ok(),
+            "valid kebab alternative id {id} must load"
+        );
+        let surfaces = interpretation_schema_surfaces(&document);
+        for validators in [
+            GENERATED_INTERPRETATION_VALIDATORS.as_slice(),
+            PUBLISHED_INTERPRETATION_VALIDATORS.as_slice(),
+        ] {
+            for (validator, surface) in validators.iter().zip(&surfaces) {
+                assert!(
+                    validator.is_valid(surface),
+                    "valid alternative id {id} must validate"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn interpretation_alternative_id_uniqueness_is_an_engine_constraint() {
+    let mut document = interpretation_document("open");
+    let mut duplicate = document["module"]["interpretations"][0]["alternatives"][0].clone();
+    duplicate["reading"] = serde_json::json!("Review supplies at each monthly boundary.");
+    document["module"]["interpretations"][0]["alternatives"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    assert!(
+        axiom_rules_engine::rulespec::lower_rulespec_str(
+            &serde_yaml::to_string(&document).unwrap()
+        )
+        .is_err(),
+        "duplicate alternative ids must fail engine validation even when readings differ"
+    );
+
+    // Draft 7 cannot express uniqueness of an object property across array
+    // items. Like interpretation ids, alternative ids need engine validation.
+    let surfaces = interpretation_schema_surfaces(&document);
+    for (kind, validators) in [
+        ("generated", GENERATED_INTERPRETATION_VALIDATORS.as_slice()),
+        ("published", PUBLISHED_INTERPRETATION_VALIDATORS.as_slice()),
+    ] {
+        for (index, (validator, surface)) in validators.iter().zip(&surfaces).enumerate() {
+            assert!(
+                validator.is_valid(surface),
+                "{kind} schema {index} permits structurally valid repeated ids"
+            );
         }
     }
 }
@@ -621,6 +804,7 @@ fn interpretation_schema_rejects_unknown_keys_missing_fields_and_wrong_types() {
         "/module/interpretations/0/texts/0/corpus_citation_path",
         "/module/interpretations/0/texts/0/excerpt",
         "/module/interpretations/0/reading",
+        "/module/interpretations/0/alternatives/0/id",
         "/module/interpretations/0/alternatives/0/reading",
         "/module/interpretations/0/alternatives/0/effect",
         "/module/interpretations/0/basis",
@@ -672,7 +856,7 @@ fn interpretation_schemas_enforce_load_time_metadata_constraints() {
         ),
         (
             "/module/interpretations/0/texts/0/corpus_citation_path",
-            serde_json::json!("uk/manual"),
+            serde_json::json!("zz-fictional-lantern/manual"),
         ),
         (
             "/module/interpretations/0/alternatives",
@@ -693,11 +877,11 @@ fn interpretation_schemas_enforce_load_time_metadata_constraints() {
         ),
         (
             "/module/interpretations/0/ruling/date",
-            serde_json::json!("2026-2-01"),
+            serde_json::json!("2020-2-01"),
         ),
         (
             "/module/interpretations/0/ruling/date",
-            serde_json::json!("2026-02-29"),
+            serde_json::json!("2019-02-29"),
         ),
         (
             "/module/interpretations/0/ruling/record",
@@ -709,7 +893,7 @@ fn interpretation_schemas_enforce_load_time_metadata_constraints() {
         ),
         (
             "/module/interpretations/0/confirmation/date",
-            serde_json::json!("2026-04-31"),
+            serde_json::json!("2020-04-31"),
         ),
         (
             "/module/interpretations/0/confirmation/excerpt",

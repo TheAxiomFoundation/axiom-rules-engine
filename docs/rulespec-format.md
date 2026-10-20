@@ -90,7 +90,8 @@ module:
           excerpt: "Review supplies at the start of each period."
       reading: Review supplies at each weekly boundary.
       alternatives:
-        - reading: Review supplies at each daily boundary.
+        - id: daily-review
+          reading: Review supplies at each daily boundary.
           effect: Reviews would occur more often.
       basis: >-
         The synthetic guide's review calendar describes a weekly review,
@@ -98,7 +99,7 @@ module:
       status: ruled
       ruling:
         by: Fictional Lantern Scheme Office
-        date: '2026-10-10'
+        date: '2024-10-10'
         record: https://example.org/fictional-lantern/weekly-review
       affects:
         - lantern_weekly_review_required
@@ -107,7 +108,7 @@ rules:
     kind: parameter
     dtype: Boolean
     versions:
-      - effective_from: '2026-04-01'
+      - effective_from: '2024-04-01'
         formula: "true"
 ```
 
@@ -119,9 +120,9 @@ Each entry has these fields. Every mapping in an entry rejects unknown keys.
 | `question` | Required non-blank string; one question in plain words. |
 | `texts` | Required non-empty list of mappings with `corpus_citation_path` and non-blank `excerpt`; the provisions in tension, verbatim. |
 | `reading` | Required non-blank string describing the adopted reading. |
-| `alternatives` | Required non-empty list of mappings with non-blank `reading` and optional string `effect` describing what changes. |
+| `alternatives` | Required non-empty list of mappings with required string `id`, non-blank `reading`, and optional string `effect` describing what changes. Each alternative id matches `^[a-z0-9]+(-[a-z0-9]+)*$` and is unique within its interpretation. |
 | `basis` | Required non-blank string explaining why this reading was adopted. |
-| `status` | Required lowercase enum: `open`, `ruled`, `confirmed`, or `contradicted`. |
+| `status` | Required string: `open`, `ruled`, `confirmed`, or `contradicted`. Objects and YAML enum tags are rejected. |
 | `ruling` | Status-dependent mapping with required `by`, `date`, and `record`. |
 | `confirmation` | Status-dependent mapping with required `by`, `date`, and non-blank `excerpt`, plus optional `record`; quotes the publisher's confirming or contradicting words. |
 | `affects` | Required non-empty list of names defined by `rules[].name` in this document. |
@@ -135,8 +136,9 @@ The engine requires or forbids the status-dependent mappings as follows:
 | `confirmed` | Required | Required |
 | `contradicted` | Required | Required |
 
-At load time, the engine checks all required fields and types, the id pattern
-and uniqueness, non-empty lists, and the non-blank strings listed above.
+At load time, the engine checks all required fields and types, both id patterns
+and their respective uniqueness scopes, non-empty lists, and the non-blank
+strings listed above.
 `ruling.by` and `confirmation.by` must also be non-blank. Each
 `texts[].corpus_citation_path` must pass the same canonical corpus citation
 path check as source verification. Dates must have exact `YYYY-MM-DD` shape

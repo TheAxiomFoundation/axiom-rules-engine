@@ -1,4 +1,4 @@
-"""The wrapper carries module interpretations through its opaque Program model."""
+"""The wrapper retains fictional Lantern metadata in its opaque Program model."""
 from __future__ import annotations
 
 import json
@@ -22,13 +22,16 @@ def _artifact() -> dict:
                         "question": "Does the percentage apply once a week?",
                         "texts": [
                             {
-                                "corpus_citation_path": "uk/manual/scheme/page-87",
+                                "corpus_citation_path": "zz-fictional-lantern/manual/example-scheme/page-7",
                                 "excerpt": "The prescribed daily percentage",
                             }
                         ],
                         "reading": "Apply the percentage once a week.",
                         "alternatives": [
-                            {"reading": "Apply the percentage each day."}
+                            {
+                                "id": "daily-percentage",
+                                "reading": "Apply the percentage each day.",
+                            }
                         ],
                         "basis": "The weekly table supplies the taper.",
                         "status": "open",
@@ -61,7 +64,7 @@ def test_loader_retains_interpretations_in_execution_requests(
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr("axiom_rules_engine.loader.subprocess.run", run)
-    program = loader("module.yaml", rulespec_roots=("rulespec-uk",))
+    program = loader("module.yaml", rulespec_roots=("fictional-lantern",))
     request = ExecutionRequest(
         mode="explain", program=program, dataset=Dataset(), queries=[]
     )

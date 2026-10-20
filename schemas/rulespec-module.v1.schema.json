@@ -70,7 +70,7 @@
           ]
         },
         "interpretations": {
-          "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. IDs must be unique within the module, and affects must name rules defined in the same document. Corpus excerpt verification is the encoder's responsibility.",
+          "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. Interpretation IDs must be unique within the module, alternative IDs must be unique within each interpretation, and affects must name rules defined in the same document. These identity and reference constraints require engine load-time validation. Corpus excerpt verification is the encoder's responsibility.",
           "items": {
             "additionalProperties": false,
             "oneOf": [
@@ -140,12 +140,17 @@
                     "effect": {
                       "type": "string"
                     },
+                    "id": {
+                      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                      "type": "string"
+                    },
                     "reading": {
                       "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
                       "type": "string"
                     }
                   },
                   "required": [
+                    "id",
                     "reading"
                   ],
                   "type": "object"

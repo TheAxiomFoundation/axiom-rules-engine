@@ -364,18 +364,12 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
                 if let Some(Value::Object(digest)) = properties.get_mut("source_sha256") {
                     digest.insert("pattern".to_string(), json!("^[0-9a-fA-F]{64}$"));
                 }
-                let interpretation = properties.contains_key("question")
-                    && properties.contains_key("reading")
-                    && properties.contains_key("affects");
                 if let Some(Value::Object(id)) = properties.get_mut("id") {
-                    id.insert(
-                        "pattern".to_string(),
-                        if interpretation {
-                            json!(INTERPRETATION_ID_PATTERN)
-                        } else {
-                            json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$")
-                        },
-                    );
+                    // Explicit metadata ID patterns also apply to alternatives;
+                    // only executable IDs need the canonical rule-ID default.
+                    id.entry("pattern").or_insert_with(|| {
+                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$")
+                    });
                 }
                 if let Some(Value::Object(slot)) = properties.get_mut("slot") {
                     slot.insert("pattern".to_string(), json!("^[A-Za-z_][A-Za-z0-9_]*$"));
@@ -609,7 +603,7 @@ fn module_metadata_schema() -> Value {
 fn interpretations_schema() -> Value {
     json!({
         "type": "array",
-        "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. IDs must be unique within the module, and affects must name rules defined in the same document. Corpus excerpt verification is the encoder's responsibility.",
+        "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. Interpretation IDs must be unique within the module, alternative IDs must be unique within each interpretation, and affects must name rules defined in the same document. These identity and reference constraints require engine load-time validation. Corpus excerpt verification is the encoder's responsibility.",
         "items": {
             "type": "object",
             "additionalProperties": false,
@@ -637,8 +631,9 @@ fn interpretations_schema() -> Value {
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
-                        "required": ["reading"],
+                        "required": ["id", "reading"],
                         "properties": {
+                            "id": { "type": "string", "pattern": INTERPRETATION_ID_PATTERN },
                             "reading": non_blank_string_schema(),
                             "effect": { "type": "string" }
                         }

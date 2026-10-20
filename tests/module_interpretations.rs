@@ -13,41 +13,43 @@ use axiom_rules_engine::spec::{ProgramSpec, SpecError};
 use proptest::prelude::*;
 use serde_json::{Value, json};
 
-const ENTRY_ID: &str = "weekly-percentage";
-const MODULE_TARGET: &str = "uk:policies/council/interpretation-test";
+const ENTRY_ID: &str = "weekly-review";
+const MODULE_TARGET: &str = "zz-fictional-lantern:policies/lantern/interpretation-test";
 const FLAT_TAX: &str = include_str!("fixtures/rulespec/other/flat_tax/rules.yaml");
 
+// All interpretation fixtures describe the invented Lantern Supply Scheme.
 fn ruling() -> Value {
     json!({
-        "by": "Axiom Foundation",
-        "date": "2026-10-10",
-        "record": "https://github.com/TheAxiomFoundation/rulespec-uk/pull/449"
+        "by": "Fictional Lantern Scheme Office",
+        "date": "2024-10-10",
+        "record": "https://example.org/fictional-lantern/weekly-review"
     })
 }
 
 fn confirmation() -> Value {
     json!({
-        "by": "Example District Council",
-        "date": "2026-10-20",
-        "excerpt": "The percentage is applied once a week.",
-        "record": "https://example.org/published-reply"
+        "by": "Fictional Lantern Scheme Office",
+        "date": "2024-10-11",
+        "excerpt": "Review supplies at each weekly boundary.",
+        "record": "https://example.org/fictional-lantern/published-reply"
     })
 }
 
 fn valid_entry(status: &str) -> Value {
     let mut entry = json!({
         "id": ENTRY_ID,
-        "question": "Is the percentage applied weekly or daily?",
+        "question": "Does the Lantern Supply Scheme review supplies weekly or daily?",
         "texts": [{
-            "corpus_citation_path": "uk-babergh/manual/council-tax-reduction-scheme-2026-2027/page-87",
-            "excerpt": "The prescribed daily percentage"
+            "corpus_citation_path": "zz-fictional-lantern/manual/lantern-supply-scheme/review-schedule",
+            "excerpt": "Review supplies at the start of each period."
         }],
-        "reading": "The percentage is applied once a week.",
+        "reading": "Review supplies at each weekly boundary.",
         "alternatives": [{
-            "reading": "The percentage is applied each day.",
-            "effect": "Support ends at a lower income."
+            "id": "daily-review",
+            "reading": "Review supplies at each daily boundary.",
+            "effect": "Reviews would occur more often."
         }],
-        "basis": "The weekly table uses the same percentage.",
+        "basis": "The synthetic guide describes a weekly review calendar.",
         "status": status,
         "affects": ["rate"]
     });
@@ -68,7 +70,7 @@ fn document(entries: Vec<Value>) -> Value {
             "name": "rate",
             "kind": "parameter",
             "dtype": "Rate",
-            "versions": [{"effective_from": "2026-01-01", "formula": "0.20"}]
+            "versions": [{"effective_from": "2025-01-01", "formula": "0.20"}]
         }]
     })
 }
@@ -140,6 +142,81 @@ fn ids_are_unique_within_each_document() {
 }
 
 #[test]
+fn alternative_ids_are_required_and_strict_strings() {
+    let mut entry = valid_entry("open");
+    remove(&mut entry, "/alternatives/0", "id");
+    let error = load_entry(entry).expect_err("every alternative requires an id");
+    assert!(matches!(error, RuleSpecError::Yaml(_)), "{error:?}");
+    assert!(error.to_string().contains("missing field `id`"));
+
+    for value in [
+        Value::Null,
+        json!(123),
+        json!(false),
+        json!([]),
+        json!({"daily-review": null}),
+    ] {
+        let mut entry = valid_entry("open");
+        entry["alternatives"][0]["id"] = value;
+        let error = load_entry(entry).expect_err("an alternative id must be a string");
+        assert!(matches!(error, RuleSpecError::Yaml(_)), "{error:?}");
+    }
+}
+
+#[test]
+fn alternative_ids_are_lowercase_kebab_case() {
+    for id in ["a", "123", "a1-b2-3", "daily-review"] {
+        let mut entry = valid_entry("open");
+        entry["alternatives"][0]["id"] = json!(id);
+        assert_loads(entry);
+    }
+    for id in ["", "-a", "a-", "a--b", "A", "a_b", "a b", "é", "a.b"] {
+        let mut entry = valid_entry("open");
+        entry["alternatives"][0]["id"] = json!(id);
+        match load_entry(entry).expect_err("invalid alternative id is refused") {
+            RuleSpecError::InvalidInterpretationAlternativeId {
+                path,
+                id: interpretation_id,
+                alternative_id,
+            } => {
+                assert_context(&path, &interpretation_id);
+                assert_eq!(alternative_id, id);
+            }
+            other => panic!("expected invalid alternative id for {id:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn alternative_ids_are_unique_within_each_interpretation() {
+    let mut entry = valid_entry("open");
+    let mut second = entry["alternatives"][0].clone();
+    second["id"] = json!("monthly-review");
+    second["reading"] = json!("Review supplies at each monthly boundary.");
+    entry["alternatives"].as_array_mut().unwrap().push(second);
+    assert_loads(entry.clone());
+
+    entry["alternatives"][1]["id"] = json!("daily-review");
+    match load_entry(entry).expect_err("duplicate alternative ids are refused") {
+        RuleSpecError::DuplicateInterpretationAlternativeId {
+            path,
+            id,
+            alternative_id,
+        } => {
+            assert_context(&path, &id);
+            assert_eq!(alternative_id, "daily-review");
+        }
+        other => panic!("expected duplicate alternative id, got {other:?}"),
+    }
+
+    let first = valid_entry("open");
+    let mut second = first.clone();
+    second["id"] = json!("another-review");
+    lower_rulespec_str(&yaml(&document(vec![first, second])))
+        .expect("different interpretations may reuse an alternative id");
+}
+
+#[test]
 fn required_prose_and_organisation_fields_are_nonblank() {
     let fields = [
         ("/question", "question"),
@@ -186,6 +263,9 @@ fn required_prose_and_organisation_fields_are_nonblank() {
         } else {
             "reading"
         }] = json!(" ");
+        if collection == "alternatives" {
+            second["id"] = json!("second-review");
+        }
         entry[collection].as_array_mut().unwrap().push(second);
         assert!(matches!(
             load_entry(entry).expect_err("later blank item is refused"),
@@ -218,10 +298,10 @@ fn texts_alternatives_and_affects_are_nonempty() {
 #[test]
 fn text_citations_are_canonical_corpus_paths() {
     for citation in [
-        "uk-babergh/manual/scheme/page-87",
-        "us/statute/7/2017/a",
-        "uk/ukpga/1992/4/section/1",
-        "uk/manual/scheme.md",
+        "zz-fictional-lantern/manual/scheme/page-7",
+        "zz-fictional-lantern/statute/supply/section-a",
+        "zz-fictional-lantern/regulation/supply/section/1",
+        "zz-fictional-lantern/manual/scheme.md",
     ] {
         let mut entry = valid_entry("open");
         entry["texts"][0]["corpus_citation_path"] = json!(citation);
@@ -229,15 +309,15 @@ fn text_citations_are_canonical_corpus_paths() {
     }
     for citation in [
         "",
-        "uk",
-        "uk:manual/scheme/page-87",
-        "/uk/manual/scheme",
-        "uk/manual/../scheme",
-        "uk//manual/scheme",
-        "uk/manual/scheme/",
+        "zz-fictional-lantern",
+        "zz-fictional-lantern:manual/lantern-supply-scheme/review-schedule",
+        "/zz-fictional-lantern/manual/scheme",
+        "zz-fictional-lantern/manual/../scheme",
+        "zz-fictional-lantern//manual/scheme",
+        "zz-fictional-lantern/manual/scheme/",
         "https://example.org/scheme",
-        "uk/manual/scheme#paragraph-1",
-        "uk/manual/scheme?version=1",
+        "zz-fictional-lantern/manual/scheme#paragraph-1",
+        "zz-fictional-lantern/manual/scheme?version=1",
     ] {
         let mut entry = valid_entry("open");
         entry["texts"][0]["corpus_citation_path"] = json!(citation);
@@ -255,26 +335,26 @@ fn text_citations_are_canonical_corpus_paths() {
 #[test]
 fn dates_have_exact_iso_shape_and_exist_in_the_calendar() {
     for field in ["ruling", "confirmation"] {
-        for date in ["2024-02-29", "2000-02-29", "2026-12-31", "0001-01-01"] {
+        for date in ["2024-02-29", "2000-02-29", "2025-12-31", "0001-01-01"] {
             let mut entry = valid_entry("confirmed");
             entry[field]["date"] = json!(date);
             assert_loads(entry);
         }
         for date in [
             "",
-            "2026-2-01",
-            "2026-02-1",
+            "2025-2-01",
+            "2025-02-1",
             "26-02-01",
-            "2026/02/01",
-            "2026-02-29",
+            "2025/02/01",
+            "2025-02-29",
             "1900-02-29",
-            "2026-04-31",
-            "2026-00-01",
-            "2026-13-01",
-            "2026-01-00",
-            "2026-01-32",
-            "2026-01-01T00:00:00Z",
-            " 2026-01-01",
+            "2025-04-31",
+            "2025-00-01",
+            "2025-13-01",
+            "2025-01-00",
+            "2025-01-32",
+            "2025-01-01T00:00:00Z",
+            " 2025-01-01",
         ] {
             let mut entry = valid_entry("confirmed");
             entry[field]["date"] = json!(date);
@@ -400,6 +480,34 @@ fn status_is_a_closed_lowercase_enum() {
 }
 
 #[test]
+fn status_rejects_nonstrings_and_yaml_enum_tags() {
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        for value in [
+            Value::Null,
+            json!(123),
+            json!(false),
+            json!([]),
+            json!({(status): null}),
+        ] {
+            let mut entry = valid_entry(status);
+            entry["status"] = value;
+            let error = load_entry(entry).expect_err("status must be a plain string");
+            assert!(matches!(error, RuleSpecError::Yaml(_)), "{error:?}");
+        }
+        let source = yaml(&document(vec![valid_entry(status)]));
+        for tagged_status in [format!("!{status}"), format!("!{status} null")] {
+            let tagged = source.replace(
+                &format!("status: {status}"),
+                &format!("status: {tagged_status}"),
+            );
+            assert_ne!(tagged, source, "the test must replace the status scalar");
+            let error = lower_rulespec_str(&tagged).expect_err("YAML enum tags are refused");
+            assert!(matches!(error, RuleSpecError::Yaml(_)), "{error:?}");
+        }
+    }
+}
+
+#[test]
 fn unknown_keys_are_rejected_at_every_interpretation_level() {
     assert_loads(valid_entry("confirmed"));
     for pointer in [
@@ -434,6 +542,7 @@ fn required_fields() -> Vec<(&'static str, &'static str)> {
         ("", "affects"),
         ("/texts/0", "corpus_citation_path"),
         ("/texts/0", "excerpt"),
+        ("/alternatives/0", "id"),
         ("/alternatives/0", "reading"),
         ("/ruling", "by"),
         ("/ruling", "date"),
@@ -557,13 +666,16 @@ fn affects_cannot_resolve_to_an_imported_rule_or_deferred_output() {
     let mut entry = valid_entry("open");
     entry["affects"] = json!(["imported_rate", "deferred_rate"]);
     let mut root = document(vec![entry]);
-    root["imports"] = json!(["uk:policies/council/imported-test"]);
+    root["imports"] = json!(["zz-fictional-lantern:policies/lantern/imported-test"]);
     root["module"]["deferred_outputs"] = json!(["deferred_rate"]);
     let mut imported = document(vec![]);
     imported["rules"][0]["name"] = json!("imported_rate");
     let source = MemorySource(HashMap::from([
         (MODULE_TARGET.into(), yaml(&root)),
-        ("uk:policies/council/imported-test".into(), yaml(&imported)),
+        (
+            "zz-fictional-lantern:policies/lantern/imported-test".into(),
+            yaml(&imported),
+        ),
     ]));
     let error = load_rulespec_with_source(MODULE_TARGET, &source)
         .expect_err("imported and deferred-only names are outside document scope");
@@ -586,14 +698,14 @@ fn affects_cannot_resolve_to_an_imported_rule_or_deferred_output() {
 #[test]
 fn imported_interpretations_validate_before_metadata_is_discarded() {
     let mut root = document(vec![]);
-    root["imports"] = json!(["uk:policies/council/imported-test"]);
+    root["imports"] = json!(["zz-fictional-lantern:policies/lantern/imported-test"]);
     root["rules"] = json!([]);
     let mut entry = valid_entry("open");
     entry["affects"] = json!(["missing_imported_rule"]);
     let source = MemorySource(HashMap::from([
         (MODULE_TARGET.into(), yaml(&root)),
         (
-            "uk:policies/council/imported-test".into(),
+            "zz-fictional-lantern:policies/lantern/imported-test".into(),
             yaml(&document(vec![entry])),
         ),
     ]));
@@ -602,7 +714,7 @@ fn imported_interpretations_validate_before_metadata_is_discarded() {
     assert!(matches!(
         error,
         RuleSpecError::UnresolvedInterpretationAffects { path, id, names }
-            if path == "uk:policies/council/imported-test"
+            if path == "zz-fictional-lantern:policies/lantern/imported-test"
             && id == ENTRY_ID
             && names == ["missing_imported_rule"]
     ));
@@ -611,11 +723,11 @@ fn imported_interpretations_validate_before_metadata_is_discarded() {
 #[test]
 fn interpretation_ids_are_independent_between_imported_documents() {
     let mut root = document(vec![valid_entry("open")]);
-    root["imports"] = json!(["uk:policies/council/imported-test"]);
+    root["imports"] = json!(["zz-fictional-lantern:policies/lantern/imported-test"]);
     let source = MemorySource(HashMap::from([
         (MODULE_TARGET.into(), yaml(&root)),
         (
-            "uk:policies/council/imported-test".into(),
+            "zz-fictional-lantern:policies/lantern/imported-test".into(),
             yaml(&document(vec![valid_entry("open")])),
         ),
     ]));
@@ -794,6 +906,71 @@ fn compiled_artifact_loads_validate_interpretation_shape() {
     }
 }
 
+#[test]
+fn compiled_artifact_loads_reject_nonstring_statuses() {
+    for status in ["open", "ruled", "confirmed", "contradicted"] {
+        let source = yaml(&document(vec![valid_entry(status)]));
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
+            .expect("valid interpreted artifact compiles");
+        let artifact = serde_json::to_value(artifact).unwrap();
+        for value in [
+            Value::Null,
+            json!(123),
+            json!(false),
+            json!([]),
+            json!({(status): null}),
+        ] {
+            let mut mutated = artifact.clone();
+            mutated["program"]["module"]["interpretations"][0]["status"] = value;
+            let error =
+                CompiledProgramArtifact::from_json_str(&serde_json::to_string(&mutated).unwrap())
+                    .expect_err("compiled interpretation status must be a string");
+            assert!(
+                matches!(error, CompileError::DeserializeArtifact { .. }),
+                "{status}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compiled_artifact_loads_require_strict_string_alternative_ids() {
+    let source = yaml(&document(vec![valid_entry("open")]));
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source)
+        .expect("valid interpreted artifact compiles");
+    let artifact = serde_json::to_value(artifact).unwrap();
+    let mut missing_id = artifact.clone();
+    remove(
+        &mut missing_id["program"]["module"]["interpretations"][0],
+        "/alternatives/0",
+        "id",
+    );
+    let error =
+        CompiledProgramArtifact::from_json_str(&serde_json::to_string(&missing_id).unwrap())
+            .expect_err("compiled interpretation alternatives require ids");
+    assert!(
+        matches!(error, CompileError::DeserializeArtifact { .. }),
+        "{error:?}"
+    );
+    for value in [
+        Value::Null,
+        json!(123),
+        json!(false),
+        json!([]),
+        json!({"daily-review": null}),
+    ] {
+        let mut mutated = artifact.clone();
+        mutated["program"]["module"]["interpretations"][0]["alternatives"][0]["id"] = value;
+        let error =
+            CompiledProgramArtifact::from_json_str(&serde_json::to_string(&mutated).unwrap())
+                .expect_err("compiled interpretation alternative ids must be strings");
+        assert!(
+            matches!(error, CompileError::DeserializeArtifact { .. }),
+            "{error:?}"
+        );
+    }
+}
+
 fn generated_rule_name(stem: &str) -> String {
     format!("rule_{stem}")
 }
@@ -829,7 +1006,7 @@ fn valid_entries() -> impl Strategy<Value = Value> {
     (
         "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
         0usize..4,
-        1901u16..2100,
+        1901u16..2026,
         1u8..13,
         1u8..29,
         "[a-z][a-z0-9_]{0,12}",
@@ -844,6 +1021,7 @@ fn valid_entries() -> impl Strategy<Value = Value> {
             entry["reading"] = json!(format!("Adopted reading: {text}"));
             entry["basis"] = json!(format!("Basis: {text}"));
             entry["texts"][0]["excerpt"] = json!(format!("Provision: {text}"));
+            entry["alternatives"][0]["id"] = json!(format!("{id}-alternative"));
             entry["alternatives"][0]["reading"] = json!(format!("Other reading: {text}"));
             let date = format!("{year:04}-{month:02}-{day:02}");
             if status > 0 {
@@ -873,6 +1051,8 @@ fn document_for_entry(entry: Value) -> Value {
 #[derive(Debug)]
 enum MutationError {
     Id,
+    AlternativeId,
+    DuplicateAlternativeId,
     Blank,
     Collection,
     Citation,
@@ -899,14 +1079,28 @@ fn mutation_errors() -> Vec<(&'static str, Value, MutationError)> {
         ),
         ("/texts/0/excerpt", json!(" \n"), MutationError::Blank),
         (
+            "/alternatives/0/id",
+            json!("Bad_Id"),
+            MutationError::AlternativeId,
+        ),
+        (
+            "/alternatives",
+            json!([
+                {"id": "daily-review", "reading": "Review daily."},
+                {"id": "daily-review", "reading": "Review twice daily."}
+            ]),
+            MutationError::DuplicateAlternativeId,
+        ),
+        (
             "/alternatives/0/reading",
             json!(" \n"),
             MutationError::Blank,
         ),
         ("/status", json!("unknown"), MutationError::Yaml),
+        ("/status", json!({"confirmed": null}), MutationError::Yaml),
         ("/ruling", Value::Null, MutationError::Yaml),
         ("/ruling/by", json!(" \n"), MutationError::Blank),
-        ("/ruling/date", json!("2026-02-30"), MutationError::Date),
+        ("/ruling/date", json!("2025-02-30"), MutationError::Date),
         (
             "/ruling/record",
             json!("http://example.org/reply"),
@@ -916,7 +1110,7 @@ fn mutation_errors() -> Vec<(&'static str, Value, MutationError)> {
         ("/confirmation/by", json!(" \n"), MutationError::Blank),
         (
             "/confirmation/date",
-            json!("2026-02-30"),
+            json!("2025-02-30"),
             MutationError::Date,
         ),
         ("/confirmation/excerpt", json!(" \n"), MutationError::Blank),
@@ -935,6 +1129,12 @@ fn is_expected_error(error: &RuleSpecError, expected: &MutationError) -> bool {
         (
             RuleSpecError::InvalidInterpretationId { .. },
             MutationError::Id
+        ) | (
+            RuleSpecError::InvalidInterpretationAlternativeId { .. },
+            MutationError::AlternativeId
+        ) | (
+            RuleSpecError::DuplicateInterpretationAlternativeId { .. },
+            MutationError::DuplicateAlternativeId
         ) | (
             RuleSpecError::BlankInterpretationField { .. },
             MutationError::Blank

@@ -40,6 +40,22 @@ pub enum RuleSpecError {
     InvalidInterpretationId { path: String, id: String },
     #[error("RuleSpec module `{path}` repeats interpretation id `{id}`")]
     DuplicateInterpretationId { path: String, id: String },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid alternative id `{alternative_id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` repeats alternative id `{alternative_id}`"
+    )]
+    DuplicateInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
     #[error("RuleSpec module `{path}` interpretation `{id}` has blank `{field}`: {value:?}")]
     BlankInterpretationField {
         path: String,
@@ -621,6 +637,8 @@ pub struct InterpretationText {
 #[serde(deny_unknown_fields)]
 pub struct InterpretationAlternative {
     #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
     pub reading: String,
     #[serde(
         default,
@@ -662,7 +680,7 @@ pub struct InterpretationConfirmation {
     pub record: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum InterpretationStatus {
@@ -672,14 +690,37 @@ pub enum InterpretationStatus {
     Contradicted,
 }
 
+impl<'de> Deserialize<'de> for InterpretationStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = deserialize_strict_string(deserializer)?;
+        match value.as_str() {
+            "open" => Ok(Self::Open),
+            "ruled" => Ok(Self::Ruled),
+            "confirmed" => Ok(Self::Confirmed),
+            "contradicted" => Ok(Self::Contradicted),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["open", "ruled", "confirmed", "contradicted"],
+            )),
+        }
+    }
+}
+
+fn is_interpretation_id(value: &str) -> bool {
+    value.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
 impl Interpretation {
     fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
-        if !self.id.split('-').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        }) {
+        if !is_interpretation_id(&self.id) {
             return Err(RuleSpecError::InvalidInterpretationId {
                 path: path.to_string(),
                 id: self.id.clone(),
@@ -715,7 +756,22 @@ impl Interpretation {
             }
             self.validate_nonblank(path, &format!("texts[{index}].excerpt"), &text.excerpt)?;
         }
+        let mut alternative_ids = HashSet::new();
         for (index, alternative) in self.alternatives.iter().enumerate() {
+            if !is_interpretation_id(&alternative.id) {
+                return Err(RuleSpecError::InvalidInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
+            if !alternative_ids.insert(&alternative.id) {
+                return Err(RuleSpecError::DuplicateInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
             self.validate_nonblank(
                 path,
                 &format!("alternatives[{index}].reading"),
