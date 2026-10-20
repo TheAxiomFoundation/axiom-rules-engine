@@ -69,7 +69,10 @@ dropped qualifier; and any question put to the publisher, whatever reading
 is encoded while awaiting the reply.
 
 The block is descriptive and inert: it never changes lowered output names,
-compilation, or execution results. The root module's entries survive lowering
+compiled rules, or execution results. Provenance hashes that cover the whole
+source artifact do change when entries are added: the experimental aggregation
+response's `plan_digest` and `trace_root`, for example, while every computed
+value stays the same. The root module's entries survive lowering
 on `program.module` and round-trip through compiled-artifact JSON. The list
 defaults to empty and is omitted when empty.
 
@@ -159,11 +162,11 @@ and local paths. These are authoring and review requirements: the engine
 checks non-blank organisation fields and the HTTPS prefix, rather than
 identifying organisations or checking public access.
 
-The encoder verifies each excerpt verbatim against corpus text at its
-citation; the engine does not retrieve or match corpus text. Interpretation
-excerpts do not count toward the encoder's complete-source coverage gate.
-The encoder treats `contradicted` as a blocking finding requiring repair of
-the adopted reading. Model-generated entries may be `open` only: a human
+The engine does not retrieve or match corpus text, so these are requirements
+on the encoder: it must verify each excerpt verbatim against corpus text at
+its citation, must not count interpretation excerpts toward its
+complete-source coverage gate, and must treat `contradicted` as a blocking
+finding requiring repair of the adopted reading. Model-generated entries may be `open` only: a human
 ruling or publisher reply supplies `ruling` or `confirmation`.
 
 ## Data types
