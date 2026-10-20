@@ -82,6 +82,11 @@ pub fn try_execute(
     data: &DataSet,
     queries: &[ExecutionQuery],
 ) -> Result<FastPathResult, EvalError> {
+    if !program.selected_year_inputs.is_empty() {
+        return Ok(FastPathResult::Unsupported {
+            reason: "selected-year input requires Explain".into(),
+        });
+    }
     if crate::only_related::program_contains(program) {
         return Ok(FastPathResult::Unsupported {
             reason: "only_related uses the explain backend".into(),
@@ -374,6 +379,9 @@ impl<'a> BulkEvaluator<'a> {
 
     fn eval_scalar_expr(&mut self, expr: &ScalarExpr) -> Result<ScalarColumn, EvalError> {
         match expr {
+            ScalarExpr::InputForYear { .. } => Err(EvalError::TypeMismatch(
+                "selected-year input requires Explain capability selection".into(),
+            )),
             ScalarExpr::OnlyRelated { .. } => Err(EvalError::TypeMismatch(
                 "only_related requires explain capability selection".into(),
             )),
@@ -1146,7 +1154,8 @@ impl<'a> BulkEvaluator<'a> {
             ScalarExpr::OverPeriods { kind, .. } => {
                 Err(EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()))
             }
-            ScalarExpr::OnlyRelated { .. }
+            ScalarExpr::InputForYear { .. }
+            | ScalarExpr::OnlyRelated { .. }
             | ScalarExpr::DateAddDays { .. }
             | ScalarExpr::DateAddMonths { .. }
             | ScalarExpr::DateAddYears { .. }

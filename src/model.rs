@@ -286,6 +286,10 @@ impl OverPeriodsKind {
 
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
@@ -488,6 +492,7 @@ pub struct IndexedParameter {
 
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    pub selected_year_inputs: HashMap<String, crate::selected_year::SelectedYearInput>,
     pub units: HashMap<String, UnitDef>,
     pub relations: HashMap<String, RelationSchema>,
     pub parameters: HashMap<String, IndexedParameter>,
@@ -920,6 +925,7 @@ fn collect_scalar_relation_usages(
 ) {
     match expr {
         ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::Derived(_)
@@ -1252,6 +1258,7 @@ fn collect_scalar_derived_entities(
             }
         }
         ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::PeriodStart
@@ -1376,6 +1383,13 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         | ScalarExpr::Derived(_)
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::InputForYear { input, .. } => {
+            slots.insert(
+                input
+                    .rsplit_once("#input.")
+                    .map_or(input.as_str(), |(_, slot)| slot),
+            );
+        }
         ScalarExpr::Input(name) => {
             slots.insert(name.as_str());
         }

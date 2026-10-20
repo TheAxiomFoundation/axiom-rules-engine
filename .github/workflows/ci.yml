@@ -180,6 +180,8 @@ jobs:
 
       - name: Node smoke test
         run: node wasm/test/smoke.mjs
+      - name: Selected-year source compile and runtime smoke
+        run: node wasm/test/selected-year-input.mjs
 
   python:
     name: Python package tests

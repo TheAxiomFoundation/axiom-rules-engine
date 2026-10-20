@@ -1253,6 +1253,9 @@ impl<'a> DenseCompiler<'a> {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
             }),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )),
             ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
                 "only_related uses the explain backend".into(),
             )),
@@ -1587,6 +1590,9 @@ impl<'a> DenseCompiler<'a> {
                 then_expr: Box::new(self.compile_related_scalar(relation_index, then_expr)?),
                 else_expr: Box::new(self.compile_related_scalar(relation_index, else_expr)?),
             }),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )),
             ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
                 "only_related uses the explain backend".into(),
             )),
@@ -1725,6 +1731,9 @@ impl<'a> DenseCompiler<'a> {
                     else_expr,
                 )?),
             }),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )),
             ScalarExpr::OnlyRelated { .. } => Err(DenseCompileError::Unsupported(
                 "only_related uses the explain backend".into(),
             )),
