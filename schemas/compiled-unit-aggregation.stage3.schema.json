@@ -1777,6 +1777,12 @@
           },
           "type": "array"
         },
+        "selected_year_inputs": {
+          "items": {
+            "$ref": "#/$defs/SelectedYearInput"
+          },
+          "type": "array"
+        },
         "units": {
           "default": [],
           "items": {
@@ -1973,6 +1979,27 @@
           "required": [
             "kind",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "input": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "input_for_year",
+              "type": "string"
+            },
+            "year": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "input",
+            "year"
           ],
           "type": "object"
         },
@@ -2571,6 +2598,40 @@
           "type": "object"
         }
       ]
+    },
+    "SelectedYearInput": {
+      "additionalProperties": false,
+      "properties": {
+        "dtype": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "period": {
+          "type": "string"
+        },
+        "slot": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "slot",
+        "entity",
+        "dtype",
+        "period"
+      ],
+      "type": "object"
     },
     "SourceVerification": {
       "additionalProperties": false,

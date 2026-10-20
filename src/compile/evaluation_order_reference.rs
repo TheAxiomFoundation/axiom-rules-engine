@@ -289,6 +289,7 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
         ScalarExprSpec::OnlyRelated { relation, .. } => {

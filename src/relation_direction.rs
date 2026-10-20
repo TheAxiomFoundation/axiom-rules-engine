@@ -450,6 +450,7 @@ impl Resolver<'_> {
                 }
             }
             ScalarExprSpec::Literal { .. }
+            | ScalarExprSpec::InputForYear { .. }
             | ScalarExprSpec::Input { .. }
             | ScalarExprSpec::InputOrElse { .. }
             | ScalarExprSpec::Derived { .. }

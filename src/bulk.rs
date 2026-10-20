@@ -829,6 +829,9 @@ impl<'a> BulkEvaluator<'a> {
                 }
                 Ok((ScalarColumn::broadcast(value, len), RowErrors::new()))
             }
+            ScalarExpr::InputForYear { .. } => {
+                Err(unsupported("selected-year input requires Explain").into())
+            }
             ScalarExpr::Input(name) => self.eval_input(name, None, mask),
             ScalarExpr::InputOrElse { name, default } => self.eval_input(name, Some(default), mask),
             ScalarExpr::Derived(name) => self.evaluate_scalar(name, mask),

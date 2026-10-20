@@ -1461,6 +1461,7 @@ impl EvidenceCollector<'_> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)

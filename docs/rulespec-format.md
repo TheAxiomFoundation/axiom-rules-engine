@@ -493,3 +493,38 @@ error. These are date operations, not jurisdictional age or deadline rules:
 encode statutory inclusion, exclusion and expiry semantics explicitly.
 As with date_add_days, generic dense and explain execution support calendar
 shifts; the specialized bulk path reports them as unsupported.
+
+### Reading a declared annual input for a selected year
+
+`input_for_year(income, 2025)` reads the current entity's `income` fact covering
+January 1 through December 31, 2025, even when the enclosing query is monthly.
+The initial form accepts only an integer year literal from 1 through 9999. Rule
+versions must express the source's applicable reference year; the engine does
+not infer a jurisdiction's reference-year policy or accept a caller override.
+
+The primitive must have one explicit declaration in the citing module, a
+matching entity, `period: Year`, a supported scalar dtype, and no default. A
+`Money` input also requires a declared currency unit. Imported declarations
+sharing a runtime slot, foreign primitives, derived values and undeclared inputs
+are rejected. The compiled `selected_year_inputs` contract retains the input's
+canonical identity, runtime slot, entity, dtype, period and unit. Structural IR
+validation is not proof of source authorship or source certification.
+
+The lookup changes only the input's period. It preserves the current entity and
+the query period used for relation membership, rule versions and other inputs.
+A related entity's annual input can be read through a typed derived rule over
+that entity. Direct annual reads in relation predicates are not supported.
+
+Missing facts, wrong value types and ambiguous equal-precedence facts fail;
+zero and false remain actual values. Decimal values retain their precision and
+are not automatically rounded to currency minor units. Existing latest-start
+covering-interval precedence applies. The trace records the selected input,
+entity, annual interval and value separately from the enclosing query.
+
+Explain executes the lookup. Fast falls back to Explain with the original
+historical dataset when execution reaches this expression; an inactive branch
+does not force a fallback. Dense and lifetime execution refuse the expression
+because those representations do not retain the required historical axis.
+Older engines reject the new expression rather than silently treating it as a
+current-period input. Hosts must deploy matching compiler/runtime artifacts and
+transport historical facts explicitly before using this feature.

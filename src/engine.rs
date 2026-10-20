@@ -469,11 +469,20 @@ pub(crate) struct ParameterTraceRead {
     pub(crate) effective_to: Option<chrono::NaiveDate>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SelectedYearTraceRead {
+    pub(crate) input: String,
+    pub(crate) entity_id: String,
+    pub(crate) selected_period: Period,
+    pub(crate) value: ScalarValue,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NodeExecutionTrace {
     pub(crate) dependencies: Vec<CacheKey>,
     pub(crate) not_evaluated_dependencies: Vec<SkippedTraceDependency>,
     pub(crate) parameter_reads: Vec<ParameterTraceRead>,
+    pub(crate) selected_year_reads: Vec<SelectedYearTraceRead>,
 }
 
 /// What a [`NodeExecutionTrace`] already holds, so a record is deduplicated
@@ -507,6 +516,7 @@ enum TraceEffect {
     Evaluated(CacheKey),
     Skipped(SkippedTraceDependency),
     ParameterRead(ParameterTraceRead),
+    SelectedYearRead(SelectedYearTraceRead),
     /// Every record resolving these derived members made, in its place.
     Members(DerivedMembersKey),
 }
@@ -1149,6 +1159,11 @@ impl<'a> Engine<'a> {
                     trace.not_evaluated_dependencies.push(dependency);
                 }
             }
+            TraceEffect::SelectedYearRead(read) => {
+                if !trace.selected_year_reads.contains(&read) {
+                    trace.selected_year_reads.push(read);
+                }
+            }
             TraceEffect::ParameterRead(read) => {
                 let positions = index
                     .parameter_reads
@@ -1346,6 +1361,51 @@ impl<'a> Engine<'a> {
     ) -> Eval<ScalarValue> {
         match expr {
             ScalarExpr::Literal(value) => Ok(value.clone()),
+            ScalarExpr::InputForYear { input, year } => {
+                let declaration =
+                    self.program
+                        .selected_year_inputs
+                        .get(input)
+                        .ok_or_else(|| {
+                            EvalError::TypeMismatch(format!(
+                                "missing selected-year contract {input}"
+                            ))
+                        })?;
+                let selected =
+                    crate::selected_year::period(*year).map_err(EvalError::TypeMismatch)?;
+                let value = self.lookup_input(&declaration.slot, entity_id, &selected)?;
+                let records = self
+                    .input_index
+                    .get(&(declaration.slot.clone(), entity_id.to_string()));
+                let mut covering = records
+                    .into_iter()
+                    .flat_map(|items| items.iter())
+                    .filter(|record| record.interval.contains_period(&selected));
+                let first = covering.next();
+                let invalid_owner = first.is_none_or(|record| record.entity != declaration.entity)
+                    || first.is_some_and(|first| {
+                        covering
+                            .take_while(|record| record.interval.start == first.interval.start)
+                            .any(|record| record.entity != declaration.entity)
+                    });
+                if invalid_owner {
+                    return Err(EvalError::TypeMismatch(format!(
+                        "{} requires owner {}",
+                        input, declaration.entity
+                    ))
+                    .into());
+                }
+                declaration
+                    .check_value(&value)
+                    .map_err(EvalError::TypeMismatch)?;
+                self.record_effect(TraceEffect::SelectedYearRead(SelectedYearTraceRead {
+                    input: input.clone(),
+                    entity_id: entity_id.to_string(),
+                    selected_period: selected,
+                    value: value.clone(),
+                }));
+                Ok(value)
+            }
             ScalarExpr::Input(name) => Ok(self.lookup_input(name, entity_id, period)?),
             ScalarExpr::InputOrElse { name, default } => {
                 match self.lookup_input(name, entity_id, period) {
@@ -2702,6 +2762,7 @@ fn collect_scalar_trace_references(
 ) {
     match expr {
         ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::PeriodStart
