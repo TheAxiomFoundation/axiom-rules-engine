@@ -131,6 +131,16 @@ impl CompiledDenseProgramHandle {
         self.compiled.output_names()
     }
 
+    /// Root-entity rules the dense plan cannot express, keyed by name, each
+    /// with the compile error that left it out. They are not outputs.
+    fn unavailable_outputs(&self) -> HashMap<String, String> {
+        self.compiled
+            .unavailable_outputs()
+            .iter()
+            .map(|(name, reason)| (name.clone(), reason.clone()))
+            .collect()
+    }
+
     fn input_catalog(&self) -> HashMap<String, String> {
         self.input_catalog.clone()
     }

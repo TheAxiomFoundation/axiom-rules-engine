@@ -143,7 +143,8 @@ fn compile(program: &Program) -> Result<DenseCompiledProgram, DenseCompileError>
     for name in program.derived.keys() {
         compiler.compile_derived(name)?;
     }
-    Ok(compiler.finish())
+    // This walk compiles every rule itself, so nothing is left out.
+    Ok(compiler.finish(std::collections::BTreeMap::new()))
 }
 
 fn batch(households: &[Vec<i64>]) -> DenseBatchSpec {
