@@ -187,7 +187,9 @@ walks a `sum`, and gathers the one related row an `only` selects; both report
 explain's errors for the rows that reach them. Because dense rows carry no
 entity ids, `EmptyRelatedAggregate` names the root entity kind where explain
 names the entity id, as a missing root input does, and `MissingRelation` and
-`AmbiguousRelation` name the row index, as `only_related` does. An aggregation nested inside a
+`AmbiguousRelation` name the row index, as `only_related` does. Each names
+the relation as the formula does, a derived relation included, although its
+batch is its base relation's. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 

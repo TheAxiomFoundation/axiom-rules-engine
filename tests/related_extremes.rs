@@ -552,8 +552,11 @@ fn normalized(value: &ScalarValueSpec) -> ScalarValueSpec {
 }
 
 /// The variant and fields of an error that every evaluator reports alike.
-/// Dense has no entity ids, so it names the root entity kind where explain
-/// names the id (as it does for a missing input); the id is left out here.
+/// Dense has no entity ids: where explain names the id, dense names the root
+/// entity kind for `EmptyRelatedAggregate` (as it does for a missing input)
+/// and the row index for `MissingRelation` and `AmbiguousRelation` (as
+/// `only_related` does). The id is left out here;
+/// `dense_errors_name_the_root_kind_or_the_row` checks what dense names.
 fn error_shape(error: &EvalError) -> String {
     match error {
         EvalError::EmptyRelatedAggregate {
@@ -830,6 +833,41 @@ fn a_person_in_two_families_fails_naming_the_count() {
     );
     let dense = dense_people(&roster, &[4], "family_income_of").expect_err("dense fails too");
     assert_eq!(error_shape(&dense), error_shape(&error));
+}
+
+#[test]
+fn dense_errors_name_the_root_kind_or_the_row() {
+    let roster = example_roster();
+    // f00 has members and f01 has none, so row 1 fails.
+    let empty =
+        dense_families(&roster, &[0, 1], "youngest_age", false).expect_err("an empty family fails");
+    assert!(
+        matches!(
+            &empty,
+            EvalError::EmptyRelatedAggregate { entity_id, .. } if entity_id == "Family"
+        ),
+        "{empty:?}"
+    );
+    // p00 is in one family; p03 is in none and p04 is in two.
+    let missing = dense_people(&roster, &[0, 3], "family_income_of").expect_err("no family fails");
+    assert!(
+        matches!(
+            &missing,
+            EvalError::MissingRelation { relation, entity_id, .. }
+                if relation == RELATION && entity_id == "1"
+        ),
+        "{missing:?}"
+    );
+    let ambiguous =
+        dense_people(&roster, &[0, 4], "family_income_of").expect_err("two families fail");
+    assert!(
+        matches!(
+            &ambiguous,
+            EvalError::AmbiguousRelation { relation, entity_id, count: 2, .. }
+                if relation == RELATION && entity_id == "1"
+        ),
+        "{ambiguous:?}"
+    );
 }
 
 #[test]

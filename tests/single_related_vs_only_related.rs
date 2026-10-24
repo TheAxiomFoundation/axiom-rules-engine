@@ -2,12 +2,15 @@
 //! (#261), which projects a Boolean input only.
 //!
 //! The two are separate kinds because `ScalarExprSpec` does not deny unknown
-//! fields: an engine that knows only `only_related` would load a
-//! `single_related` with a `where` clause or a derived value and drop them.
-//! Where both apply, a Boolean input and no `where` clause, they must be the
-//! same function. This checks that on generated data in explain, fast and
-//! dense (Decimal and f64): the same value, or the same error with the same
-//! fields.
+//! fields: an engine that knows only `only_related` would load one carrying
+//! a `where` clause and ignore the clause, answering over every member with
+//! no error. (It refuses a derived value or other slots at load, and a
+//! non-Boolean input at evaluation.) Where both apply, a Boolean input and no
+//! `where` clause, they must be the same function. This checks that on
+//! generated data in explain, fast and dense (Decimal and f64): the same
+//! value, or the same error with the same fields. Each query reads one
+//! person; dense runs one person per batch, since a batch stops at its first
+//! failing row.
 //!
 //! One difference is intended and not generated here: `only_related` refuses
 //! a non-Boolean value with `TypeMismatch`, while `single_related` returns it
@@ -18,7 +21,7 @@ use std::collections::HashMap;
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
-    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec,
+    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue, DenseRelationBatchSpec,
 };
 use axiom_rules_engine::rulespec::lower_rulespec_str;
 use axiom_rules_engine::spec::ProgramSpec;
@@ -27,8 +30,9 @@ use serde_json::{Value, json};
 
 const HOUSEHOLDS: usize = 3;
 
-/// One `decision(person, household)` tuple. A partial tuple covers only the
-/// first half of the month, so it does not cover the queried period.
+/// One `decision` tuple between a person and a household. A partial tuple
+/// covers only the first half of the month, so it does not cover the queried
+/// period.
 #[derive(Clone, Debug)]
 struct Edge {
     person: usize,
@@ -42,14 +46,53 @@ struct Case {
     edges: Vec<Edge>,
     /// Each household's `refused`, or `None` when it has no record.
     refused: Vec<Option<bool>>,
+    /// Whether `decision` is written household first and read at slots
+    /// (1, 0), rather than person first at (0, 1).
+    reversed: bool,
+    /// When set, the query reads `kept`, derived from `decision`, which keeps
+    /// the households whose `listed` is true; these are the households'
+    /// `listed`. When `None` the query reads `decision` itself.
+    listed: Option<Vec<bool>>,
 }
 
-fn expr(kind: &str) -> Value {
+impl Case {
+    fn slots(&self) -> (usize, usize) {
+        if self.reversed { (1, 0) } else { (0, 1) }
+    }
+
+    fn slot_entities(&self) -> Value {
+        if self.reversed {
+            json!(["Household", "Person"])
+        } else {
+            json!(["Person", "Household"])
+        }
+    }
+
+    fn relation(&self) -> &'static str {
+        if self.listed.is_some() {
+            "kept"
+        } else {
+            "decision"
+        }
+    }
+
+    /// The households of `person`'s tuples that cover the period, in order.
+    fn full_households(&self, person: usize) -> Vec<usize> {
+        self.edges
+            .iter()
+            .filter(|edge| edge.person == person && !edge.partial)
+            .map(|edge| edge.household)
+            .collect()
+    }
+}
+
+fn expr(kind: &str, case: &Case) -> Value {
+    let (current_slot, related_slot) = case.slots();
     let mut expr = json!({
         "kind": kind,
-        "relation": "decision",
-        "current_slot": 0,
-        "related_slot": 1,
+        "relation": case.relation(),
+        "current_slot": current_slot,
+        "related_slot": related_slot,
         "value": {"kind": "input", "name": "refused"},
     });
     if kind == "single_related" {
@@ -58,43 +101,78 @@ fn expr(kind: &str) -> Value {
     expr
 }
 
-fn program(kind: &str) -> Value {
+fn program(kind: &str, case: &Case) -> Value {
+    let (current_slot, related_slot) = case.slots();
+    let mut relations = vec![json!({
+        "name": "decision",
+        "arity": 2,
+        "slot_entities": case.slot_entities(),
+    })];
+    if case.listed.is_some() {
+        relations.push(json!({
+            "name": "kept",
+            "arity": 2,
+            "slot_entities": case.slot_entities(),
+            "derivation": {
+                "source_relation": "decision",
+                "current_slot": current_slot,
+                "related_slot": related_slot,
+                "slot_entities": case.slot_entities(),
+                "predicate": {
+                    "kind": "comparison",
+                    "left": {"kind": "input", "name": "listed"},
+                    "op": "eq",
+                    "right": {"kind": "literal", "value": {"kind": "bool", "value": true}},
+                },
+            },
+        }));
+    }
     json!({
-        "relations": [{"name": "decision", "arity": 2, "slot_entities": ["Person", "Household"]}],
+        "relations": relations,
         "derived": [{
             "name": "projected",
             "entity": "Person",
             "dtype": "boolean",
             "semantics": "scalar",
-            "expr": expr(kind),
+            "expr": expr(kind, case),
         }],
     })
 }
 
 fn request(kind: &str, mode: &str, case: &Case, person: usize) -> ExecutionRequest {
-    let inputs: Vec<Value> = case
+    let interval = json!({"start": "2026-01-01", "end": "2026-01-31"});
+    let record = |name: &str, household: usize, value: bool| {
+        json!({
+            "name": name,
+            "entity": "Household",
+            "entity_id": format!("h{household}"),
+            "interval": interval,
+            "value": {"kind": "bool", "value": value},
+        })
+    };
+    let mut inputs: Vec<Value> = case
         .refused
         .iter()
         .enumerate()
-        .filter_map(|(household, value)| {
-            value.map(|value| {
-                json!({
-                    "name": "refused",
-                    "entity": "Household",
-                    "entity_id": format!("h{household}"),
-                    "interval": {"start": "2026-01-01", "end": "2026-01-31"},
-                    "value": {"kind": "bool", "value": value},
-                })
-            })
-        })
+        .filter_map(|(household, value)| value.map(|value| record("refused", household, value)))
         .collect();
+    if let Some(listed) = &case.listed {
+        inputs.extend(
+            listed
+                .iter()
+                .enumerate()
+                .map(|(household, value)| record("listed", household, *value)),
+        );
+    }
     let relations: Vec<Value> = case
         .edges
         .iter()
         .map(|edge| {
+            let person = format!("p{}", edge.person);
+            let household = format!("h{}", edge.household);
             json!({
                 "name": "decision",
-                "tuple": [format!("p{}", edge.person), format!("h{}", edge.household)],
+                "tuple": if case.reversed { [household, person] } else { [person, household] },
                 "interval": {
                     "start": "2026-01-01",
                     "end": if edge.partial { "2026-01-15" } else { "2026-01-31" },
@@ -104,7 +182,7 @@ fn request(kind: &str, mode: &str, case: &Case, person: usize) -> ExecutionReque
         .collect();
     serde_json::from_value(json!({
         "mode": mode,
-        "program": program(kind),
+        "program": program(kind, case),
         "dataset": {"inputs": inputs, "relations": relations},
         "queries": [{
             "entity_id": format!("p{person}"),
@@ -127,46 +205,47 @@ fn sparse(kind: &str, mode: &str, case: &Case, person: usize) -> String {
     }
 }
 
-/// Dense rows are the people; each person's related rows are their full
-/// tuples in order (dense has no intervals, so partial tuples are left out).
-/// `refused` gives each related row its household's value; when a reached
-/// household has no record the column is left out, which dense reports as a
-/// missing input.
-fn dense(kind: &str, case: &Case, f64_mode: bool) -> String {
-    let spec: ProgramSpec = serde_json::from_value(program(kind)).expect("program parses");
+fn dense_program(kind: &str, case: &Case) -> DenseCompiledProgram {
+    let spec: ProgramSpec = serde_json::from_value(program(kind, case)).expect("program parses");
     let artifact = CompiledProgramArtifact::compile(spec).expect("program compiles");
-    let compiled =
-        DenseCompiledProgram::from_artifact(&artifact, Some("Person")).expect("dense compiles");
-    let mut offsets = vec![0];
-    let mut values = Vec::new();
-    let mut complete = true;
-    for person in 0..case.people {
-        for edge in case
-            .edges
-            .iter()
-            .filter(|edge| edge.person == person && !edge.partial)
-        {
-            match case.refused[edge.household] {
-                Some(value) => values.push(value),
-                None => {
-                    complete = false;
-                    values.push(false);
-                }
+    DenseCompiledProgram::from_artifact(&artifact, Some("Person")).expect("dense compiles")
+}
+
+/// One batch with `person` as its only row, since a batch stops at its first
+/// failing row. The row's related rows are its full tuples in order (dense
+/// has no intervals, so partial tuples are left out, and a repeated tuple is
+/// two rows). When a related row's household has no `refused` record the
+/// column is left out, which dense reports as a missing input.
+fn dense(compiled: &DenseCompiledProgram, case: &Case, person: usize, f64_mode: bool) -> String {
+    let households = case.full_households(person);
+    let mut relations: HashMap<_, DenseRelationBatchSpec> = HashMap::new();
+    for schema in compiled.relations() {
+        let batch = relations
+            .entry(schema.key.clone())
+            .or_insert_with(|| DenseRelationBatchSpec {
+                offsets: vec![0, households.len()],
+                inputs: HashMap::new(),
+            });
+        for name in &schema.related_inputs {
+            let column: Option<Vec<bool>> = households
+                .iter()
+                .map(|&household| match name.as_str() {
+                    "refused" => case.refused[household],
+                    "listed" => case.listed.as_ref().map(|listed| listed[household]),
+                    other => panic!("unexpected related input `{other}`"),
+                })
+                .collect();
+            if let Some(values) = column {
+                batch.inputs.insert(name.clone(), DenseColumn::Bool(values));
             }
         }
-        offsets.push(values.len());
     }
-    let mut inputs = HashMap::new();
-    if complete {
-        inputs.insert("refused".to_string(), DenseColumn::Bool(values));
-    }
-    let key = compiled.relations()[0].key.clone();
     let batch = DenseBatchSpec {
-        row_count: case.people,
+        row_count: 1,
         inputs: HashMap::new(),
-        relations: HashMap::from([(key, DenseRelationBatchSpec { offsets, inputs })]),
+        relations,
     };
-    let period = request(kind, "explain", case, 0).queries[0]
+    let period = request("only_related", "explain", case, person).queries[0]
         .period
         .to_model()
         .expect("period");
@@ -177,7 +256,10 @@ fn dense(kind: &str, case: &Case, f64_mode: bool) -> String {
         compiled.execute(&period, batch, &outputs)
     };
     match result {
-        Ok(result) => format!("{:?}", result.outputs),
+        Ok(result) => match result.outputs.get("projected") {
+            Some(DenseOutputValue::Scalar(DenseColumn::Bool(values))) => format!("{values:?}"),
+            other => panic!("`projected` is a Boolean column, got {other:?}"),
+        },
         Err(error) => format!("{error:?}"),
     }
 }
@@ -195,11 +277,15 @@ fn cases() -> impl Strategy<Value = Case> {
             Just(people),
             proptest::collection::vec(edge, 0..=6),
             proptest::collection::vec(proptest::option::weighted(0.85, any::<bool>()), HOUSEHOLDS),
+            any::<bool>(),
+            proptest::option::of(proptest::collection::vec(any::<bool>(), HOUSEHOLDS)),
         )
-            .prop_map(|(people, edges, refused)| Case {
+            .prop_map(|(people, edges, refused, reversed, listed)| Case {
                 people,
                 edges,
                 refused,
+                reversed,
+                listed,
             })
     })
 }
@@ -209,83 +295,104 @@ proptest! {
 
     #[test]
     fn single_related_equals_only_related_on_a_boolean_input(case in cases()) {
-        for mode in ["explain", "fast"] {
-            for person in 0..case.people {
+        let single = dense_program("single_related", &case);
+        let only = dense_program("only_related", &case);
+        for person in 0..case.people {
+            for mode in ["explain", "fast"] {
                 prop_assert_eq!(
                     sparse("single_related", mode, &case, person),
                     sparse("only_related", mode, &case, person),
                     "{} mode, person p{}", mode, person
                 );
             }
-        }
-        for f64_mode in [false, true] {
-            prop_assert_eq!(
-                dense("single_related", &case, f64_mode),
-                dense("only_related", &case, f64_mode),
-                "dense, f64 {}", f64_mode
-            );
+            for f64_mode in [false, true] {
+                prop_assert_eq!(
+                    dense(&single, &case, person, f64_mode),
+                    dense(&only, &case, person, f64_mode),
+                    "dense, f64 {}, person p{}", f64_mode, person
+                );
+            }
         }
     }
 }
 
-/// The generator reaches every outcome the property compares: a value, no
-/// member, several members, a repeated tuple, a member with no record and a
-/// tuple that does not cover the period.
-#[test]
-fn the_examples_reach_every_outcome() {
-    let edge = |person, household, partial| Edge {
+fn edge(person: usize, household: usize, partial: bool) -> Edge {
+    Edge {
         person,
         household,
         partial,
-    };
-    let case = Case {
-        people: 3,
-        edges: vec![
+    }
+}
+
+fn case(people: usize, edges: Vec<Edge>) -> Case {
+    Case {
+        people,
+        edges,
+        refused: vec![Some(true), Some(false), None],
+        reversed: false,
+        listed: None,
+    }
+}
+
+/// Every outcome the property compares, in each mode, for both kinds.
+#[test]
+fn the_examples_reach_every_outcome() {
+    let mixed = case(
+        3,
+        vec![
             edge(0, 0, false),
             edge(1, 0, false),
             edge(1, 1, false),
             edge(2, 2, true),
         ],
-        refused: vec![Some(true), Some(false), None],
-    };
-    let outcomes: Vec<String> = (0..3)
-        .map(|person| sparse("only_related", "explain", &case, person))
-        .collect();
-    assert_eq!(outcomes[0], r#"{"kind":"bool","value":true}"#);
-    assert!(outcomes[1].contains("AmbiguousRelation"), "{}", outcomes[1]);
-    assert!(outcomes[2].contains("MissingRelation"), "{}", outcomes[2]);
-    let missing_input = Case {
-        people: 1,
-        edges: vec![edge(0, 2, false)],
-        refused: vec![Some(true), Some(false), None],
-    };
-    for kind in ["only_related", "single_related"] {
-        assert!(sparse(kind, "explain", &missing_input, 0).contains("MissingInput"));
-        assert!(dense(kind, &missing_input, false).contains("MissingInput"));
-    }
-    let several = Case {
-        people: 1,
-        edges: vec![edge(0, 0, false), edge(0, 1, false)],
-        refused: vec![Some(true), Some(false), None],
-    };
-    for kind in ["only_related", "single_related"] {
-        assert!(dense(kind, &several, false).contains("AmbiguousRelation"));
-        assert!(dense(kind, &case, false).contains("AmbiguousRelation"));
-    }
+    );
+    let missing_input = case(1, vec![edge(0, 2, false)]);
     // A repeated tuple: explain reads the distinct ids, so one household;
-    // dense rows are the tuples, so two (docs/only-related.md). Both kinds
-    // agree within each mode.
-    let repeated = Case {
-        people: 1,
-        edges: vec![edge(0, 0, false), edge(0, 0, false)],
-        refused: vec![Some(true), Some(false), None],
+    // dense rows are the tuples, so two (docs/only-related.md).
+    let repeated = case(1, vec![edge(0, 0, false), edge(0, 0, false)]);
+    // Read household first through `kept`: of p0's two households only h0 is
+    // listed, so the read is h0's where `decision` itself is ambiguous.
+    let kept = Case {
+        reversed: true,
+        listed: Some(vec![true, false, false]),
+        ..case(1, vec![edge(0, 0, false), edge(0, 1, false)])
+    };
+    let unkept = Case {
+        listed: Some(vec![false, false, true]),
+        ..kept.clone()
     };
     for kind in ["only_related", "single_related"] {
-        assert_eq!(
-            sparse(kind, "explain", &repeated, 0),
-            r#"{"kind":"bool","value":true}"#
-        );
-        assert!(dense(kind, &repeated, false).contains("AmbiguousRelation"));
+        for mode in ["explain", "fast"] {
+            let expect = |case: &Case, person: usize, outcome: &str| {
+                let got = sparse(kind, mode, case, person);
+                assert!(got.contains(outcome), "{kind} {mode} p{person}: {got}");
+            };
+            expect(&mixed, 0, r#"{"kind":"bool","value":true}"#);
+            expect(&mixed, 1, "AmbiguousRelation");
+            expect(&mixed, 2, "MissingRelation");
+            expect(&missing_input, 0, "MissingInput");
+            expect(&repeated, 0, r#"{"kind":"bool","value":true}"#);
+            expect(&kept, 0, r#"{"kind":"bool","value":true}"#);
+            expect(&unkept, 0, r#"MissingRelation { relation: "kept""#);
+        }
+        for f64_mode in [false, true] {
+            let expect = |case: &Case, person: usize, outcome: &str| {
+                let got = dense(&dense_program(kind, case), case, person, f64_mode);
+                assert!(
+                    got.contains(outcome),
+                    "{kind} dense f64 {f64_mode} p{person}: {got}"
+                );
+            };
+            expect(&mixed, 0, "[true]");
+            expect(&mixed, 1, "AmbiguousRelation");
+            expect(&mixed, 2, "MissingRelation");
+            expect(&missing_input, 0, "MissingInput");
+            expect(&repeated, 0, "AmbiguousRelation");
+            expect(&kept, 0, "[true]");
+            // The relation as the formula names it, not `decision`, the base
+            // relation its dense batch is keyed to.
+            expect(&unkept, 0, r#"MissingRelation { relation: "kept""#);
+        }
     }
 }
 

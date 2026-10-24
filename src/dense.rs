@@ -454,8 +454,10 @@ enum CompiledScalarExpr {
         from: Box<CompiledScalarExpr>,
         to: Box<CompiledScalarExpr>,
     },
+    /// `only_related`; `relation_name` as for `ExtremeRelated`.
     OnlyRelated {
         relation: usize,
+        relation_name: String,
         input: usize,
     },
     CountRelated {
@@ -1865,9 +1867,14 @@ impl<'a> DenseCompiler<'a> {
                     )
                     .into());
                 };
+                let relation_name = relation.clone();
                 let relation = self.relation(relation, *current_slot, *related_slot)?;
                 let input = self.related_input(relation, name);
-                Ok(CompiledScalarExpr::OnlyRelated { relation, input })
+                Ok(CompiledScalarExpr::OnlyRelated {
+                    relation,
+                    relation_name,
+                    input,
+                })
             }
             ScalarExpr::CountRelated {
                 relation,
@@ -3870,9 +3877,11 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledScalarExpr::DaysBetween { from, to } => {
                 eval_days_between::<N, _, _>(self, from, to, mask)
             }
-            CompiledScalarExpr::OnlyRelated { relation, input } => {
-                self.eval_only_related(*relation, *input, mask)
-            }
+            CompiledScalarExpr::OnlyRelated {
+                relation,
+                relation_name,
+                input,
+            } => self.eval_only_related((*relation, relation_name), *input, mask),
             CompiledScalarExpr::CountRelated {
                 relation,
                 predicate,
@@ -4100,7 +4109,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
 
     fn eval_only_related(
         &mut self,
-        relation: usize,
+        (relation, relation_name): (usize, &str),
         input: usize,
         mask: &RowMask,
     ) -> Flow<DenseEval> {
@@ -4110,18 +4119,17 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         for related in members.rows() {
             counts[owners[related]] += 1;
         }
-        let schema = &self.program.relations[relation];
         for row in mask.without(&errors).rows() {
             let error = match counts[row] {
                 0 => Some(EvalError::MissingRelation {
-                    relation: schema.key.name.clone(),
+                    relation: relation_name.to_string(),
                     entity_id: row.to_string(),
                     period_start: self.period.start,
                     period_end: self.period.end,
                 }),
                 1 => None,
                 count => Some(EvalError::AmbiguousRelation {
-                    relation: schema.key.name.clone(),
+                    relation: relation_name.to_string(),
                     entity_id: row.to_string(),
                     period_start: self.period.start,
                     period_end: self.period.end,

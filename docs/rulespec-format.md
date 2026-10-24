@@ -497,8 +497,9 @@ JSON Schemas give exact field shapes.
 Scalar kinds: `literal`, `input`, `input_for_year`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
 `floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
-`date_add_years`, `days_between`, `only_related`,
-`count_related`, `sum_related`, `if`, `no_match`, `over_periods`.
+`date_add_years`, `days_between`, `only_related`, `single_related`,
+`count_related`, `sum_related`, `extreme_related`, `if`, `no_match`,
+`over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
 `eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`,

@@ -21,8 +21,10 @@ kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
 `only(r.f)` is a kind of its own, `single_related`, not an extension of
 `only_related`, which projects a Boolean input only. `ScalarExprSpec` does not
 deny unknown fields, so an engine that knows only `only_related` would load an
-`only_related` carrying a `where` clause or a derived value and silently drop
-them. Under a new kind that engine refuses the artifact instead. Where both
+`only_related` carrying a `where` clause, ignore the clause and answer over
+every member, with no error. It refuses the other extensions: a derived value
+or slots other than 0 and 1 at load, and a non-Boolean input at evaluation.
+Under a new kind that engine refuses the artifact instead. Where both
 apply (a Boolean input, no `where` clause) they are the same function in every
 mode, which `tests/single_related_vs_only_related.rs` checks on generated
 data; `only_related` alone refuses a non-Boolean value.
@@ -56,7 +58,10 @@ data; `only_related` alone refuses a non-Boolean value.
   entity kind where explain names the id, as a missing root input does;
   `MissingRelation` and `AmbiguousRelation` name the row index, as
   `only_related` does, so each error means one thing in dense whichever
-  expression raised it.
+  expression raised it. Every one of them names the relation as the formula
+  does. A derived relation's dense schema is keyed to the base relation of its
+  chain, and `only_related`'s dense errors had named that base relation where
+  explain names the derived one; they now name the derived one too.
 
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 
