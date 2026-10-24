@@ -22,8 +22,9 @@ kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
 `only_related`, which projects a Boolean input only. `ScalarExprSpec` does not
 deny unknown fields, so an engine that knows only `only_related` would load an
 `only_related` carrying a `where` clause, ignore the clause and answer over
-every member, with no error. It refuses the other extensions: a derived value
-or slots other than 0 and 1 at load, and a non-Boolean input at evaluation.
+every member, with no error for the dropped clause. It refuses the other
+extensions: a derived value or any slot pair other than 0 and 1 at load, and a
+non-Boolean input at evaluation.
 Under a new kind that engine refuses the artifact instead. Where both
 apply (a Boolean input, no `where` clause) they are the same function in every
 mode, which `tests/single_related_vs_only_related.rs` checks on generated

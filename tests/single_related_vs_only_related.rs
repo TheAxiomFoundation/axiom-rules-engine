@@ -4,13 +4,14 @@
 //! The two are separate kinds because `ScalarExprSpec` does not deny unknown
 //! fields: an engine that knows only `only_related` would load one carrying
 //! a `where` clause and ignore the clause, answering over every member with
-//! no error. (It refuses a derived value or other slots at load, and a
-//! non-Boolean input at evaluation.) Where both apply, a Boolean input and no
+//! no error for the dropped clause. (It refuses a derived value or any slot
+//! pair other than 0 and 1 at load, and a non-Boolean input at evaluation.)
+//! Where both apply, a Boolean input and no
 //! `where` clause, they must be the same function. This checks that on
 //! generated data in explain, fast and dense (Decimal and f64): the same
 //! value, or the same error with the same fields. Each query reads one
-//! person; dense runs one person per batch, since a batch stops at its first
-//! failing row.
+//! person. A dense batch stops at its first failing row, so dense runs each
+//! person alone and then all of them in one batch.
 //!
 //! One difference is intended and not generated here: `only_related` refuses
 //! a non-Boolean value with `TypeMismatch`, while `single_related` returns it
@@ -211,19 +212,25 @@ fn dense_program(kind: &str, case: &Case) -> DenseCompiledProgram {
     DenseCompiledProgram::from_artifact(&artifact, Some("Person")).expect("dense compiles")
 }
 
-/// One batch with `person` as its only row, since a batch stops at its first
-/// failing row. The row's related rows are its full tuples in order (dense
+/// One batch whose rows are `people`, in order. A batch stops at its first
+/// failing row, so the property runs each person alone as well as all of
+/// them together. A row's related rows are its full tuples in order (dense
 /// has no intervals, so partial tuples are left out, and a repeated tuple is
 /// two rows). When a related row's household has no `refused` record the
 /// column is left out, which dense reports as a missing input.
-fn dense(compiled: &DenseCompiledProgram, case: &Case, person: usize, f64_mode: bool) -> String {
-    let households = case.full_households(person);
+fn dense(compiled: &DenseCompiledProgram, case: &Case, people: &[usize], f64_mode: bool) -> String {
+    let mut offsets = vec![0];
+    let mut households = Vec::new();
+    for &person in people {
+        households.extend(case.full_households(person));
+        offsets.push(households.len());
+    }
     let mut relations: HashMap<_, DenseRelationBatchSpec> = HashMap::new();
     for schema in compiled.relations() {
         let batch = relations
             .entry(schema.key.clone())
             .or_insert_with(|| DenseRelationBatchSpec {
-                offsets: vec![0, households.len()],
+                offsets: offsets.clone(),
                 inputs: HashMap::new(),
             });
         for name in &schema.related_inputs {
@@ -241,11 +248,11 @@ fn dense(compiled: &DenseCompiledProgram, case: &Case, person: usize, f64_mode: 
         }
     }
     let batch = DenseBatchSpec {
-        row_count: 1,
+        row_count: people.len(),
         inputs: HashMap::new(),
         relations,
     };
-    let period = request("only_related", "explain", case, person).queries[0]
+    let period = request("only_related", "explain", case, 0).queries[0]
         .period
         .to_model()
         .expect("period");
@@ -307,11 +314,21 @@ proptest! {
             }
             for f64_mode in [false, true] {
                 prop_assert_eq!(
-                    dense(&single, &case, person, f64_mode),
-                    dense(&only, &case, person, f64_mode),
+                    dense(&single, &case, &[person], f64_mode),
+                    dense(&only, &case, &[person], f64_mode),
                     "dense, f64 {}, person p{}", f64_mode, person
                 );
             }
+        }
+        // All people in one batch: the first failing row's error, which
+        // names that row's index.
+        let everyone: Vec<usize> = (0..case.people).collect();
+        for f64_mode in [false, true] {
+            prop_assert_eq!(
+                dense(&single, &case, &everyone, f64_mode),
+                dense(&only, &case, &everyone, f64_mode),
+                "dense, f64 {}, every person", f64_mode
+            );
         }
     }
 }
@@ -377,7 +394,7 @@ fn the_examples_reach_every_outcome() {
         }
         for f64_mode in [false, true] {
             let expect = |case: &Case, person: usize, outcome: &str| {
-                let got = dense(&dense_program(kind, case), case, person, f64_mode);
+                let got = dense(&dense_program(kind, case), case, &[person], f64_mode);
                 assert!(
                     got.contains(outcome),
                     "{kind} dense f64 {f64_mode} p{person}: {got}"
@@ -392,6 +409,13 @@ fn the_examples_reach_every_outcome() {
             // The relation as the formula names it, not `decision`, the base
             // relation its dense batch is keyed to.
             expect(&unkept, 0, r#"MissingRelation { relation: "kept""#);
+            // All three people in one batch: p0 reads a value and p1 is the
+            // first to fail, so the error names row 1.
+            let got = dense(&dense_program(kind, &mixed), &mixed, &[0, 1, 2], f64_mode);
+            assert!(
+                got.contains(r#"AmbiguousRelation { relation: "decision", entity_id: "1""#),
+                "{kind} dense f64 {f64_mode} every person: {got}"
+            );
         }
     }
 }
