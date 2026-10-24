@@ -289,8 +289,14 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,

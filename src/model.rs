@@ -318,6 +318,10 @@ impl OverPeriodsKind {
 
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
@@ -359,6 +363,12 @@ pub enum ScalarExpr {
     DaysBetween {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
+    },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
     },
     CountRelated {
         relation: String,
@@ -545,6 +555,7 @@ pub struct IndexedParameter {
 
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    pub selected_year_inputs: HashMap<String, crate::selected_year::SelectedYearInput>,
     pub units: HashMap<String, UnitDef>,
     pub relations: HashMap<String, RelationSchema>,
     pub parameters: HashMap<String, IndexedParameter>,
@@ -835,6 +846,13 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         | ScalarExpr::Derived(_)
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::InputForYear { input, .. } => {
+            slots.insert(
+                input
+                    .rsplit_once("#input.")
+                    .map_or(input.as_str(), |(_, slot)| slot),
+            );
+        }
         ScalarExpr::Input(name) => {
             slots.insert(name.as_str());
         }
@@ -873,6 +891,11 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         ScalarExpr::DaysBetween { from, to } => {
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
+        }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
         }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {

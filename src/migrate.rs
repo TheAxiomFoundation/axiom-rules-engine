@@ -1366,6 +1366,20 @@ impl EvidenceCollector<'_> {
     fn scalar(&self, expr: &crate::model::ScalarExpr, entity: Option<&str>, slots: &mut Evidence) {
         use crate::model::ScalarExpr;
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => self.aggregate(
+                relation,
+                *current_slot,
+                *related_slot,
+                Some(value),
+                None,
+                entity,
+                slots,
+            ),
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1462,6 +1476,7 @@ impl EvidenceCollector<'_> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)

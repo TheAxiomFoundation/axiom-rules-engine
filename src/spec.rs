@@ -16,6 +16,14 @@ use crate::model::{
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
+    #[error(transparent)]
+    InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
     #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
@@ -95,8 +103,10 @@ pub enum SpecError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
-    /// validation status) carried through RuleSpec lowering for tooling and
+    /// validation status, interpretations) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
     /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +142,14 @@ impl ProgramSpec {
                     value: digest.to_string(),
                 });
             }
+        }
+        if let Some(module) = &self.module {
+            // The compiled IR preserves root metadata but no longer records
+            // each document's rules. Validate entry shape here; local affects
+            // resolution belongs to RuleSpec loading before imports merge.
+            module
+                .validate("program.module")
+                .map_err(|error| SpecError::InvalidModuleMetadata(Box::new(error)))?;
         }
         for parameter in &self.parameters {
             if let Some(id) = parameter.id.as_deref() {
@@ -201,7 +219,13 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        crate::selected_year::validate(self)?;
         let mut program = Program::default();
+        program.selected_year_inputs = self
+            .selected_year_inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.clone()))
+            .collect();
 
         for unit in &self.units {
             program.add_unit(unit.to_model())?;
@@ -241,6 +265,20 @@ impl ProgramSpec {
                 .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
         )?;
 
+        if !program.selected_year_inputs.is_empty() {
+            let catalog = program.input_catalog();
+            for input in program.selected_year_inputs.values() {
+                if catalog
+                    .get(&input.slot)
+                    .is_none_or(|names| names.as_slice() != [input.id.as_str()])
+                {
+                    return Err(SpecError::SelectedYearInput(format!(
+                        "{} shares a runtime slot across module identities",
+                        input.id
+                    )));
+                }
+            }
+        }
         Ok(program)
     }
 }
@@ -1075,6 +1113,10 @@ pub enum ScalarExprSpec {
     Input {
         name: String,
     },
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     InputOrElse {
         name: String,
         default: ScalarValueSpec,
@@ -1133,6 +1175,12 @@ pub enum ScalarExprSpec {
     DaysBetween {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
+    },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
     },
     CountRelated {
         relation: String,
@@ -1271,6 +1319,10 @@ impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
+            Self::InputForYear { input, year } => Ok(ScalarExpr::InputForYear {
+                input: input.clone(),
+                year: *year,
+            }),
             Self::Input { name } => Ok(ScalarExpr::Input(name.clone())),
             Self::InputOrElse { name, default } => Ok(ScalarExpr::InputOrElse {
                 name: name.clone(),
@@ -1321,6 +1373,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,

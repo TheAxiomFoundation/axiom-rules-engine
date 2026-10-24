@@ -191,6 +191,20 @@ impl<'a> PhaseTwoEngine<'a> {
                 self.collect_scalar_reduction_reasons(left, entity_id, period, visiting, reasons);
                 self.collect_scalar_reduction_reasons(right, entity_id, period, visiting, reasons);
             }
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                ..
+            } => {
+                self.collect_relation_reasons(
+                    relation,
+                    *current_slot,
+                    entity_id,
+                    period,
+                    visiting,
+                    reasons,
+                );
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -261,6 +275,7 @@ impl<'a> PhaseTwoEngine<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::PeriodStart

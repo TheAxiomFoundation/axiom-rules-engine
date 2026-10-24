@@ -2300,9 +2300,14 @@ fn lower_program_reading(
 
 fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
     match expr {
+        ScalarExprSpec::OnlyRelated { value, .. } => match value {
+            RelatedValueRefSpec::Input { name } => visit(Ref::Input(name)),
+            RelatedValueRefSpec::Derived { name } => visit(Ref::Derived(name)),
+        },
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
+        ScalarExprSpec::InputForYear { input, .. } => visit(Ref::Input(input)),
         ScalarExprSpec::Input { name } | ScalarExprSpec::InputOrElse { name, .. } => {
             visit(Ref::Input(name))
         }
@@ -4272,11 +4277,13 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
             usize::from(matches!(value, RelatedValueRefSpec::Derived { .. }))
         }
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::CountRelated { .. }
         // Added after #201: no earlier engine listed a blocker for them.
+        | ScalarExprSpec::OnlyRelated { .. }
         | ScalarExprSpec::ExtremeRelated { .. }
         | ScalarExprSpec::SingleRelated { .. }
         | ScalarExprSpec::PeriodStart
@@ -4683,7 +4690,8 @@ fn random_programs_dense_matches_explain_over_linked_households() {
 /// directly.
 fn uses_related_extremes(case: &CaseG, profile: Profile) -> bool {
     let program = serde_json::to_string(&lower(case, profile).program).expect("serializes");
-    program.contains(r#""kind":"extreme_related""#) || program.contains(r#""kind":"single_related""#)
+    program.contains(r#""kind":"extreme_related""#)
+        || program.contains(r#""kind":"single_related""#)
 }
 
 /// Fails unless at least a quarter of a full run's programs contain the new

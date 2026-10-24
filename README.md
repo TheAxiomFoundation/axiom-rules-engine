@@ -309,3 +309,5 @@ review the diff:
 ```bash
 AXIOM_UPDATE_UNIT_AGGREGATION_FIXTURE=1 cargo test --features "schema unit-derivation" --test unit_aggregation_cli
 ```
+
+See [exactly-one related Boolean projection](docs/only-related.md) for `only_related`.

@@ -869,8 +869,9 @@ blocking, attachments, bars) has met synthetic plans only. An encoding of
   and the stage-3 plan grammar, so the NZ family plan lives in
   `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` and not in a
   jurisdiction repo.
-- The ordinary engine has no unknown. A missing input is an error unless the
-  rule declares a default, and no expression originates `Undetermined`.
+- The ordinary engine has no unknown. A missing input is an error (RuleSpec
+  refuses rule-level defaults; the engine's `InputOrElse` has no RuleSpec
+  spelling), and no expression originates `Undetermined`.
 - Artifacts remain format 2 and do not mark a relation derived or supplied.
 - `run-compiled`, the dense path and the execution trace know nothing of
   derived units.
