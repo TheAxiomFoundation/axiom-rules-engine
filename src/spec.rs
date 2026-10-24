@@ -10,7 +10,7 @@ use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
     IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
     ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
-    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef,
+    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, Term, UnitDef,
     UnitKind,
 };
 
@@ -1242,6 +1242,52 @@ pub enum ScalarExprSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         n: Option<Box<ScalarExprSpec>>,
     },
+    /// `t.name` for an input in a derived relation's predicate: the input
+    /// read at the term's id. An engine without relation roles refuses the
+    /// unknown `kind` on load.
+    RoleInput {
+        term: TermSpec,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule in a derived relation's predicate:
+    /// the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
+}
+
+/// An end of the pair a derived relation's predicate tests, mirroring
+/// [`crate::model::Term`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum TermSpec {
+    /// The id the relation is read from: its current slot.
+    Anchor,
+    /// The id being tested: its related slot.
+    Candidate,
+}
+
+impl TermSpec {
+    pub fn to_model(self) -> Term {
+        match self {
+            Self::Anchor => Term::Anchor,
+            Self::Candidate => Term::Candidate,
+        }
+    }
+
+    pub fn from_model(term: Term) -> Self {
+        match term {
+            Term::Anchor => Self::Anchor,
+            Term::Candidate => Self::Candidate,
+        }
+    }
+
+    /// The name a predicate spells this term with.
+    pub fn as_str(self) -> &'static str {
+        self.to_model().as_str()
+    }
 }
 
 /// The over-periods reduction vocabulary, mirroring
@@ -1479,6 +1525,14 @@ impl ScalarExprSpec {
                     .map(|inner| inner.to_model().map(Box::new))
                     .transpose()?,
             }),
+            Self::RoleInput { term, name } => Ok(ScalarExpr::RoleInput {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
+            Self::RoleDerived { term, name } => Ok(ScalarExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
         }
     }
 }
@@ -1539,6 +1593,12 @@ pub enum JudgmentExprSpec {
     ExactlyOne {
         items: Vec<JudgmentExprSpec>,
     },
+    /// `t.name` for a judgment derived rule in a derived relation's
+    /// predicate: the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
 }
 
 impl JudgmentExprSpec {
@@ -1572,6 +1632,10 @@ impl JudgmentExprSpec {
                     .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?,
             )),
             Self::Not { item } => Ok(JudgmentExpr::Not(Box::new(item.to_model()?))),
+            Self::RoleDerived { term, name } => Ok(JudgmentExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
             Self::ExactlyOne { items } => {
                 let lowered = items
                     .iter()

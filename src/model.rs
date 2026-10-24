@@ -281,6 +281,27 @@ impl Extreme {
     }
 }
 
+/// An end of the pair a derived relation's predicate tests: the id the
+/// relation is read from (its current slot) or the id being tested (its
+/// related slot). A term has the kind the derivation's `slot_entities` give
+/// that slot. Terms are meaningful only inside a derived relation's
+/// predicate (docs/relation-roles.md, section 3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Term {
+    Anchor,
+    Candidate,
+}
+
+impl Term {
+    /// The name a predicate spells this term with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anchor => "anchor",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
 /// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
 /// own period axis. Valid only under the lifetime execution surface
 /// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
@@ -430,6 +451,19 @@ pub enum ScalarExpr {
         value: Box<ScalarExpr>,
         n: Option<Box<ScalarExpr>>,
     },
+    /// `t.name` for an input: the input read at the term's id. Valid only in
+    /// a derived relation's predicate, outside any aggregation's `where`
+    /// clause or aggregated value.
+    RoleInput {
+        term: Term,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule: the rule evaluated at the term's
+    /// id. The rule's entity is the term's kind (checked at compile).
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -448,6 +482,12 @@ pub enum JudgmentExpr {
     And(Vec<JudgmentExpr>),
     Or(Vec<JudgmentExpr>),
     Not(Box<JudgmentExpr>),
+    /// `t.name` for a judgment derived rule, evaluated at the term's id. The
+    /// same scope and kind rules as [`ScalarExpr::RoleDerived`] apply.
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -859,6 +899,12 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         ScalarExpr::InputOrElse { name, .. } => {
             slots.insert(name.as_str());
         }
+        // An input read only through a term enters the catalog as a bare
+        // read does, under the owning relation's request name.
+        ScalarExpr::RoleInput { name, .. } => {
+            slots.insert(name.as_str());
+        }
+        ScalarExpr::RoleDerived { .. } => {}
         ScalarExpr::ParameterLookup { index, .. } => {
             collect_input_slots_from_scalar_expr(index, slots);
         }
@@ -957,7 +1003,9 @@ fn collect_input_slots_from_judgment_expr<'a>(
             collect_input_slots_from_scalar_expr(left, slots);
             collect_input_slots_from_scalar_expr(right, slots);
         }
-        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+        JudgmentExpr::Derived(_)
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::RelationMember { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_input_slots_from_judgment_expr(item, slots);

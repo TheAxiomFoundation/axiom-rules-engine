@@ -24,8 +24,8 @@ use thiserror::Error;
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
     ExtremeSpec, IndexedParameterSpec, JudgmentExprSpec, OverPeriodsKindSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitKindSpec,
-    UnitSpec,
+    ProgramSpec, RelatedValueRefSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, TermSpec,
+    UnitKindSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -1206,17 +1206,18 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
     // entity literal-only vars are scalar parameters; vars with an entity
     // are derived outputs; no-entity computed vars are attached to a
     // synthetic `Scalar` entity.
-    let mut scalar_names: HashSet<String> = HashSet::new();
-    let mut derived_names: HashSet<String> = HashSet::new();
-    for v in &module.variables {
-        if v.entity.is_some() {
-            derived_names.insert(v.path.clone());
-        } else if v.values.iter().all(|t| is_literal_expr(&t.expr)) {
-            scalar_names.insert(v.path.clone());
-        } else {
-            derived_names.insert(v.path.clone());
-        }
-    }
+    let scalar_names = module
+        .variables
+        .iter()
+        .filter(|variable| is_parameter_variable(variable))
+        .map(|variable| variable.path.clone())
+        .collect::<HashSet<String>>();
+    let derived_names = module
+        .variables
+        .iter()
+        .filter(|variable| !is_parameter_variable(variable))
+        .map(|variable| variable.path.clone())
+        .collect::<HashSet<String>>();
 
     // First pass: scalar parameters.
     for v in &module.variables {
@@ -1257,6 +1258,7 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         scalars: scalar_names,
         derived: derived_names,
         relation_predicates: HashSet::new(),
+        terms: false,
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     for v in &module.variables {
@@ -1350,6 +1352,29 @@ pub(crate) fn infer_relation_slots_for_rulespec(relation: &str) -> (usize, usize
     infer_slots(relation)
 }
 
+/// Whether lowering reads `variable` as a parameter: it has no entity and
+/// every value is a literal. A table parameter is written as such a stub.
+fn is_parameter_variable(variable: &VariableDecl) -> bool {
+    variable.entity.is_none()
+        && variable
+            .values
+            .iter()
+            .all(|value| is_literal_expr(&value.expr))
+}
+
+/// The names `lower_module` reads as parameters in `source`: the parameter
+/// tables, the scalar parameters, and the entity-free rules with literal
+/// values. Derived-relation predicates read the same set (relation roles,
+/// section 3.3).
+pub(crate) fn parameter_names(source: &str) -> Result<HashSet<String>, FormulaError> {
+    Ok(parse_source(source)?
+        .variables
+        .iter()
+        .filter(|variable| is_parameter_variable(variable))
+        .map(|variable| variable.path.clone())
+        .collect())
+}
+
 fn is_literal_expr(e: &Expr) -> bool {
     matches!(
         e,
@@ -1388,11 +1413,106 @@ struct LowerCtx {
     scalars: HashSet<String>,
     derived: HashSet<String>,
     relation_predicates: HashSet<String>,
+    /// Lowering a derived relation's predicate, where `anchor` and
+    /// `candidate` are reserved terms. Elsewhere they stay ordinary names.
+    terms: bool,
     // Relations discovered while lowering expressions (len / sum /
     // count_where / sum_where) so we can emit matching RelationSpec
     // declarations without requiring an explicit entity-declaration
     // block in the source.
     relations: std::cell::RefCell<HashSet<String>>,
+}
+
+/// The term a reserved predicate name stands for.
+fn term_named(name: &str) -> Option<TermSpec> {
+    match name {
+        "anchor" => Some(TermSpec::Anchor),
+        "candidate" => Some(TermSpec::Candidate),
+        _ => None,
+    }
+}
+
+impl LowerCtx {
+    /// The term `name` stands for, when this is a predicate.
+    fn term(&self, name: &str) -> Option<TermSpec> {
+        self.terms.then(|| term_named(name)).flatten()
+    }
+
+    /// The term `expr` reads through, when it is `t.name` in a predicate.
+    fn role_read<'e>(&self, expr: &'e Expr) -> Option<(TermSpec, &'e str)> {
+        let Expr::FieldAccess { obj, field } = expr else {
+            return None;
+        };
+        let Expr::Var(name) = obj.as_ref() else {
+            return None;
+        };
+        Some((self.term(name)?, field.as_str()))
+    }
+
+    /// Refuse a reserved term written where a name is read (`what`).
+    fn reject_term_name(&self, name: &str, what: &str) -> Result<(), FormulaError> {
+        match self.term(name) {
+            Some(term) => Err(term_used_as_value(term, what)),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse a reserved term, or a read through one, as an argument of an
+    /// aggregation (`what`): no term is bound there.
+    fn reject_in_aggregation(&self, arg: &Expr, what: &str) -> Result<(), FormulaError> {
+        if let Some((term, name)) = self.role_read(arg) {
+            return Err(FormulaError::lower(format!(
+                "[relation_role_outside_scope] `{}.{name}` is read as {what}, which is evaluated on the aggregated relation's ids, where no term is bound; a read through a term may appear in a derived relation's predicate only outside any aggregation's `where` clause or aggregated value",
+                term.as_str()
+            )));
+        }
+        if let Expr::Var(name) = arg {
+            self.reject_term_name(name, what)?;
+        }
+        Ok(())
+    }
+
+    /// Lower `term.name`, a read of a derived rule or an input at the term's
+    /// id (relation roles, section 3.2).
+    fn lower_role_read(&self, term: TermSpec, name: &str) -> Result<ScalarExprSpec, FormulaError> {
+        let t = term.as_str();
+        if let Some(inner) = term_named(name) {
+            return Err(term_used_as_value(
+                inner,
+                &format!("the name read through `{t}`"),
+            ));
+        }
+        if self.relation_predicates.contains(name) {
+            return Err(FormulaError::lower(format!(
+                "`{t}.{name}` reads relation `{name}`; a read through a term names a rule or an input, and relation atoms are not supported yet (#214)"
+            )));
+        }
+        if self.scalars.contains(name) || matches!(name, "period_start" | "period_end") {
+            return Err(FormulaError::lower(format!(
+                "[relation_role_entity_mismatch] `{t}.{name}` reads `{name}`, which has no entity, so it reads no id; read it unqualified"
+            )));
+        }
+        Ok(if self.derived.contains(name) {
+            ScalarExprSpec::RoleDerived {
+                term,
+                name: name.to_string(),
+            }
+        } else {
+            ScalarExprSpec::RoleInput {
+                term,
+                name: name.to_string(),
+            }
+        })
+    }
+}
+
+/// The refusal of a reserved term written as a value (`what`).
+fn term_used_as_value(term: TermSpec, what: &str) -> FormulaError {
+    FormulaError::lower(format!(
+        "[relation_term_used_as_value] `{}` names a term of this derived relation's predicate, so it cannot be {what}; read a value at it with `{}.name`",
+        term.as_str(),
+        term.as_str()
+    ))
 }
 
 fn lit_int_spec(i: i64) -> ScalarExprSpec {
@@ -1419,28 +1539,32 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
         Expr::LitStr(s) => ScalarExprSpec::Literal {
             value: ScalarValueSpec::Text { value: s.clone() },
         },
-        Expr::Var(name) => match name.as_str() {
-            "period_start" => ScalarExprSpec::PeriodStart,
-            "period_end" => ScalarExprSpec::PeriodEnd,
-            _ => {
-                if ctx.scalars.contains(name) {
-                    ScalarExprSpec::ParameterLookup {
-                        parameter: name.clone(),
-                        index: Box::new(lit_int_spec(0)),
+        Expr::Var(name) => {
+            ctx.reject_term_name(name, "read as a value")?;
+            match name.as_str() {
+                "period_start" => ScalarExprSpec::PeriodStart,
+                "period_end" => ScalarExprSpec::PeriodEnd,
+                _ => {
+                    if ctx.scalars.contains(name) {
+                        ScalarExprSpec::ParameterLookup {
+                            parameter: name.clone(),
+                            index: Box::new(lit_int_spec(0)),
+                        }
+                    } else if ctx.derived.contains(name) {
+                        ScalarExprSpec::Derived { name: name.clone() }
+                    } else {
+                        ScalarExprSpec::Input { name: name.clone() }
                     }
-                } else if ctx.derived.contains(name) {
-                    ScalarExprSpec::Derived { name: name.clone() }
-                } else {
-                    ScalarExprSpec::Input { name: name.clone() }
                 }
             }
-        },
+        }
         Expr::Index { target, index } => {
             let Expr::Var(parameter) = target.as_ref() else {
                 return Err(FormulaError::lower(
                     "parameter lookup target must be a named parameter".to_string(),
                 ));
             };
+            ctx.reject_term_name(parameter, "indexed as a parameter table")?;
             if !ctx.scalars.contains(parameter) {
                 return Err(FormulaError::lower(format!(
                     "`{parameter}` is not a parameter table"
@@ -1492,13 +1616,17 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
         }
         // `min(relation.field)` / `max(relation.field)`: with a single
         // relation field access argument these aggregate over the related
-        // entities. Every other form keeps its scalar meaning below.
+        // entities. Every other form keeps its scalar meaning below. In a
+        // predicate, `anchor` and `candidate` name terms, not relations, so
+        // `max(candidate.age)` is the scalar maximum of one qualified read.
         Expr::Call { func, args }
             if matches!(func.as_str(), "max" | "min")
                 && args.len() == 1
-                && relation_field_access(&args[0]).is_some() =>
+                && relation_field_access(&args[0])
+                    .is_some_and(|(relation, _)| ctx.term(relation).is_none()) =>
         {
             let (relation, field) = relation_field_access(&args[0]).expect("checked by the guard");
+            ctx.reject_term_name(field, "the aggregated value")?;
             let extreme = if func == "min" {
                 ExtremeSpec::Min
             } else {
@@ -1643,6 +1771,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                         ));
                     }
                 };
+                ctx.reject_term_name(&rel, "counted as a relation")?;
                 ctx.relations.borrow_mut().insert(rel.clone());
                 let (current_slot, related_slot) = infer_slots(&rel);
                 return Ok(ScalarExprSpec::CountRelated {
@@ -1653,8 +1782,12 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 });
             }
             "sum" => {
+                if let Some(arg) = args.first() {
+                    ctx.reject_in_aggregation(arg, "the summed value")?;
+                }
                 if let Some(Expr::FieldAccess { obj, field }) = args.first() {
                     if let Expr::Var(rel) = obj.as_ref() {
+                        ctx.reject_term_name(field, "the summed value")?;
                         ctx.relations.borrow_mut().insert(rel.clone());
                         let (current_slot, related_slot) = infer_slots(rel);
                         let value = if ctx.derived.contains(field) {
@@ -1686,11 +1819,13 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 if args.len() != 1 {
                     return Err(FormulaError::lower("only takes 1 arg".to_string()));
                 }
+                ctx.reject_in_aggregation(&args[0], "the value `only` reads")?;
                 let Some((relation, field)) = relation_field_access(&args[0]) else {
                     return Err(FormulaError::lower(
                         "only(...) requires a relation field access argument".to_string(),
                     ));
                 };
+                ctx.reject_term_name(field, "the value `only` reads")?;
                 ctx.relations.borrow_mut().insert(relation.to_string());
                 let (current_slot, related_slot) = infer_slots(relation);
                 ScalarExprSpec::SingleRelated {
@@ -1713,6 +1848,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     return Err(FormulaError::lower("input_for_year takes 2 args"));
                 }
                 let input = expect_var(&args[0], "input_for_year primitive input")?;
+                ctx.reject_term_name(&input, "read as an input")?;
                 if ctx.derived.contains(&input) || ctx.scalars.contains(&input) {
                     return Err(FormulaError::lower(
                         "input_for_year requires a declared primitive",
@@ -1735,6 +1871,8 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 if args.len() != 2 {
                     return Err(FormulaError::lower("only_related takes 2 args"));
                 }
+                ctx.reject_in_aggregation(&args[0], "the relation `only_related` reads")?;
+                ctx.reject_in_aggregation(&args[1], "the input `only_related` projects")?;
                 let relation = expect_var(&args[0], "only_related relation")?;
                 let field = expect_var(&args[1], "only_related Boolean input")?;
                 if ctx.derived.contains(&field) {
@@ -1755,6 +1893,8 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 if args.len() != 2 {
                     return Err(FormulaError::lower("count_where takes 2 args".to_string()));
                 }
+                ctx.reject_in_aggregation(&args[0], "the relation `count_where` counts")?;
+                ctx.reject_in_aggregation(&args[1], "a `count_where` `where` clause")?;
                 let relation = expect_var(&args[0], "count_where arg 1")?;
                 let pred = expect_var(&args[1], "count_where arg 2")?;
                 ctx.relations.borrow_mut().insert(relation.clone());
@@ -1779,6 +1919,9 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 if args.len() != 3 {
                     return Err(FormulaError::lower("sum_where takes 3 args".to_string()));
                 }
+                ctx.reject_in_aggregation(&args[0], "the relation `sum_where` sums over")?;
+                ctx.reject_in_aggregation(&args[1], "the summed value")?;
+                ctx.reject_in_aggregation(&args[2], "a `sum_where` `where` clause")?;
                 let relation = expect_var(&args[0], "sum_where arg 1")?;
                 let field = expect_var(&args[1], "sum_where arg 2")?;
                 let pred = expect_var(&args[2], "sum_where arg 3")?;
@@ -1816,6 +1959,9 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 if args.len() != 3 {
                     return Err(FormulaError::lower(format!("{func} takes 3 args")));
                 }
+                ctx.reject_in_aggregation(&args[0], &format!("the relation `{func}` reads"))?;
+                ctx.reject_in_aggregation(&args[1], "the aggregated value")?;
+                ctx.reject_in_aggregation(&args[2], &format!("a `{func}` `where` clause"))?;
                 let extreme = if func == "min_where" {
                     ExtremeSpec::Min
                 } else {
@@ -1895,9 +2041,12 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             expr
         }
         Expr::FieldAccess { .. } => {
-            return Err(FormulaError::lower(
-                "bare field access in scalar position not supported".to_string(),
-            ));
+            let Some((term, name)) = ctx.role_read(e) else {
+                return Err(FormulaError::lower(
+                    "bare field access in scalar position not supported".to_string(),
+                ));
+            };
+            ctx.lower_role_read(term, name)?
         }
     })
 }
@@ -2006,11 +2155,26 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
         //   * CountRelated / SumRelated / ExtremeRelated / SingleRelated
         //     (aggregators)
         //   * Input / Derived / PeriodStart/End / DateAddDays / DaysBetween
+        //   * RoleInput / RoleDerived (reads, like Input / Derived)
         _ => {}
     }
 }
 
 fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, FormulaError> {
+    // As with a bare name, a rule read through a term is a judgment and an
+    // input read through one holds when it is true.
+    if let Some((term, name)) = ctx.role_read(e) {
+        return Ok(match ctx.lower_role_read(term, name)? {
+            ScalarExprSpec::RoleDerived { term, name } => {
+                JudgmentExprSpec::RoleDerived { term, name }
+            }
+            read => JudgmentExprSpec::Comparison {
+                left: Box::new(read),
+                op: ComparisonOpSpec::Eq,
+                right: Box::new(lit_bool_spec(true)),
+            },
+        });
+    }
     Ok(match e {
         Expr::LitBool(b) => JudgmentExprSpec::Comparison {
             left: Box::new(lit_bool_spec(*b)),
@@ -2018,6 +2182,7 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
             right: Box::new(lit_bool_spec(true)),
         },
         Expr::Var(name) => {
+            ctx.reject_term_name(name, "tested as a judgment")?;
             if ctx.derived.contains(name) {
                 JudgmentExprSpec::Derived { name: name.clone() }
             } else if ctx.relation_predicates.contains(name) {
@@ -2200,10 +2365,15 @@ fn count_non_exhaustive_matches(expr: &Expr) -> usize {
     }
 }
 
+/// Lower a derived relation's predicate. `parameter_names` are the names
+/// rule lowering reads as parameters in the same module
+/// ([`parameter_names`]); they take precedence over `derived_names`, as in
+/// rule lowering.
 pub(crate) fn lower_judgment_formula(
     formula: &str,
     derived_names: HashSet<String>,
     relation_predicates: HashSet<String>,
+    parameter_names: HashSet<String>,
 ) -> Result<JudgmentExprSpec, FormulaError> {
     let tokens = Lexer::new(formula).tokenise()?;
     let mut parser = Parser::new(tokens);
@@ -2216,10 +2386,15 @@ pub(crate) fn lower_judgment_formula(
             "unexpected trailing token in relation predicate",
         ));
     }
+    let derived = derived_names
+        .into_iter()
+        .filter(|name| !parameter_names.contains(name))
+        .collect();
     let ctx = LowerCtx {
-        scalars: HashSet::new(),
-        derived: derived_names,
+        scalars: parameter_names,
+        derived,
         relation_predicates,
+        terms: true,
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     lower_to_judgment(&expr, &ctx)

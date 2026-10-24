@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, Extreme, JudgmentExpr,
-    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue, Term,
 };
 
 /// Shift by calendar months, clamping a missing target day to month end.
@@ -334,11 +334,37 @@ pub(crate) fn decimal_tie_prefers(candidate: &Decimal, best: &Decimal) -> bool {
     (candidate.scale(), !candidate.is_sign_negative()) > (best.scale(), !best.is_sign_negative())
 }
 
+/// The id `term` names in `relation_context`, or the refusal of a read
+/// through it (`term.name`) when no relation context binds it.
+fn term_id<'c>(
+    term: Term,
+    name: &str,
+    relation_context: Option<RelationEvalContext<'c>>,
+) -> Result<&'c str, EvalError> {
+    relation_context
+        .map(|context| context.id_of(term))
+        .ok_or_else(|| relation_role_outside_derived_relation(term, name))
+}
+
+/// The error for a qualified read (`anchor.name`, `candidate.name`)
+/// evaluated without a relation context. Compilation refuses such a read
+/// (`relation_role_outside_scope`); this guards hand-built programs, which
+/// [`Engine::new`] does not check.
+pub(crate) fn relation_role_outside_derived_relation(term: Term, name: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "`{}.{name}` reads a term of a derived relation's predicate, so it can only be evaluated inside one, outside any aggregation's `where` clause or aggregated value",
+        term.as_str()
+    ))
+}
+
 pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
     match expr {
         ScalarExpr::Literal(value) => describe_scalar_value(value),
         ScalarExpr::Input(name) | ScalarExpr::Derived(name) => name.clone(),
         ScalarExpr::InputOrElse { name, .. } => name.clone(),
+        ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+            format!("{}.{name}", term.as_str())
+        }
         _ => "the match subject".to_string(),
     }
 }
@@ -599,6 +625,16 @@ pub(crate) struct EvaluatedTraceInstance {
     pub(crate) execution: NodeExecutionTrace,
 }
 
+/// The binding environment of a derived relation's predicate: the id and
+/// kind of each of its terms. `anchor` is the id the relation is read from
+/// (its current slot) and `candidate` the id being tested (its related
+/// slot); each kind is the derivation's `slot_entities` at that slot.
+///
+/// Unqualified reads route through [`Self::entity_id_for`], exactly as
+/// before terms existed. A qualified read `t.name` reads [`Self::id_of`] its
+/// term. Variables bound by `exists` (docs/relation-roles.md, section 3.6)
+/// extend this environment with a borrowed chain of frames; unqualified
+/// routing never reads them.
 #[derive(Clone, Copy)]
 struct RelationEvalContext<'a> {
     current_id: &'a str,
@@ -608,6 +644,10 @@ struct RelationEvalContext<'a> {
 }
 
 impl<'a> RelationEvalContext<'a> {
+    /// The id an unqualified rule read of `entity` routes to: the current id
+    /// when the current slot has that kind, else the related id when the
+    /// related slot has it, else none (the caller falls back to the id the
+    /// predicate is evaluated on, the candidate).
     fn entity_id_for(self, entity: &str) -> Option<&'a str> {
         if self.current_entity == Some(entity) {
             return Some(self.current_id);
@@ -616,6 +656,14 @@ impl<'a> RelationEvalContext<'a> {
             return Some(self.related_id);
         }
         None
+    }
+
+    /// The id `term` names.
+    fn id_of(self, term: Term) -> &'a str {
+        match term {
+            Term::Anchor => self.current_id,
+            Term::Candidate => self.related_id,
+        }
     }
 }
 
@@ -1245,6 +1293,81 @@ impl<'a> Engine<'a> {
         self.record_effect(TraceEffect::Evaluated(key));
     }
 
+    /// A read through a term: an input read at the term's id, or a scalar
+    /// rule evaluated there.
+    fn role_scalar(
+        &mut self,
+        expr: &ScalarExpr,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<ScalarValue> {
+        match expr {
+            ScalarExpr::RoleInput { term, name } => {
+                Ok(self.role_input(*term, name, period, relation_context)?)
+            }
+            ScalarExpr::RoleDerived { term, name } => {
+                self.role_scalar_rule(*term, name, period, relation_context)
+            }
+            _ => unreachable!("only reads through a term"),
+        }
+    }
+
+    /// The input `name` read at `term`'s id.
+    fn role_input(
+        &self,
+        term: Term,
+        name: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Result<ScalarValue, EvalError> {
+        self.lookup_input(name, term_id(term, name, relation_context)?, period)
+    }
+
+    /// The scalar rule `name` evaluated at `term`'s id.
+    fn role_scalar_rule(
+        &mut self,
+        term: Term,
+        name: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<ScalarValue> {
+        let target_entity_id = self.role_dependency(term, name, period, relation_context)?;
+        self.scalar_rule(name, target_entity_id, period)
+    }
+
+    /// The judgment rule `name` evaluated at `term`'s id.
+    fn role_judgment_rule(
+        &mut self,
+        term: Term,
+        name: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let target_entity_id = self.role_dependency(term, name, period, relation_context)?;
+        self.judgment_rule(name, target_entity_id, period)
+    }
+
+    /// The id a rule read through `term` is evaluated on, recorded as a
+    /// dependency there. This and the reads above live outside
+    /// `scalar_node` and `judgment_node`: every nesting level pays for those
+    /// two frames, and a debug build does not overlap its match arms' slots.
+    fn role_dependency<'c>(
+        &mut self,
+        term: Term,
+        name: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'c>>,
+    ) -> Result<&'c str, EvalError> {
+        let target_entity_id = term_id(term, name, relation_context)?;
+        self.get_derived(name)?;
+        self.record_evaluated_dependency(CacheKey {
+            derived: name.to_string(),
+            entity_id: target_entity_id.to_string(),
+            period: period.clone(),
+        });
+        Ok(target_entity_id)
+    }
+
     fn record_skipped_dependency(&mut self, dependency: SkippedTraceDependency) {
         self.record_effect(TraceEffect::Skipped(dependency));
     }
@@ -1380,28 +1503,14 @@ impl<'a> Engine<'a> {
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_scalar_trace_references(expr, &mut derived, &mut parameters);
-        for name in derived {
-            let target_entity_id = self
-                .program
-                .derived
-                .get(&name)
-                .and_then(|dependency| {
-                    relation_context.and_then(|context| context.entity_id_for(&dependency.entity))
-                })
-                .unwrap_or(entity_id)
-                .to_string();
-            self.record_skipped_dependency(SkippedTraceDependency::Derived {
-                key: CacheKey {
-                    derived: name,
-                    entity_id: target_entity_id,
-                    period: period.clone(),
-                },
-                reason,
-            });
-        }
-        for parameter in parameters {
-            self.record_skipped_dependency(SkippedTraceDependency::Parameter { parameter, reason });
-        }
+        self.record_skipped_references(
+            derived,
+            parameters,
+            entity_id,
+            period,
+            relation_context,
+            reason,
+        );
     }
 
     fn record_skipped_judgment_dependencies(
@@ -1418,16 +1527,51 @@ impl<'a> Engine<'a> {
         let mut derived = Vec::new();
         let mut parameters = Vec::new();
         collect_judgment_trace_references(expr, &mut derived, &mut parameters);
-        for name in derived {
-            let target_entity_id = self
-                .program
-                .derived
-                .get(&name)
-                .and_then(|dependency| {
-                    relation_context.and_then(|context| context.entity_id_for(&dependency.entity))
-                })
-                .unwrap_or(entity_id)
-                .to_string();
+        self.record_skipped_references(
+            derived,
+            parameters,
+            entity_id,
+            period,
+            relation_context,
+            reason,
+        );
+    }
+
+    /// Record the rules and parameters a skipped expression would have read.
+    /// An unqualified rule read is recorded at the id it routes to; a
+    /// qualified read at its term's id. A qualified read with no relation
+    /// context names no id, so it is not recorded: evaluating it would fail.
+    fn record_skipped_references(
+        &mut self,
+        derived: Vec<TraceReference>,
+        parameters: Vec<String>,
+        entity_id: &str,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+        reason: TraceSkipReason,
+    ) {
+        for reference in derived {
+            let (name, target_entity_id) = match reference {
+                TraceReference::Routed(name) => {
+                    let target_entity_id = self
+                        .program
+                        .derived
+                        .get(&name)
+                        .and_then(|dependency| {
+                            relation_context
+                                .and_then(|context| context.entity_id_for(&dependency.entity))
+                        })
+                        .unwrap_or(entity_id)
+                        .to_string();
+                    (name, target_entity_id)
+                }
+                TraceReference::Term(term, name) => {
+                    let Some(context) = relation_context else {
+                        continue;
+                    };
+                    (name, context.id_of(term).to_string())
+                }
+            };
             self.record_skipped_dependency(SkippedTraceDependency::Derived {
                 key: CacheKey {
                     derived: name,
@@ -1556,6 +1700,9 @@ impl<'a> Engine<'a> {
                     period: period.clone(),
                 });
                 self.scalar_rule(name, target_entity_id, period)
+            }
+            ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {
+                self.role_scalar(expr, period, relation_context)
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 let lookup_key = self
@@ -1980,6 +2127,9 @@ impl<'a> Engine<'a> {
                     period: period.clone(),
                 });
                 self.judgment_rule(name, target_entity_id, period)
+            }
+            JudgmentExpr::RoleDerived { term, name } => {
+                self.role_judgment_rule(*term, name, period, relation_context)
             }
             JudgmentExpr::RelationMember {
                 relation,
@@ -2983,9 +3133,17 @@ pub(crate) fn compare_scalar_values(
     }
 }
 
+/// A rule a skipped expression would have read: unqualified, so routed by
+/// the rule's entity, or qualified by a term, so read at that term's id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TraceReference {
+    Routed(String),
+    Term(Term, String),
+}
+
 fn collect_scalar_trace_references(
     expr: &ScalarExpr,
-    derived: &mut Vec<String>,
+    derived: &mut Vec<TraceReference>,
     parameters: &mut Vec<String>,
 ) {
     match expr {
@@ -2993,9 +3151,13 @@ fn collect_scalar_trace_references(
         | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::RoleInput { .. }
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
-        ScalarExpr::Derived(name) => derived.push(name.clone()),
+        ScalarExpr::Derived(name) => derived.push(TraceReference::Routed(name.clone())),
+        ScalarExpr::RoleDerived { term, name } => {
+            derived.push(TraceReference::Term(*term, name.clone()));
+        }
         ScalarExpr::ParameterLookup { parameter, index } => {
             parameters.push(parameter.clone());
             collect_scalar_trace_references(index, derived, parameters);
@@ -3052,7 +3214,7 @@ fn collect_scalar_trace_references(
             ..
         } => {
             if let RelatedValueRef::Derived(name) = value {
-                derived.push(name.clone());
+                derived.push(TraceReference::Routed(name.clone()));
             }
             if let Some(predicate) = where_clause {
                 collect_judgment_trace_references(predicate, derived, parameters);
@@ -3084,7 +3246,7 @@ fn collect_scalar_trace_references(
 
 fn collect_judgment_trace_references(
     expr: &JudgmentExpr,
-    derived: &mut Vec<String>,
+    derived: &mut Vec<TraceReference>,
     parameters: &mut Vec<String>,
 ) {
     match expr {
@@ -3092,7 +3254,10 @@ fn collect_judgment_trace_references(
             collect_scalar_trace_references(left, derived, parameters);
             collect_scalar_trace_references(right, derived, parameters);
         }
-        JudgmentExpr::Derived(name) => derived.push(name.clone()),
+        JudgmentExpr::Derived(name) => derived.push(TraceReference::Routed(name.clone())),
+        JudgmentExpr::RoleDerived { term, name } => {
+            derived.push(TraceReference::Term(*term, name.clone()));
+        }
         JudgmentExpr::RelationMember { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
