@@ -1349,7 +1349,7 @@ fn the_new_aggregates_serialize_as_new_kinds_and_round_trip() {
         "{json}"
     );
     assert!(json.contains(r#""kind":"extreme_related","extreme":"max""#));
-    assert!(json.contains(r#""kind":"only_related""#));
+    assert!(json.contains(r#""kind":"single_related""#));
     let reloaded = CompiledProgramArtifact::from_json_str(&json).expect("reloads");
     assert_eq!(
         serde_json::to_string(&reloaded).expect("serializes"),
@@ -1456,7 +1456,7 @@ fn the_trace_records_the_member_rules_an_aggregate_evaluates_and_skips_as_sum_do
     let (expression, dependencies, _) = trace_root(&response, "family_income_doubled_of");
     assert_eq!(
         expression,
-        r#"only_related("member_of_family", 0, 1, family_income_doubled)"#
+        r#"single_related("member_of_family", 0, 1, family_income_doubled)"#
     );
     assert_eq!(dependencies.len(), 1);
 }

@@ -389,7 +389,7 @@ pub enum ScalarExpr {
     /// The `value` of the one related entity `where` selects (`only(r.f)`).
     /// Members resolve as for [`ScalarExpr::SumRelated`]; zero members or
     /// more than one fail the evaluation, so it never returns a default.
-    OnlyRelated {
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -889,7 +889,7 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             where_clause,
             ..
         }
-        | ScalarExpr::OnlyRelated {
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..

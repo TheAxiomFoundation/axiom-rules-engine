@@ -722,7 +722,7 @@ family's `family_income`, and a person in none or in two fails rather than
 reading 0.
 
 They serialize as the expression kinds `extreme_related` (with `extreme:
-min | max`) and `only_related`. An engine whose `capabilities` lists
+min | max`) and `single_related`. An engine whose `capabilities` lists
 `related_min_max_only` loads them; an earlier engine refuses an artifact that
 uses them on load, and a program that uses none of them compiles to the same
 bytes as before. Explain, fast and dense evaluate them; see

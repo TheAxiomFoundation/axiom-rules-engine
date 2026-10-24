@@ -14,7 +14,7 @@ names the relation, the entity and the period. None of them returns 0, a
 sentinel, or the first member. A rule whose law gives the empty case a value
 writes it as a guard, `if len(r) > 0: min(r.f) else: <value>`; conditionals
 are lazy, so the guarded form never fails. The aggregates are new expression
-kinds (`extreme_related`, `only_related`); `ARTIFACT_FORMAT_VERSION` stays 2
+kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
 (#232, step 1).
 
 **Why.**

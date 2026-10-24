@@ -1538,7 +1538,7 @@ impl<'a> Engine<'a> {
                     .into()
                 })
             }
-            ScalarExpr::OnlyRelated {
+            ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -2324,7 +2324,7 @@ fn collect_scalar_trace_references(
             where_clause,
             ..
         }
-        | ScalarExpr::OnlyRelated {
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..

@@ -470,7 +470,7 @@ enum CompiledScalarExpr {
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
     /// `only` over related entities; `relation_name` as for `ExtremeRelated`.
-    OnlyRelated {
+    SingleRelated {
         relation: usize,
         relation_name: String,
         value: Box<CompiledRelatedScalarExpr>,
@@ -1125,7 +1125,7 @@ impl DenseCompiledProgram {
             CompiledScalarExpr::CountRelated { .. }
             | CompiledScalarExpr::SumRelated { .. }
             | CompiledScalarExpr::ExtremeRelated { .. }
-            | CompiledScalarExpr::OnlyRelated { .. } => false,
+            | CompiledScalarExpr::SingleRelated { .. } => false,
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
@@ -1776,7 +1776,7 @@ impl<'a> DenseCompiler<'a> {
                     predicate,
                 })
             }
-            ScalarExpr::OnlyRelated {
+            ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -1792,7 +1792,7 @@ impl<'a> DenseCompiler<'a> {
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
                     .transpose()
                     .map_err(|error| named_aggregate_error("only", relation, error))?;
-                Ok(CompiledScalarExpr::OnlyRelated {
+                Ok(CompiledScalarExpr::SingleRelated {
                     relation: relation_index,
                     relation_name: relation.clone(),
                     value: Box::new(value),
@@ -2235,7 +2235,7 @@ impl<'a> DenseCompiler<'a> {
                 "{} over relation `{relation}` nested inside a related expression",
                 extreme.call_name(where_clause.is_some())
             ))),
-            ScalarExpr::OnlyRelated { relation, .. } => Err(DenseCompileError::Unsupported(
+            ScalarExpr::SingleRelated { relation, .. } => Err(DenseCompileError::Unsupported(
                 format!("only over relation `{relation}` nested inside a related expression"),
             )),
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
@@ -2426,7 +2426,7 @@ impl<'a> DenseCompiler<'a> {
                 "current-entity derived relation predicates cannot use {} over relation `{relation}`",
                 extreme.call_name(where_clause.is_some())
             ))),
-            ScalarExpr::OnlyRelated { relation, .. } => {
+            ScalarExpr::SingleRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "current-entity derived relation predicates cannot use only over relation `{relation}`"
                 )))
@@ -3697,13 +3697,13 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 predicate.as_ref(),
                 mask,
             ),
-            CompiledScalarExpr::OnlyRelated {
+            CompiledScalarExpr::SingleRelated {
                 relation,
                 relation_name,
                 value,
                 predicate,
             } => {
-                self.eval_only_related((*relation, relation_name), value, predicate.as_ref(), mask)
+                self.eval_single_related((*relation, relation_name), value, predicate.as_ref(), mask)
             }
             CompiledScalarExpr::NoMatch {
                 subject,
@@ -4046,7 +4046,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     /// selects none or several fails with explain's error (naming the root
     /// entity kind, as `eval_extreme_related` does) and reads no value. The
     /// value keeps its column's type, as an input read does.
-    fn eval_only_related(
+    fn eval_single_related(
         &mut self,
         (relation, relation_name): (usize, &str),
         value: &CompiledRelatedScalarExpr,
@@ -4838,7 +4838,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                     Extreme::Max => "max over a relation",
                 },
             )),
-            CompiledScalarExpr::OnlyRelated { .. } => Ok(ambiguous(
+            CompiledScalarExpr::SingleRelated { .. } => Ok(ambiguous(
                 N::into_column(vec![N::ZERO; len]),
                 "only over a relation",
             )),
@@ -5198,7 +5198,7 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::CountRelated { .. }
         | CompiledScalarExpr::SumRelated { .. }
         | CompiledScalarExpr::ExtremeRelated { .. }
-        | CompiledScalarExpr::OnlyRelated { .. } => None,
+        | CompiledScalarExpr::SingleRelated { .. } => None,
         CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),
         CompiledScalarExpr::Add(items)
         | CompiledScalarExpr::Max(items)

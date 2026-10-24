@@ -3452,7 +3452,7 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3774,7 +3774,7 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3988,7 +3988,7 @@ fn rewrite_scalar_relation_references(
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             relation,
             value,
             where_clause,
@@ -4262,7 +4262,7 @@ fn scalar_uses_imported_derived(
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             value,
             where_clause,
             ..

@@ -887,7 +887,7 @@ fn format_scalar_expression(
             where_clause,
             ..
         }
-        | ScalarExpr::OnlyRelated {
+        | ScalarExpr::SingleRelated {
             relation,
             current_slot,
             related_slot,
@@ -904,7 +904,7 @@ fn format_scalar_expression(
                     extreme: Extreme::Max,
                     ..
                 } => "max_related",
-                ScalarExpr::OnlyRelated { .. } => "only_related",
+                ScalarExpr::SingleRelated { .. } => "single_related",
                 _ => "sum_related",
             },
             json_string(relation),

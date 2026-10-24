@@ -1163,7 +1163,7 @@ pub enum ScalarExprSpec {
     },
     /// `only(relation.field)`: the value of the single related entity. Zero
     /// or several members fail the evaluation.
-    OnlyRelated {
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -1369,13 +1369,13 @@ impl ScalarExprSpec {
                     .map(|inner| inner.to_model().map(Box::new))
                     .transpose()?,
             }),
-            Self::OnlyRelated {
+            Self::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
                 value,
                 where_clause,
-            } => Ok(ScalarExpr::OnlyRelated {
+            } => Ok(ScalarExpr::SingleRelated {
                 relation: relation.clone(),
                 current_slot: *current_slot,
                 related_slot: *related_slot,

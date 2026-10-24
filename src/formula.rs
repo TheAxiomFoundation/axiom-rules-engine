@@ -1693,7 +1693,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                 };
                 ctx.relations.borrow_mut().insert(relation.to_string());
                 let (current_slot, related_slot) = infer_slots(relation);
-                ScalarExprSpec::OnlyRelated {
+                ScalarExprSpec::SingleRelated {
                     relation: relation.to_string(),
                     current_slot,
                     related_slot,
@@ -1960,7 +1960,7 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
         // Don't descend into:
         //   * Comparisons (operands compare by their own type)
         //   * ParameterLookup index (always Integer)
-        //   * CountRelated / SumRelated / ExtremeRelated / OnlyRelated
+        //   * CountRelated / SumRelated / ExtremeRelated / SingleRelated
         //     (aggregators)
         //   * Input / Derived / PeriodStart/End / DateAddDays / DaysBetween
         _ => {}

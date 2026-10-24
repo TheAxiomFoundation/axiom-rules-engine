@@ -1406,7 +1406,7 @@ fn collect_fast_blockers_from_scalar_expr(
         // nothing inside one blocks it (a date result falls back at run time).
         ScalarExprSpec::CountRelated { .. }
         | ScalarExprSpec::ExtremeRelated { .. }
-        | ScalarExprSpec::OnlyRelated { .. } => {}
+        | ScalarExprSpec::SingleRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
@@ -1716,7 +1716,7 @@ fn collect_scalar_dependencies(
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             value,
             relation,
             where_clause,
@@ -1843,7 +1843,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..

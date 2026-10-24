@@ -315,7 +315,7 @@ impl Resolver<'_> {
                 where_clause,
                 ..
             }
-            | ScalarExprSpec::OnlyRelated {
+            | ScalarExprSpec::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,

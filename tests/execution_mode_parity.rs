@@ -1491,7 +1491,7 @@ fn lower_num(expr: &NumG, cx: &Cx<'_>) -> ScalarExprSpec {
             let where_clause = predicate
                 .as_ref()
                 .map(|predicate| Box::new(lower_pbool(predicate, cx)));
-            let only = ScalarExprSpec::OnlyRelated {
+            let only = ScalarExprSpec::SingleRelated {
                 relation: relation.clone(),
                 current_slot: 1,
                 related_slot: 0,
@@ -2362,7 +2362,7 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             value,
             where_clause,
             ..
@@ -3584,7 +3584,7 @@ fn fmt_scalar(expr: &ScalarExprSpec) -> String {
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             relation,
             value,
             where_clause,
@@ -4278,7 +4278,7 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::CountRelated { .. }
         // Added after #201: no earlier engine listed a blocker for them.
         | ScalarExprSpec::ExtremeRelated { .. }
-        | ScalarExprSpec::OnlyRelated { .. }
+        | ScalarExprSpec::SingleRelated { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => 0,
         ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),
@@ -4683,7 +4683,7 @@ fn random_programs_dense_matches_explain_over_linked_households() {
 /// directly.
 fn uses_related_extremes(case: &CaseG, profile: Profile) -> bool {
     let program = serde_json::to_string(&lower(case, profile).program).expect("serializes");
-    program.contains(r#""kind":"extreme_related""#) || program.contains(r#""kind":"only_related""#)
+    program.contains(r#""kind":"extreme_related""#) || program.contains(r#""kind":"single_related""#)
 }
 
 /// Fails unless at least a quarter of a full run's programs contain the new

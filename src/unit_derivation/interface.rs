@@ -209,7 +209,7 @@ impl<'a> PhaseTwoEngine<'a> {
                 where_clause,
                 ..
             }
-            | ScalarExpr::OnlyRelated {
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 where_clause,

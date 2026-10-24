@@ -170,7 +170,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // this capability and is refused by engines with it
                         // (`migrate artifact` types it). An artifact that
                         // uses `min`/`max`/`only` over related entities
-                        // (`extreme_related`, `only_related`) loads only in
+                        // (`extreme_related`, `single_related`) loads only in
                         // engines listing `related_min_max_only`.
                         "capabilities": ["relation_entity_typing", "related_min_max_only"],
                     }))?

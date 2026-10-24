@@ -1395,7 +1395,7 @@ impl EvidenceCollector<'_> {
                 where_clause,
                 ..
             }
-            | ScalarExpr::OnlyRelated {
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,

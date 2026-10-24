@@ -135,7 +135,7 @@ fn artifact_schema_accepts_min_max_and_only_over_related_entities() {
     for kind in [
         r#""extreme":"min""#,
         r#""extreme":"max""#,
-        r#""kind":"only_related""#,
+        r#""kind":"single_related""#,
     ] {
         assert!(serialized.contains(kind), "the artifact uses {kind}");
     }

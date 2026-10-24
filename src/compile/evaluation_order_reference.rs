@@ -354,7 +354,7 @@ fn collect_scalar_dependencies(
             where_clause,
             ..
         }
-        | ScalarExprSpec::OnlyRelated {
+        | ScalarExprSpec::SingleRelated {
             value,
             relation,
             where_clause,
