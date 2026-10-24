@@ -681,8 +681,8 @@ its declared slot kinds, as for every aggregate.
 - `only` yields the member's value with its own kind (integer, decimal, text,
   Boolean or date).
 - None of them invents a value. `min` or `max` with no selected member fails
-  with `EmptyRelatedAggregate`; `only` fails with `NoRelatedEntity` when there
-  is no member and with `AmbiguousRelatedEntity`, which reports the count,
+  with `EmptyRelatedAggregate`; `only` fails with `MissingRelation` when there
+  is no member and with `AmbiguousRelation`, which reports the count,
   when there are several. Each error names the relation, the entity and the
   period. A rule whose law gives the empty case a value says so with a guard;
   conditionals are lazy, so the guarded form never fails:
@@ -722,7 +722,10 @@ family's `family_income`, and a person in none or in two fails rather than
 reading 0.
 
 They serialize as the expression kinds `extreme_related` (with `extreme:
-min | max`) and `single_related`. An engine whose `capabilities` lists
+min | max`) and `single_related`. `only(r.f)` is not
+[`only_related(r, f)`](only-related.md), which projects a Boolean input only
+and serializes as its own kind; where both apply they give the same value and
+the same errors. An engine whose `capabilities` lists
 `related_min_max_only` loads them; an earlier engine refuses an artifact that
 uses them on load, and a program that uses none of them compiles to the same
 bytes as before. Explain, fast and dense evaluate them; see

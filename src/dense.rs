@@ -4326,8 +4326,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
 
     /// `only` over each root row's members: the `where` clause for every
     /// member, then the value of the one member a root selects. A root that
-    /// selects none or several fails with explain's error (naming the root
-    /// entity kind, as `eval_extreme_related` does) and reads no value. The
+    /// selects none or several fails with explain's error and reads no value;
+    /// the error names the row, as `eval_only_related` does, so each of these
+    /// errors means one thing in dense whichever expression raised it. The
     /// value keeps its column's type, as an input read does.
     fn eval_single_related(
         &mut self,
@@ -4354,15 +4355,15 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     chosen[single[row]] = true;
                     continue;
                 }
-                0 => EvalError::NoRelatedEntity {
+                0 => EvalError::MissingRelation {
                     relation: relation_name.to_string(),
-                    entity_id: self.program.root_entity.clone(),
+                    entity_id: row.to_string(),
                     period_start: self.period.start,
                     period_end: self.period.end,
                 },
-                count => EvalError::AmbiguousRelatedEntity {
+                count => EvalError::AmbiguousRelation {
                     relation: relation_name.to_string(),
-                    entity_id: self.program.root_entity.clone(),
+                    entity_id: row.to_string(),
                     period_start: self.period.start,
                     period_end: self.period.end,
                     count,

@@ -178,27 +178,6 @@ pub enum EvalError {
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
     },
-    /// An `only` over related entities that selects none.
-    #[error(
-        "only over relation `{relation}` found no related entity for entity `{entity_id}` over {period_start}..{period_end}; it needs exactly one"
-    )]
-    NoRelatedEntity {
-        relation: String,
-        entity_id: String,
-        period_start: chrono::NaiveDate,
-        period_end: chrono::NaiveDate,
-    },
-    /// An `only` over related entities that selects more than one.
-    #[error(
-        "only over relation `{relation}` found {count} related entities for entity `{entity_id}` over {period_start}..{period_end}; it needs exactly one"
-    )]
-    AmbiguousRelatedEntity {
-        relation: String,
-        entity_id: String,
-        period_start: chrono::NaiveDate,
-        period_end: chrono::NaiveDate,
-        count: usize,
-    },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
     #[error("type mismatch: {0}")]
@@ -1891,14 +1870,14 @@ impl<'a> Engine<'a> {
                 };
                 match selected.as_slice() {
                     [member] => self.eval_related_value(value, member, period),
-                    [] => Err(EvalError::NoRelatedEntity {
+                    [] => Err(EvalError::MissingRelation {
                         relation: relation.clone(),
                         entity_id: entity_id.to_string(),
                         period_start: period.start,
                         period_end: period.end,
                     }
                     .into()),
-                    members => Err(EvalError::AmbiguousRelatedEntity {
+                    members => Err(EvalError::AmbiguousRelation {
                         relation: relation.clone(),
                         entity_id: entity_id.to_string(),
                         period_start: period.start,

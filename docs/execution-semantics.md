@@ -46,8 +46,8 @@ output's formula is evaluated for that entity and period as follows.
   compare numbers numerically and dates chronologically; a Boolean or text
   member value is a type error, as is a date among numbers. With no selected
   member they fail with `EmptyRelatedAggregate`. `only` fails with
-  `NoRelatedEntity` when no member is selected and `AmbiguousRelatedEntity`
-  (with the count) when several are. Each error names the relation, the
+  `MissingRelation` when no member is selected and `AmbiguousRelation`
+  (with the count) when several are, as `only_related` does. Each error names the relation, the
   entity and the period. `if len(r) > 0: min(r.f) else: ...` and
   `if len(r) == 1: only(r.f) else: ...` are total, because conditionals are
   lazy.
@@ -185,9 +185,9 @@ batch happens to look up.
 Dense reduces `min`/`max` over each row's related rows, walking them as it
 walks a `sum`, and gathers the one related row an `only` selects; both report
 explain's errors for the rows that reach them. Because dense rows carry no
-entity ids, `EmptyRelatedAggregate`, `NoRelatedEntity` and
-`AmbiguousRelatedEntity` name the root entity kind where explain names the
-entity id, as a missing root input does. An aggregation nested inside a
+entity ids, `EmptyRelatedAggregate` names the root entity kind where explain
+names the entity id, as a missing root input does, and `MissingRelation` and
+`AmbiguousRelation` name the row index, as `only_related` does. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 

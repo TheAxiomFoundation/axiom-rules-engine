@@ -8,14 +8,24 @@ entry per decision, most recent first.
 
 **Decision.** `min(r.f)` and `max(r.f)` (and `min_where` / `max_where`) over
 related entities fail with `EmptyRelatedAggregate` when no member is
-selected. `only(r.f)` fails with `NoRelatedEntity` when none is and with
-`AmbiguousRelatedEntity`, which reports the count, when several are. Each error
-names the relation, the entity and the period. None of them returns 0, a
+selected. `only(r.f)` fails with `MissingRelation` when none is and with
+`AmbiguousRelation`, which reports the count, when several are: the errors
+`only_related` (#261) raises for the same cases. Each error names the
+relation, the entity and the period. None of them returns 0, a
 sentinel, or the first member. A rule whose law gives the empty case a value
 writes it as a guard, `if len(r) > 0: min(r.f) else: <value>`; conditionals
 are lazy, so the guarded form never fails. The aggregates are new expression
 kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
 (#232, step 1).
+
+`only(r.f)` is a kind of its own, `single_related`, not an extension of
+`only_related`, which projects a Boolean input only. `ScalarExprSpec` does not
+deny unknown fields, so an engine that knows only `only_related` would load an
+`only_related` carrying a `where` clause or a derived value and silently drop
+them. Under a new kind that engine refuses the artifact instead. Where both
+apply (a Boolean input, no `where` clause) they are the same function in every
+mode, which `tests/single_related_vs_only_related.rs` checks on generated
+data; `only_related` alone refuses a non-Boolean value.
 
 **Why.**
 
@@ -42,8 +52,11 @@ kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
   does, and compare dates chronologically. Equal decimals of different scale
   keep the larger scale, then the non-negative zero, so dense's batch order
   and explain's id order give the same value.
-- Dense rows carry no entity ids, so dense's errors name the root entity kind
-  where explain names the id.
+- Dense rows carry no entity ids. `EmptyRelatedAggregate` names the root
+  entity kind where explain names the id, as a missing root input does;
+  `MissingRelation` and `AmbiguousRelation` name the row index, as
+  `only_related` does, so each error means one thing in dense whichever
+  expression raised it.
 
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 

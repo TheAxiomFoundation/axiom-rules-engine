@@ -563,19 +563,19 @@ fn error_shape(error: &EvalError) -> String {
             period_end,
             ..
         } => format!("EmptyRelatedAggregate({function}, {relation}, {period_start}..{period_end})"),
-        EvalError::NoRelatedEntity {
+        EvalError::MissingRelation {
             relation,
             period_start,
             period_end,
             ..
-        } => format!("NoRelatedEntity({relation}, {period_start}..{period_end})"),
-        EvalError::AmbiguousRelatedEntity {
+        } => format!("MissingRelation({relation}, {period_start}..{period_end})"),
+        EvalError::AmbiguousRelation {
             relation,
             period_start,
             period_end,
             count,
             ..
-        } => format!("AmbiguousRelatedEntity({relation}, {period_start}..{period_end}, {count})"),
+        } => format!("AmbiguousRelation({relation}, {period_start}..{period_end}, {count})"),
         other => other.to_string(),
     }
 }
@@ -716,7 +716,7 @@ fn duplicate_relation_tuples_change_no_extreme_value_only_cardinality_or_trace()
                     (Err(original), Err(repeated)) => {
                         assert!(matches!(
                             &original,
-                            ApiError::Eval(EvalError::AmbiguousRelatedEntity { count: 3, .. })
+                            ApiError::Eval(EvalError::AmbiguousRelation { count: 3, .. })
                         ));
                         assert_eq!(original.to_string(), repeated.to_string());
                     }
@@ -783,7 +783,7 @@ fn a_child_in_no_family_fails_rather_than_reading_zero() {
     assert!(
         matches!(
             &error,
-            EvalError::NoRelatedEntity { relation, entity_id, period_start, period_end }
+            EvalError::MissingRelation { relation, entity_id, period_start, period_end }
                 if relation == RELATION
                     && entity_id == "p03"
                     && *period_start == month().start
@@ -793,7 +793,7 @@ fn a_child_in_no_family_fails_rather_than_reading_zero() {
     );
     assert_eq!(
         error.to_string(),
-        "only over relation `member_of_family` found no related entity for entity `p03` over 2026-01-01..2026-01-31; it needs exactly one"
+        "missing related entity for `member_of_family` from `p03` over 2026-01-01..2026-01-31"
     );
     let fast = run(
         ExecutionMode::Fast,
@@ -819,14 +819,14 @@ fn a_person_in_two_families_fails_naming_the_count() {
     assert!(
         matches!(
             &error,
-            EvalError::AmbiguousRelatedEntity { relation, entity_id, count: 2, .. }
+            EvalError::AmbiguousRelation { relation, entity_id, count: 2, .. }
                 if relation == RELATION && entity_id == "p04"
         ),
         "{error:?}"
     );
     assert_eq!(
         error.to_string(),
-        "only over relation `member_of_family` found 2 related entities for entity `p04` over 2026-01-01..2026-01-31; it needs exactly one"
+        "ambiguous relation `member_of_family` from `p04` over 2026-01-01..2026-01-31: 2 distinct targets"
     );
     let dense = dense_people(&roster, &[4], "family_income_of").expect_err("dense fails too");
     assert_eq!(error_shape(&dense), error_shape(&error));
@@ -861,7 +861,7 @@ fn an_empty_family_fails_min_and_max_by_name_and_the_guard_answers() {
     );
     let only = explain_one(&data, family.clone(), "only_age").expect_err("empty only fails");
     assert!(
-        matches!(only, EvalError::NoRelatedEntity { .. }),
+        matches!(only, EvalError::MissingRelation { .. }),
         "{only:?}"
     );
     for output in [
@@ -963,7 +963,7 @@ fn only_over_a_family_with_several_members_fails_and_reads_no_value() {
         .retain(|record| !(record.name == "age" && record.entity_id == "p01"));
     let error = explain_one(&data, Roster::family_id(0), "only_age").expect_err("ambiguous");
     assert!(
-        matches!(error, EvalError::AmbiguousRelatedEntity { count: 3, .. }),
+        matches!(error, EvalError::AmbiguousRelation { count: 3, .. }),
         "{error:?}"
     );
 }
@@ -1800,12 +1800,12 @@ fn observed(result: Result<ScalarValueSpec, EvalError>, entity_id: &str) -> Expe
             entity_id: named,
             ..
         }) if relation == RELATION && named == entity_id => Expected::Empty(function),
-        Err(EvalError::NoRelatedEntity {
+        Err(EvalError::MissingRelation {
             relation,
             entity_id: named,
             ..
         }) if relation == RELATION && named == entity_id => Expected::NoMember,
-        Err(EvalError::AmbiguousRelatedEntity {
+        Err(EvalError::AmbiguousRelation {
             relation,
             entity_id: named,
             count,
@@ -2244,14 +2244,14 @@ fn the_rulespec_reference_example_answers_as_documented() {
     );
     let none = ask(&dataset, "p2", "family_income_of_child").expect_err("no family");
     assert!(
-        matches!(none, ApiError::Eval(EvalError::NoRelatedEntity { .. })),
+        matches!(none, ApiError::Eval(EvalError::MissingRelation { .. })),
         "{none}"
     );
     let two = ask(&dataset, "p3", "family_income_of_child").expect_err("two families");
     assert!(
         matches!(
             two,
-            ApiError::Eval(EvalError::AmbiguousRelatedEntity { count: 2, .. })
+            ApiError::Eval(EvalError::AmbiguousRelation { count: 2, .. })
         ),
         "{two}"
     );
