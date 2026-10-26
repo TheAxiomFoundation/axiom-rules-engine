@@ -262,7 +262,7 @@ fn artifact_schema_accepts_min_max_and_only_over_related_entities() {
     }
     let schema_value = all_schemas()
         .into_iter()
-        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
+        .find(|named| named.file_name == CURRENT_ARTIFACT_SCHEMA)
         .expect("artifact schema is published")
         .schema;
     let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
