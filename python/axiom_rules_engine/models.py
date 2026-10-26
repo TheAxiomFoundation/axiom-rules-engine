@@ -147,6 +147,15 @@ class InterfaceEntity(_Exact):
     instances: EntityInstances
 
 
+class InputElection(_Exact):
+    """A choice the law gives ``actor``, an entity kind, under
+    ``provision``, a corpus citation path. The engine evaluates the value it
+    is given and never defaults one."""
+
+    actor: str
+    provision: str
+
+
 class InterfaceInput(_Exact):
     name: str
     legal_id: str
@@ -156,6 +165,8 @@ class InterfaceInput(_Exact):
     default: ScalarValue | None
     values: list[int] | None
     values_basis: Literal["parameter_index"] | None
+    # Null for a fact, which a simulator must not optimize over.
+    election: InputElection | None
 
 
 class RelationReads(_Exact):

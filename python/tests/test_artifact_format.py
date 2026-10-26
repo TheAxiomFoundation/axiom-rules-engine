@@ -76,6 +76,7 @@ def _interface_input(**overrides):
         "default": None,
         "values": None,
         "values_basis": None,
+        "election": None,
         **overrides,
     }
 
@@ -114,7 +115,7 @@ def test_format_3_interface_objects_have_exactly_their_keys() -> None:
     }
     CompiledProgram.model_validate(_format_3(relations=[relation]))
     # Every nullable key must be written, as null when it has no value.
-    for nullable in ["dtype", "dtype_basis", "default", "values", "values_basis"]:
+    for nullable in ["dtype", "dtype_basis", "default", "values", "values_basis", "election"]:
         missing = _interface_input()
         del missing[nullable]
         with pytest.raises(ValidationError):
@@ -127,6 +128,12 @@ def test_format_3_interface_objects_have_exactly_their_keys() -> None:
             CompiledProgram.model_validate(_format_3(**{field: [interface]}))
     with pytest.raises(ValidationError):
         CompiledProgram.model_validate(_format_3(inputs=[_interface_input(unexpected=1)]))
+    # An election has exactly `actor` and `provision`.
+    election = {"actor": "Household", "provision": "us/regulation/7/273/1/b/3"}
+    CompiledProgram.model_validate(_format_3(inputs=[_interface_input(election=election)]))
+    for bad in [{"actor": "Household"}, {**election, "default": False}]:
+        with pytest.raises(ValidationError):
+            CompiledProgram.model_validate(_format_3(inputs=[_interface_input(election=bad)]))
     with pytest.raises(ValidationError):
         CompiledProgram.model_validate(
             _format_3(entities=[{**entity, "id_template": None, "instances": {"source": "alias", "via": []}}])
