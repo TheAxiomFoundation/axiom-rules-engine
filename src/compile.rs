@@ -473,6 +473,10 @@ struct ArtifactWire {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(rename = "ArtifactProgram"))]
 struct ArtifactProgramWire {
+    /// As `ProgramSpec`'s field of the same name, first so the two serialize
+    /// in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
     /// validation status) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
@@ -510,6 +514,8 @@ struct ArtifactWireRef<'a> {
 /// [`ArtifactProgramWire`], borrowed, for serialization.
 #[derive(Serialize)]
 struct ArtifactProgramWireRef<'a> {
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    selected_year_inputs: &'a [crate::selected_year::SelectedYearInput],
     #[serde(skip_serializing_if = "Option::is_none")]
     module: Option<&'a ModuleMetadata>,
     units: &'a [UnitSpec],
@@ -520,9 +526,14 @@ struct ArtifactProgramWireRef<'a> {
     interface: Option<&'a ProgramInterface>,
 }
 
+fn slice_is_empty<T>(items: &&[T]) -> bool {
+    items.is_empty()
+}
+
 impl<'a> ArtifactProgramWireRef<'a> {
     fn new(program: &'a ProgramSpec, interface: Option<&'a ProgramInterface>) -> Self {
         Self {
+            selected_year_inputs: &program.selected_year_inputs,
             module: program.module.as_ref(),
             units: &program.units,
             relations: &program.relations,
@@ -556,6 +567,7 @@ impl<'de> Deserialize<'de> for CompiledProgramArtifact {
             engine_build: wire.engine_build,
             source_closure: wire.source_closure,
             program: ProgramSpec {
+                selected_year_inputs: wire.program.selected_year_inputs,
                 module: wire.program.module,
                 units: wire.program.units,
                 relations: wire.program.relations,
@@ -693,6 +705,7 @@ impl CompiledProgramArtifact {
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
+        crate::selected_year::validate(&program)?;
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
         let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
@@ -789,6 +802,7 @@ impl CompiledProgramArtifact {
             });
         }
         self.program.validate_provenance()?;
+        crate::selected_year::validate(&self.program)?;
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
         self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
@@ -2070,11 +2084,19 @@ fn collect_fast_blockers_from_scalar_expr(
     blockers: &mut Vec<String>,
 ) {
     match expr {
+        ScalarExprSpec::InputForYear { .. } => blockers.push(format!(
+            "{derived_name}: selected-year input requires Explain"
+        )),
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
-        ScalarExprSpec::CountRelated { .. } => {}
+        // Fast mode runs relation aggregations on the explain interpreter, so
+        // nothing inside one blocks it (a date result falls back at run time).
+        ScalarExprSpec::OnlyRelated { .. }
+        | ScalarExprSpec::CountRelated { .. }
+        | ScalarExprSpec::ExtremeRelated { .. }
+        | ScalarExprSpec::SingleRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
@@ -2220,39 +2242,69 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         graph.insert(relation.name.clone(), dependencies);
     }
 
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    for relation in graph.keys() {
-        detect_relation_cycle(relation, &graph, &mut visiting, &mut visited)?;
-    }
-    Ok(())
+    detect_relation_cycle(&graph)
 }
 
-fn detect_relation_cycle(
-    relation: &str,
-    graph: &BTreeMap<String, BTreeSet<String>>,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-) -> Result<(), CompileError> {
-    if visited.contains(relation) {
-        return Ok(());
-    }
-    if !visiting.insert(relation.to_string()) {
-        let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
-        cycle.sort();
-        return Err(CompileError::CyclicRelationDependency {
-            cycle: cycle.join(", "),
-        });
-    }
-    if let Some(dependencies) = graph.get(relation) {
-        for dependency in dependencies {
-            if graph.contains_key(dependency) {
-                detect_relation_cycle(dependency, graph, visiting, visited)?;
+/// Depth-first search of the derived-relation graph for a cycle, with an
+/// explicit stack so a long chain of relations cannot overflow the call
+/// stack. Relations are visited in name order and each relation's
+/// dependencies in name order; on meeting a relation already on the current
+/// path, the error names every relation on that path, sorted.
+fn detect_relation_cycle(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+    // Nodes are derived relations by position in name order; each keeps its
+    // dependencies that are themselves derived relations, in name order.
+    let index = graph
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.as_str(), position))
+        .collect::<HashMap<_, _>>();
+    let dependencies = graph
+        .values()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter_map(|dependency| index.get(dependency.as_str()).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let names = graph.keys().collect::<Vec<_>>();
+
+    let mut on_path = vec![false; names.len()];
+    let mut finished = vec![false; names.len()];
+    // The current path: each relation with the next dependency to follow.
+    let mut path = Vec::<(usize, usize)>::new();
+    for root in 0..names.len() {
+        if finished[root] {
+            continue;
+        }
+        on_path[root] = true;
+        path.push((root, 0));
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&dependency) = dependencies[node].get(*next) else {
+                on_path[node] = false;
+                finished[node] = true;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            if finished[dependency] {
+                continue;
             }
+            if on_path[dependency] {
+                let mut cycle = path
+                    .iter()
+                    .map(|&(member, _)| names[member].as_str())
+                    .collect::<Vec<_>>();
+                cycle.sort_unstable();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            on_path[dependency] = true;
+            path.push((dependency, 0));
         }
     }
-    visiting.remove(relation);
-    visited.insert(relation.to_string());
     Ok(())
 }
 
@@ -2321,8 +2373,12 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -2373,6 +2429,18 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(to, dependencies, aggregated_relations);
         }
         ScalarExprSpec::SumRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             value,
             relation,
             where_clause,
@@ -2440,6 +2508,7 @@ fn collect_judgment_dependencies(
 fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
@@ -2479,6 +2548,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_scalar(from, relations);
             collect_relation_members_from_scalar(to, relations);
         }
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -2490,6 +2560,16 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -2905,9 +2985,10 @@ mod wire_tests {
 
     /// Every in-repo RuleSpec fixture that compiles: the sources of the
     /// frozen format-2 artifacts under `tests/fixtures/artifacts/format2/`.
-    pub(crate) const RULESPEC_FIXTURES: [&str; 20] = [
+    pub(crate) const RULESPEC_FIXTURES: [&str; 22] = [
         "tests/fixtures/artifacts/nz_best_start_carer_sum.rulespec.yaml",
         "tests/fixtures/artifacts/related_derived_sums.rulespec.yaml",
+        "tests/fixtures/only_related.yaml",
         "tests/fixtures/rulespec/other/family_allowance/rules.yaml",
         "tests/fixtures/rulespec/other/flat_tax/rules.yaml",
         "tests/fixtures/rulespec/rounding/snap_allotment.yaml",
@@ -2925,6 +3006,7 @@ mod wire_tests {
         "tests/fixtures/rulespec/uksi/2006/965/regulation/2/rules.yaml",
         "tests/fixtures/rulespec/uksi/2013/376/rules.yaml",
         "tests/fixtures/rulespec/uksi/2026/148/rules.yaml",
+        "tests/fixtures/selected_year_input.yaml",
         "tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml",
     ];
 
@@ -2993,5 +3075,132 @@ mod wire_tests {
                 relations: Vec::new(),
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod relation_cycle_tests {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    use proptest::collection::{btree_set, vec};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+
+    use super::{CompileError, detect_relation_cycle};
+
+    /// The recursive search [`detect_relation_cycle`] replaced, kept as the
+    /// reference for which cycle is reported.
+    fn reference_detect(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+        fn visit(
+            relation: &str,
+            graph: &BTreeMap<String, BTreeSet<String>>,
+            visiting: &mut HashSet<String>,
+            visited: &mut HashSet<String>,
+        ) -> Result<(), CompileError> {
+            if visited.contains(relation) {
+                return Ok(());
+            }
+            if !visiting.insert(relation.to_string()) {
+                let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
+                cycle.sort();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            if let Some(dependencies) = graph.get(relation) {
+                for dependency in dependencies {
+                    if graph.contains_key(dependency) {
+                        visit(dependency, graph, visiting, visited)?;
+                    }
+                }
+            }
+            visiting.remove(relation);
+            visited.insert(relation.to_string());
+            Ok(())
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        for relation in graph.keys() {
+            visit(relation, graph, &mut visiting, &mut visited)?;
+        }
+        Ok(())
+    }
+
+    /// A derived-relation graph over up to nine relations whose dependencies
+    /// name other relations or a data relation outside the graph.
+    fn graph() -> impl Strategy<Value = BTreeMap<String, BTreeSet<String>>> {
+        (1_usize..10).prop_flat_map(|size| {
+            let dependency = prop_oneof![
+                6 => (0..size).prop_map(|index| format!("r{index}")),
+                1 => Just("base".to_string()),
+            ];
+            vec(btree_set(dependency, 0..3), size).prop_map(|dependencies| {
+                dependencies
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, dependencies)| (format!("r{index}"), dependencies))
+                    .collect()
+            })
+        })
+    }
+
+    fn outcome(result: Result<(), CompileError>) -> Result<(), String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn iterative_search_reports_what_the_recursive_search_reported() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 4000,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[11; 32]),
+        );
+        let cycles = std::cell::Cell::new(0_usize);
+        runner
+            .run(&graph(), |graph| {
+                let expected = outcome(reference_detect(&graph));
+                cycles.set(cycles.get() + usize::from(expected.is_err()));
+                let actual = outcome(detect_relation_cycle(&graph));
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "iterative {actual:?}, recursive {expected:?}, graph {graph:?}"
+                    )));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(cycles.get() > 1000, "only {} cyclic graphs", cycles.get());
+    }
+
+    #[test]
+    fn a_long_chain_is_searched_without_recursing_per_link() {
+        // Names ascend toward the data relation, so the first relation in name
+        // order heads the whole chain; 50,000 links overflowed the recursion.
+        let links = 50_000;
+        let mut graph = (0..links)
+            .map(|link| {
+                let source = if link + 1 < links {
+                    format!("rel{:07}", link + 1)
+                } else {
+                    "base".to_string()
+                };
+                (format!("rel{link:07}"), BTreeSet::from([source]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(detect_relation_cycle(&graph).is_ok());
+
+        // Closing the chain into a loop reports every relation on it.
+        graph.insert(
+            format!("rel{:07}", links - 1),
+            BTreeSet::from(["rel0000000".to_string()]),
+        );
+        let Err(CompileError::CyclicRelationDependency { cycle }) = detect_relation_cycle(&graph)
+        else {
+            panic!("a closed chain is a cycle");
+        };
+        assert_eq!(cycle.split(", ").count(), links);
     }
 }

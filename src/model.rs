@@ -249,6 +249,38 @@ pub enum RelatedValueRef {
     Derived(String),
 }
 
+/// Which end of the related entities' values an
+/// [`ScalarExpr::ExtremeRelated`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extreme {
+    Min,
+    Max,
+}
+
+impl Extreme {
+    /// The formula builtin that lowers to this aggregate, used in diagnostics:
+    /// `min`/`max`, or `min_where`/`max_where` when a `where` clause selects
+    /// the members.
+    pub fn call_name(self, filtered: bool) -> &'static str {
+        match (self, filtered) {
+            (Self::Min, false) => "min",
+            (Self::Max, false) => "max",
+            (Self::Min, true) => "min_where",
+            (Self::Max, true) => "max_where",
+        }
+    }
+
+    /// Whether `candidate` replaces `best` as the extreme so far. Ties keep
+    /// `best`; callers that must not depend on member order break them
+    /// separately.
+    pub fn improves<T: PartialOrd>(self, candidate: &T, best: &T) -> bool {
+        match self {
+            Self::Min => candidate < best,
+            Self::Max => candidate > best,
+        }
+    }
+}
+
 /// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
 /// own period axis. Valid only under the lifetime execution surface
 /// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
@@ -286,6 +318,10 @@ impl OverPeriodsKind {
 
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
@@ -328,6 +364,12 @@ pub enum ScalarExpr {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -335,6 +377,29 @@ pub enum ScalarExpr {
         where_clause: Option<Box<JudgmentExpr>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The least or greatest `value` over the related entities `where`
+    /// selects (`min(r.f)`, `max_where(r, f, p)`). Members resolve as for
+    /// [`ScalarExpr::SumRelated`]. Numbers compare numerically and dates
+    /// chronologically; with no selected member the evaluation fails rather
+    /// than inventing a value.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The `value` of the one related entity `where` selects (`only(r.f)`).
+    /// Members resolve as for [`ScalarExpr::SumRelated`]; zero members or
+    /// more than one fail the evaluation, so it never returns a default.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -490,6 +555,7 @@ pub struct IndexedParameter {
 
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    pub selected_year_inputs: HashMap<String, crate::selected_year::SelectedYearInput>,
     pub units: HashMap<String, UnitDef>,
     pub relations: HashMap<String, RelationSchema>,
     pub parameters: HashMap<String, IndexedParameter>,
@@ -780,6 +846,13 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         | ScalarExpr::Derived(_)
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::InputForYear { input, .. } => {
+            slots.insert(
+                input
+                    .rsplit_once("#input.")
+                    .map_or(input.as_str(), |(_, slot)| slot),
+            );
+        }
         ScalarExpr::Input(name) => {
             slots.insert(name.as_str());
         }
@@ -819,12 +892,27 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
         }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
+        }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {
                 collect_input_slots_from_judgment_expr(where_clause, slots);
             }
         }
         ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..

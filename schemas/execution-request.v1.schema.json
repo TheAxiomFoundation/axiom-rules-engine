@@ -285,6 +285,14 @@
       ],
       "type": "object"
     },
+    "ExtremeSpec": {
+      "description": "Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring\n[`crate::model::Extreme`].",
+      "enum": [
+        "min",
+        "max"
+      ],
+      "type": "string"
+    },
     "IndexedParameterSpec": {
       "properties": {
         "corpus_citation_path": {
@@ -547,6 +555,209 @@
             }
           ]
         },
+        "interpretations": {
+          "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. Interpretation IDs must be unique within the module, alternative IDs must be unique within each interpretation, and affects must name rules defined in the same document. These identity and reference constraints require engine load-time validation. Corpus excerpt verification is the encoder's responsibility.",
+          "items": {
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "ruling"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "confirmation"
+                      ]
+                    }
+                  ]
+                },
+                "properties": {
+                  "status": {
+                    "const": "open"
+                  }
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "confirmation"
+                  ]
+                },
+                "properties": {
+                  "status": {
+                    "const": "ruled"
+                  }
+                },
+                "required": [
+                  "ruling"
+                ]
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "confirmed",
+                      "contradicted"
+                    ]
+                  }
+                },
+                "required": [
+                  "ruling",
+                  "confirmation"
+                ]
+              }
+            ],
+            "properties": {
+              "affects": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "alternatives": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "effect": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                      "type": "string"
+                    },
+                    "reading": {
+                      "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "reading"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "basis": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "by": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "date": {
+                    "format": "date",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "type": "string"
+                  },
+                  "excerpt": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "record": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "by",
+                  "date",
+                  "excerpt"
+                ],
+                "type": "object"
+              },
+              "id": {
+                "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                "type": "string"
+              },
+              "question": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "reading": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "ruling": {
+                "additionalProperties": false,
+                "properties": {
+                  "by": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "date": {
+                    "format": "date",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "type": "string"
+                  },
+                  "record": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "by",
+                  "date",
+                  "record"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "open",
+                  "ruled",
+                  "confirmed",
+                  "contradicted"
+                ],
+                "type": "string"
+              },
+              "texts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "corpus_citation_path": {
+                      "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                      "type": "string"
+                    },
+                    "excerpt": {
+                      "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "corpus_citation_path",
+                    "excerpt"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "question",
+              "texts",
+              "reading",
+              "alternatives",
+              "basis",
+              "status",
+              "affects"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "kind": {
           "type": [
             "string",
@@ -718,7 +929,7 @@
               "type": "null"
             }
           ],
-          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status) carried through RuleSpec lowering for tooling and\nartifact pass-through. Load/compile boundaries validate it; execution\nsemantics do not depend on it."
+          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status, interpretations) carried through RuleSpec lowering for tooling and\nartifact pass-through. Load/compile boundaries validate it; execution\nsemantics do not depend on it."
         },
         "parameters": {
           "default": [],
@@ -731,6 +942,12 @@
           "default": [],
           "items": {
             "$ref": "#/$defs/RelationSpec"
+          },
+          "type": "array"
+        },
+        "selected_year_inputs": {
+          "items": {
+            "$ref": "#/$defs/SelectedYearInput"
           },
           "type": "array"
         },
@@ -937,6 +1154,27 @@
           "required": [
             "kind",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "input": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "input_for_year",
+              "type": "string"
+            },
+            "year": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "input",
+            "year"
           ],
           "type": "object"
         },
@@ -1259,6 +1497,38 @@
               "type": "integer"
             },
             "kind": {
+              "const": "only_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
               "const": "count_related",
               "type": "string"
             },
@@ -1299,6 +1569,98 @@
             },
             "kind": {
               "const": "sum_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            },
+            "where": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgmentExprSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`min`/`max` (and `min_where`/`max_where`) over related entities. A\nnew variant: an engine without it refuses the artifact on load, and a\nprogram that does not use it serializes exactly as before.",
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "extreme": {
+              "$ref": "#/$defs/ExtremeSpec"
+            },
+            "kind": {
+              "const": "extreme_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            },
+            "where": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgmentExprSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "extreme",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`only(relation.field)`: the value of the single related entity. Zero\nor several members fail the evaluation.",
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "single_related",
               "type": "string"
             },
             "related_slot": {
@@ -1503,6 +1865,40 @@
           "type": "object"
         }
       ]
+    },
+    "SelectedYearInput": {
+      "additionalProperties": false,
+      "properties": {
+        "dtype": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "period": {
+          "type": "string"
+        },
+        "slot": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "slot",
+        "entity",
+        "dtype",
+        "period"
+      ],
+      "type": "object"
     },
     "SourceVerification": {
       "additionalProperties": false,

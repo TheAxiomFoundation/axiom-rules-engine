@@ -7,14 +7,23 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
-    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
-    Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
-    RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
+    IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
+    ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
+    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef,
+    UnitKind,
 };
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
+    #[error(transparent)]
+    InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
     #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
@@ -94,8 +103,10 @@ pub enum SpecError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
-    /// validation status) carried through RuleSpec lowering for tooling and
+    /// validation status, interpretations) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
     /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,6 +142,14 @@ impl ProgramSpec {
                     value: digest.to_string(),
                 });
             }
+        }
+        if let Some(module) = &self.module {
+            // The compiled IR preserves root metadata but no longer records
+            // each document's rules. Validate entry shape here; local affects
+            // resolution belongs to RuleSpec loading before imports merge.
+            module
+                .validate("program.module")
+                .map_err(|error| SpecError::InvalidModuleMetadata(Box::new(error)))?;
         }
         for parameter in &self.parameters {
             if let Some(id) = parameter.id.as_deref() {
@@ -200,7 +219,13 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        crate::selected_year::validate(self)?;
         let mut program = Program::default();
+        program.selected_year_inputs = self
+            .selected_year_inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.clone()))
+            .collect();
 
         for unit in &self.units {
             program.add_unit(unit.to_model())?;
@@ -240,6 +265,20 @@ impl ProgramSpec {
                 .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
         )?;
 
+        if !program.selected_year_inputs.is_empty() {
+            let catalog = program.input_catalog();
+            for input in program.selected_year_inputs.values() {
+                if catalog
+                    .get(&input.slot)
+                    .is_none_or(|names| names.as_slice() != [input.id.as_str()])
+                {
+                    return Err(SpecError::SelectedYearInput(format!(
+                        "{} shares a runtime slot across module identities",
+                        input.id
+                    )));
+                }
+            }
+        }
         Ok(program)
     }
 }
@@ -496,7 +535,10 @@ fn relation_slot_entity_diagnostics(
     // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
-    let filtered_kinds = crate::relation_typing::filtered_entity_kinds(program);
+    // Resolved once for the program: asking per tuple would follow a chain of
+    // derived relations again for every tuple naming one.
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
     let canonical = |entity: &str| {
         filtered_kinds
             .get(entity)
@@ -530,9 +572,7 @@ fn relation_slot_entity_diagnostics(
         // execution reads each slot by its declared kind, so the declaration
         // is the expected tuple order. An untyped relation no rule executes
         // has no expectation to check.
-        let Some(expected_entities) =
-            crate::relation_typing::effective_slot_entities(program, &record.name)
-        else {
+        let Some(expected_entities) = slot_kinds.get(&record.name) else {
             continue;
         };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
@@ -1073,6 +1113,10 @@ pub enum ScalarExprSpec {
     Input {
         name: String,
     },
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     InputOrElse {
         name: String,
         default: ScalarValueSpec,
@@ -1132,6 +1176,12 @@ pub enum ScalarExprSpec {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -1140,6 +1190,28 @@ pub enum ScalarExprSpec {
         where_clause: Option<Box<JudgmentExprSpec>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `min`/`max` (and `min_where`/`max_where`) over related entities. A
+    /// new variant: an engine without it refuses the artifact on load, and a
+    /// program that does not use it serializes exactly as before.
+    ExtremeRelated {
+        extreme: ExtremeSpec,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `only(relation.field)`: the value of the single related entity. Zero
+    /// or several members fail the evaluation.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -1204,6 +1276,32 @@ impl OverPeriodsKindSpec {
     }
 }
 
+/// Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring
+/// [`crate::model::Extreme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExtremeSpec {
+    Min,
+    Max,
+}
+
+impl ExtremeSpec {
+    fn to_model(self) -> Extreme {
+        match self {
+            Self::Min => Extreme::Min,
+            Self::Max => Extreme::Max,
+        }
+    }
+
+    pub fn from_model(extreme: Extreme) -> Self {
+        match extreme {
+            Extreme::Min => Self::Min,
+            Extreme::Max => Self::Max,
+        }
+    }
+}
+
 /// Convert the operands of `max()` or `min()`, refusing an empty list. With
 /// no operand there is no value; refusing it on load keeps a program that
 /// could only fail at evaluation from compiling at all.
@@ -1221,6 +1319,10 @@ impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
+            Self::InputForYear { input, year } => Ok(ScalarExpr::InputForYear {
+                input: input.clone(),
+                year: *year,
+            }),
             Self::Input { name } => Ok(ScalarExpr::Input(name.clone())),
             Self::InputOrElse { name, default } => Ok(ScalarExpr::InputOrElse {
                 name: name.clone(),
@@ -1271,6 +1373,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,
@@ -1292,6 +1413,40 @@ impl ScalarExprSpec {
                 value,
                 where_clause,
             } => Ok(ScalarExpr::SumRelated {
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::ExtremeRelated {
+                extreme: extreme.to_model(),
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::SingleRelated {
                 relation: relation.clone(),
                 current_slot: *current_slot,
                 related_slot: *related_slot,

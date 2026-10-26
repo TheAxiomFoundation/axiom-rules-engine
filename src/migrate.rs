@@ -1004,6 +1004,7 @@ fn execution_evidence_contested(
     };
     let collector = EvidenceCollector {
         model,
+        derived_sources: derived_data_sources(model),
         filters: crate::relation_typing::filtered_entities(model),
         trusted,
         contest,
@@ -1057,21 +1058,8 @@ fn execution_evidence_contested(
 fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
     let trusted = trusted_filter_kinds(model);
     let consistent = consistent_derivations(model);
-    let data_source = |relation: &str| {
-        let mut name = relation.to_string();
-        let mut visited = std::collections::BTreeSet::new();
-        while let Some(derivation) = model
-            .relations
-            .get(&name)
-            .and_then(|schema| schema.derivation.as_ref())
-        {
-            if !visited.insert(name.clone()) {
-                return None;
-            }
-            name = derivation.source_relation.clone();
-        }
-        Some(name)
-    };
+    let data_sources = chain_bottoms(model);
+    let data_source = |relation: &str| data_sources.get(relation).copied().flatten();
     let evaluated = model
         .derived
         .values()
@@ -1108,6 +1096,65 @@ fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
         .collect()
 }
 
+/// The relation at the bottom of each relation's chain of sources (a data
+/// relation, or a name the program does not declare), or none for a chain
+/// that cycles. Each chain is followed once, however many relations share it.
+fn chain_bottoms(model: &crate::model::Program) -> std::collections::BTreeMap<&str, Option<&str>> {
+    use crate::relation_typing::ChainStep;
+    crate::relation_typing::follow_chains(
+        model.relations.keys().map(String::as_str),
+        None,
+        |name| match model
+            .relations
+            .get(name)
+            .and_then(|schema| schema.derivation.as_ref())
+        {
+            Some(derivation) => ChainStep::Next(&derivation.source_relation),
+            None => ChainStep::End(Some(name)),
+        },
+    )
+}
+
+type DerivedDataSources<'a> = std::collections::BTreeMap<&'a str, Option<(&'a str, usize, usize)>>;
+
+/// For each derived relation, the data relation an aggregate over it reads
+/// and the slots it reads it with: the relation's own derivation slots,
+/// carried down a chain whose every derived link traverses its source with
+/// those same slots. A link with other slots, a source the program does not
+/// declare, or a cycle leaves it unresolved. Each chain is followed once.
+fn derived_data_sources(model: &crate::model::Program) -> DerivedDataSources<'_> {
+    use crate::relation_typing::ChainStep;
+    let derived = model
+        .relations
+        .iter()
+        .filter(|(_, schema)| schema.derivation.is_some())
+        .map(|(name, _)| name.as_str());
+    crate::relation_typing::follow_chains(derived, None, |name| {
+        let Some(derivation) = model
+            .relations
+            .get(name)
+            .and_then(|schema| schema.derivation.as_ref())
+        else {
+            return ChainStep::End(None);
+        };
+        let slots = (derivation.current_slot, derivation.related_slot);
+        match model.relations.get(&derivation.source_relation) {
+            None => ChainStep::End(None),
+            Some(source) => match &source.derivation {
+                None => ChainStep::End(Some((
+                    derivation.source_relation.as_str(),
+                    slots.0,
+                    slots.1,
+                ))),
+                Some(next) if (next.current_slot, next.related_slot) == slots => {
+                    ChainStep::Next(&derivation.source_relation)
+                }
+                Some(_) => ChainStep::End(None),
+            },
+        }
+    })
+}
+
 /// Filtered entity -> the physical kind of the ids it is queried with, for
 /// names every defining derivation agrees on through consistent source
 /// chains. A filter of a filter resolves to the innermost kind.
@@ -1115,6 +1162,7 @@ fn trusted_filter_kinds(
     model: &crate::model::Program,
 ) -> std::collections::BTreeMap<String, String> {
     let consistent = consistent_derivations(model);
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(model);
     let mut direct = std::collections::BTreeMap::<String, Option<String>>::new();
     for (name, schema) in &model.relations {
         let Some(derivation) = &schema.derivation else {
@@ -1126,7 +1174,8 @@ fn trusted_filter_kinds(
         let kind = consistent
             .contains(name)
             .then(|| {
-                crate::relation_typing::effective_slot_entities(model, name)
+                slot_kinds
+                    .get(name)
                     .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
             })
             .flatten();
@@ -1139,26 +1188,7 @@ fn trusted_filter_kinds(
             })
             .or_insert(kind);
     }
-    direct
-        .keys()
-        .filter_map(|entity| {
-            let mut kind = entity.clone();
-            let mut visited = std::collections::BTreeSet::new();
-            loop {
-                let Some(entry) = direct.get(&kind) else {
-                    return Some((entity.clone(), kind));
-                };
-                let next = entry.clone()?;
-                if next == kind {
-                    return Some((entity.clone(), kind));
-                }
-                if !visited.insert(kind.clone()) {
-                    return None;
-                }
-                kind = next;
-            }
-        })
-        .collect()
+    crate::relation_typing::innermost_kinds(&direct)
 }
 
 /// Derived relations whose declared kinds agree with their source's, and
@@ -1167,6 +1197,8 @@ fn trusted_filter_kinds(
 /// declares, so one contradicting ancestor poisons every derived relation
 /// above it. A cyclic chain is never consistent.
 fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
+    use crate::relation_typing::ChainStep;
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(model);
     let locally_consistent = |name: &str| {
         let Some(schema) = model.relations.get(name) else {
             return false;
@@ -1183,34 +1215,35 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         {
             return false;
         }
-        let source =
-            crate::relation_typing::effective_slot_entities(model, &derivation.source_relation);
+        let source = slot_kinds.get(&derivation.source_relation);
         let agrees = |declared: &Vec<String>| {
-            declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
+            declared.is_empty() || source.is_some_and(|source| source == declared.as_slice())
         };
         agrees(&derivation.slot_entities) && agrees(&schema.slot_entities)
     };
+    // A relation is consistent when it and every relation down its chain
+    // are, and the chain ends at a data relation rather than cycling.
+    let consistent = crate::relation_typing::follow_chains(
+        model.relations.keys().map(String::as_str),
+        false,
+        |name| {
+            if !locally_consistent(name) {
+                return ChainStep::End(false);
+            }
+            match model
+                .relations
+                .get(name)
+                .and_then(|schema| schema.derivation.as_ref())
+            {
+                Some(derivation) => ChainStep::Next(&derivation.source_relation),
+                None => ChainStep::End(true),
+            }
+        },
+    );
     model
         .relations
         .iter()
-        .filter(|(_, schema)| schema.derivation.is_some())
-        .filter(|(name, _)| {
-            let mut current = name.to_string();
-            let mut visited = std::collections::BTreeSet::new();
-            loop {
-                if !visited.insert(current.clone()) || !locally_consistent(&current) {
-                    return false;
-                }
-                match model
-                    .relations
-                    .get(&current)
-                    .and_then(|schema| schema.derivation.as_ref())
-                {
-                    Some(derivation) => current = derivation.source_relation.clone(),
-                    None => return true,
-                }
-            }
-        })
+        .filter(|(name, schema)| schema.derivation.is_some() && consistent[name.as_str()])
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -1222,6 +1255,8 @@ const CONTESTED: &str = "\u{1}contested";
 
 struct EvidenceCollector<'a> {
     model: &'a crate::model::Program,
+    /// [`derived_data_sources`] of the model, resolved once.
+    derived_sources: DerivedDataSources<'a>,
     filters: std::collections::BTreeSet<String>,
     trusted: std::collections::BTreeMap<String, String>,
     contest: std::collections::BTreeSet<String>,
@@ -1252,24 +1287,14 @@ impl EvidenceCollector<'_> {
         current_slot: usize,
         related_slot: usize,
     ) -> Option<(String, usize, usize)> {
-        let mut name = relation.to_string();
-        let mut slots = (current_slot, related_slot);
-        let mut visited = std::collections::BTreeSet::new();
-        loop {
-            if !visited.insert(name.clone()) {
-                return None;
-            }
-            let schema = self.model.relations.get(&name)?;
-            let Some(derivation) = &schema.derivation else {
-                return Some((name, slots.0, slots.1));
-            };
-            let derivation_slots = (derivation.current_slot, derivation.related_slot);
-            if name != relation && derivation_slots != slots {
-                return None;
-            }
-            slots = derivation_slots;
-            name = derivation.source_relation.clone();
+        let schema = self.model.relations.get(relation)?;
+        if schema.derivation.is_none() {
+            return Some((relation.to_string(), current_slot, related_slot));
         }
+        // A derived relation is read with its derivation's slots whatever
+        // slots the aggregate names, so its data source is the relation's own.
+        let (source, current, related) = self.derived_sources.get(relation).copied().flatten()?;
+        Some((source.to_string(), current, related))
     }
 
     /// The kind of the related ids: the agreed physical entity of every rule
@@ -1341,6 +1366,20 @@ impl EvidenceCollector<'_> {
     fn scalar(&self, expr: &crate::model::ScalarExpr, entity: Option<&str>, slots: &mut Evidence) {
         use crate::model::ScalarExpr;
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => self.aggregate(
+                relation,
+                *current_slot,
+                *related_slot,
+                Some(value),
+                None,
+                entity,
+                slots,
+            ),
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1356,6 +1395,21 @@ impl EvidenceCollector<'_> {
                 slots,
             ),
             ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -1422,6 +1476,7 @@ impl EvidenceCollector<'_> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
@@ -1450,5 +1505,296 @@ impl EvidenceCollector<'_> {
             JudgmentExpr::Not(item) => self.judgment(item, entity, slots),
             JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    //! Migration's chain walks against the per-relation walks they replaced.
+    use super::{
+        EvidenceCollector, chain_bottoms, consistent_derivations, derived_data_sources,
+        trusted_filter_kinds,
+    };
+    use crate::model::Program;
+    use crate::relation_typing::chain_test_programs::{program, reference_effective_slot_entities};
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn reference_consistent_derivations(model: &Program) -> BTreeSet<String> {
+        let locally_consistent = |name: &str| {
+            let Some(schema) = model.relations.get(name) else {
+                return false;
+            };
+            let Some(derivation) = schema.derivation.as_ref() else {
+                return true;
+            };
+            if let Some(source) = model
+                .relations
+                .get(&derivation.source_relation)
+                .and_then(|source| source.derivation.as_ref())
+                && (source.current_slot, source.related_slot)
+                    != (derivation.current_slot, derivation.related_slot)
+            {
+                return false;
+            }
+            let source = reference_effective_slot_entities(model, &derivation.source_relation);
+            let agrees = |declared: &Vec<String>| {
+                declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
+            };
+            agrees(&derivation.slot_entities) && agrees(&schema.slot_entities)
+        };
+        model
+            .relations
+            .iter()
+            .filter(|(_, schema)| schema.derivation.is_some())
+            .filter(|(name, _)| {
+                let mut current = name.to_string();
+                let mut visited = BTreeSet::new();
+                loop {
+                    if !visited.insert(current.clone()) || !locally_consistent(&current) {
+                        return false;
+                    }
+                    match model
+                        .relations
+                        .get(&current)
+                        .and_then(|schema| schema.derivation.as_ref())
+                    {
+                        Some(derivation) => current = derivation.source_relation.clone(),
+                        None => return true,
+                    }
+                }
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    fn reference_trusted_filter_kinds(model: &Program) -> BTreeMap<String, String> {
+        let consistent = reference_consistent_derivations(model);
+        let mut direct = BTreeMap::<String, Option<String>>::new();
+        for (name, schema) in &model.relations {
+            let Some(derivation) = &schema.derivation else {
+                continue;
+            };
+            let Some(entity) = &derivation.entity else {
+                continue;
+            };
+            let kind = consistent
+                .contains(name)
+                .then(|| {
+                    reference_effective_slot_entities(model, name)
+                        .and_then(|kinds| kinds.get(derivation.current_slot).cloned())
+                })
+                .flatten();
+            direct
+                .entry(entity.clone())
+                .and_modify(|known| {
+                    if *known != kind {
+                        *known = None;
+                    }
+                })
+                .or_insert(kind);
+        }
+        direct
+            .keys()
+            .filter_map(|entity| {
+                let mut kind = entity.clone();
+                let mut visited = BTreeSet::new();
+                loop {
+                    let Some(entry) = direct.get(&kind) else {
+                        return Some((entity.clone(), kind));
+                    };
+                    let next = entry.clone()?;
+                    if next == kind {
+                        return Some((entity.clone(), kind));
+                    }
+                    if !visited.insert(kind.clone()) {
+                        return None;
+                    }
+                    kind = next;
+                }
+            })
+            .collect()
+    }
+
+    fn reference_chain_bottom(model: &Program, relation: &str) -> Option<String> {
+        let mut name = relation.to_string();
+        let mut visited = BTreeSet::new();
+        while let Some(derivation) = model
+            .relations
+            .get(&name)
+            .and_then(|schema| schema.derivation.as_ref())
+        {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            name = derivation.source_relation.clone();
+        }
+        Some(name)
+    }
+
+    /// The per-aggregation walk `EvidenceCollector::data_source` ran.
+    fn reference_data_source(
+        model: &Program,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> Option<(String, usize, usize)> {
+        let mut name = relation.to_string();
+        let mut slots = (current_slot, related_slot);
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            let schema = model.relations.get(&name)?;
+            let Some(derivation) = &schema.derivation else {
+                return Some((name, slots.0, slots.1));
+            };
+            let derivation_slots = (derivation.current_slot, derivation.related_slot);
+            if name != relation && derivation_slots != slots {
+                return None;
+            }
+            slots = derivation_slots;
+            name = derivation.source_relation.clone();
+        }
+    }
+
+    #[test]
+    fn migration_chain_walks_match_the_per_relation_walks() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 4000,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[13; 32]),
+        );
+        let consistent_seen = std::cell::Cell::new(0_usize);
+        let sourced = std::cell::Cell::new(0_usize);
+        runner
+            .run(&program(), |model| {
+                let expected = reference_consistent_derivations(&model);
+                consistent_seen.set(consistent_seen.get() + expected.len());
+                let actual = consistent_derivations(&model);
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "consistent {actual:?} != {expected:?}\n{model:#?}"
+                    )));
+                }
+                let (actual, expected) = (
+                    trusted_filter_kinds(&model),
+                    reference_trusted_filter_kinds(&model),
+                );
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "trusted {actual:?} != {expected:?}\n{model:#?}"
+                    )));
+                }
+                let collector = EvidenceCollector {
+                    model: &model,
+                    derived_sources: derived_data_sources(&model),
+                    filters: BTreeSet::new(),
+                    trusted: BTreeMap::new(),
+                    contest: BTreeSet::new(),
+                };
+                let names = model.relations.keys().cloned().chain(["ghost".to_string()]);
+                for name in names {
+                    for (current, related) in [(0, 1), (1, 0), (0, 0), (2, 1)] {
+                        let actual = collector.data_source(&name, current, related);
+                        let expected = reference_data_source(&model, &name, current, related);
+                        if actual.is_some()
+                            && model
+                                .relations
+                                .get(&name)
+                                .is_some_and(|schema| schema.derivation.is_some())
+                        {
+                            sourced.set(sourced.get() + 1);
+                        }
+                        if actual != expected {
+                            return Err(TestCaseError::fail(format!(
+                                "data source of {name} ({current}, {related}): {actual:?} != {expected:?}\n{model:#?}"
+                            )));
+                        }
+                    }
+                }
+                let bottoms = chain_bottoms(&model);
+                for name in model.relations.keys() {
+                    let actual = bottoms.get(name.as_str()).copied().flatten();
+                    let expected = reference_chain_bottom(&model, name);
+                    if actual != expected.as_deref() {
+                        return Err(TestCaseError::fail(format!(
+                            "bottom of {name}: {actual:?} != {expected:?}\n{model:#?}"
+                        )));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        let consistent_seen = consistent_seen.get();
+        assert!(
+            consistent_seen > 500,
+            "only {consistent_seen} consistent derivations"
+        );
+        let sourced = sourced.get();
+        assert!(sourced > 2000, "only {sourced} derived data sources");
+    }
+
+    #[test]
+    fn migration_chain_walks_are_linear_in_a_long_chain() {
+        // Every relation walked its chain to the bottom, and checked each
+        // link's source kinds by walking again: cubic in the chain length.
+        let links = 50_000;
+        let mut model = Program::default();
+        let base = crate::model::RelationSchema {
+            name: "base".to_string(),
+            arity: 2,
+            slot_entities: vec!["Household".to_string(), "Person".to_string()],
+            derivation: None,
+        };
+        model.relations.insert(base.name.clone(), base);
+        for link in 0..links {
+            let source_relation = if link + 1 < links {
+                format!("rel{:07}", link + 1)
+            } else {
+                "base".to_string()
+            };
+            let name = format!("rel{link:07}");
+            model.relations.insert(
+                name.clone(),
+                crate::model::RelationSchema {
+                    name,
+                    arity: 2,
+                    slot_entities: Vec::new(),
+                    derivation: Some(crate::model::RelationDerivation {
+                        source_relation,
+                        current_slot: 0,
+                        related_slot: 1,
+                        entity: Some(format!("U{link}")),
+                        member_relation: None,
+                        slot_entities: Vec::new(),
+                        predicate: crate::model::JudgmentExpr::Derived("p".to_string()),
+                    }),
+                },
+            );
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(consistent_derivations(&model).len(), links);
+        let trusted = trusted_filter_kinds(&model);
+        assert_eq!(trusted.len(), links);
+        assert!(trusted.values().all(|kind| kind == "Household"));
+        assert!(
+            chain_bottoms(&model)
+                .values()
+                .all(|bottom| *bottom == Some("base"))
+        );
+        let sources = derived_data_sources(&model);
+        assert_eq!(sources.len(), links);
+        assert!(
+            sources
+                .values()
+                .all(|source| *source == Some(("base", 0, 1)))
+        );
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 10, "{elapsed:?}");
     }
 }

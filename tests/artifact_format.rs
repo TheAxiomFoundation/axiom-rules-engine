@@ -495,7 +495,7 @@ fn frozen_fixtures() -> Vec<(String, String)> {
             (source, read(&path))
         })
         .collect::<Vec<_>>();
-    assert_eq!(fixtures.len(), 20, "every compiling fixture is frozen");
+    assert_eq!(fixtures.len(), 22, "every compiling fixture is frozen");
     fixtures
 }
 
@@ -550,7 +550,7 @@ fn every_fixture_round_trips_as_format_3() {
 }
 
 /// `(name, input, what main's loader returned)` for every payload in the
-/// legacy-reload baseline: the twenty compiled fixtures and the pre-lazy
+/// legacy-reload baseline: the twenty-two compiled fixtures and the pre-lazy
 /// fast-path fixture, which main reloaded byte for byte, and the constructed
 /// dialect payloads, which it normalized.
 fn legacy_reloads() -> Vec<(String, String, String)> {

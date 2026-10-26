@@ -34,6 +34,95 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid id `{id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationId { path: String, id: String },
+    #[error("RuleSpec module `{path}` repeats interpretation id `{id}`")]
+    DuplicateInterpretationId { path: String, id: String },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid alternative id `{alternative_id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` repeats alternative id `{alternative_id}`"
+    )]
+    DuplicateInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
+    #[error("RuleSpec module `{path}` interpretation `{id}` has blank `{field}`: {value:?}")]
+    BlankInterpretationField {
+        path: String,
+        id: String,
+        field: String,
+        value: String,
+    },
+    #[error("RuleSpec module `{path}` interpretation `{id}` requires non-empty `{field}`")]
+    EmptyInterpretationCollection {
+        path: String,
+        id: String,
+        field: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has noncanonical corpus citation path `{value}`"
+    )]
+    InvalidInterpretationCitationPath {
+        path: String,
+        id: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` date `{value}`; expected a real YYYY-MM-DD date"
+    )]
+    InvalidInterpretationDate {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` record `{value}`; expected https://"
+    )]
+    InvalidInterpretationRecord {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` with status {status:?} has `{field}` {requirement}"
+    )]
+    InvalidInterpretationStatusFields {
+        path: String,
+        id: String,
+        status: InterpretationStatus,
+        field: &'static str,
+        requirement: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` affects rules not defined in this document: {names:?}"
+    )]
+    UnresolvedInterpretationAffects {
+        path: String,
+        id: String,
+        names: Vec<String>,
+    },
+    #[error(
+        "only_related in `{citing}` requires one declared Boolean input `{input}` owned by the related entity: {message}"
+    )]
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -428,6 +517,15 @@ fn text_sha256(text: &str) -> String {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
+    /// Retained for validation of only_related; other operators keep their existing input contract.
+    #[serde(default)]
+    pub inputs: serde_yaml::Value,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub imported_input_declarations: Vec<(Option<String>, serde_yaml::Value)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub input_origin: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
@@ -464,6 +562,12 @@ pub struct ModuleMetadata {
     pub encoding_provenance: Option<EncodingProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation: Vec<ValidationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::interpretations_json_schema")
+    )]
+    pub interpretations: Vec<Interpretation>,
 }
 
 impl ModuleMetadata {
@@ -471,7 +575,7 @@ impl ModuleMetadata {
     /// error reporting: the file path for filesystem loads, the canonical
     /// target for source-backed loads, or the module id / `<memory>` for
     /// in-memory strings.
-    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+    pub(crate) fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
         if let Some(verification) = self.source_verification.as_ref()
             && !is_canonical_corpus_citation_path(&verification.corpus_citation_path)
         {
@@ -489,6 +593,303 @@ impl ModuleMetadata {
             return Err(RuleSpecError::InvalidSourceSha256 {
                 path: path.to_string(),
                 value: sha.to_string(),
+            });
+        }
+        let mut ids = HashSet::new();
+        for interpretation in &self.interpretations {
+            interpretation.validate(path)?;
+            if !ids.insert(&interpretation.id) {
+                return Err(RuleSpecError::DuplicateInterpretationId {
+                    path: path.to_string(),
+                    id: interpretation.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An adopted reading of ambiguous, conflicting, or nonliteral source text.
+/// Descriptive only: the encoder verifies excerpts against the corpus.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Interpretation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub question: String,
+    pub texts: Vec<InterpretationText>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    pub alternatives: Vec<InterpretationAlternative>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub basis: String,
+    pub status: InterpretationStatus,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ruling: Option<InterpretationRuling>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confirmation: Option<InterpretationConfirmation>,
+    #[serde(deserialize_with = "deserialize_strict_string_list")]
+    pub affects: Vec<String>,
+}
+
+/// A verbatim provision in tension with another reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationText {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub corpus_citation_path: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+}
+
+/// Another reading and its optional effect on the result.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationAlternative {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effect: Option<String>,
+}
+
+/// An organisation's ruling, linked to its public record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationRuling {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub record: String,
+}
+
+/// The publisher organisation's words confirming or contradicting a reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationConfirmation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub record: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum InterpretationStatus {
+    Open,
+    Ruled,
+    Confirmed,
+    Contradicted,
+}
+
+impl<'de> Deserialize<'de> for InterpretationStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = deserialize_strict_string(deserializer)?;
+        match value.as_str() {
+            "open" => Ok(Self::Open),
+            "ruled" => Ok(Self::Ruled),
+            "confirmed" => Ok(Self::Confirmed),
+            "contradicted" => Ok(Self::Contradicted),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["open", "ruled", "confirmed", "contradicted"],
+            )),
+        }
+    }
+}
+
+fn is_interpretation_id(value: &str) -> bool {
+    value.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
+impl Interpretation {
+    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+        if !is_interpretation_id(&self.id) {
+            return Err(RuleSpecError::InvalidInterpretationId {
+                path: path.to_string(),
+                id: self.id.clone(),
+            });
+        }
+        for (field, value) in [
+            ("question", &self.question),
+            ("reading", &self.reading),
+            ("basis", &self.basis),
+        ] {
+            self.validate_nonblank(path, field, value)?;
+        }
+        for (field, empty) in [
+            ("texts", self.texts.is_empty()),
+            ("alternatives", self.alternatives.is_empty()),
+            ("affects", self.affects.is_empty()),
+        ] {
+            if empty {
+                return Err(RuleSpecError::EmptyInterpretationCollection {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    field,
+                });
+            }
+        }
+        for (index, text) in self.texts.iter().enumerate() {
+            if !is_canonical_corpus_citation_path(&text.corpus_citation_path) {
+                return Err(RuleSpecError::InvalidInterpretationCitationPath {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    value: text.corpus_citation_path.clone(),
+                });
+            }
+            self.validate_nonblank(path, &format!("texts[{index}].excerpt"), &text.excerpt)?;
+        }
+        let mut alternative_ids = HashSet::new();
+        for (index, alternative) in self.alternatives.iter().enumerate() {
+            if !is_interpretation_id(&alternative.id) {
+                return Err(RuleSpecError::InvalidInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
+            if !alternative_ids.insert(&alternative.id) {
+                return Err(RuleSpecError::DuplicateInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
+            self.validate_nonblank(
+                path,
+                &format!("alternatives[{index}].reading"),
+                &alternative.reading,
+            )?;
+        }
+        for (field, present, required) in [
+            (
+                "ruling",
+                self.ruling.is_some(),
+                self.status != InterpretationStatus::Open,
+            ),
+            (
+                "confirmation",
+                self.confirmation.is_some(),
+                matches!(
+                    self.status,
+                    InterpretationStatus::Confirmed | InterpretationStatus::Contradicted
+                ),
+            ),
+        ] {
+            if present != required {
+                return Err(RuleSpecError::InvalidInterpretationStatusFields {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    status: self.status,
+                    field,
+                    requirement: if required { "required" } else { "forbidden" },
+                });
+            }
+        }
+        if let Some(ruling) = &self.ruling {
+            self.validate_nonblank(path, "ruling.by", &ruling.by)?;
+            self.validate_date(path, "ruling.date", &ruling.date)?;
+            self.validate_record(path, "ruling.record", &ruling.record)?;
+        }
+        if let Some(confirmation) = &self.confirmation {
+            self.validate_nonblank(path, "confirmation.by", &confirmation.by)?;
+            self.validate_nonblank(path, "confirmation.excerpt", &confirmation.excerpt)?;
+            self.validate_date(path, "confirmation.date", &confirmation.date)?;
+            if let Some(record) = &confirmation.record {
+                self.validate_record(path, "confirmation.record", record)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_nonblank(&self, path: &str, field: &str, value: &str) -> Result<(), RuleSpecError> {
+        if value.trim().is_empty() {
+            return Err(RuleSpecError::BlankInterpretationField {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field: field.to_string(),
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_date(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        let exact_shape = value.len() == 10
+            && value.bytes().enumerate().all(|(index, byte)| {
+                if index == 4 || index == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+        if !exact_shape || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
+            return Err(RuleSpecError::InvalidInterpretationDate {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_record(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        if !value.starts_with("https://") {
+            return Err(RuleSpecError::InvalidInterpretationRecord {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
             });
         }
         Ok(())
@@ -901,7 +1302,16 @@ fn validate_composed_dependency_metadata(source: &str, path: &str) -> Result<(),
 }
 
 fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
-    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    // Interpretations have a strict typed contract, validated below before
+    // import merging. Let that validator report citation failures with the
+    // entry id rather than the generic recursive corpus-path error.
+    if let Some(module) = value
+        .get_mut("module")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        module.remove(serde_yaml::Value::String("interpretations".to_string()));
+    }
     validate_recursive_corpus_value(&value, path)
 }
 
@@ -1349,6 +1759,10 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     if extension.module.is_some() {
         base.module = extension.module;
     }
+    base.imported_input_declarations
+        .push((extension.input_origin, extension.inputs));
+    base.imported_input_declarations
+        .extend(extension.imported_input_declarations);
     base.units.extend(extension.units);
     base.relations.extend(extension.relations);
     base.rules.extend(extension.rules);
@@ -2059,10 +2473,29 @@ fn canonical_composed_dependency(
 
 impl RulesDocument {
     fn validate_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
-        match &self.module {
-            Some(module) => module.validate(path),
-            None => Ok(()),
+        if let Some(module) = &self.module {
+            module.validate(path)?;
+            // Resolve against this document before imports are merged or
+            // lowering assigns runtime names. Imported and deferred-only
+            // names are not definitions in this module.
+            let names: HashSet<&str> = self.rules.iter().map(|rule| rule.name.as_str()).collect();
+            for interpretation in &module.interpretations {
+                let unresolved: Vec<String> = interpretation
+                    .affects
+                    .iter()
+                    .filter(|name| !names.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                if !unresolved.is_empty() {
+                    return Err(RuleSpecError::UnresolvedInterpretationAffects {
+                        path: path.to_string(),
+                        id: interpretation.id.clone(),
+                        names: unresolved,
+                    });
+                }
+            }
         }
+        Ok(())
     }
 
     fn validate_atomic_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
@@ -2079,6 +2512,7 @@ impl RulesDocument {
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        self.input_origin = origin_target.clone();
         // The module-level corpus citation path rides onto every rule here,
         // because `merge_rules_documents` keeps only the root module's
         // metadata: without stamping, an imported module's join key would be
@@ -2241,28 +2675,49 @@ impl RulesDocument {
             })
             .map(|rule| rule.canonical_relation_id())
             .collect::<HashSet<_>>();
-        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
-            match error {
-                crate::relation_direction::DirectionError::Aggregate {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousRelationDirection {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                },
-                crate::relation_direction::DirectionError::DerivedSlots {
-                    relation,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousDerivedRelationSlots {
-                    relation,
-                    slot_entities,
-                },
-            }
+        crate::relation_direction::resolve(
+            &mut program,
+            &defaulted_slots,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(|error| match error {
+            crate::relation_direction::DirectionError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            } => RuleSpecError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            },
+            crate::relation_direction::DirectionError::Aggregate {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            } => RuleSpecError::AmbiguousRelationDirection {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            },
+            crate::relation_direction::DirectionError::DerivedSlots {
+                relation,
+                slot_entities,
+            } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                relation,
+                slot_entities,
+            },
         })?;
+        crate::selected_year::bind(
+            &mut program,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(RuleSpecError::SelectedYearInput)?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -3441,6 +3896,7 @@ fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
 fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, relation_name: &str) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3480,6 +3936,11 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(from, alias, relation_name);
             rewrite_relation_alias_in_scalar(to, alias, relation_name);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3493,6 +3954,16 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3755,6 +4226,7 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
 fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3794,6 +4266,9 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(from, names);
             collect_scalar_relation_names(to, names);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            names.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3805,6 +4280,16 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3870,6 +4355,7 @@ fn rewrite_scalar_relation_references(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
         | ScalarExprSpec::PeriodStart
@@ -3981,6 +4467,9 @@ fn rewrite_scalar_relation_references(
                 derived_origin_targets,
             );
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            rewrite_relation_name(relation, origin_target, rewrites);
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -4007,6 +4496,18 @@ fn rewrite_scalar_relation_references(
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             value,
             where_clause,
@@ -4227,6 +4728,7 @@ fn scalar_uses_imported_derived(
 ) -> bool {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::PeriodStart
@@ -4266,11 +4768,22 @@ fn scalar_uses_imported_derived(
             scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(to, origin_target, derived_origin_targets)
         }
+        ScalarExprSpec::OnlyRelated { .. } => false,
         ScalarExprSpec::CountRelated { where_clause, .. } => where_clause
             .as_deref()
             .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
             .unwrap_or(false),
         ScalarExprSpec::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             value,
             where_clause,
             ..
@@ -4400,6 +4913,23 @@ where
             "expected string, got {other:?}"
         ))),
     }
+}
+
+// A supplied optional field must contain its declared type. Serde's default
+// handles absence; explicit null must not stand in for a forbidden block.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_strict_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_strict_string(deserializer).map(Some)
 }
 
 fn deserialize_strict_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>

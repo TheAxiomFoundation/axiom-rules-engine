@@ -309,6 +309,7 @@ pub fn derive_interface(program: &ProgramSpec) -> Result<ProgramInterface, SpecE
 pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
     let mut collector = Collector {
         program,
+        slot_kinds: relation_typing::EffectiveSlotEntities::new(program),
         sites: Vec::new(),
         references: Vec::new(),
         lookup_slots: BTreeMap::new(),
@@ -339,7 +340,7 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
         // A derived relation traverses its source keyed on its current slot.
         collector.lookup(&derivation.source_relation, derivation.current_slot);
         let (current_kind, related_kind) =
-            relation_typing::predicate_slot_kinds(program, name, derivation);
+            relation_typing::predicate_slot_kinds(&collector.slot_kinds, name, derivation);
         let routing = Routing {
             derivation,
             current_kind,
@@ -417,7 +418,7 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
             InterfaceRelation {
                 name: (*name).clone(),
                 arity: schema.arity,
-                slot_entities: relation_typing::effective_slot_entities(program, name),
+                slot_entities: collector.slot_kinds.get(name).map(<[String]>::to_vec),
                 lookup_slots: collector
                     .lookup_slots
                     .get(name.as_str())
@@ -442,7 +443,7 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
         })
         .collect::<Vec<_>>();
 
-    let entities = entity_roster(program, &inputs);
+    let entities = entity_roster(program, &collector.slot_kinds, &inputs);
     ProgramInterface {
         entities,
         inputs,
@@ -489,6 +490,9 @@ struct ReadSite {
 
 struct Collector<'a> {
     program: &'a Program,
+    /// Every relation's effective slot kinds, resolved once: a chain of n
+    /// derived relations costs n steps, not one walk per link.
+    slot_kinds: relation_typing::EffectiveSlotEntities<'a>,
     sites: Vec<ReadSite>,
     references: Vec<(String, Flow)>,
     lookup_slots: BTreeMap<String, BTreeSet<usize>>,
@@ -541,7 +545,8 @@ impl Collector<'_> {
         let (_, related) =
             relation_typing::traversed_slots(self.program, relation, current_slot, related_slot);
         Flow::Kind(
-            relation_typing::effective_slot_entities(self.program, relation)
+            self.slot_kinds
+                .get(relation)
                 .and_then(|kinds| kinds.get(related).cloned()),
         )
     }
@@ -557,6 +562,11 @@ impl Collector<'_> {
         match expr {
             ScalarExpr::Literal(_) | ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => {}
             ScalarExpr::Input(name) => self.site(name, flow, demand, None, index_of),
+            // `input_for_year` reads the slot on the same id, for a period
+            // the formula names.
+            ScalarExpr::InputForYear { input, .. } => {
+                self.site(input, flow, demand, None, index_of);
+            }
             ScalarExpr::InputOrElse { name, default } => {
                 self.site(name, flow, demand, Some(default), index_of);
             }
@@ -625,6 +635,51 @@ impl Collector<'_> {
                     self.judgment(where_clause, &related, None);
                 }
             }
+            // `only_related` projects a Boolean input of the one related
+            // entity.
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                self.lookup(relation, *current_slot);
+                let related = self.related_flow(relation, *current_slot, *related_slot);
+                match value {
+                    RelatedValueRef::Input(name) => {
+                        self.site(name, &related, Demand::Bool, None, None);
+                    }
+                    RelatedValueRef::Derived(name) => self.reference(name, &related, None),
+                }
+            }
+            // `min`/`max`/`only` over related entities return a related
+            // value as it is, so the value meets the demand placed on the
+            // aggregate.
+            ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                self.lookup(relation, *current_slot);
+                let related = self.related_flow(relation, *current_slot, *related_slot);
+                match value {
+                    RelatedValueRef::Input(name) => self.site(name, &related, demand, None, None),
+                    RelatedValueRef::Derived(name) => self.reference(name, &related, None),
+                }
+                if let Some(where_clause) = where_clause {
+                    self.judgment(where_clause, &related, None);
+                }
+            }
             ScalarExpr::If {
                 condition,
                 then_expr,
@@ -680,7 +735,9 @@ impl Collector<'_> {
 fn comparison_demand(op: ComparisonOp, other: &ScalarExpr) -> Demand {
     let equality = matches!(op, ComparisonOp::Eq | ComparisonOp::Ne);
     match other {
-        ScalarExpr::Literal(ScalarValue::Bool(_)) if equality => Demand::Bool,
+        ScalarExpr::Literal(ScalarValue::Bool(_)) | ScalarExpr::OnlyRelated { .. } if equality => {
+            Demand::Bool
+        }
         ScalarExpr::Literal(ScalarValue::Text(_)) if equality => Demand::Text,
         ScalarExpr::Literal(ScalarValue::Date(_))
         | ScalarExpr::PeriodStart
@@ -795,6 +852,7 @@ fn slot_values(program: &Program, sites: &[&ReadSite]) -> Option<Vec<i64>> {
 fn collect_scalar_relations(expr: &ScalarExpr, relations: &mut BTreeSet<String>) {
     match expr {
         ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::Derived(_)
@@ -839,6 +897,16 @@ fn collect_scalar_relations(expr: &ScalarExpr, relations: &mut BTreeSet<String>)
             relation,
             where_clause,
             ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
+            relation,
+            where_clause,
+            ..
         } => {
             relations.insert(relation.clone());
             if let Some(where_clause) = where_clause {
@@ -853,6 +921,9 @@ fn collect_scalar_relations(expr: &ScalarExpr, relations: &mut BTreeSet<String>)
             collect_judgment_relations(condition, relations);
             collect_scalar_relations(then_expr, relations);
             collect_scalar_relations(else_expr, relations);
+        }
+        ScalarExpr::OnlyRelated { relation, .. } => {
+            relations.insert(relation.clone());
         }
         ScalarExpr::NoMatch { subject, patterns } => {
             collect_scalar_relations(subject, relations);
@@ -891,7 +962,11 @@ fn collect_judgment_relations(expr: &JudgmentExpr, relations: &mut BTreeSet<Stri
 /// One entry per kind a derived rule declares, a relation's effective slots
 /// hold, or a derived relation filters to, and `Scalar` when an input lists
 /// it.
-fn entity_roster(program: &Program, inputs: &[InterfaceInput]) -> Vec<InterfaceEntity> {
+fn entity_roster(
+    program: &Program,
+    slot_kinds: &relation_typing::EffectiveSlotEntities<'_>,
+    inputs: &[InterfaceInput],
+) -> Vec<InterfaceEntity> {
     let mut kinds = BTreeSet::new();
     kinds.extend(
         program
@@ -900,7 +975,7 @@ fn entity_roster(program: &Program, inputs: &[InterfaceInput]) -> Vec<InterfaceE
             .map(|derived| derived.entity.clone()),
     );
     for name in program.relations.keys() {
-        kinds.extend(relation_typing::effective_slot_entities(program, name).unwrap_or_default());
+        kinds.extend(slot_kinds.get(name).unwrap_or_default().iter().cloned());
     }
     kinds.extend(relation_typing::filtered_entities(program));
     if inputs

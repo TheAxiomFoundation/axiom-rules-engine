@@ -237,3 +237,6 @@ assert.throws(
 );
 
 console.log("smoke test passed");
+
+// Keep the new tagged projection in the existing hosted smoke entrypoint.
+await import("./only-related.mjs");

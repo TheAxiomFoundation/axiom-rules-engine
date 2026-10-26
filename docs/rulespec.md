@@ -653,6 +653,85 @@ versions:
 replaces the four-branch expansion whose leaf-reference count grows with the
 square of the option count.
 
+### Minimum, maximum and exactly-one over related entities
+
+Beside `len(relation)`, `sum(relation.field)`, `count_where(relation,
+predicate)` and `sum_where(relation, field, predicate)`, scalar formulas take
+three more aggregates over the entities a relation relates to the rule's
+entity:
+
+| Function | Value |
+|---|---|
+| `min(relation.field)` / `max(relation.field)` | the least / greatest `field` over the related entities |
+| `min_where(relation, field, predicate)` / `max_where(relation, field, predicate)` | the same over the related entities whose `predicate` holds |
+| `only(relation.field)` | `field` of the one related entity |
+
+`min` and `max` aggregate only when their single argument is a relation field
+access; every other form (`min(a, b)`, `max(x)`, `min(members.age, 3)`) keeps
+its scalar meaning. `field` is an input or a derived scalar rule of the related
+entity, and a `_where` predicate is a Boolean input or a derived judgment on
+it, exactly as for `sum` and `sum_where`. The members are resolved as `sum`
+resolves them: the distinct related ids, a derived relation's filter, then the
+`where` clause, evaluated for each member. The relation's direction comes from
+its declared slot kinds, as for every aggregate.
+
+- `min` and `max` compare numbers numerically and yield a decimal, as `sum`
+  does, and compare dates chronologically and yield a date. A Boolean or text
+  value is a type error.
+- `only` yields the member's value with its own kind (integer, decimal, text,
+  Boolean or date).
+- None of them invents a value. `min` or `max` with no selected member fails
+  with `EmptyRelatedAggregate`; `only` fails with `MissingRelation` when there
+  is no member and with `AmbiguousRelation`, which reports the count,
+  when there are several. Each error names the relation, the entity and the
+  period. A rule whose law gives the empty case a value says so with a guard;
+  conditionals are lazy, so the guarded form never fails:
+
+```yaml
+rules:
+  - name: member_of_family
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Family]
+  - name: youngest_child_age
+    kind: derived
+    entity: Family
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2026-04-01'
+        formula: |-
+          if len(member_of_family) > 0: min(member_of_family.age)
+          else: 0
+  - name: family_income_of_child
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-04-01'
+        formula: only(member_of_family.family_income)
+```
+
+Here `youngest_child_age` reads each member's `age` from the family; a family
+with no member takes the `else` branch, which the encoder writes from the law
+(0 here only for the example). `family_income_of_child` reads from the person
+side, so it runs for each person: a person in exactly one family reads that
+family's `family_income`, and a person in none or in two fails rather than
+reading 0.
+
+They serialize as the expression kinds `extreme_related` (with `extreme:
+min | max`) and `single_related`. `only(r.f)` is not
+[`only_related(r, f)`](only-related.md), which projects a Boolean input only
+and serializes as its own kind; where both apply they give the same value and
+the same errors. An engine whose `capabilities` lists
+`related_min_max_only` loads them; an earlier engine refuses an artifact that
+uses them on load, and a program that uses none of them compiles to the same
+bytes as before. Explain, fast and dense evaluate them; see
+[execution semantics](execution-semantics.md) for the evaluation order and
+each mode's contract.
+
 ## Currency rounding
 
 A `derived` rule whose `unit` is a currency may declare an output-rounding
@@ -707,6 +786,13 @@ formula semantics or execution results. The lowered `ProgramSpec` keeps the
 (merged) root module's metadata on `program.module`, and compiled artifacts pass
 it through their JSON, so tooling can read it from a loaded module or artifact
 without re-parsing the YAML.
+
+`module.interpretations` carries structured readings of ambiguous,
+conflicting, or nonliteral source text. It is also preserved on
+`program.module` and in compiled artifacts without affecting output names,
+compilation, or results. The [format reference](rulespec-format.md#interpretations)
+documents its shape, status-dependent fields, load-time validation, and
+encoder responsibilities for verbatim corpus excerpts.
 
 ```yaml
 module:

@@ -829,6 +829,9 @@ impl<'a> BulkEvaluator<'a> {
                 }
                 Ok((ScalarColumn::broadcast(value, len), RowErrors::new()))
             }
+            ScalarExpr::InputForYear { .. } => {
+                Err(unsupported("selected-year input requires Explain").into())
+            }
             ScalarExpr::Input(name) => self.eval_input(name, None, mask),
             ScalarExpr::InputOrElse { name, default } => self.eval_input(name, Some(default), mask),
             ScalarExpr::Derived(name) => self.evaluate_scalar(name, mask),
@@ -897,9 +900,11 @@ impl<'a> BulkEvaluator<'a> {
                 mask,
                 EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                self.eval_per_entity(expr, mask)
-            }
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::SingleRelated { .. } => self.eval_per_entity(expr, mask),
             // The fallback of a `match` without `_`: every row that reaches it
             // fails with explain's error, and any failure sends the request to
             // explain, which names the rule.

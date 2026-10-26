@@ -199,6 +199,9 @@ jobs:
       - name: Node smoke test
         run: node wasm/test/smoke.mjs
 
+      - name: Selected-year input WASM regression
+        run: node wasm/test/selected-year-input.mjs
+
   python:
     name: Python package tests
     runs-on: ubuntu-latest

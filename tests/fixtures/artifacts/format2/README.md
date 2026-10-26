@@ -4,7 +4,11 @@ These files stand for format-2 artifacts already published. They were written
 by the unmodified library at `main` 5d63e8f3 (crate 0.2.2, artifact format 2)
 on 2026-10-10, before format 3. The same steps run against `main` at 621e0f24
 (2026-10-13), the last `main` commit before format 3, wrote every file here
-byte for byte the same, so each is what `main` wrote at both commits. Never
+byte for byte the same, so each is what `main` wrote at both commits. `main`
+at 841b9b65 (2026-10-26), still format 2, again wrote all twenty byte for
+byte, and wrote the two fixtures `main` added after 621e0f24:
+`tests/fixtures/only_related.yaml` (#261) and
+`tests/fixtures/selected_year_input.yaml` (#263). Never
 regenerate them with a newer engine: a regenerated file would test the engine
 against itself.
 
@@ -16,7 +20,7 @@ wrote at 5d63e8f3 for the RuleSpec fixture its name spells, with `/` written
 as `__` and `.yaml` replaced by `.compiled.json`
 (`tests__fixtures__rulespec__other__flat_tax__rules.compiled.json` is
 `tests/fixtures/rulespec/other/flat_tax/rules.yaml`). They cover every
-in-repo RuleSpec fixture that compiles; the twenty-first,
+in-repo RuleSpec fixture that compiles; the twenty-third,
 `tests/fixtures/artifacts/relation_typing/inconsistent_filter_contests_slot.rulespec.yaml`,
 is ill-typed on purpose and has no artifact.
 
