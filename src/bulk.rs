@@ -902,7 +902,9 @@ impl<'a> BulkEvaluator<'a> {
             )),
             ScalarExpr::OnlyRelated { .. }
             | ScalarExpr::CountRelated { .. }
-            | ScalarExpr::SumRelated { .. } => self.eval_per_entity(expr, mask),
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::SingleRelated { .. } => self.eval_per_entity(expr, mask),
             // The fallback of a `match` without `_`: every row that reaches it
             // fails with explain's error, and any failure sends the request to
             // explain, which names the rule.

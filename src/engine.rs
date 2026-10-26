@@ -9,8 +9,8 @@ use rust_decimal::Decimal;
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, JudgmentExpr, JudgmentOutcome, Period,
-    Program, RelatedValueRef, ScalarExpr, ScalarValue,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, Extreme, JudgmentExpr,
+    JudgmentOutcome, Period, Program, RelatedValueRef, ScalarExpr, ScalarValue,
 };
 
 /// Shift by calendar months, clamping a missing target day to month end.
@@ -165,6 +165,19 @@ pub enum EvalError {
         value: String,
         patterns: String,
     },
+    /// A `min`/`max` over related entities that selects none. The law gives
+    /// no value for the least of nothing, so the engine invents none; guard
+    /// the call with a count of the same members.
+    #[error(
+        "{function} over relation `{relation}` has no related entity for entity `{entity_id}` over {period_start}..{period_end}, so it has no value; guard it with a count of the same members (for example `if len({relation}) > 0 then ... else ...`)"
+    )]
+    EmptyRelatedAggregate {
+        function: &'static str,
+        relation: String,
+        entity_id: String,
+        period_start: chrono::NaiveDate,
+        period_end: chrono::NaiveDate,
+    },
     #[error("unit `{0}` was not declared")]
     UnknownUnit(String),
     #[error("type mismatch: {0}")]
@@ -302,6 +315,23 @@ pub(crate) fn relation_member_outside_derived_relation(relation: &str) -> EvalEr
     EvalError::TypeMismatch(format!(
         "relation predicate `{relation}` can only be evaluated inside a derived relation"
     ))
+}
+
+/// The error for a `min`/`max` over related entities whose member value it
+/// cannot compare. Every evaluator words it the same way.
+pub(crate) fn extreme_value_type_error(function: &str, relation: &str, found: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "{function} over relation `{relation}` compares numbers or dates, but a related value is {found}"
+    ))
+}
+
+/// Whether `candidate` replaces an equal `best` as a `min`/`max` result.
+/// Equal decimals can differ in scale (`2.5`, `2.50`) or in the sign of zero,
+/// so the order the members are walked in would otherwise pick the result's
+/// representation. The larger scale wins, then the non-negative sign, so
+/// every evaluator and every member order returns the same value.
+pub(crate) fn decimal_tie_prefers(candidate: &Decimal, best: &Decimal) -> bool {
+    (candidate.scale(), !candidate.is_sign_negative()) > (best.scale(), !best.is_sign_negative())
 }
 
 pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
@@ -631,24 +661,24 @@ pub struct Engine<'a> {
     /// The level at which a reference to a rule not yet evaluated is deferred
     /// to the driver (see [`crate::depth`]).
     suspend_depth: usize,
-    /// How far each `count`/`sum` over related entities has got in the
+    /// How far each aggregation over related entities has got in the
     /// current drive (see [`Step`]).
-    folds: HashMap<Step, Progress<FoldResume, (usize, Decimal)>>,
+    folds: HashMap<Step, Progress<FoldResume, Fold>>,
     /// How far each resolution of a relation's members has got in the current
     /// drive (see [`Step`]).
     #[cfg(test)]
     members: HashMap<Step, Progress<MembersResume, Vec<String>>>,
     #[cfg(test)]
     recursive_relation_oracle: bool,
-    /// Expression levels evaluated, members a `count`/`sum` walked and
+    /// Expression levels evaluated, members an aggregation walked and
     /// relation tuples read since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
 }
 
-/// A loop over data that a deferral can interrupt: a `count`/`sum` over one
-/// entity's related entities, or the resolution of one entity's members of a
-/// relation, which tests a derived relation's predicate on each candidate.
+/// A loop over data that a deferral can interrupt: an aggregation (`count`,
+/// `sum`, `min`/`max`, `only`) over one entity's related entities, or the
+/// resolution of one entity's members of a relation, which tests a derived relation's predicate on each candidate.
 /// A deferral inside one retries the rule evaluation it runs in, which reaches
 /// the loop again. Without a record of where it stood, the retry would walk
 /// every member before the one that deferred again, and every loop the
@@ -677,11 +707,11 @@ struct Step {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Site {
-    /// A `count`/`sum`, identified by its node's address. That is sound
-    /// because every expression the engine evaluates is borrowed from the
-    /// program for the engine's whole life: the evaluation functions take
-    /// `&'a` expressions, so the compiler refuses to evaluate a copy, whose
-    /// address another expression could reuse.
+    /// An aggregation over related entities, identified by its node's
+    /// address. That is sound because every expression the engine evaluates
+    /// is borrowed from the program for the engine's whole life: the
+    /// evaluation functions take `&'a` expressions, so the compiler refuses
+    /// to evaluate a copy, whose address another expression could reuse.
     Fold(usize),
     /// A relation's members, read from one slot to another.
     #[cfg(test)]
@@ -702,14 +732,115 @@ enum Progress<P, D> {
 }
 
 /// An interrupted aggregation: its related entities, the member that
-/// deferred (evaluated again, from its `where` clause, on the retry), and the
-/// count and total of the members before it.
+/// deferred (evaluated again, from its `where` clause, on the retry), and
+/// what the members before it contributed.
 #[derive(Debug)]
 struct FoldResume {
     related_ids: Vec<String>,
     next: usize,
-    count: usize,
-    total: Decimal,
+    fold: Fold,
+}
+
+/// What an aggregation over related entities has gathered from the members
+/// walked so far. A fold keeps the kind it starts with.
+#[derive(Clone, Debug)]
+enum Fold {
+    /// `count` and `sum`: the members selected and the total of their values
+    /// (zero for a count, which reads none).
+    Total { count: usize, total: Decimal },
+    /// `min` / `max`: the extreme value so far, `None` before the first
+    /// member. Numbers are held as `Decimal`, as `sum` holds them.
+    Extreme {
+        extreme: Extreme,
+        best: Option<ScalarValue>,
+    },
+    /// `only`: the ids of the members selected. Its value is read once the
+    /// selection finishes, and only for a single member, so a selection of
+    /// none or several reads no value.
+    Select(Vec<String>),
+}
+
+/// One related entity's part in an aggregation.
+enum MemberPart {
+    /// The `where` clause does not select it.
+    Excluded,
+    /// Selected; the aggregation reads no value from it (`count`, `only`).
+    Selected,
+    /// Selected, with its value.
+    Valued(ScalarValue),
+}
+
+impl Fold {
+    /// Take in one selected member. Fails on a value the aggregation cannot
+    /// combine: a non-number for `sum`, an overflowing total, or for
+    /// `min`/`max` a value that is neither a number nor a date, or whose kind
+    /// differs from the members before it.
+    fn add(
+        &mut self,
+        related_id: &str,
+        value: Option<ScalarValue>,
+        relation: &str,
+        filtered: bool,
+    ) -> Result<(), EvalError> {
+        match self {
+            Self::Total { count, total } => {
+                *count += 1;
+                if let Some(value) = value {
+                    let amount = value.as_decimal().ok_or_else(|| {
+                        EvalError::TypeMismatch(
+                            "related aggregation requires numeric values".to_string(),
+                        )
+                    })?;
+                    *total = checked_add(*total, amount)?;
+                }
+            }
+            Self::Extreme { extreme, best } => {
+                let function = extreme.call_name(filtered);
+                let candidate = match value {
+                    Some(value @ (ScalarValue::Integer(_) | ScalarValue::Decimal(_))) => {
+                        ScalarValue::Decimal(value.as_decimal().expect("a number is a decimal"))
+                    }
+                    Some(ScalarValue::Date(date)) => ScalarValue::Date(date),
+                    Some(ScalarValue::Bool(_)) => {
+                        return Err(extreme_value_type_error(function, relation, "a boolean"));
+                    }
+                    Some(ScalarValue::Text(_)) => {
+                        return Err(extreme_value_type_error(function, relation, "text"));
+                    }
+                    None => unreachable!("min/max reads every member's value"),
+                };
+                let replace = match (&candidate, best.as_ref()) {
+                    (_, None) => true,
+                    (ScalarValue::Decimal(candidate), Some(ScalarValue::Decimal(current))) => {
+                        extreme.improves(candidate, current)
+                            || (candidate == current && decimal_tie_prefers(candidate, current))
+                    }
+                    (ScalarValue::Date(candidate), Some(ScalarValue::Date(current))) => {
+                        extreme.improves(candidate, current)
+                    }
+                    (ScalarValue::Date(_), Some(_)) => {
+                        return Err(extreme_value_type_error(
+                            function,
+                            relation,
+                            "a date where earlier members are numbers",
+                        ));
+                    }
+                    (_, Some(_)) => {
+                        return Err(extreme_value_type_error(
+                            function,
+                            relation,
+                            "a number where earlier members are dates",
+                        ));
+                    }
+                };
+                if replace {
+                    *best = Some(candidate);
+                }
+            }
+            Self::Select(selected) => selected.push(related_id.to_string()),
+        }
+        Ok(())
+    }
 }
 
 /// An interrupted resolution of a derived relation's members: the candidates
@@ -1640,14 +1771,21 @@ impl<'a> Engine<'a> {
                 related_slot,
                 where_clause,
             } => {
-                let (count, _) = self.fold_related(
+                let fold = self.fold_related(
                     expr,
                     (relation, *current_slot, *related_slot),
                     where_clause.as_deref(),
                     None,
+                    Fold::Total {
+                        count: 0,
+                        total: Decimal::ZERO,
+                    },
                     entity_id,
                     period,
                 )?;
+                let Fold::Total { count, .. } = fold else {
+                    unreachable!("a fold keeps its kind");
+                };
                 // A count of collected ids fits in i64 on every supported target.
                 Ok(ScalarValue::Integer(count as i64))
             }
@@ -1658,15 +1796,96 @@ impl<'a> Engine<'a> {
                 value,
                 where_clause,
             } => {
-                let (_, total) = self.fold_related(
+                let fold = self.fold_related(
                     expr,
                     (relation, *current_slot, *related_slot),
                     where_clause.as_deref(),
                     Some(value),
+                    Fold::Total {
+                        count: 0,
+                        total: Decimal::ZERO,
+                    },
                     entity_id,
                     period,
                 )?;
+                let Fold::Total { total, .. } = fold else {
+                    unreachable!("a fold keeps its kind");
+                };
                 Ok(ScalarValue::Decimal(total))
+            }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let fold = self.fold_related(
+                    expr,
+                    (relation, *current_slot, *related_slot),
+                    where_clause.as_deref(),
+                    Some(value),
+                    Fold::Extreme {
+                        extreme: *extreme,
+                        best: None,
+                    },
+                    entity_id,
+                    period,
+                )?;
+                let Fold::Extreme { best, .. } = fold else {
+                    unreachable!("a fold keeps its kind");
+                };
+                // The least of nothing has no value; the encoder guards the
+                // call with a count rather than the engine inventing one.
+                best.ok_or_else(|| {
+                    EvalError::EmptyRelatedAggregate {
+                        function: extreme.call_name(where_clause.is_some()),
+                        relation: relation.clone(),
+                        entity_id: entity_id.to_string(),
+                        period_start: period.start,
+                        period_end: period.end,
+                    }
+                    .into()
+                })
+            }
+            ScalarExpr::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let fold = self.fold_related(
+                    expr,
+                    (relation, *current_slot, *related_slot),
+                    where_clause.as_deref(),
+                    None,
+                    Fold::Select(Vec::new()),
+                    entity_id,
+                    period,
+                )?;
+                let Fold::Select(selected) = fold else {
+                    unreachable!("a fold keeps its kind");
+                };
+                match selected.as_slice() {
+                    [member] => self.eval_related_value(value, member, period),
+                    [] => Err(EvalError::MissingRelation {
+                        relation: relation.clone(),
+                        entity_id: entity_id.to_string(),
+                        period_start: period.start,
+                        period_end: period.end,
+                    }
+                    .into()),
+                    members => Err(EvalError::AmbiguousRelation {
+                        relation: relation.clone(),
+                        entity_id: entity_id.to_string(),
+                        period_start: period.start,
+                        period_end: period.end,
+                        count: members.len(),
+                    }
+                    .into()),
+                }
             }
             ScalarExpr::If {
                 condition,
@@ -1856,9 +2075,13 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Count the related entities of `entity_id` that `where_clause` selects,
-    /// and sum `value` over them, in order: a `count` passes no `value` and
-    /// reads only the count, a `sum` reads only the total.
+    /// Walk the related entities of `entity_id` in order, and fold into
+    /// `fold` each one `where_clause` selects, with its `value` when one is
+    /// given: a `count` passes no `value` and reads only the count, a `sum`
+    /// reads only the total, a `min`/`max` reads the extreme, and an `only`
+    /// passes no `value` and reads the members selected. The first member
+    /// whose clause or value fails, or that the fold cannot take in, ends the
+    /// walk with its error.
     ///
     /// When a member defers a rule (see [`crate::depth`]), the fold records
     /// where it stopped before unwinding, and the retry resumes at that member.
@@ -1871,9 +2094,10 @@ impl<'a> Engine<'a> {
         (relation, current_slot, related_slot): (&str, usize, usize),
         where_clause: Option<&'a JudgmentExpr>,
         value: Option<&'a RelatedValueRef>,
+        fold: Fold,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<(usize, Decimal)> {
+    ) -> Eval<Fold> {
         let key = self.step(
             Site::Fold(std::ptr::from_ref(node) as usize),
             entity_id,
@@ -1882,11 +2106,10 @@ impl<'a> Engine<'a> {
         let FoldResume {
             related_ids,
             mut next,
-            mut count,
-            mut total,
+            mut fold,
         } = match self.folds.remove(&key) {
             Some(Progress::Done(result)) => {
-                self.folds.insert(key, Progress::Done(result));
+                self.folds.insert(key, Progress::Done(result.clone()));
                 return Ok(result);
             }
             Some(Progress::Pending(resume)) => resume,
@@ -1899,8 +2122,7 @@ impl<'a> Engine<'a> {
                     period,
                 )?,
                 next: 0,
-                count: 0,
-                total: Decimal::ZERO,
+                fold,
             },
         };
         while let Some(related_id) = related_ids.get(next) {
@@ -1908,10 +2130,17 @@ impl<'a> Engine<'a> {
             // `count_visits` even when its members read nothing.
             self.visits += 1;
             match self.fold_member(where_clause, value, related_id, period) {
-                Ok(None) => {}
-                Ok(Some(amount)) => {
-                    count += 1;
-                    total = checked_add(total, amount)?;
+                Ok(MemberPart::Excluded) => {}
+                Ok(MemberPart::Selected) => {
+                    fold.add(related_id, None, relation, where_clause.is_some())?;
+                }
+                Ok(MemberPart::Valued(member_value)) => {
+                    fold.add(
+                        related_id,
+                        Some(member_value),
+                        relation,
+                        where_clause.is_some(),
+                    )?;
                 }
                 Err(interrupt)
                     if self.suspended_on.is_some() || matches!(interrupt, Interrupt::Defer(_)) =>
@@ -1921,8 +2150,7 @@ impl<'a> Engine<'a> {
                         Progress::Pending(FoldResume {
                             related_ids,
                             next,
-                            count,
-                            total,
+                            fold,
                         }),
                     );
                     return Err(interrupt);
@@ -1931,8 +2159,8 @@ impl<'a> Engine<'a> {
             }
             next += 1;
         }
-        self.folds.insert(key, Progress::Done((count, total)));
-        Ok((count, total))
+        self.folds.insert(key, Progress::Done(fold.clone()));
+        Ok(fold)
     }
 
     /// The key of a loop at `site` for this entity and period, in the rule
@@ -1949,26 +2177,29 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// One related entity's part in a `count` or `sum`: `None` when the
-    /// `where` clause does not select it, else its value (zero for a count).
+    /// One related entity's part in an aggregation: the `where` clause
+    /// first, then, for a selected member, its value when the aggregation
+    /// reads one.
     fn fold_member(
         &mut self,
         where_clause: Option<&'a JudgmentExpr>,
         value: Option<&'a RelatedValueRef>,
         related_id: &str,
         period: &Period,
-    ) -> Eval<Option<Decimal>> {
+    ) -> Eval<MemberPart> {
         if let Some(predicate) = where_clause {
             if !self
                 .eval_judgment_expr(predicate, related_id, period)?
                 .is_holds()
             {
-                return Ok(None);
+                return Ok(MemberPart::Excluded);
             }
         }
         match value {
-            Some(value) => Ok(Some(self.eval_related_value(value, related_id, period)?)),
-            None => Ok(Some(Decimal::ZERO)),
+            Some(value) => Ok(MemberPart::Valued(
+                self.eval_related_value(value, related_id, period)?,
+            )),
+            None => Ok(MemberPart::Selected),
         }
     }
 
@@ -1977,21 +2208,18 @@ impl<'a> Engine<'a> {
         value: &'a RelatedValueRef,
         entity_id: &str,
         period: &Period,
-    ) -> Eval<Decimal> {
-        let scalar = match value {
-            RelatedValueRef::Input(name) => self.lookup_input(name, entity_id, period)?,
+    ) -> Eval<ScalarValue> {
+        match value {
+            RelatedValueRef::Input(name) => Ok(self.lookup_input(name, entity_id, period)?),
             RelatedValueRef::Derived(name) => {
                 self.record_evaluated_dependency(CacheKey {
                     derived: name.clone(),
                     entity_id: entity_id.to_string(),
                     period: period.clone(),
                 });
-                self.scalar_rule(name, entity_id, period)?
+                self.scalar_rule(name, entity_id, period)
             }
-        };
-        Ok(scalar.as_decimal().ok_or_else(|| {
-            EvalError::TypeMismatch("related aggregation requires numeric values".to_string())
-        })?)
+        }
     }
 
     fn eval_decimal(
@@ -2809,6 +3037,16 @@ fn collect_scalar_trace_references(
             }
         }
         ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..

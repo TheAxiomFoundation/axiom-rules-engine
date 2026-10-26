@@ -395,6 +395,20 @@ impl Resolver<'_> {
                 related_slot,
                 where_clause,
                 ..
+            }
+            | ScalarExprSpec::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExprSpec::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
             } => {
                 let related_entity =
                     self.aggregate(relation, current_slot, related_slot, entity)?;

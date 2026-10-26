@@ -249,6 +249,38 @@ pub enum RelatedValueRef {
     Derived(String),
 }
 
+/// Which end of the related entities' values an
+/// [`ScalarExpr::ExtremeRelated`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extreme {
+    Min,
+    Max,
+}
+
+impl Extreme {
+    /// The formula builtin that lowers to this aggregate, used in diagnostics:
+    /// `min`/`max`, or `min_where`/`max_where` when a `where` clause selects
+    /// the members.
+    pub fn call_name(self, filtered: bool) -> &'static str {
+        match (self, filtered) {
+            (Self::Min, false) => "min",
+            (Self::Max, false) => "max",
+            (Self::Min, true) => "min_where",
+            (Self::Max, true) => "max_where",
+        }
+    }
+
+    /// Whether `candidate` replaces `best` as the extreme so far. Ties keep
+    /// `best`; callers that must not depend on member order break them
+    /// separately.
+    pub fn improves<T: PartialOrd>(self, candidate: &T, best: &T) -> bool {
+        match self {
+            Self::Min => candidate < best,
+            Self::Max => candidate > best,
+        }
+    }
+}
+
 /// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
 /// own period axis. Valid only under the lifetime execution surface
 /// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
@@ -345,6 +377,29 @@ pub enum ScalarExpr {
         where_clause: Option<Box<JudgmentExpr>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The least or greatest `value` over the related entities `where`
+    /// selects (`min(r.f)`, `max_where(r, f, p)`). Members resolve as for
+    /// [`ScalarExpr::SumRelated`]. Numbers compare numerically and dates
+    /// chronologically; with no selected member the evaluation fails rather
+    /// than inventing a value.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The `value` of the one related entity `where` selects (`only(r.f)`).
+    /// Members resolve as for [`ScalarExpr::SumRelated`]; zero members or
+    /// more than one fail the evaluation, so it never returns a default.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -848,6 +903,16 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             }
         }
         ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..

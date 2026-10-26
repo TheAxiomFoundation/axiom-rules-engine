@@ -1407,8 +1407,12 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
-        ScalarExprSpec::OnlyRelated { .. } => {}
-        ScalarExprSpec::CountRelated { .. } => {}
+        // Fast mode runs relation aggregations on the explain interpreter, so
+        // nothing inside one blocks it (a date result falls back at run time).
+        ScalarExprSpec::OnlyRelated { .. }
+        | ScalarExprSpec::CountRelated { .. }
+        | ScalarExprSpec::ExtremeRelated { .. }
+        | ScalarExprSpec::SingleRelated { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
@@ -1745,6 +1749,18 @@ fn collect_scalar_dependencies(
             relation,
             where_clause,
             ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
+            value,
+            relation,
+            where_clause,
+            ..
         } => {
             aggregated_relations.insert(relation.clone());
             if let RelatedValueRefSpec::Derived { name } = value {
@@ -1860,6 +1876,16 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..

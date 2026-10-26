@@ -285,6 +285,14 @@
       ],
       "type": "object"
     },
+    "ExtremeSpec": {
+      "description": "Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring\n[`crate::model::Extreme`].",
+      "enum": [
+        "min",
+        "max"
+      ],
+      "type": "string"
+    },
     "IndexedParameterSpec": {
       "properties": {
         "corpus_citation_path": {
@@ -1561,6 +1569,98 @@
             },
             "kind": {
               "const": "sum_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            },
+            "where": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgmentExprSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`min`/`max` (and `min_where`/`max_where`) over related entities. A\nnew variant: an engine without it refuses the artifact on load, and a\nprogram that does not use it serializes exactly as before.",
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "extreme": {
+              "$ref": "#/$defs/ExtremeSpec"
+            },
+            "kind": {
+              "const": "extreme_related",
+              "type": "string"
+            },
+            "related_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/RelatedValueRefSpec"
+            },
+            "where": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgmentExprSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "extreme",
+            "relation",
+            "current_slot",
+            "related_slot",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`only(relation.field)`: the value of the single related entity. Zero\nor several members fail the evaluation.",
+          "properties": {
+            "current_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "single_related",
               "type": "string"
             },
             "related_slot": {

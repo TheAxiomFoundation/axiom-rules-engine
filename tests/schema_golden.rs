@@ -106,6 +106,56 @@ fn artifact_schema_accepts_a_real_compiled_artifact() {
     );
 }
 
+#[test]
+fn artifact_schema_accepts_min_max_and_only_over_related_entities() {
+    // Every form of the related aggregates added for #232: a bare and a
+    // filtered extreme of each kind, and `only`.
+    let rule = |name: &str, formula: &str| {
+        format!(
+            "  - name: {name}\n    kind: derived\n    entity: Family\n    dtype: Decimal\n    period: Month\n    versions:\n      - effective_from: '2026-01-01'\n        formula: {formula}\n"
+        )
+    };
+    let source = format!(
+        "format: rulespec/v1\nrules:\n  - name: member_of_family\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Family]\n{}{}{}{}{}",
+        rule("youngest", "min(member_of_family.age)"),
+        rule("oldest", "max(member_of_family.age)"),
+        rule(
+            "youngest_eligible",
+            "min_where(member_of_family, age, eligible)"
+        ),
+        rule(
+            "oldest_eligible",
+            "max_where(member_of_family, age, eligible)"
+        ),
+        rule("only_age", "only(member_of_family.age)"),
+    );
+    let artifact = CompiledProgramArtifact::from_rulespec_str(&source).expect("module compiles");
+    let artifact_json = serde_json::to_value(&artifact).expect("artifact serializes to JSON");
+    let serialized = artifact_json.to_string();
+    for kind in [
+        r#""extreme":"min""#,
+        r#""extreme":"max""#,
+        r#""kind":"single_related""#,
+    ] {
+        assert!(serialized.contains(kind), "the artifact uses {kind}");
+    }
+    let schema_value = all_schemas()
+        .into_iter()
+        .find(|named| named.file_name == "compiled-artifact.v2.schema.json")
+        .expect("artifact schema is published")
+        .schema;
+    let validator = jsonschema::draft7::new(&schema_value).expect("artifact schema compiles");
+    let errors: Vec<String> = validator
+        .iter_errors(&artifact_json)
+        .map(|error| format!("{} at {}", error, error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the artifact did not validate against its schema:\n{}",
+        errors.join("\n")
+    );
+}
+
 #[cfg(feature = "unit-derivation")]
 #[test]
 fn experimental_unit_aggregation_schemas_accept_the_exact_cli_fixtures() {

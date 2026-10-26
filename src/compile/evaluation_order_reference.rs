@@ -353,6 +353,18 @@ fn collect_scalar_dependencies(
             relation,
             where_clause,
             ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
+            value,
+            relation,
+            where_clause,
+            ..
         } => {
             if let Some(relation_dependencies) = relation_dependencies.get(relation) {
                 dependencies.extend(relation_dependencies.iter().cloned());

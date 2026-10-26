@@ -54,6 +54,15 @@ fn capabilities_report_the_artifact_format_version() {
         serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION),
         "capabilities must report the version the loader enforces"
     );
+    let capabilities = value["capabilities"]
+        .as_array()
+        .expect("capabilities lists names");
+    for capability in ["relation_entity_typing", "related_min_max_only"] {
+        assert!(
+            capabilities.iter().any(|listed| listed == capability),
+            "capabilities lists {capability}: {capabilities:?}"
+        );
+    }
 }
 
 #[test]

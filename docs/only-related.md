@@ -30,7 +30,10 @@ RuleSpec lowering requires exactly one Boolean input declaration in the citing
 module, owned by the relation's related-slot entity. An unrelated import's
 same-named declaration is not authority for this input. Direction follows the
 existing declared-entity resolution; ambiguous same-kind direction is refused.
-Derived values and non-Boolean projections are not supported.
+Derived values and non-Boolean projections are not supported. `only(r.f)`
+([RuleSpec](rulespec.md)) covers them, and a `where` clause, under its own
+expression kind, `single_related`; on a Boolean input with no `where` clause it
+gives the same value and the same errors as `only_related`.
 
 The serialized scalar expression has a new `only_related` tag, a relation name,
 distinct binary `current_slot` and `related_slot` coordinates, and an input-valued

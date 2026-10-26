@@ -168,8 +168,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // A format-2 artifact whose executed relations
                         // declare no slot kinds loads in engines without
                         // this capability and is refused by engines with it
-                        // (`migrate artifact` types it).
-                        "capabilities": ["relation_entity_typing"],
+                        // (`migrate artifact` types it). An artifact that
+                        // uses `min`/`max`/`only` over related entities
+                        // (`extreme_related`, `single_related`) loads only in
+                        // engines listing `related_min_max_only`.
+                        "capabilities": ["relation_entity_typing", "related_min_max_only"],
                     }))?
                 );
                 return Ok(());

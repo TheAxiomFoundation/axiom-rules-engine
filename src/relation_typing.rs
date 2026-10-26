@@ -1041,6 +1041,21 @@ impl<'a> Checker<'a> {
                 related_slot,
                 value,
                 where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
             } => self.aggregation(
                 relation,
                 *current_slot,
@@ -1250,6 +1265,8 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
         ScalarExpr::OnlyRelated { .. } => {}
         ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
+        | ScalarExpr::ExtremeRelated { .. }
+        | ScalarExpr::SingleRelated { .. }
         | ScalarExpr::Literal(_)
         | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)

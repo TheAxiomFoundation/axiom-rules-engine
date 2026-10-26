@@ -334,6 +334,8 @@ rules:
 |---|---|---|
 | `max(a, b, ...)` | 1 or more | largest argument; `max()` is a compile error |
 | `min(a, b, ...)` | 1 or more | smallest argument; `min()` is a compile error |
+| `min(relation.field)` | 1 | least `field` over related entities; fails when there is none |
+| `max(relation.field)` | 1 | greatest `field` over related entities; fails when there is none |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
 | `days_between(from, to)` | 2 | day count between two dates |
@@ -344,6 +346,9 @@ rules:
 | `sum(relation.field)` | 1 | sum a field over related entities |
 | `count_where(relation, predicate_field)` | 2 | count related entities whose Boolean `predicate_field` holds |
 | `sum_where(relation, field, predicate_field)` | 3 | sum `field` over related entities whose `predicate_field` holds |
+| `min_where(relation, field, predicate_field)` | 3 | least `field` over related entities whose `predicate_field` holds; fails when there is none |
+| `max_where(relation, field, predicate_field)` | 3 | greatest `field` over related entities whose `predicate_field` holds; fails when there is none |
+| `only(relation.field)` | 1 | `field` of the one related entity; fails when there are none or several |
 | `sum_over_periods(x)` | 1 | sum `x` across the entity's own periods |
 | `max_over_periods(x)` | 1 | maximum of `x` across periods |
 | `count_over_periods(x)` | 1 | period count of `x` |
@@ -351,9 +356,15 @@ rules:
 
 The `_where` predicate names a Boolean input or a derived judgment computed
 on the related entity. The lowerer enforces the fixed arities (`ceil`,
-`floor`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`, `count_where`, `sum_where`, and
-the reductions); `max` and `min` accept any argument list unchecked,
-including an empty one. The `*_over_periods` reductions are meaningful only
+`floor`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`,
+`count_where`, `sum_where`, `min_where`, `max_where`, `only`, and the
+reductions); `max` and `min` take one or more arguments. They aggregate over
+related entities only when their single argument is a relation field access
+(`min(member_of_family.age)`); every other form is the scalar `min`/`max`.
+The related aggregates never default: an empty `min`/`max` and an `only` over
+zero or several entities fail the evaluation, so a rule whose law gives the
+empty case a value guards it (`if len(member_of_family) > 0:
+min(member_of_family.age) else: ...`). See [RuleSpec](rulespec.md#minimum-maximum-and-exactly-one-over-related-entities). The `*_over_periods` reductions are meaningful only
 under the lifetime execution surface; per-period execution paths reject
 them, and an unrecognized `*_over_periods` name fails lowering with an error
 that lists the supported reductions. Any other unknown function name fails
@@ -384,6 +395,25 @@ rules:
     versions:
       - effective_from: '2026-01-01'
         formula: sum_where(member_of_household, earned_income, is_countable_member)
+  - name: youngest_member_age
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: |-
+          if len(member_of_household) > 0: min(member_of_household.age)
+          else: 0
+  - name: household_rent_of_member
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    unit: USD
+    versions:
+      - effective_from: '2026-01-01'
+        formula: only(member_of_household.rent)
 ```
 
 Relation entity typing is mandatory. Every relation an aggregate or
@@ -467,8 +497,9 @@ JSON Schemas give exact field shapes.
 Scalar kinds: `literal`, `input`, `input_for_year`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
 `floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
-`date_add_years`, `days_between`, `only_related`,
-`count_related`, `sum_related`, `if`, `no_match`, `over_periods`.
+`date_add_years`, `days_between`, `only_related`, `single_related`,
+`count_related`, `sum_related`, `extreme_related`, `if`, `no_match`,
+`over_periods`.
 
 Judgment kinds: `comparison` (with `op` one of `lt`, `lte`, `gt`, `gte`,
 `eq`, `ne`), `derived`, `relation_member`, `and`, `or`, `not`,
