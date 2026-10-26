@@ -17,6 +17,8 @@ examples cannot drift from the grammar they document.
 
 A module is one YAML document: a `format` marker, an optional `module` block
 (source verification, interpretations, summary — see
+[rulespec.md](rulespec.md)), an optional `inputs` block (inert except an
+input's `election`; see "Input declarations and elections" in
 [rulespec.md](rulespec.md)), and a `rules` list.
 
 ```yaml

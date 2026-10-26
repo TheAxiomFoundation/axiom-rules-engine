@@ -773,6 +773,47 @@ explain-mode traces, a rounded node reports the applied `rounding` mode and,
 when rounding changed the value, the `pre_rounding_value`, so the rounding step
 is auditable.
 
+## Input declarations and elections
+
+A module's top-level `inputs:` block describes the inputs its rules read, as
+a list of entries with `name` or as a mapping from name to entry. The engine
+ignores every key of an entry except `election`, and a block without an
+`election` anywhere changes nothing about how the module compiles. (A module
+that uses `only_related` or `input_for_year` also needs the block to declare
+those inputs; see [only-related.md](only-related.md) and
+[rulespec-format.md](rulespec-format.md).)
+
+`election` marks an input as a choice the law gives a named actor, rather
+than a fact:
+
+```yaml
+inputs:
+  - name: is_boarder
+    entity: Person
+    dtype: Boolean
+    period: Month
+  - name: provider_requests_boarder_inclusion
+    entity: Person
+    dtype: Boolean
+    period: Month
+    election:
+      actor: Household
+      provision: us/regulation/7/273/1/b/3
+```
+
+`actor` is the entity kind that makes the choice, an UpperCamelCase label
+that need not be a kind the program evaluates on. `provision` is the corpus
+citation path of the provision that gives it. `election` takes exactly those
+two keys. The entry must have a name, and the name must be an input that a
+rule or derived-relation predicate of the same module reads. The engine
+evaluates the value it is given and never defaults an election, so reading
+an election with `input_or_else` is a compile error. Two modules that read
+one input slot may both declare it an election only with the same actor and
+provision. The compiled artifact reports each input's election, or null for
+a fact, in `program.interface` ([artifact-format.md](artifact-format.md)), so
+a simulator knows which inputs it may branch over; it must not optimize over
+a fact.
+
 ## Source pinning and provenance
 
 The `module:` block can carry inert metadata that grounds the module in source

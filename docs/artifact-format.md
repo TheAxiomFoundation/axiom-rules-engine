@@ -179,7 +179,15 @@ commits. The next cut should be 0.3.0.
       "entities": ["Household"],
       "dtype": "integer", "dtype_basis": "usage",
       "default": null,
-      "values": [1, 2, 3, 4, 5, 6, 7, 8], "values_basis": "parameter_index" }
+      "values": [1, 2, 3, 4, 5, 6, 7, 8], "values_basis": "parameter_index",
+      "election": null },
+    { "name": "provider_requests_boarder_inclusion",
+      "legal_id": "us:regulations/7/273/1#input.provider_requests_boarder_inclusion",
+      "entities": ["Person"],
+      "dtype": "bool", "dtype_basis": "usage",
+      "default": null, "values": null, "values_basis": null,
+      "election": { "actor": "Household",
+                    "provision": "us/regulation/7/273/1/b/3" } }
   ],
   "relations": [
     { "name": "us:statutes/7/2012/j#relation.member_of_household",
@@ -322,6 +330,53 @@ in a period whose table version lacks the key. Values
 compare as numbers, so a decimal `1.0` is the key `1`. An equality
 comparison does not close a domain, and neither does a mixed use.
 
+**`election`** says the input is a choice the law gives a named actor:
+`actor` is the entity kind that makes it and `provision` the corpus citation
+path of the provision that gives it. It is null for a fact. The engine
+evaluates the value it is given; choosing among values belongs to the
+simulation layer, which may branch over an election and must not optimize
+over a fact. The engine never defaults an election, so a slot with an
+election and any `input_or_else` read site is a compile error, and its
+`default` is always null. A slot is an election when a module that reads it
+declares it one (`program.input_declarations`, below); two declarations for
+one slot that disagree on actor or provision are a compile error. Like the
+rest of the block, `election` is derived from the program alone, so the
+loader's re-derivation checks it.
+
+#### Declaring an election in RuleSpec
+
+A module's top-level `inputs:` block declares its inputs, as a list of
+entries with `name` or as a mapping from name to entry. Every entry key
+except `election` is inert and unvalidated, as before this format: the
+corpus carries `entity`, `dtype`, `period`, `description` and `unit` there,
+with dtypes such as `Count` that are not engine vocabulary, and a block with
+no `election` anywhere changes nothing, whatever its shape. `election` is
+strict: `{actor, provision}` and no other key, `actor` an UpperCamelCase kind
+label (it need not be a kind the program evaluates on), `provision` a
+canonical corpus citation path. The entry must have a name, and the name
+must be an input slot that a rule or derived-relation predicate of the same
+module reads; an imported module is checked against its own rules. Each
+failure is a load error naming the module and the entry.
+
+```yaml
+inputs:
+  - name: provider_requests_boarder_inclusion
+    entity: Person
+    dtype: Boolean
+    period: Month
+    election:
+      actor: Household
+      provision: us/regulation/7/273/1/b/3
+```
+
+Lowering carries the declarations in `ProgramSpec.input_declarations`, its
+last field, omitted when empty: a list sorted by `input`, each
+`{input, election}`, where `input` is the declaring module's request name,
+`<module>#input.<slot>`, or the bare slot for an originless composition
+root. The interface derivation refuses declarations that are not in that
+form: unsorted or repeated, naming an input the program does not read, or
+malformed.
+
 ### Relations
 
 One entry per `program.relations` entry, with its name, arity and effective
@@ -348,11 +403,16 @@ refusal of supplied tuples for a derived relation, ratified in
 
 ## In Rust
 
-`ProgramSpec` does not change, so a raw `ExecutionRequest.program` and the
-`execution-request.v1` schema do not change either. `CompiledProgramArtifact`
-gains `interface: Option<ProgramInterface>`, `engine_build` and
-`source_closure` beside `program`. Its serialization goes through a wire
-struct that repeats `ProgramSpec`'s fields in order and appends `interface`,
+`ProgramSpec` gains one field, `input_declarations`, last and omitted when
+empty, so a raw `ExecutionRequest.program` may carry it and the
+`execution-request.v1` schema gains it. This is deliberate and additive:
+an election is program content, compiled from the module source, and the
+loader derives the interface from the program alone. Execution never reads
+the field. A program without elections serializes as before.
+`CompiledProgramArtifact` gains `interface: Option<ProgramInterface>`,
+`engine_build` and `source_closure` beside `program`. Its serialization goes
+through a wire struct that repeats `ProgramSpec`'s fields in order and
+appends `interface`,
 so the block sits at `program.interface` on the wire. The wire struct does
 not use `#[serde(flatten)]`: flattening buffers values, and the buffered form
 cannot read the integer keys of a parameter table. A test pins that the wire
@@ -380,8 +440,8 @@ in the emitted schema.
 
 The format-2 dialect tolerances move out of the default loader into
 `from_legacy_format_2_json_str` / `_file`. That loader accepts format 2 only
-and refuses a format-2 payload that carries `interface`, `engine_build` or
-`source_closure`. What it returns is still format 2:
+and refuses a format-2 payload that carries `interface`,
+`input_declarations`, `engine_build` or `source_closure`. What it returns is still format 2:
 `artifact_format_version` is 2 and `interface` is `None`. The engine never
 derives an interface for it, so nothing downstream can mistake it for a
 format-3 artifact. Three separate statements hold for its bytes:
@@ -487,6 +547,16 @@ transcribe what the evaluators enforce. Golden fixtures pin it.
    whose phase-two `program` or `metadata` differs is refused; the artifact
    the previous engine wrote loads through the legacy path with its source
    digest unchanged.
+10. **Elections are declared, never defaulted.** Both forms of the `inputs:`
+    block reach the interface and compile to the same artifact; any block
+    in which no entry carries `election` compiles to the artifact the module
+    compiles to without it (property test); each refusal names its module
+    and entry; an imported module's elections are checked against its own
+    rules; disagreeing declarations of one slot, an election read with
+    `input_or_else`, and tampering with an `election` or with
+    `program.input_declarations` are refused; explain and fast give
+    byte-identical responses with and without the declarations; and the
+    module schema refuses exactly the election shapes the loader refuses.
 
 Corpus impact is reported as: modules compiled by main, modules compiled by
 the branch (the two sets must be equal), modules whose artifact gains the
@@ -497,15 +567,16 @@ many have a dtype, a default and a closed domain.
 
 `src/compile.rs`, new `src/interface.rs`, new `src/digest.rs` (the SHA-256
 routine moves out of `unit_derivation`), new `build.rs`, `Cargo.toml`
-(`include`), `src/rulespec.rs` (module hashes into the lowering outcome),
+(`include`), `src/rulespec.rs` (module hashes into the lowering outcome;
+the `inputs:` block's elections), `src/spec.rs` (`ProgramSpec.input_declarations`),
 `src/schema.rs` (format 3 generated; `compiled-artifact.v2.schema.json`
 frozen as an archive and added to the crate `include` list), `src/main.rs`,
 `src/migrate.rs`, `src/unit_derivation` (embedded artifacts and the
 phase-two comparison), `python/`, `python-ext/`, `wasm/`, the three RuleSpec
 docs, `README.md` and `DECISIONS.md`.
 
-Not touched: `src/spec.rs`'s `ProgramSpec`, the evaluators, `PROGRESS.md`,
-workflow pins, CODEOWNERS, `release/v0.1`, tags.
+Not touched: the evaluators, `PROGRESS.md`, workflow pins, CODEOWNERS,
+`release/v0.1`, tags.
 
 ## Deferred
 
@@ -563,3 +634,14 @@ matching the catalog), that parity be compared within each mode (invariant
 "The four identities"). Its suggestion to stop freezing the derivation is not
 taken: the loader's comparison needs one derivation per format, so the note
 keeps the freeze and narrows what is derived.
+
+### Added after review: elections
+
+Max added a requirement on #155 on 2026-10-10, after the review, and ruled
+on #134 (d1265) the same day: the interface marks which inputs are
+elections and who makes each one, so the simulation layer can tell which
+inputs it may branch over. That is `election` under "Inputs" and the
+RuleSpec `inputs:` block. It reverses finding 11 for one field:
+`ProgramSpec` gains `input_declarations`, because an election is program
+content and the interface is derived from the program alone. Execution
+never reads it, and a program without elections serializes as before.

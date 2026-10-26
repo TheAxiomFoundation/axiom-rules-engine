@@ -2,7 +2,7 @@
 //! reads as an election, `{actor, provision}`. The program carries the
 //! declaration in `input_declarations`, and the interface reports it on the
 //! input's slot; every other input is a fact. Every other key of the block
-//! stays inert.
+//! stays inert. Invariant 10 of `docs/artifact-format.md`.
 
 use std::collections::BTreeMap;
 
