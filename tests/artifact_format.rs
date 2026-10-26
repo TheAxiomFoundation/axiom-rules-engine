@@ -570,7 +570,7 @@ fn legacy_reloads() -> Vec<(String, String, String)> {
         ));
         cases.push((name, read(&input), reloaded));
     }
-    assert_eq!(cases.len(), 26);
+    assert_eq!(cases.len(), 28);
     cases
 }
 

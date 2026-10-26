@@ -828,6 +828,14 @@ fn interpretations_roundtrip_and_leave_lowering_compilation_and_execution_byte_i
         let mut annotated_compiled = artifact;
         baseline_compiled.program.module = None;
         annotated_compiled.program.module = None;
+        // The source closure digests the module text, which the annotation
+        // changes; it is carried metadata too.
+        assert_ne!(
+            baseline_compiled.source_closure,
+            annotated_compiled.source_closure
+        );
+        baseline_compiled.source_closure = None;
+        annotated_compiled.source_closure = None;
         assert_eq!(
             serde_json::to_vec(&baseline_compiled).unwrap(),
             serde_json::to_vec(&annotated_compiled).unwrap(),
