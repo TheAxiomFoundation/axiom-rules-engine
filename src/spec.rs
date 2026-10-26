@@ -18,6 +18,8 @@ use crate::model::{
 pub enum SpecError {
     #[error("invalid selected-year input: {0}")]
     SelectedYearInput(String),
+    #[error("input declaration `{input}`: {message}")]
+    InputDeclaration { input: String, message: String },
     #[error("only_related requires a Boolean input reference")]
     InvalidOnlyRelatedValue,
     #[error("only_related requires distinct binary relation slots 0 and 1")]
@@ -119,6 +121,57 @@ pub struct ProgramSpec {
     pub parameters: Vec<IndexedParameterSpec>,
     #[serde(default)]
     pub derived: Vec<DerivedSpec>,
+    /// What the program's modules declare about their inputs, sorted by
+    /// `input`: today, which inputs are elections. Carried for the artifact
+    /// interface (`docs/artifact-format.md`); execution never reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_declarations: Vec<InputDeclarationSpec>,
+}
+
+/// A module's declaration about one input it reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputDeclarationSpec {
+    /// The declaring module's request name for the input:
+    /// `<module>#input.<slot>`, or the bare slot for an originless
+    /// composition root.
+    pub input: String,
+    pub election: InputElection,
+}
+
+/// A choice the law gives a named actor: the input records which way the
+/// actor chose. The engine evaluates the value it is given and never
+/// defaults one; choosing among values belongs to the simulation layer. An
+/// input without an election is a fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputElection {
+    /// The entity kind that makes the choice, an UpperCamelCase label. The
+    /// program need not evaluate on it.
+    pub actor: String,
+    /// The corpus citation path of the provision that gives the choice.
+    pub provision: String,
+}
+
+impl InputElection {
+    /// Why the election is malformed, or `None`.
+    pub(crate) fn shape_error(&self) -> Option<String> {
+        if !crate::rulespec::is_relation_entity_kind_label(&self.actor) {
+            return Some(format!(
+                "election actor `{}` is not an UpperCamelCase entity kind",
+                self.actor
+            ));
+        }
+        if !crate::rulespec::is_canonical_corpus_citation_path(&self.provision) {
+            return Some(format!(
+                "election provision `{}` is not a canonical corpus citation path",
+                self.provision
+            ));
+        }
+        None
+    }
 }
 
 impl ProgramSpec {

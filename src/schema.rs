@@ -690,6 +690,7 @@ pub fn rulespec_module_schema() -> Value {
                 }
             })),
             "module": nullable_object(module_metadata_schema()),
+            "inputs": input_declarations_schema(),
             "units": nullable_array(unit_spec_schema()),
             // Top-level `relations:` deserializes but is rejected at lowering
             // (`TopLevelRelationsUnsupported`). It is included so that files
@@ -715,6 +716,48 @@ pub fn rulespec_module_schema() -> Value {
          relations, and source-relation provenance edges).",
     );
     schema
+}
+
+/// `inputs:` block. The loader keeps it as a raw YAML value: every key but
+/// `election` is inert and unvalidated, so the block may be any value and
+/// its entries any shape until one carries an `election`. An entry is a list
+/// item with `name`, or a mapping value keyed by the name. That the name is
+/// an input slot the module reads requires the engine's load-time
+/// validation.
+fn input_declarations_schema() -> Value {
+    let election = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actor", "provision"],
+        "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+        "properties": {
+            "actor": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Za-z0-9]*$",
+                "description": "The entity kind that makes the choice."
+            },
+            "provision": {
+                "type": "string",
+                "pattern": CORPUS_CITATION_PATH_PATTERN,
+                "description": "The corpus citation path of the provision that gives the choice."
+            }
+        }
+    });
+    let carries_election = json!({ "type": "object", "required": ["election"] });
+    json!({
+        "description": "Declarations about the module's inputs. Inert except `election`: a list of entries with `name`, or a mapping from name to entry.",
+        "items": {
+            "if": carries_election,
+            "then": {
+                "required": ["name"],
+                "properties": { "name": { "type": "string" }, "election": election }
+            }
+        },
+        "additionalProperties": {
+            "if": carries_election,
+            "then": { "properties": { "election": election } }
+        }
+    })
 }
 
 /// `module:` block — [`crate::rulespec::ModuleMetadata`]. Every field is

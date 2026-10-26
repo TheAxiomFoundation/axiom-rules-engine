@@ -384,7 +384,8 @@ fn roster_and_relations_describe_a_filtered_entity() {
 
 /// Every interface object refuses an unknown key and a missing one, a
 /// nullable key included, when deserialized: the stage-3 artifact reads its
-/// embedded artifacts through serde before the loader sees them.
+/// embedded artifacts through serde before the loader sees them. The program
+/// declares one election so the `election` object is covered too.
 #[test]
 fn interface_objects_have_exactly_their_keys() {
     let interface = derive(json!({
@@ -395,8 +396,17 @@ fn interface_objects_have_exactly_their_keys() {
                 "entity": "Unit", "predicate": cmp(input("age"), "gt", int(1))
             }}
         ],
-        "derived": [scalar_rule("total", "Household", add(vec![input("x"), int(1)]))]
+        "derived": [scalar_rule("total", "Household", add(vec![input("x"), int(1)]))],
+        "input_declarations": [{"input": "x", "election": {
+            "actor": "Household", "provision": "us/regulation/7/273/1/b/3"
+        }}]
     }));
+    assert!(
+        interface
+            .inputs
+            .iter()
+            .any(|input| input.election.is_some())
+    );
     let value = serde_json::to_value(&interface).unwrap();
     let round_trip: ProgramInterface = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(round_trip, interface);

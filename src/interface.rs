@@ -16,7 +16,7 @@ use crate::model::{
     SCALAR_ENTITY, ScalarExpr, ScalarValue,
 };
 use crate::relation_typing;
-use crate::spec::{ProgramSpec, ScalarValueSpec, SpecError};
+use crate::spec::{InputDeclarationSpec, InputElection, ProgramSpec, ScalarValueSpec, SpecError};
 
 /// `program.interface`. Every list is sorted except a relation's
 /// `slot_entities`, which keeps tuple order.
@@ -89,6 +89,11 @@ pub struct InterfaceInput {
     pub values: Option<Vec<i64>>,
     #[serde(deserialize_with = "required_nullable")]
     pub values_basis: Option<ValuesBasis>,
+    /// Who chooses the value and under which provision, when a module
+    /// declares the input an election; null for a fact, which a simulator
+    /// must not optimize over.
+    #[serde(deserialize_with = "required_nullable")]
+    pub election: Option<InputElection>,
 }
 
 /// The narrowest type every read site of a slot demands.
@@ -303,10 +308,16 @@ impl<'de> Deserialize<'de> for RelationProvenance {
 /// Derive the interface of `program`. Deterministic: the same program always
 /// yields the same interface.
 pub fn derive_interface(program: &ProgramSpec) -> Result<ProgramInterface, SpecError> {
-    Ok(derive_from_model(&program.to_program()?))
+    derive_from_model(&program.to_program()?, &program.input_declarations)
 }
 
-pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
+/// Fails only on `declarations`: see [`slot_elections`], and an election
+/// some read site defaults with `input_or_else`, since the engine never
+/// defaults an election.
+pub(crate) fn derive_from_model(
+    program: &Program,
+    declarations: &[InputDeclarationSpec],
+) -> Result<ProgramInterface, SpecError> {
     let mut collector = Collector {
         program,
         slot_kinds: relation_typing::EffectiveSlotEntities::new(program),
@@ -380,6 +391,7 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
     };
 
     let catalog = program.input_catalog();
+    let elections = slot_elections(&catalog, declarations)?;
     let mut sites_by_slot = BTreeMap::<&str, Vec<&ReadSite>>::new();
     for site in &collector.sites {
         sites_by_slot.entry(&site.slot).or_default().push(site);
@@ -387,13 +399,24 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
     let inputs = sites_by_slot
         .into_iter()
         .map(|(slot, sites)| {
+            let election = elections.get(slot);
+            if let Some((input, _)) = election
+                && sites.iter().any(|site| site.default.is_some())
+            {
+                return Err(SpecError::InputDeclaration {
+                    input: (*input).to_string(),
+                    message: format!(
+                        "`{slot}` is an election, and `input_or_else` reads it with a default; the engine never defaults an election"
+                    ),
+                });
+            }
             let entities = sites
                 .iter()
                 .flat_map(|site| flow_kinds(&site.flow))
                 .collect::<BTreeSet<_>>();
             let dtype = slot_dtype(&sites);
             let values = slot_values(program, &sites);
-            InterfaceInput {
+            Ok(InterfaceInput {
                 name: slot.to_string(),
                 legal_id: catalog
                     .get(slot)
@@ -407,9 +430,10 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
                 default: slot_default(&sites),
                 values_basis: values.as_ref().map(|_| ValuesBasis::ParameterIndex),
                 values,
-            }
+                election: election.map(|(_, election)| (*election).clone()),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let relations = relation_names
         .iter()
@@ -444,11 +468,71 @@ pub(crate) fn derive_from_model(program: &Program) -> ProgramInterface {
         .collect::<Vec<_>>();
 
     let entities = entity_roster(program, &collector.slot_kinds, &inputs);
-    ProgramInterface {
+    Ok(ProgramInterface {
         entities,
         inputs,
         relations,
+    })
+}
+
+/// Each declared slot's election, with the first declaration naming it.
+/// The declarations must be sorted by `input`, each input once, each naming
+/// a request name in the program's input catalog with a well-formed
+/// election; the declarations of one slot, from different modules, must
+/// agree.
+fn slot_elections<'a>(
+    catalog: &'a BTreeMap<String, Vec<String>>,
+    declarations: &'a [InputDeclarationSpec],
+) -> Result<BTreeMap<&'a str, (&'a str, &'a InputElection)>, SpecError> {
+    let fail = |declaration: &InputDeclarationSpec, message: String| SpecError::InputDeclaration {
+        input: declaration.input.clone(),
+        message,
+    };
+    let slot_of = catalog
+        .iter()
+        .flat_map(|(slot, request_names)| {
+            request_names
+                .iter()
+                .map(move |request_name| (request_name.as_str(), slot.as_str()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut elections = BTreeMap::<&str, (&str, &InputElection)>::new();
+    for (index, declaration) in declarations.iter().enumerate() {
+        if index > 0 && declarations[index - 1].input >= declaration.input {
+            return Err(fail(
+                declaration,
+                "input declarations must be sorted by `input`, each input once".to_string(),
+            ));
+        }
+        if let Some(message) = declaration.election.shape_error() {
+            return Err(fail(declaration, message));
+        }
+        let Some(slot) = slot_of.get(declaration.input.as_str()) else {
+            return Err(fail(
+                declaration,
+                "names no input the program reads".to_string(),
+            ));
+        };
+        match elections.get(slot) {
+            None => {
+                elections.insert(slot, (&declaration.input, &declaration.election));
+            }
+            Some((_, election)) if **election == declaration.election => {}
+            Some((first, election)) => {
+                return Err(fail(
+                    declaration,
+                    format!(
+                        "its election (actor `{}`, provision `{}`) disagrees with `{first}`'s (actor `{}`, provision `{}`) for the slot `{slot}`",
+                        declaration.election.actor,
+                        declaration.election.provision,
+                        election.actor,
+                        election.provision
+                    ),
+                ));
+            }
+        }
     }
+    Ok(elections)
 }
 
 /// The kind of the id an expression is evaluated on: every kind its

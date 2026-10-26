@@ -1,0 +1,37 @@
+format: rulespec/v1
+inputs:
+  - name: purchases_and_prepares_with_household
+    entity: Person
+    dtype: Boolean
+    period: Month
+    description: Customarily purchases food and prepares meals with the household.
+  - name: provider_requests_boarder_inclusion
+    entity: Person
+    dtype: Boolean
+    period: Month
+    description: The household providing board asks that this boarder be a member.
+    election:
+      actor: Household
+      provision: us/regulation/7/273/1/b/3
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: in_snap_household
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: purchases_and_prepares_with_household and (not is_boarder or provider_requests_boarder_inclusion)
+  - name: snap_household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: count_where(member_of_household, in_snap_household)

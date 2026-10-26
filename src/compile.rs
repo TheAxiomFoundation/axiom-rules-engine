@@ -491,6 +491,10 @@ struct ArtifactProgramWire {
     parameters: Vec<IndexedParameterSpec>,
     #[serde(default)]
     derived: Vec<DerivedSpec>,
+    /// As `ProgramSpec`'s field of the same name, last of its fields so the
+    /// two serialize in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_declarations: Vec<crate::spec::InputDeclarationSpec>,
     /// The program's entity roster, input slots and relations. Execution
     /// never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +526,8 @@ struct ArtifactProgramWireRef<'a> {
     relations: &'a [RelationSpec],
     parameters: &'a [IndexedParameterSpec],
     derived: &'a [DerivedSpec],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    input_declarations: &'a [crate::spec::InputDeclarationSpec],
     #[serde(skip_serializing_if = "Option::is_none")]
     interface: Option<&'a ProgramInterface>,
 }
@@ -539,6 +545,7 @@ impl<'a> ArtifactProgramWireRef<'a> {
             relations: &program.relations,
             parameters: &program.parameters,
             derived: &program.derived,
+            input_declarations: &program.input_declarations,
             interface,
         }
     }
@@ -573,6 +580,7 @@ impl<'de> Deserialize<'de> for CompiledProgramArtifact {
                 relations: wire.program.relations,
                 parameters: wire.program.parameters,
                 derived: wire.program.derived,
+                input_declarations: wire.program.input_declarations,
             },
             interface: wire.program.interface,
             metadata: wire.metadata,
@@ -717,7 +725,7 @@ impl CompiledProgramArtifact {
                 report,
             }
         })?;
-        let interface = crate::interface::derive_from_model(&model);
+        let interface = crate::interface::derive_from_model(&model, &program.input_declarations)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -774,7 +782,8 @@ impl CompiledProgramArtifact {
         })?;
         // Compared as JSON so a value that deserializes to the same thing
         // but is written differently is refused too.
-        let interface = crate::interface::derive_from_model(&model);
+        let interface =
+            crate::interface::derive_from_model(&model, &self.program.input_declarations)?;
         let derived = serde_json::to_value(&interface).map_err(CompileError::SerializeArtifact)?;
         if derived != *stored_interface {
             return Err(invalid_artifact_contract(
@@ -1046,7 +1055,7 @@ impl CompiledProgramArtifact {
     /// rule set (kept, with a `stale_fast_path_metadata` diagnostic), and the
     /// relation typing gate with its pointer to `migrate artifact`. It
     /// refuses a format-2 payload carrying `program.interface`,
-    /// `engine_build` or `source_closure`.
+    /// `program.input_declarations`, `engine_build` or `source_closure`.
     ///
     /// The result is still format 2: `artifact_format_version` is 2 and
     /// `interface`, `engine_build` and `source_closure` are `None`, so nothing
@@ -1435,10 +1444,14 @@ fn reject_format_3_additions(value: &serde_json::Value, path: &str) -> Result<()
         .into_iter()
         .find(|key| value.get(key).is_some())
         .or_else(|| {
-            value
-                .get("program")
-                .and_then(|program| program.get("interface"))
-                .map(|_| "program.interface")
+            let program = value.get("program")?;
+            [
+                ("interface", "program.interface"),
+                ("input_declarations", "program.input_declarations"),
+            ]
+            .into_iter()
+            .find(|(key, _)| program.get(key).is_some())
+            .map(|(_, location)| location)
         });
     match carried {
         Some(key) => Err(invalid_artifact_contract(

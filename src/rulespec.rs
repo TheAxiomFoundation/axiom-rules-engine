@@ -12,9 +12,9 @@ use thiserror::Error;
 use crate::source::ModuleSource;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec,
-    ScalarValueSpec, UnitSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, InputDeclarationSpec, InputElection,
+    JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
+    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
 };
 
 /// The only content roots admitted directly below a jurisdiction directory.
@@ -123,6 +123,14 @@ pub enum RuleSpecError {
         input: String,
         message: String,
     },
+    #[error("RuleSpec module `{module}` input `{input}`: {message}")]
+    InputElection {
+        module: String,
+        input: String,
+        message: String,
+    },
+    #[error("RuleSpec module `{module}` `inputs` entry {index} carries an `election` but no name")]
+    UnnamedInputElection { module: String, index: usize },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -517,7 +525,8 @@ fn text_sha256(text: &str) -> String {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
-    /// Retained for validation of only_related; other operators keep their existing input contract.
+    /// Retained for validation of only_related and selected-year reads, and
+    /// for the elections it declares; every other key stays inert.
     #[serde(default)]
     pub inputs: serde_yaml::Value,
     #[serde(skip)]
@@ -1415,7 +1424,66 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
     })
 }
 
-fn is_relation_entity_kind_label(value: &str) -> bool {
+/// `(origin, slot, election)`: an election some module declares.
+type DeclaredElection<'a> = (Option<&'a str>, String, InputElection);
+
+/// The elections one module's `inputs:` block declares. The block is a list of entries with `name`, or
+/// a mapping from name to entry. Every key but `election` stays inert and
+/// unvalidated: a block with no `election` anywhere yields nothing, whatever
+/// its shape.
+fn declared_elections<'a>(
+    origin: Option<&'a str>,
+    block: &serde_yaml::Value,
+) -> Result<Vec<DeclaredElection<'a>>, RuleSpecError> {
+    let entries: Vec<(Option<&serde_yaml::Value>, &serde_yaml::Value)> = match block {
+        serde_yaml::Value::Sequence(items) => {
+            items.iter().map(|item| (item.get("name"), item)).collect()
+        }
+        serde_yaml::Value::Mapping(entries) => entries
+            .iter()
+            .map(|(name, entry)| (Some(name), entry))
+            .collect(),
+        _ => return Ok(Vec::new()),
+    };
+    let mut elections = Vec::new();
+    for (index, (name, entry)) in entries.into_iter().enumerate() {
+        let Some(election) = entry.get("election") else {
+            continue;
+        };
+        let Some(slot) = name.and_then(serde_yaml::Value::as_str) else {
+            return Err(RuleSpecError::UnnamedInputElection {
+                module: module_label(origin),
+                index,
+            });
+        };
+        let fail = |message: String| RuleSpecError::InputElection {
+            module: module_label(origin),
+            input: slot.to_string(),
+            message,
+        };
+        let election = serde_yaml::from_value::<InputElection>(election.clone())
+            .map_err(|error| fail(format!("invalid election: {error}")))?;
+        if let Some(message) = election.shape_error() {
+            return Err(fail(message));
+        }
+        elections.push((origin, slot.to_string(), election));
+    }
+    Ok(elections)
+}
+
+/// A module's request name for one of its input slots.
+fn request_name(origin: Option<&str>, slot: &str) -> String {
+    origin.map_or_else(
+        || slot.to_string(),
+        |origin| format!("{origin}#input.{slot}"),
+    )
+}
+
+fn module_label(origin: Option<&str>) -> String {
+    origin.unwrap_or("<root>").to_string()
+}
+
+pub(crate) fn is_relation_entity_kind_label(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_uppercase())
         && bytes.all(|byte| byte.is_ascii_alphanumeric())
@@ -2528,6 +2596,62 @@ impl RulesDocument {
         }
     }
 
+    /// The elections every module's `inputs:` block declares, sorted by
+    /// request name. Each is checked against the inputs its own module's
+    /// rules and derived-relation predicates read: an atomic module's request
+    /// names are its own `<module>#input.<slot>`, so the catalog says which
+    /// module reads what.
+    fn input_declarations(
+        &self,
+        program: &ProgramSpec,
+    ) -> Result<Vec<InputDeclarationSpec>, RuleSpecError> {
+        let mut declared = Vec::new();
+        for (origin, block) in std::iter::once((self.input_origin.as_deref(), &self.inputs)).chain(
+            self.imported_input_declarations
+                .iter()
+                .map(|(origin, block)| (origin.as_deref(), block)),
+        ) {
+            declared.extend(declared_elections(origin, block)?);
+        }
+        if declared.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A program that does not build fails compilation with its own
+        // error, before any interface is derived from these declarations.
+        let catalog = program.to_program().ok().map(|model| model.input_catalog());
+        let mut by_input = BTreeMap::<String, InputElection>::new();
+        for (origin, slot, election) in declared {
+            let fail = |message: String| RuleSpecError::InputElection {
+                module: module_label(origin),
+                input: slot.clone(),
+                message,
+            };
+            let input = request_name(origin, &slot);
+            if catalog.as_ref().is_some_and(|catalog| {
+                !catalog
+                    .get(&slot)
+                    .is_some_and(|request_names| request_names.contains(&input))
+            }) {
+                return Err(fail(
+                    "carries an election, but no rule or derived-relation predicate of this module reads an input of that name".to_string(),
+                ));
+            }
+            match by_input.get(&input) {
+                None => {
+                    by_input.insert(input, election);
+                }
+                Some(previous) if *previous == election => {}
+                Some(_) => {
+                    return Err(fail("is declared with two different elections".to_string()));
+                }
+            }
+        }
+        Ok(by_input
+            .into_iter()
+            .map(|(input, election)| InputDeclarationSpec { input, election })
+            .collect())
+    }
+
     fn without_imports(mut self) -> Self {
         self.imports.clear();
         self
@@ -2718,6 +2842,7 @@ impl RulesDocument {
             &self.imported_input_declarations,
         )
         .map_err(RuleSpecError::SelectedYearInput)?;
+        program.input_declarations = self.input_declarations(&program)?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();

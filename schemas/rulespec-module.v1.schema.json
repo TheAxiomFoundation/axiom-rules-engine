@@ -38,6 +38,81 @@
         "null"
       ]
     },
+    "inputs": {
+      "additionalProperties": {
+        "if": {
+          "required": [
+            "election"
+          ],
+          "type": "object"
+        },
+        "then": {
+          "properties": {
+            "election": {
+              "additionalProperties": false,
+              "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+              "properties": {
+                "actor": {
+                  "description": "The entity kind that makes the choice.",
+                  "pattern": "^[A-Z][A-Za-z0-9]*$",
+                  "type": "string"
+                },
+                "provision": {
+                  "description": "The corpus citation path of the provision that gives the choice.",
+                  "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "actor",
+                "provision"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      },
+      "description": "Declarations about the module's inputs. Inert except `election`: a list of entries with `name`, or a mapping from name to entry.",
+      "items": {
+        "if": {
+          "required": [
+            "election"
+          ],
+          "type": "object"
+        },
+        "then": {
+          "properties": {
+            "election": {
+              "additionalProperties": false,
+              "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+              "properties": {
+                "actor": {
+                  "description": "The entity kind that makes the choice.",
+                  "pattern": "^[A-Z][A-Za-z0-9]*$",
+                  "type": "string"
+                },
+                "provision": {
+                  "description": "The corpus citation path of the provision that gives the choice.",
+                  "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "actor",
+                "provision"
+              ],
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    },
     "module": {
       "additionalProperties": true,
       "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
