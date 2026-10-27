@@ -95,7 +95,7 @@ def _format_3(**interface):
         },
         "metadata": {
             "evaluation_order": [],
-            "fast_path": {"strategy": "generic_bulk", "compatible": True},
+            "fast_path": {"strategy": "generic_bulk", "compatible": True, "blockers": []},
             "input_catalog": [],
         },
     }
