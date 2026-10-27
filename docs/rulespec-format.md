@@ -17,7 +17,10 @@ examples cannot drift from the grammar they document.
 
 A module is one YAML document: a `format` marker, an optional `module` block
 (source verification, interpretations, summary — see
-[rulespec.md](rulespec.md)), and a `rules` list.
+[rulespec.md](rulespec.md)), an optional `inputs` block (elections and the
+declarations required by `only_related` and `input_for_year`; see
+[Input declarations and elections](rulespec.md#input-declarations-and-elections)),
+and a `rules` list.
 
 ```yaml
 format: rulespec/v1
@@ -210,6 +213,14 @@ Undeclared names are not an error at lowering time — a typo becomes an input
 the engine then reports as missing. Compile queries can surface the
 resulting input catalog; `metadata.input_catalog` on compiled artifacts
 lists every owner.
+
+Format-3 compiled artifacts also publish `program.interface.inputs` for
+slots expressions actually read. Each entry uses its catalog canonical
+request name as `legal_id`, lists the entity kinds whose ids can read it,
+and reports conservative usage-derived type/default/domain information plus
+an election, when declared. An unused `indexed_by` label remains in the
+catalog and is absent from the interface. The complete derivation and
+format-2 opt-in are in [the artifact format reference](artifact-format.md).
 
 ## Indexed parameters
 
@@ -456,8 +467,9 @@ names those declarations. Declare the relation, typed, in the module that
 aggregates it, or aggregate the imported relation through the module that
 declares it (see axiom-rules-engine#226 on aliasing).
 
-Compiled artifacts written before typing became mandatory can execute untyped
-relations. Loading one fails with a message naming
+The explicit format-2 compatibility loader still enforces relation typing.
+An old compiled artifact that executes an untyped relation fails with a
+message naming
 `axiom-rules-engine migrate artifact`, which types the artifact as it executes
 (see [`docs/rulespec.md`](rulespec.md#relation-entity-typing)). Recompiling from
 typed source is the durable fix.

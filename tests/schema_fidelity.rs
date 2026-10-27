@@ -274,7 +274,7 @@ fn interpretation_validators() -> Vec<Validator> {
             matches!(
                 named.file_name,
                 "rulespec-module.v1.schema.json"
-                    | "compiled-artifact.v2.schema.json"
+                    | "compiled-artifact.v3.schema.json"
                     | "execution-request.v1.schema.json"
             )
         })
@@ -307,7 +307,7 @@ fn interpretation_schema_surfaces(document: &Value) -> [Value; 3] {
 static PUBLISHED_INTERPRETATION_VALIDATORS: LazyLock<[Validator; 3]> = LazyLock::new(|| {
     [
         include_str!("../schemas/rulespec-module.v1.schema.json"),
-        include_str!("../schemas/compiled-artifact.v2.schema.json"),
+        include_str!("../schemas/compiled-artifact.v3.schema.json"),
         include_str!("../schemas/execution-request.v1.schema.json"),
     ]
     .map(|schema| {

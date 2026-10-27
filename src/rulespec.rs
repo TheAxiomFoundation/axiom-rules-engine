@@ -12,9 +12,9 @@ use thiserror::Error;
 use crate::source::ModuleSource;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec,
-    ScalarValueSpec, UnitSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, InputDeclarationSpec, InputElection,
+    JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
+    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
 };
 
 /// The only content roots admitted directly below a jurisdiction directory.
@@ -123,6 +123,14 @@ pub enum RuleSpecError {
         input: String,
         message: String,
     },
+    #[error("RuleSpec module `{module}` input `{input}`: {message}")]
+    InputElection {
+        module: String,
+        input: String,
+        message: String,
+    },
+    #[error("RuleSpec module `{module}` `inputs` entry {index} carries an `election` but no name")]
+    UnnamedInputElection { module: String, index: usize },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -515,11 +523,32 @@ impl fmt::Display for RuleSpecDiagnosticReport {
 pub struct RuleSpecLoweringOutcome {
     pub program: ProgramSpec,
     pub diagnostics: Vec<RuleSpecDiagnostic>,
+    /// The module texts a loader read to lower `program`. Set by the loaders
+    /// below; `None` when a [`RulesDocument`] was lowered directly.
+    pub source: Option<RuleSpecSourceTexts>,
+}
+
+/// Every module text a loader read to lower a program, the root included,
+/// each with the SHA-256 of its exact text. A compiled artifact records it as
+/// its `source_closure`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuleSpecSourceTexts {
+    /// The root module's canonical target; `None` for an originless root (an
+    /// in-memory string or a composition file).
+    pub root: Option<String>,
+    /// `(target, sha256)` in the order the loader read them, with 64
+    /// lowercase hex digits per digest. The originless root has no target.
+    pub modules: Vec<(Option<String>, String)>,
+}
+
+fn text_sha256(text: &str) -> String {
+    crate::digest::hex(&crate::digest::sha256(text.as_bytes()))
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
-    /// Retained for validation of only_related; other operators keep their existing input contract.
+    /// Retained for validation of only_related and selected-year reads, and
+    /// for the elections it declares; every other key stays inert.
     #[serde(default)]
     pub inputs: serde_yaml::Value,
     #[serde(skip)]
@@ -1417,7 +1446,66 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
     })
 }
 
-fn is_relation_entity_kind_label(value: &str) -> bool {
+/// `(origin, slot, election)`: an election some module declares.
+type DeclaredElection<'a> = (Option<&'a str>, String, InputElection);
+
+/// The elections one module's `inputs:` block declares. The block is a list of entries with `name`, or
+/// a mapping from name to entry. Every key but `election` stays inert and
+/// unvalidated: a block with no `election` anywhere yields nothing, whatever
+/// its shape.
+fn declared_elections<'a>(
+    origin: Option<&'a str>,
+    block: &serde_yaml::Value,
+) -> Result<Vec<DeclaredElection<'a>>, RuleSpecError> {
+    let entries: Vec<(Option<&serde_yaml::Value>, &serde_yaml::Value)> = match block {
+        serde_yaml::Value::Sequence(items) => {
+            items.iter().map(|item| (item.get("name"), item)).collect()
+        }
+        serde_yaml::Value::Mapping(entries) => entries
+            .iter()
+            .map(|(name, entry)| (Some(name), entry))
+            .collect(),
+        _ => return Ok(Vec::new()),
+    };
+    let mut elections = Vec::new();
+    for (index, (name, entry)) in entries.into_iter().enumerate() {
+        let Some(election) = entry.get("election") else {
+            continue;
+        };
+        let Some(slot) = name.and_then(serde_yaml::Value::as_str) else {
+            return Err(RuleSpecError::UnnamedInputElection {
+                module: module_label(origin),
+                index,
+            });
+        };
+        let fail = |message: String| RuleSpecError::InputElection {
+            module: module_label(origin),
+            input: slot.to_string(),
+            message,
+        };
+        let election = serde_yaml::from_value::<InputElection>(election.clone())
+            .map_err(|error| fail(format!("invalid election: {error}")))?;
+        if let Some(message) = election.shape_error() {
+            return Err(fail(message));
+        }
+        elections.push((origin, slot.to_string(), election));
+    }
+    Ok(elections)
+}
+
+/// A module's request name for one of its input slots.
+fn request_name(origin: Option<&str>, slot: &str) -> String {
+    origin.map_or_else(
+        || slot.to_string(),
+        |origin| format!("{origin}#input.{slot}"),
+    )
+}
+
+fn module_label(origin: Option<&str>) -> String {
+    origin.unwrap_or("<root>").to_string()
+}
+
+pub(crate) fn is_relation_entity_kind_label(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_uppercase())
         && bytes.all(|byte| byte.is_ascii_alphanumeric())
@@ -1443,7 +1531,12 @@ pub fn lower_rulespec_str_with_options(
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
     document.assign_origin_target(None);
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules: vec![(None, text_sha256(source))],
+    });
+    Ok(outcome)
 }
 
 #[cfg(feature = "fs")]
@@ -1525,7 +1618,19 @@ pub fn load_composed_rulespec_file_with_options(
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
-    combined.to_program_spec_with_options(options)
+    let mut outcome = combined.to_program_spec_with_options(options)?;
+    let mut modules = vec![(None, text_sha256(&source))];
+    modules.extend(
+        context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256)),
+    );
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules,
+    });
+    Ok(outcome)
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -1563,7 +1668,16 @@ pub fn load_rulespec_with_source_with_options(
         &mut context,
         ModuleSurface::Atomic,
     )?;
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: Some(root_target),
+        modules: context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256))
+            .collect(),
+    });
+    Ok(outcome)
 }
 
 fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
@@ -1576,6 +1690,8 @@ fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
 struct SourceLoadContext {
     stack: Vec<String>,
     loaded: HashSet<String>,
+    /// `(target, sha256)` of every module text read, in read order.
+    read: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1604,6 +1720,7 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    context.read.push((target.to_string(), text_sha256(&text)));
     // Parse once up front so a syntax error names this module and keeps its
     // position, instead of surfacing as a missing discriminator.
     if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
@@ -2501,6 +2618,65 @@ impl RulesDocument {
         }
     }
 
+    /// The elections every module's `inputs:` block declares, sorted by
+    /// request name. Each is checked against the inputs its own module's
+    /// rules and derived-relation predicates read: an atomic module's request
+    /// names are its own `<module>#input.<slot>`, so the expression-read
+    /// catalog says which module reads what.
+    fn input_declarations(
+        &self,
+        program: &ProgramSpec,
+    ) -> Result<Vec<InputDeclarationSpec>, RuleSpecError> {
+        let mut declared = Vec::new();
+        for (origin, block) in std::iter::once((self.input_origin.as_deref(), &self.inputs)).chain(
+            self.imported_input_declarations
+                .iter()
+                .map(|(origin, block)| (origin.as_deref(), block)),
+        ) {
+            declared.extend(declared_elections(origin, block)?);
+        }
+        if declared.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A program that does not build fails compilation with its own
+        // error, before any interface is derived from these declarations.
+        let catalog = program
+            .to_program()
+            .ok()
+            .map(|model| model.input_read_catalog());
+        let mut by_input = BTreeMap::<String, InputElection>::new();
+        for (origin, slot, election) in declared {
+            let fail = |message: String| RuleSpecError::InputElection {
+                module: module_label(origin),
+                input: slot.clone(),
+                message,
+            };
+            let input = request_name(origin, &slot);
+            if catalog.as_ref().is_some_and(|catalog| {
+                !catalog
+                    .get(&slot)
+                    .is_some_and(|request_names| request_names.contains(&input))
+            }) {
+                return Err(fail(
+                    "carries an election, but no rule or derived-relation predicate of this module reads an input of that name".to_string(),
+                ));
+            }
+            match by_input.get(&input) {
+                None => {
+                    by_input.insert(input, election);
+                }
+                Some(previous) if *previous == election => {}
+                Some(_) => {
+                    return Err(fail("is declared with two different elections".to_string()));
+                }
+            }
+        }
+        Ok(by_input
+            .into_iter()
+            .map(|(input, election)| InputDeclarationSpec { input, election })
+            .collect())
+    }
+
     fn without_imports(mut self) -> Self {
         self.imports.clear();
         self
@@ -2830,6 +3006,7 @@ impl RulesDocument {
             &self.imported_input_declarations,
         )
         .map_err(RuleSpecError::SelectedYearInput)?;
+        program.input_declarations = self.input_declarations(&program)?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2841,6 +3018,7 @@ impl RulesDocument {
         Ok(RuleSpecLoweringOutcome {
             program,
             diagnostics,
+            source: None,
         })
     }
 

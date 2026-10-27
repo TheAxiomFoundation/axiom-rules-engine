@@ -1,0 +1,544 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Pensions Act 2014 s.4 — entitlement to state pension at the transitional\nrate.\n\nA person reaches entitlement when\n  s.4(1)(a): they have reached pensionable age,\n  s.4(1)(b): they have at least the minimum qualifying years (regs max 10),\n  s.4(1)(c): they have at least one pre-commencement qualifying year.\n\ns.4(4) defines a pre-commencement qualifying year as either\n  * a qualifying year starting 1978-04-06 ≤ year_start < 2016-04-06, OR\n  * a reckonable year deemed qualifying under SI 1979/643 reg 13(1).\n\nThe \"pre/post commencement\" classification is a date-range test the\ncaller pre-applies on each QualifyingYear record as\n`is_pre_commencement_qy` and `is_post_commencement_qy` so the filtered\n`count_where` aggregator can count them without needing the deployed\nDSL to evaluate date comparisons inside an aggregation predicate."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "qualifying_year_of",
+        "arity": 2,
+        "slot_entities": [
+          "QualifyingYear",
+          "Person"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "state_pension_minimum_qy_count",
+        "unit": null,
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 10
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "pre_commencement_qy_count",
+        "entity": "Person",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(4)",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2014/19/section/4",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "qualifying_year_of",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_pre_commencement_qy"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "qualifying_year_of",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_pre_commencement_qy"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "post_commencement_qy_count",
+        "entity": "Person",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(4)",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2014/19/section/4",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "qualifying_year_of",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_post_commencement_qy"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "qualifying_year_of",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_post_commencement_qy"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "total_qy_count",
+        "entity": "Person",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(1)(b) and s.4(5)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "pre_commencement_qy_count"
+            },
+            {
+              "kind": "derived",
+              "name": "post_commencement_qy_count"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "pre_commencement_qy_count"
+                },
+                {
+                  "kind": "derived",
+                  "name": "post_commencement_qy_count"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "reached_pensionable_age",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(1)(a)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "current_age_years"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "input",
+            "name": "pensionable_age_years"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "current_age_years"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "input",
+                "name": "pensionable_age_years"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "meets_minimum_qy",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(1)(b)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "total_qy_count"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "state_pension_minimum_qy_count",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "total_qy_count"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "state_pension_minimum_qy_count",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "has_any_pre_commencement_year",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(1)(c)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "pre_commencement_qy_count"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "pre_commencement_qy_count"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "entitled_to_transitional_rate",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2014 s.4(1) combined",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2014/19/section/4",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "reached_pensionable_age"
+                },
+                {
+                  "kind": "derived",
+                  "name": "meets_minimum_qy"
+                }
+              ]
+            },
+            {
+              "kind": "derived",
+              "name": "has_any_pre_commencement_year"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2016-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "derived",
+                      "name": "reached_pensionable_age"
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "meets_minimum_qy"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "has_any_pre_commencement_year"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "post_commencement_qy_count",
+      "pre_commencement_qy_count",
+      "has_any_pre_commencement_year",
+      "reached_pensionable_age",
+      "total_qy_count",
+      "meets_minimum_qy",
+      "entitled_to_transitional_rate"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "current_age_years",
+        "canonical_request_name": "current_age_years",
+        "request_names": [
+          "current_age_years"
+        ]
+      },
+      {
+        "slot": "is_post_commencement_qy",
+        "canonical_request_name": "is_post_commencement_qy",
+        "request_names": [
+          "is_post_commencement_qy"
+        ]
+      },
+      {
+        "slot": "is_pre_commencement_qy",
+        "canonical_request_name": "is_pre_commencement_qy",
+        "request_names": [
+          "is_pre_commencement_qy"
+        ]
+      },
+      {
+        "slot": "pensionable_age_years",
+        "canonical_request_name": "pensionable_age_years",
+        "request_names": [
+          "pensionable_age_years"
+        ]
+      }
+    ]
+  }
+}

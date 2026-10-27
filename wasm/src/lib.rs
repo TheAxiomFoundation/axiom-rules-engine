@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use axiom_rules_engine::api::{CompiledExecutionRequest, execute_compiled_request};
-use axiom_rules_engine::compile::{ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact};
+use axiom_rules_engine::compile::{ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, EngineBuild};
 use axiom_rules_engine::source::{ModuleSource, SourceError};
 use wasm_bindgen::prelude::*;
 
@@ -71,12 +71,30 @@ pub fn compile(modules_json: &str, root_target: &str) -> Result<String, JsError>
 /// `ExecutionResponse` as JSON, byte-compatible with the CLI's `execute`
 /// subcommand output.
 ///
-/// Missing, older, or newer artifact versions are rejected, mirroring the
-/// core's exact artifact contract.
+/// The artifact must be format 3, the format [`compile`] writes. Missing,
+/// older and newer versions are rejected with the core's message, which names
+/// the older side; run a format-2 artifact through
+/// [`execute_legacy_format_2`].
 #[wasm_bindgen]
 pub fn execute(artifact_json: &str, request_json: &str) -> Result<String, JsError> {
     let artifact = CompiledProgramArtifact::from_json_str(artifact_json)
         .map_err(|error| JsError::new(&error.to_string()))?;
+    execute_artifact(artifact, request_json)
+}
+
+/// [`execute`] for a format-2 artifact, read unchanged through the core's
+/// format-2 compatibility loader. It refuses any other format.
+#[wasm_bindgen]
+pub fn execute_legacy_format_2(artifact_json: &str, request_json: &str) -> Result<String, JsError> {
+    let artifact = CompiledProgramArtifact::from_legacy_format_2_json_str(artifact_json)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    execute_artifact(artifact, request_json)
+}
+
+fn execute_artifact(
+    artifact: CompiledProgramArtifact,
+    request_json: &str,
+) -> Result<String, JsError> {
     let request: CompiledExecutionRequest = serde_json::from_str(request_json).map_err(|error| {
         JsError::new(&format!(
             "request_json is not a CompiledExecutionRequest: {error}"
@@ -95,7 +113,15 @@ pub fn engine_version() -> String {
     axiom_rules_engine::ENGINE_VERSION.to_string()
 }
 
-/// The exact artifact format version this engine writes and accepts.
+/// The build of the core compiled into this binary, as JSON
+/// (`{"commit": ..., "dirty": ...}`), the `engine_build` stamped into
+/// artifacts returned by [`compile`].
+#[wasm_bindgen]
+pub fn engine_build() -> String {
+    serde_json::to_string(&EngineBuild::current()).expect("the build identity serializes")
+}
+
+/// The artifact format version this engine writes and [`execute`] reads.
 #[wasm_bindgen]
 pub fn artifact_format_version() -> u32 {
     ARTIFACT_FORMAT_VERSION

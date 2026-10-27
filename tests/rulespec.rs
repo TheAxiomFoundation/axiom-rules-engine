@@ -2483,18 +2483,21 @@ fn relation_orientation_mismatch_is_refused_at_compile_load_and_migration() {
         assert!(message.contains("eitc_qualifying_child"), "{message}");
     }
 
-    // Load: an artifact carrying those slots is refused in either mode, with
-    // a pointer to the migration.
-    let mut legacy = serde_json::to_value(
-        CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
-            .expect("the declared order compiles"),
-    )
-    .expect("artifact serializes");
+    // Load: an artifact carrying those slots (format 2, as earlier engines
+    // wrote it) is refused in either mode, with a pointer to the migration.
+    let mut legacy = CompiledProgramArtifact::from_rulespec_str(ORIENTATION_MISMATCH_RULESPEC)
+        .expect("the declared order compiles");
+    legacy.artifact_format_version = 2;
+    legacy.engine_build = None;
+    legacy.source_closure = None;
+    legacy.interface = None;
+    let mut legacy = serde_json::to_value(legacy).expect("artifact serializes");
     force_legacy_count_slots(&mut legacy);
     let legacy = serde_json::to_string(&legacy).expect("artifact JSON serializes");
     for options in [CompileOptions::default(), strict] {
-        let error = CompiledProgramArtifact::from_json_str_with_options(&legacy, options)
-            .expect_err("an artifact whose slots contradict its declaration must not load");
+        let error =
+            CompiledProgramArtifact::from_legacy_format_2_json_str_with_options(&legacy, options)
+                .expect_err("an artifact whose slots contradict its declaration must not load");
         let CompileError::LegacyArtifactRelationTyping { report, .. } = &error else {
             panic!("expected a legacy artifact typing error, got {error}");
         };
@@ -2542,7 +2545,7 @@ fn relation_orientation_mismatch_is_refused_at_compile_load_and_migration() {
         migration.changes[0].slot_entities,
         vec!["Person", "TaxUnit"]
     );
-    CompiledProgramArtifact::from_json_str(
+    CompiledProgramArtifact::from_legacy_format_2_json_str(
         &serde_json::to_string(&migration.artifact).expect("migrated artifact serializes"),
     )
     .expect("the migrated artifact loads");

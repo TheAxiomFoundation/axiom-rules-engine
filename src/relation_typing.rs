@@ -10,7 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    JudgmentExpr, Program, RelatedValueRef, RelationSchema, SCALAR_ENTITY, ScalarExpr, Term,
+    JudgmentExpr, Program, RelatedValueRef, RelationDerivation, RelationSchema, SCALAR_ENTITY,
+    ScalarExpr, Term,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -223,6 +224,49 @@ impl<'p> EffectiveSlotEntities<'p> {
     pub fn get(&self, relation: &str) -> Option<&'p [String]> {
         self.kinds.get(relation).copied().flatten()
     }
+}
+
+/// The slots an aggregation over `relation` traverses: a derived relation's
+/// own slots, whichever slots the node names, else the node's.
+pub(crate) fn traversed_slots(
+    program: &Program,
+    relation: &str,
+    current_slot: usize,
+    related_slot: usize,
+) -> (usize, usize) {
+    match program
+        .relations
+        .get(relation)
+        .and_then(|schema| schema.derivation.as_ref())
+    {
+        Some(derivation) => (derivation.current_slot, derivation.related_slot),
+        None => (current_slot, related_slot),
+    }
+}
+
+/// The kinds of the current and related ids a derived relation's predicate
+/// is evaluated with: its effective slot kinds at the derivation's slots.
+/// `slot_kinds` is shared across calls, so a chain of n derived relations
+/// costs n steps rather than one walk per link.
+pub(crate) fn predicate_slot_kinds(
+    slot_kinds: &EffectiveSlotEntities<'_>,
+    name: &str,
+    derivation: &RelationDerivation,
+) -> (Option<String>, Option<String>) {
+    let kinds = slot_kinds.get(name);
+    let slot = |slot: usize| kinds.and_then(|kinds| kinds.get(slot)).cloned();
+    (slot(derivation.current_slot), slot(derivation.related_slot))
+}
+
+/// Whether `derivation`'s predicate evaluates a rule of `entity` on the
+/// current id: its entity is the derivation's declared current kind
+/// (`RelationEvalContext::entity_id_for` in the explain evaluator). Every
+/// other rule the predicate reads runs on the related id.
+pub(crate) fn predicate_routes_to_current(derivation: &RelationDerivation, entity: &str) -> bool {
+    derivation
+        .slot_entities
+        .get(derivation.current_slot)
+        .is_some_and(|kind| kind == entity)
 }
 
 /// The known current-slot kinds of every derived relation filtering to each
@@ -712,25 +756,21 @@ impl<'a> Checker<'a> {
         // derivation's slots; only tuples supplied under the derived
         // relation's own name use the aggregate's. The two must agree or
         // explain and the bulk path read different positions.
-        let (current, related) = match derivation {
-            Some(derivation) => {
-                if (current_slot, related_slot)
-                    != (derivation.current_slot, derivation.related_slot)
-                {
-                    self.push(
-                        RelationTypingCode::DerivedRelationSlotsDiverge,
-                        relation,
-                        citing,
-                        format!(
-                            "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
-                            derivation.current_slot, derivation.related_slot
-                        ),
-                    );
-                }
-                (derivation.current_slot, derivation.related_slot)
-            }
-            None => (current_slot, related_slot),
-        };
+        let (current, related) =
+            traversed_slots(self.program, relation, current_slot, related_slot);
+        if let Some(derivation) = derivation
+            && (current_slot, related_slot) != (current, related)
+        {
+            self.push(
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                relation,
+                citing,
+                format!(
+                    "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
+                    derivation.current_slot, derivation.related_slot
+                ),
+            );
+        }
 
         let mut related_entity = None;
         if let Some(kinds) = kinds.as_ref() {
@@ -971,7 +1011,6 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        let routed_current = derivation.slot_entities.get(derivation.current_slot);
         let routed_related = derivation.slot_entities.get(derivation.related_slot);
         let mut referenced = BTreeSet::new();
         collect_judgment_derived(&derivation.predicate, &mut referenced);
@@ -981,7 +1020,7 @@ impl<'a> Checker<'a> {
             };
             let entity = rule.entity.as_str();
             if entity == SCALAR_ENTITY
-                || routed_current.is_some_and(|kind| kind == entity)
+                || predicate_routes_to_current(derivation, entity)
                 || routed_related.is_some_and(|kind| kind == entity)
                 || entity == effective_related
                 || self.id_kind(entity) == effective_related

@@ -387,6 +387,76 @@
       ],
       "type": "object"
     },
+    "ArtifactProgram": {
+      "description": "`ProgramSpec` plus `interface`, as written inside an artifact.",
+      "properties": {
+        "derived": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DerivedSpec"
+          },
+          "type": "array"
+        },
+        "input_declarations": {
+          "description": "As `ProgramSpec`'s field of the same name, last of its fields so the\ntwo serialize in the same order.",
+          "items": {
+            "$ref": "#/$defs/InputDeclarationSpec"
+          },
+          "type": "array"
+        },
+        "interface": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramInterface"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The program's entity roster, input slots and relations. Execution\nnever reads it."
+        },
+        "module": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModuleMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status) carried through RuleSpec lowering for tooling and\nartifact pass-through. Load/compile boundaries validate it; execution\nsemantics do not depend on it."
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/IndexedParameterSpec"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelationSpec"
+          },
+          "type": "array"
+        },
+        "selected_year_inputs": {
+          "description": "As `ProgramSpec`'s field of the same name, first so the two serialize\nin the same order.",
+          "items": {
+            "$ref": "#/$defs/SelectedYearInput"
+          },
+          "type": "array"
+        },
+        "units": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UnitSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "CareSemantics": {
       "additionalProperties": false,
       "properties": {
@@ -569,11 +639,22 @@
       "type": "object"
     },
     "CompiledProgramArtifact": {
+      "description": "The serialized artifact. `program` repeats `ProgramSpec`'s fields in\norder, with their serde attributes, and appends `interface`, so the block\nsits at `program.interface` while `ProgramSpec` itself is unchanged. It\ndoes not use `#[serde(flatten)]`: flattening buffers values, and the\nbuffered form cannot read the integer keys of a parameter table.",
       "properties": {
         "artifact_format_version": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "engine_build": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EngineBuild"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "engine_version": {
           "type": [
@@ -585,7 +666,17 @@
           "$ref": "#/$defs/CompiledProgramMetadata"
         },
         "program": {
-          "$ref": "#/$defs/ProgramSpec"
+          "$ref": "#/$defs/ArtifactProgram"
+        },
+        "source_closure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceClosure"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -609,7 +700,7 @@
         },
         "input_catalog": {
           "default": [],
-          "description": "Defaulted only so an artifact that predates the catalog can be read at\nall. Absence is filled from the embedded program in `from_json_source`;\na catalog that IS present is still checked against the program, so an\nexplicit `[]` remains a mismatch rather than a way to skip the check.",
+          "description": "Required in format 3. Defaulted only so a format-2 artifact that\npredates the catalog can be read at all: the format-2 compatibility\nloader fills an absent one from the embedded program. A catalog that\nIS present is still checked against the program, so an explicit `[]`\nremains a mismatch rather than a way to skip the check.",
           "items": {
             "$ref": "#/$defs/CompiledInputCatalogEntry"
           },
@@ -645,6 +736,20 @@
         "rate_input"
       ],
       "type": "object"
+    },
+    "DTypeBasis": {
+      "oneOf": [
+        {
+          "const": "usage",
+          "description": "Inferred from the read sites.",
+          "type": "string"
+        },
+        {
+          "const": "declared",
+          "description": "Reserved for the day RuleSpec declares input types.",
+          "type": "string"
+        }
+      ]
     },
     "DTypeSpec": {
       "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal.",
@@ -884,6 +989,31 @@
       },
       "type": "object"
     },
+    "EngineBuild": {
+      "additionalProperties": false,
+      "description": "Which build of the engine compiled an artifact, stamped by `build.rs`.\nTwo builds with the same `engine_version` can differ here, and builds that\ndiffer here write artifacts that differ in this field alone.",
+      "properties": {
+        "commit": {
+          "description": "The commit the engine was built from (40 lowercase hex digits), or\nnull when the build could not know it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dirty": {
+          "description": "Whether the engine's `src/`, `build.rs`, `Cargo.toml` or `Cargo.lock`\ndiffered from that commit; null when unknown, and always null when\n`commit` is.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "commit",
+        "dirty"
+      ],
+      "type": "object"
+    },
     "EngineComputationBinding": {
       "additionalProperties": false,
       "properties": {
@@ -895,6 +1025,67 @@
         "rule_id"
       ],
       "type": "object"
+    },
+    "EntityInstances": {
+      "description": "Where a kind's instances come from.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The caller supplies the instances.",
+          "properties": {
+            "source": {
+              "const": "supplied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A filtered entity whose ids are the ids of kind `of` (null when the\nprogram does not establish it); `via` names the derived relations\nthat filter to it.",
+          "properties": {
+            "of": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "const": "alias",
+              "type": "string"
+            },
+            "via": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "source",
+            "via",
+            "of"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The entity-free scope, `Scalar`.",
+          "properties": {
+            "source": {
+              "const": "unscoped",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ExtremeSpec": {
       "description": "Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring\n[`crate::model::Extreme`].",
@@ -1276,6 +1467,233 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "InputDType": {
+      "description": "The narrowest type every read site of a slot demands.",
+      "oneOf": [
+        {
+          "enum": [
+            "bool",
+            "text",
+            "date"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "integer",
+          "description": "A whole number: a tagged integer, or a decimal with zero fraction.",
+          "type": "string"
+        },
+        {
+          "const": "decimal",
+          "description": "A number: a tagged integer or a decimal.",
+          "type": "string"
+        }
+      ]
+    },
+    "InputDeclarationSpec": {
+      "additionalProperties": false,
+      "description": "A module's declaration about one input it reads.",
+      "properties": {
+        "election": {
+          "$ref": "#/$defs/InputElection"
+        },
+        "input": {
+          "description": "The declaring module's request name for the input:\n`<module>#input.<slot>`, or the bare slot for an originless\ncomposition root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "election"
+      ],
+      "type": "object"
+    },
+    "InputElection": {
+      "additionalProperties": false,
+      "description": "A choice the law gives a named actor: the input records which way the\nactor chose. The engine evaluates the value it is given and never\ndefaults one; choosing among values belongs to the simulation layer. An\ninput without an election is a fact.",
+      "properties": {
+        "actor": {
+          "description": "The entity kind that makes the choice, an UpperCamelCase label. The\nprogram need not evaluate on it.",
+          "type": "string"
+        },
+        "provision": {
+          "description": "The corpus citation path of the provision that gives the choice.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "provision"
+      ],
+      "type": "object"
+    },
+    "InterfaceEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "id_template": {
+          "description": "`<kind>:{index}`, counting from 1, for a supplied kind; the template of\nthe aliased kind for an alias; null for `Scalar` and for an alias whose\nkind the program does not establish.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instances": {
+          "$ref": "#/$defs/EntityInstances"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "instances",
+        "id_template"
+      ],
+      "type": "object"
+    },
+    "InterfaceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScalarValueSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The literal every read site defaults to, when they all agree."
+        },
+        "dtype": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputDType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dtype_basis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DTypeBasis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "election": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputElection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who chooses the value and under which provision, when a module\ndeclares the input an election; null for a fact, which a simulator\nmust not optimize over."
+        },
+        "entities": {
+          "description": "Every entity kind whose ids a read site of the slot can be evaluated\non.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "legal_id": {
+          "description": "The slot's `canonical_request_name` in `metadata.input_catalog`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The runtime slot.",
+          "type": "string"
+        },
+        "values": {
+          "description": "A closed domain of whole numbers.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "values_basis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValuesBasis"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "legal_id",
+        "entities",
+        "default",
+        "dtype",
+        "dtype_basis",
+        "election",
+        "values",
+        "values_basis"
+      ],
+      "type": "object"
+    },
+    "InterfaceRelation": {
+      "additionalProperties": false,
+      "properties": {
+        "accepts_supplied_tuples": {
+          "description": "Whether the evaluator reads tuples supplied under the relation's own\nname.",
+          "type": "boolean"
+        },
+        "arity": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lookup_slots": {
+          "description": "The slots aggregates and membership tests key on, with a derived\nrelation's traversal of its source counted against the source.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/RelationProvenance"
+        },
+        "slot_entities": {
+          "description": "The effective slot kinds, in tuple order; null for a relation that\ndeclares none.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "arity",
+        "lookup_slots",
+        "accepts_supplied_tuples",
+        "provenance",
+        "slot_entities"
       ],
       "type": "object"
     },
@@ -1772,54 +2190,37 @@
       ],
       "type": "object"
     },
-    "ProgramSpec": {
+    "ProgramInterface": {
+      "additionalProperties": false,
+      "description": "`program.interface`. Every list is sorted except a relation's\n`slot_entities`, which keeps tuple order.",
       "properties": {
-        "derived": {
-          "default": [],
+        "entities": {
+          "description": "One entry per entity kind the program can evaluate on, by kind.",
           "items": {
-            "$ref": "#/$defs/DerivedSpec"
+            "$ref": "#/$defs/InterfaceEntity"
           },
           "type": "array"
         },
-        "module": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ModuleMetadata"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Module-level metadata (source pinning, encoding provenance,\nvalidation status, interpretations) carried through RuleSpec lowering for tooling and\nartifact pass-through. Load/compile boundaries validate it; execution\nsemantics do not depend on it."
-        },
-        "parameters": {
-          "default": [],
+        "inputs": {
+          "description": "One entry per input slot some expression reads, by name.",
           "items": {
-            "$ref": "#/$defs/IndexedParameterSpec"
+            "$ref": "#/$defs/InterfaceInput"
           },
           "type": "array"
         },
         "relations": {
-          "default": [],
+          "description": "One entry per declared relation, by name.",
           "items": {
-            "$ref": "#/$defs/RelationSpec"
-          },
-          "type": "array"
-        },
-        "selected_year_inputs": {
-          "items": {
-            "$ref": "#/$defs/SelectedYearInput"
-          },
-          "type": "array"
-        },
-        "units": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/UnitSpec"
+            "$ref": "#/$defs/InterfaceRelation"
           },
           "type": "array"
         }
       },
+      "required": [
+        "entities",
+        "inputs",
+        "relations"
+      ],
       "type": "object"
     },
     "RelatedValueRefSpec": {
@@ -1909,6 +2310,85 @@
         "symmetric"
       ],
       "type": "string"
+    },
+    "RelationProvenance": {
+      "description": "What the declaration makes a relation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A data relation.",
+          "properties": {
+            "kind": {
+              "const": "supplied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `derived_relation`.",
+          "properties": {
+            "kind": {
+              "const": "derived",
+              "type": "string"
+            },
+            "reads": {
+              "$ref": "#/$defs/RelationReads"
+            },
+            "rule": {
+              "description": "The id of the rule that derives it.",
+              "type": "string"
+            },
+            "source_relation": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "rule",
+            "source_relation",
+            "reads"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RelationReads": {
+      "additionalProperties": false,
+      "description": "What a derived relation's predicate mentions directly.",
+      "properties": {
+        "inputs": {
+          "description": "Input slots.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "relations": {
+          "description": "Relation names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "description": "Rule ids (the public id, or the name of a rule without one).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "inputs",
+        "rules",
+        "relations"
+      ],
+      "type": "object"
     },
     "RelationSpec": {
       "properties": {
@@ -2796,6 +3276,57 @@
       ],
       "type": "object"
     },
+    "SourceClosure": {
+      "additionalProperties": false,
+      "description": "Which RuleSpec text an artifact was compiled from: every module text the\nloader read to lower the program, the root included. It identifies module\ntext and nothing else; a corpus provision index, which fills `source_url`\nfields after compilation, is not in it.",
+      "properties": {
+        "digest": {
+          "description": "`sha256:` and the SHA-256 of `axiom-rules-engine/source-closure/v1\\n`\nfollowed by one `<target>\\t<sha256>\\n` line per module, in order\n(an empty target for an originless root).",
+          "type": "string"
+        },
+        "modules": {
+          "description": "One entry per module text, sorted by target, an originless root first.",
+          "items": {
+            "$ref": "#/$defs/SourceClosureModule"
+          },
+          "type": "array"
+        },
+        "root": {
+          "description": "The root module's canonical target; null for an originless root (an\nin-memory string, or a composition file).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "modules",
+        "digest",
+        "root"
+      ],
+      "type": "object"
+    },
+    "SourceClosureModule": {
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "description": "The SHA-256 of the module's exact text, 64 lowercase hex digits.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The module's canonical target; null for an originless root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sha256",
+        "target"
+      ],
+      "type": "object"
+    },
     "SourceVerification": {
       "additionalProperties": false,
       "description": "Grounding of a module in legal source text. `corpus_citation_path`\naddresses the provision in the Axiom corpus; `source_sha256` pins the\nSHA-256 hex digest of the exact provision text the module was encoded\nfrom, so tooling can detect mechanically when the published source has\nchanged out from under the encoding. `upstream_source_check` records the\nhigher-authority sources checked before using guidance or another\nimplementation source. The mapping is exact: the singular citation path\nis required and unknown/plural fields are rejected.",
@@ -2979,6 +3510,15 @@
         "pending"
       ],
       "type": "string"
+    },
+    "ValuesBasis": {
+      "oneOf": [
+        {
+          "const": "parameter_index",
+          "description": "The table keys of the parameters every read site indexes.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$id": "https://schemas.axiom-foundation.org/rules-engine/compiled-unit-aggregation.stage3.schema.json",

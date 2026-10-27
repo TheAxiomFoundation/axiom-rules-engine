@@ -1,0 +1,499 @@
+{
+  "entities": [
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Household"
+    },
+    {
+      "id_template": "Person:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Person"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "against_if_value",
+      "name": "against_if_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "against_lookup_value",
+      "name": "against_lookup_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "against_rule_value",
+      "name": "against_rule_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "bare",
+      "name": "bare",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "date",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "birth_date",
+      "name": "birth_date",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": {
+        "kind": "decimal",
+        "value": "0"
+      },
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "bonus",
+      "name": "bonus",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "branch_value",
+      "name": "branch_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "cap",
+      "name": "cap",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "claimed",
+      "name": "claimed",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "date",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "deadline",
+      "name": "deadline",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "declared_wages",
+      "name": "declared_wages",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "date",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "due",
+      "name": "due",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "bool",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "flag",
+      "name": "flag",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "integer",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "grace_days",
+      "name": "grace_days",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "gross",
+      "name": "gross",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "hours",
+      "name": "hours",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "integer",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "household_size",
+      "name": "household_size",
+      "values": [
+        1,
+        2,
+        3
+      ],
+      "values_basis": "parameter_index"
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "left_value",
+      "name": "left_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "lower",
+      "name": "lower",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "date",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "move_in",
+      "name": "move_in",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "numerator",
+      "name": "numerator",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "ordered_flag",
+      "name": "ordered_flag",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "ordered_label",
+      "name": "ordered_label",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "period_hours",
+      "name": "period_hours",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "rate",
+      "name": "rate",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "ratio",
+      "name": "ratio",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "text",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "region",
+      "name": "region",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "right_value",
+      "name": "right_value",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "size_claimed",
+      "name": "size_claimed",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "date",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "start_date",
+      "name": "start_date",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "tenure_days",
+      "name": "tenure_days",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "tier",
+      "name": "tier",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": null,
+      "dtype_basis": null,
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "tier_pattern",
+      "name": "tier_pattern",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "upper",
+      "name": "upper",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "wage",
+      "name": "wage",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": [
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "member_of_household",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Person",
+        "Household"
+      ]
+    }
+  ]
+}

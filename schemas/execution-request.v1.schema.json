@@ -351,6 +351,43 @@
       ],
       "type": "object"
     },
+    "InputDeclarationSpec": {
+      "additionalProperties": false,
+      "description": "A module's declaration about one input it reads.",
+      "properties": {
+        "election": {
+          "$ref": "#/$defs/InputElection"
+        },
+        "input": {
+          "description": "The declaring module's request name for the input:\n`<module>#input.<slot>`, or the bare slot for an originless\ncomposition root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "election"
+      ],
+      "type": "object"
+    },
+    "InputElection": {
+      "additionalProperties": false,
+      "description": "A choice the law gives a named actor: the input records which way the\nactor chose. The engine evaluates the value it is given and never\ndefaults one; choosing among values belongs to the simulation layer. An\ninput without an election is a fact.",
+      "properties": {
+        "actor": {
+          "description": "The entity kind that makes the choice, an UpperCamelCase label. The\nprogram need not evaluate on it.",
+          "type": "string"
+        },
+        "provision": {
+          "description": "The corpus citation path of the provision that gives the choice.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "provision"
+      ],
+      "type": "object"
+    },
     "InputRecordSpec": {
       "properties": {
         "entity": {
@@ -938,6 +975,13 @@
           "default": [],
           "items": {
             "$ref": "#/$defs/DerivedSpec"
+          },
+          "type": "array"
+        },
+        "input_declarations": {
+          "description": "What the program's modules declare about their inputs, sorted by\n`input`: today, which inputs are elections. Carried for the artifact\ninterface (`docs/artifact-format.md`); execution never reads it.",
+          "items": {
+            "$ref": "#/$defs/InputDeclarationSpec"
           },
           "type": "array"
         },
