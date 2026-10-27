@@ -13,7 +13,10 @@
 //! predicate rules into every rule that counts or sums over the relation, so
 //! it is quadratic in that fan-out; keep it out of timing tests. The helpers
 //! this change did not touch (`validate_relation_derivation_graph` and the
-//! relation-member collectors) are shared with the production path.
+//! relation-member collectors) are shared with the production path. Its
+//! collectors gain arms only for expression kinds added since, each read as
+//! the production collectors read it: a rule read through a term
+//! (`role_derived`) is a dependency, an input read through one is not.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -309,9 +312,10 @@ fn collect_scalar_dependencies(
                 collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
             }
         }
-        ScalarExprSpec::Derived { name } => {
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
+        ScalarExprSpec::RoleInput { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_scalar_dependencies(index, dependencies, relation_dependencies);
         }
@@ -410,7 +414,7 @@ fn collect_judgment_dependencies(
             collect_scalar_dependencies(left, dependencies, relation_dependencies);
             collect_scalar_dependencies(right, dependencies, relation_dependencies);
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } => {}

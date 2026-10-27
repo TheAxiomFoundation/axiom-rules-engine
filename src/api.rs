@@ -822,6 +822,12 @@ fn format_scalar_expression(
             )
         }
         ScalarExpr::Derived(name) => program.public_derived_key(name),
+        ScalarExpr::RoleInput { term, name } => {
+            format!("{}.input({})", term.as_str(), json_string(name))
+        }
+        ScalarExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
         ScalarExpr::ParameterLookup { parameter, index } => format!(
             "{}[{}]",
             public_parameter_key(program, parameter),
@@ -1012,6 +1018,9 @@ fn format_judgment_expression(
             format_scalar_expression(program, right)
         ),
         JudgmentExpr::Derived(name) => program.public_derived_key(name),
+        JudgmentExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
         JudgmentExpr::RelationMember {
             relation,
             current_slot,

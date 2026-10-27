@@ -51,6 +51,7 @@ FORMULA_KEYWORDS = {
     "then",
     "true",
 }
+PREDICATE_TERMS = {"anchor", "candidate"}
 
 
 @dataclass(frozen=True)
@@ -479,6 +480,9 @@ def _infer_input_names(
         versions = rule.get("versions")
         if not isinstance(versions, list):
             continue
+        # In a derived relation's predicate, `anchor` and `candidate` name
+        # terms; elsewhere they are ordinary identifiers.
+        reserved = PREDICATE_TERMS if rule.get("kind") == "derived_relation" else set()
         for version in versions:
             if not isinstance(version, dict) or not isinstance(version.get("formula"), str):
                 continue
@@ -486,6 +490,7 @@ def _infer_input_names(
                 if (
                     identifier not in rule_names
                     and identifier not in FORMULA_KEYWORDS
+                    and identifier not in reserved
                 ):
                     inputs.add(identifier)
     return inputs

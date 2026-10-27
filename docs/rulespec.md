@@ -137,6 +137,9 @@ zero. Relation entity typing is therefore mandatory:
   `derived_relation_slots_diverge`, `filtered_entity_kind_conflict`, and
   `relation_slot_kind_is_filtered_entity` (a slot declares a filtered entity
   such as `SnapUnit` rather than the kind of the ids it is queried with).
+  Reads through a predicate's terms add `relation_roles_need_slot_kinds`,
+  `relation_role_entity_mismatch`, and `relation_role_outside_scope` (see
+  the terms of a derived relation's predicate, below).
 - **Load and request.** The same check runs when a compiled artifact loads
   (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
   carries a raw `ProgramSpec`, and when the dense compiler builds from a
@@ -361,6 +364,76 @@ for the related record, whatever entity it declares: a `Household` rule in a
 the household, and a `Person` rule in a `where` clause over a
 person-to-person relation is evaluated for each related person. See
 [execution-semantics.md](execution-semantics.md).
+
+A predicate can also name the record it reads. Inside a derived relation's
+predicate, two **terms** name entity ids: `anchor`, the id the relation is read
+from (its current slot), and `candidate`, the id being tested (its related
+slot). `t.name` reads a value at a term's id:
+
+- `t.rule` evaluates a derived rule at `t`'s id. The rule's entity must be the
+  kind of `t`'s slot, where a filtered entity such as `SnapUnit` counts as its
+  source's current kind (`relation_role_entity_mismatch`). An entity-free rule
+  reads no id; read it unqualified.
+- `t.input` reads an input at `t`'s id. Inputs declare no kind, so this read is
+  not kind-checked: a misspelt input compiles and fails at evaluation as a
+  missing input, as a bare read does. An input read only through a term enters
+  the input catalog as a bare read does.
+
+A predicate reads the module's parameters as a rule body does: parameter
+tables, scalar parameters, and entity-free rules with literal values, which
+lowering turns into parameters.
+
+```yaml
+  - name: older_relative_of
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relative_of
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: 2026-01-01
+        formula: candidate.age >= anchor.age + minimum_gap
+```
+
+Here `minimum_gap` is a scalar parameter. Both slots of `relative_of` hold
+`Person` ids, so a bare `age` reads the candidate's and a bare `Person` rule
+the anchor's; the terms reach either side. A term's kind is the
+derivation's `slot_entities` at the term's slot. A derivation that omits
+them takes them from a source whose two slots hold different kinds, but not
+from a source whose slots share a kind such as `[Person, Person]`, so such a
+derivation must declare them or a read through a term is refused
+(`relation_roles_need_slot_kinds`).
+
+Inside a predicate, `anchor` and `candidate` are reserved. A term written bare
+(as a value, a judgment, a parameter index, an aggregated relation, or after
+another term's `.`) is refused with `relation_term_used_as_value`. A read
+through a term may not appear in an aggregation's `where` clause or
+aggregated value (`count`, `sum`, `min`, `max`, `only` and their `_where`
+forms, and `only_related`), which have no relation context
+(`relation_role_outside_scope`). Because `anchor` and `candidate` name terms,
+not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
+are the scalar minimum and maximum of one qualified read. Reading a
+parameter, `period_start` or `period_end` through a term is refused with
+`relation_role_entity_mismatch`; reading a relation through a term is refused
+until relation atoms are supported (#214). Outside predicates the two names
+are ordinary identifiers: `anchor + 1` in a rule body reads an input named
+`anchor`, and `anchor.age` there is a field access, which RuleSpec rejects. A
+compiled program that carries a read through a term anywhere but a derived
+relation's predicate fails relation typing with `relation_role_outside_scope`.
+
+Unqualified reads keep the routing above. A bare parameter name now reads the
+parameter in two places where it used to read an input of that name: anywhere
+in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
+formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
+in a rule body as in a predicate. A program with neither, and with no term,
+compiles to the same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
+records a rule read through a term at the term's id. The dense compiler
+rejects a root entity whose rules reach a derived relation whose predicate
+reads through a term, naming the qualified read and #218; a root that reaches
+no such relation compiles. Dense does compile parameter reads in a predicate. See [relation-roles.md](relation-roles.md) for the
+design.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach

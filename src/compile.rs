@@ -2110,6 +2110,10 @@ fn collect_fast_blockers_from_scalar_expr(
         | ScalarExprSpec::CountRelated { .. }
         | ScalarExprSpec::ExtremeRelated { .. }
         | ScalarExprSpec::SingleRelated { .. } => {}
+        // A qualified read is valid only inside a derived relation's
+        // predicate, which fast mode runs on the explain interpreter; a rule
+        // body holding one is refused (`relation_role_outside_scope`).
+        ScalarExprSpec::RoleInput { .. } | ScalarExprSpec::RoleDerived { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
@@ -2211,7 +2215,9 @@ fn collect_fast_blockers_from_judgment_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, rules, left, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, rules, right, blockers);
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2402,9 +2408,12 @@ fn collect_scalar_dependencies(
                 collect_judgment_dependencies(predicate, dependencies, aggregated_relations);
             }
         }
-        ScalarExprSpec::Derived { name } => {
+        // A rule read through a term is a dependency like an unqualified
+        // one: the order walk and the cycle check see it either way.
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
+        ScalarExprSpec::RoleInput { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_scalar_dependencies(index, dependencies, aggregated_relations);
         }
@@ -2501,7 +2510,7 @@ fn collect_judgment_dependencies(
             collect_scalar_dependencies(left, dependencies, aggregated_relations);
             collect_scalar_dependencies(right, dependencies, aggregated_relations);
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } => {}
@@ -2525,6 +2534,8 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::ParameterLookup { index, .. }
@@ -2625,7 +2636,7 @@ fn collect_relation_members_from_judgment(
             collect_relation_members_from_scalar(left, relations);
             collect_relation_members_from_scalar(right, relations);
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             relations.insert(relation.clone());
         }

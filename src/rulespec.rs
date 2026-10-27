@@ -2666,6 +2666,45 @@ impl RulesDocument {
         Ok(outcome.program)
     }
 
+    /// The names rule lowering reads as parameters in this module, which
+    /// derived-relation predicates read the same way (relation roles,
+    /// section 3.3): the parameter tables, and each parameter or derived
+    /// rule whose definition `lower_module` reads as a parameter. Each
+    /// definition is classified on its own, as `lower_module` classifies it.
+    /// One that does not write or parse is left out here; the module's
+    /// lowering refuses it where it meets it, so errors keep their order.
+    /// A module without derived relations needs none of this.
+    fn predicate_parameter_names(&self) -> HashSet<String> {
+        if !self
+            .rules
+            .iter()
+            .any(|rule| matches!(rule.kind, Some(RuleKind::DerivedRelation)))
+        {
+            return HashSet::new();
+        }
+        let mut names = HashSet::new();
+        for rule in &self.rules {
+            if !matches!(
+                rule.declared_kind(),
+                Ok(RuleKind::Parameter | RuleKind::Derived)
+            ) {
+                continue;
+            }
+            if rule.is_parameter_table() {
+                names.insert(rule.name.clone());
+                continue;
+            }
+            let mut definition = String::new();
+            if rule.write_formula_definition(&mut definition).is_err() {
+                continue;
+            }
+            if let Ok(found) = crate::formula::parameter_names(&definition) {
+                names.extend(found);
+            }
+        }
+        names
+    }
+
     pub fn to_program_spec_with_options(
         &self,
         options: RuleSpecLoweringOptions,
@@ -2698,6 +2737,7 @@ impl RulesDocument {
                 _ => None,
             })
             .collect::<HashSet<String>>();
+        let predicate_parameter_names = self.predicate_parameter_names();
         for rule in &self.rules {
             let kind = match rule.declared_kind() {
                 Ok(kind) => kind,
@@ -2751,8 +2791,11 @@ impl RulesDocument {
                 }
                 RuleKind::DerivedRelation => {
                     rule.reject_top_level_arity()?;
-                    let relation = rule
-                        .to_derived_relation_spec(&derived_rule_names, &relation_predicate_names)?;
+                    let relation = rule.to_derived_relation_spec(
+                        &derived_rule_names,
+                        &relation_predicate_names,
+                        &predicate_parameter_names,
+                    )?;
                     if relation.name != rule.name {
                         if let Some(origin_target) = rule.origin_target.as_deref() {
                             relation_rewrites.insert(
@@ -3379,6 +3422,7 @@ impl RuleDefinition {
         &self,
         derived_names: &HashSet<String>,
         relation_predicate_names: &HashSet<String>,
+        parameter_names: &HashSet<String>,
     ) -> Result<RelationSpec, RuleSpecError> {
         let derived_relation = self.derived_relation.as_ref().ok_or_else(|| {
             RuleSpecError::MissingDerivedRelation {
@@ -3418,6 +3462,7 @@ impl RuleDefinition {
             formula,
             derived_names.clone(),
             relation_predicate_names.clone(),
+            parameter_names.clone(),
         )?;
         let (inferred_current_slot, inferred_related_slot) =
             crate::formula::infer_relation_slots_for_rulespec(source_relation.as_str());
@@ -4027,6 +4072,8 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
         | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -4137,7 +4184,7 @@ fn rewrite_relation_alias_in_judgment(
             rewrite_relation_alias_in_scalar(left, alias, relation_name);
             rewrite_relation_alias_in_scalar(right, alias, relation_name);
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             if relation == alias {
                 *relation = relation_name.to_string();
@@ -4357,6 +4404,8 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
         | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -4453,7 +4502,7 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
 
 fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<String>) {
     match expr {
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             names.insert(relation.clone());
         }
@@ -4486,6 +4535,8 @@ fn rewrite_scalar_relation_references(
         | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -4751,7 +4802,7 @@ fn rewrite_judgment_relation_references(
                 derived_origin_targets,
             );
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             rewrite_relation_name(relation, origin_target, rewrites);
         }
@@ -4834,7 +4885,7 @@ fn judgment_uses_imported_derived(
             scalar_uses_imported_derived(left, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(right, origin_target, derived_origin_targets)
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
         JudgmentExprSpec::RelationMember { .. } => false,
@@ -4859,9 +4910,10 @@ fn scalar_uses_imported_derived(
         | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
+        | ScalarExprSpec::RoleInput { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => false,
-        ScalarExprSpec::Derived { name } => {
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
         ScalarExprSpec::ParameterLookup { index, .. }

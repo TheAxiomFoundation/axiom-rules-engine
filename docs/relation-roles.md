@@ -178,8 +178,9 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing, so every existing program compiles to
-the same artifact.
+Unqualified reads keep today's routing. The change to existing programs is a
+bare parameter name in a predicate, or tested as a judgment in a rule body,
+which used to read an input of that name and now reads the parameter (3.3).
 
 ### 3.3 Parameters in predicates
 
@@ -885,4 +886,6 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change,** so no existing artifact changes.
+- **Unqualified reads do not change.** The exception is a bare parameter name
+  in a predicate, or tested as a judgment in a rule body, which now reads the
+  parameter (3.3).

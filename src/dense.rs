@@ -19,7 +19,7 @@ use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
     ComparisonOp, DType, Derived, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
     JudgmentOutcome, OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode,
-    SCALAR_ENTITY, ScalarExpr, ScalarValue,
+    SCALAR_ENTITY, ScalarExpr, ScalarValue, Term,
 };
 
 #[cfg(test)]
@@ -611,6 +611,16 @@ impl MatchLabels {
 
 const NO_MATCH_OUTSIDE_IF: &str =
     "a `match` fallback (`no_match`) that is not the `else` branch of an `if`";
+
+/// The refusal of a qualified read (`anchor.name`, `candidate.name`). Dense
+/// compiles no relation roles yet (#218): a program whose reachable
+/// predicates use one runs in explain or fast mode.
+fn relation_role_unsupported(term: Term, name: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the qualified read `{}.{name}` in a derived relation's predicate; relation roles run in explain and fast modes, and dense support is #218",
+        term.as_str()
+    ))
+}
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
@@ -1769,6 +1779,9 @@ impl<'a> DenseCompiler<'a> {
         expr: &ScalarExpr,
     ) -> Compiling<CompiledScalarExpr> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name).into())
+            }
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
@@ -2028,6 +2041,9 @@ impl<'a> DenseCompiler<'a> {
         expr: &JudgmentExpr,
     ) -> Compiling<CompiledJudgmentExpr> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name).into())
+            }
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_scalar_expr(derived_name, left)?,
                 op: *op,
@@ -2085,6 +2101,7 @@ impl<'a> DenseCompiler<'a> {
         expr: &JudgmentExpr,
     ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
             JudgmentExpr::Comparison { left, op, right } => {
                 Ok(CompiledRelatedJudgmentExpr::Comparison {
                     left: self.compile_related_scalar(relation_index, left)?,
@@ -2217,6 +2234,9 @@ impl<'a> DenseCompiler<'a> {
         expr: &ScalarExpr,
     ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name))
+            }
             ScalarExpr::Literal(value) => Ok(CompiledRelatedScalarExpr::Literal(value.clone())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
@@ -2433,6 +2453,9 @@ impl<'a> DenseCompiler<'a> {
         expr: &ScalarExpr,
     ) -> Result<CompiledScalarExpr, DenseCompileError> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name))
+            }
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
@@ -2630,6 +2653,7 @@ impl<'a> DenseCompiler<'a> {
         expr: &JudgmentExpr,
     ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_current_scalar_expr(derived_name, entity, left)?,
                 op: *op,
