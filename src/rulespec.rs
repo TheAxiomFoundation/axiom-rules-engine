@@ -3295,11 +3295,12 @@ impl RuleDefinition {
     /// Whether lowering reads this parameter or derived rule as a parameter:
     /// a parameter table, or a definition `lower_module` classifies as one
     /// (no entity, and every version a literal). `None` when the definition
-    /// does not write or parse; the module's lowering refuses it where it
-    /// meets it.
+    /// does not write or parse, or a table's name is not one formula token;
+    /// the module's lowering refuses it where it meets it, so its error comes
+    /// first.
     fn lowers_to_parameter(&self) -> Option<bool> {
         if self.is_parameter_table() {
-            return Some(true);
+            return self.validate_source_name().is_ok().then_some(true);
         }
         let mut definition = String::new();
         self.write_formula_definition(&mut definition).ok()?;

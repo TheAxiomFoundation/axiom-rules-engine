@@ -259,11 +259,11 @@ fn every_kind_of_declaration_is_refused_a_reserved_name() {
 
 /// A formula keyword is never read as a name: the lexer reads `true` and
 /// `false` as literals and the rest as syntax. A parameter or rule could
-/// never take one, because its name is written into the formula source, so
-/// it is still refused: a parameter table by this check, which classifies
-/// it without writing it, and any other parameter or rule by that one. A
-/// relation or an input could take one, and is now refused as for a
-/// built-in. Names are quoted, so YAML keeps `true` a string.
+/// never take one, because its name is written into the formula source, and
+/// it keeps that refusal (`InvalidFormulaField`, pinned for tables by
+/// `tests/source_string_audit.rs`). A relation or an input could take one,
+/// and is now refused as for a built-in. Names are quoted, so YAML keeps
+/// `true` a string.
 #[test]
 fn a_formula_keyword_is_refused_as_a_declaration_name() {
     const KEYWORDS: [&str; 15] = [
@@ -277,12 +277,9 @@ fn a_formula_keyword_is_refused_as_a_declaration_name() {
                 .expect_err(&format!("{name} {kind:?}"));
             let refused = match kind.role() {
                 Role::Relation | Role::Input => error.contains(&reserved_refusal(name, kind.label())),
-                Role::Parameter | Role::Rule => {
-                    error.contains(&reserved_refusal(name, kind.label()))
-                        || error.contains(&format!(
-                            "RuleSpec rule {name:?} has name {name:?}; it must be exactly one identifier or path"
-                        ))
-                }
+                Role::Parameter | Role::Rule => error.contains(&format!(
+                    "RuleSpec rule {name:?} has name {name:?}; it must be exactly one identifier or path"
+                )),
             };
             assert!(refused, "{name} {kind:?}: {error}");
         }
