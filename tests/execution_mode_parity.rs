@@ -2312,6 +2312,8 @@ fn walk_scalar(expr: &ScalarExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             visit(Ref::Input(name))
         }
         ScalarExprSpec::Derived { name } => visit(Ref::Derived(name)),
+        ScalarExprSpec::RoleInput { name, .. } => visit(Ref::Input(name)),
+        ScalarExprSpec::RoleDerived { name, .. } => visit(Ref::Derived(name)),
         ScalarExprSpec::ParameterLookup { parameter, index } => {
             visit(Ref::Parameter(parameter));
             walk_scalar(index, visit);
@@ -2405,7 +2407,9 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             walk_scalar(left, visit);
             walk_scalar(right, visit);
         }
-        JudgmentExprSpec::Derived { name } => visit(Ref::Derived(name)),
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
+            visit(Ref::Derived(name))
+        }
         JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
@@ -4286,6 +4290,8 @@ fn retired_sums_in_scalar(expr: &ScalarExprSpec) -> usize {
         | ScalarExprSpec::OnlyRelated { .. }
         | ScalarExprSpec::ExtremeRelated { .. }
         | ScalarExprSpec::SingleRelated { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => 0,
         ScalarExprSpec::ParameterLookup { index, .. } => retired_sums_in_scalar(index),
@@ -4334,7 +4340,9 @@ fn retired_sums_in_judgment(expr: &JudgmentExprSpec) -> usize {
         JudgmentExprSpec::Comparison { left, right, .. } => {
             retired_sums_in_scalar(left) + retired_sums_in_scalar(right)
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => 0,
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::RelationMember { .. } => 0,
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {

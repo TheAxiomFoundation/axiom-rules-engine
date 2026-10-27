@@ -463,11 +463,15 @@ impl Resolver<'_> {
                     self.scalar(n, entity, None)?;
                 }
             }
+            // A qualified read names its term, so it has no direction to
+            // resolve: it reads the term's id whatever the slot kinds are.
             ScalarExprSpec::Literal { .. }
             | ScalarExprSpec::InputForYear { .. }
             | ScalarExprSpec::Input { .. }
             | ScalarExprSpec::InputOrElse { .. }
             | ScalarExprSpec::Derived { .. }
+            | ScalarExprSpec::RoleInput { .. }
+            | ScalarExprSpec::RoleDerived { .. }
             | ScalarExprSpec::PeriodStart
             | ScalarExprSpec::PeriodEnd => {}
         }
@@ -540,7 +544,7 @@ impl Resolver<'_> {
                     *related_slot = related_index;
                 }
             }
-            JudgmentExprSpec::Derived { .. } => {}
+            JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         }
         Ok(())
     }

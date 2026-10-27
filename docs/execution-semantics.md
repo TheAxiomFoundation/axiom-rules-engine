@@ -59,8 +59,12 @@ output's formula is evaluated for that entity and period as follows.
   rule in a `where` clause over household members is evaluated for each
   member); and inside a derived relation's own predicate, the current entity
   when the rule's declared entity is the relation's current slot entity, and
-  the related entity otherwise. The referenced rule's body is then evaluated
-  for that entity, with no relation context. Its declared output rounding
+  the related entity otherwise. A read through a term of that predicate
+  overrides this choice: `anchor.rule` is evaluated for the current entity and
+  `candidate.rule` for the related one, and `anchor.input` and
+  `candidate.input` read the input of that entity where a bare input reads
+  the related one's. The referenced rule's body is then evaluated for that
+  entity, with no relation context. Its declared output rounding
   applies before any dependent reads the value, including when dense inlines
   the rule into an aggregation or predicate.
 - **A value keeps the kind its expression computes.** A rule's declared
@@ -80,7 +84,10 @@ output's formula is evaluated for that entity and period as follows.
   evaluated appear together, in the slots it names, in the named relation.
   That predicate is the only place that supplies them. Anywhere else, including an aggregation's `where` clause
   and a rule the predicate references, `relation_member` is a type error of
-  the evaluation that reaches it.
+  the evaluation that reaches it. The same holds for a read through a term,
+  which compilation and relation typing already refuse outside a predicate
+  (`relation_role_outside_scope`); an evaluator that meets one fails the
+  evaluation that reaches it.
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -192,6 +199,12 @@ the relation as the formula does, a derived relation included, although its
 batch is its base relation's. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
+
+A derived relation's predicate that reads through a term (`anchor.name`,
+`candidate.name`) makes the dense compiler reject any root entity whose rules
+reach that relation, naming the qualified read and #218; a root that reaches
+no such relation compiles. Explain and fast evaluate it. Parameter reads in a
+predicate compile in dense as in a rule body.
 
 Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
 body reads on the related rows, for the related entity as explain does. Only a
