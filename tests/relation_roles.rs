@@ -471,6 +471,115 @@ fn a_bare_period_built_in_is_refused_as_a_judgment() {
     }
 }
 
+/// A bare name tested as a judgment resolves as `name == true` does, and that
+/// comparison lowers the name in scalar position. So the read the comparison
+/// makes decides the bare form: a period built-in (a date) is refused, a rule
+/// is a judgment of the rule, and a parameter or input is the comparison
+/// itself. The one addition is a relation name in a predicate, which tests
+/// membership. Checked for every kind a name can have, in predicates and rule
+/// bodies.
+#[test]
+fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
+    let declarations = [
+        "",
+        "    kind: parameter\n    dtype: Bool\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"true\"\n",
+        "    kind: derived\n    entity: Person\n    dtype: Judgment\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: age >= 18\n",
+    ];
+    let mut kinds = std::collections::BTreeSet::new();
+    for name in ["period_start", "period_end", "flag", "older_relative_of"] {
+        for declaration in declarations {
+            if name == "older_relative_of" && !declaration.is_empty() {
+                continue;
+            }
+            let declared = if declaration.is_empty() {
+                String::new()
+            } else {
+                format!("\n  - name: {name}\n{declaration}")
+            };
+            for in_predicate in [true, false] {
+                let lowered = |formula: &str| {
+                    let extra = if in_predicate {
+                        relative_relation("tested", PERSON_SLOTS, formula)
+                    } else {
+                        format!(
+                            r#"
+  - name: tested
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: {formula}
+"#
+                        )
+                    };
+                    let artifact = compile(&people_module(&format!("{declared}{extra}")))
+                        .map_err(|error| error.to_string())?;
+                    let program = program_of(&artifact);
+                    Ok::<Value, String>(if in_predicate {
+                        predicate_of(&program, "tested").clone()
+                    } else {
+                        program["derived"]
+                            .as_array()
+                            .expect("rules")
+                            .iter()
+                            .find(|rule| rule["name"] == "tested")
+                            .expect("rule")["expr"]
+                            .clone()
+                    })
+                };
+                let case = format!("{name} {declaration:?} in_predicate={in_predicate}");
+                let bare = lowered(name);
+                let compared = match lowered(&format!("{name} == true")) {
+                    Ok(compared) => compared,
+                    Err(_) => {
+                        assert!(bare.is_err(), "{case}: {bare:?}");
+                        continue;
+                    }
+                };
+                let read = compared["left"]["kind"]
+                    .as_str()
+                    .expect("a read")
+                    .to_string();
+                match read.as_str() {
+                    "period_start" | "period_end" => {
+                        let error = bare.expect_err(&case);
+                        assert!(error.contains("is a date"), "{case}: {error}");
+                    }
+                    "derived" => {
+                        assert_eq!(
+                            bare.expect(&case),
+                            json!({"kind": "derived", "name": name}),
+                            "{case}"
+                        );
+                    }
+                    _ if in_predicate && name == "older_relative_of" => {
+                        assert_eq!(
+                            bare.expect(&case)["kind"],
+                            json!("relation_member"),
+                            "{case}"
+                        );
+                    }
+                    _ => assert_eq!(bare.expect(&case), compared, "{case}"),
+                }
+                kinds.insert(read);
+            }
+        }
+    }
+    // Every kind of read occurs, so no branch above passes vacuously.
+    assert_eq!(
+        kinds.into_iter().collect::<Vec<_>>(),
+        [
+            "derived",
+            "input",
+            "parameter_lookup",
+            "period_end",
+            "period_start"
+        ]
+    );
+}
+
 /// A bare parameter of another type compares that value with `true`, so
 /// evaluation fails with a type mismatch rather than reading an input.
 #[test]
