@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from axiom_rules_engine.cli import main
 from axiom_rules_engine.concepts import (
@@ -137,6 +138,124 @@ rules:
         "us:statutes/26/62#input.age",
         "us:statutes/26/62#input.anchor",
     }
+
+
+def write_formula_module(root: Path, formulas: dict[str, str]) -> None:
+    rules: list[dict[str, object]] = [
+        {
+            "name": "member_of_household",
+            "kind": "data_relation",
+            "data_relation": {"arity": 2},
+        }
+    ]
+    for name, formula in formulas.items():
+        rules.append(
+            {
+                "name": name,
+                "kind": "derived",
+                "entity": "Household",
+                "dtype": "Money",
+                "period": "Month",
+                "versions": [{"effective_from": "2026-01-01", "formula": formula}],
+            }
+        )
+    write_rulespec(
+        root,
+        "us/statutes/7/2014.yaml",
+        yaml.safe_dump({"format": "rulespec/v1", "rules": rules}, sort_keys=False),
+    )
+
+
+def inferred_input_names(root: Path) -> set[str]:
+    prefix = "us:statutes/7/2014#input."
+    return {
+        concept.concept_id.removeprefix(prefix)
+        for concept in discover_concepts([root])
+        if concept.kind == "input"
+    }
+
+
+def test_function_calls_are_not_inferred_inputs(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(
+        root,
+        {"has_several_members": "len(member_of_household) >= 2 and income < limit"},
+    )
+
+    assert inferred_input_names(root) == {"income", "limit"}
+
+
+# Each function the formula lowering accepts (`lower_to_scalar` and
+# `lower_to_judgment` in src/formula.rs), called as documented there, with the
+# inputs the call reads.
+FUNCTION_CALLS = [
+    ("max(wages, 0)", {"wages"}),
+    ("min(wages, cap)", {"wages", "cap"}),
+    ("max(member_of_household.age)", {"age"}),
+    ("min(member_of_household.age)", {"age"}),
+    ("ceil(wages)", {"wages"}),
+    ("floor(wages)", {"wages"}),
+    ("days_between(birth_date, assessment_date)", {"birth_date", "assessment_date"}),
+    ("date_add_days(birth_date, 1)", {"birth_date"}),
+    ("date_add_months(birth_date, 1)", {"birth_date"}),
+    ("date_add_years(birth_date, 18)", {"birth_date"}),
+    ("sum_over_periods(wages)", {"wages"}),
+    ("max_over_periods(wages)", {"wages"}),
+    ("count_over_periods(is_adult)", {"is_adult"}),
+    ("sum_top_n_over_periods(wages, 35)", {"wages"}),
+    ("len(member_of_household)", set()),
+    ("sum(member_of_household.wages)", {"wages"}),
+    ("only(member_of_household.age)", {"age"}),
+    ("input_for_year(wages, 2024)", {"wages"}),
+    ("only_related(member_of_household, is_adult)", {"is_adult"}),
+    ("count_where(member_of_household, is_adult)", {"is_adult"}),
+    ("sum_where(member_of_household, wages, is_adult)", {"wages", "is_adult"}),
+    ("min_where(member_of_household, age, is_adult)", {"age", "is_adult"}),
+    ("max_where(member_of_household, age, is_adult)", {"age", "is_adult"}),
+    ("exactly_one(is_adult, is_student)", {"is_adult", "is_student"}),
+]
+
+
+@pytest.mark.parametrize(("formula", "inputs"), FUNCTION_CALLS)
+def test_no_function_name_is_inferred_as_an_input(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(root, {"called": formula})
+
+    assert inferred_input_names(root) == inputs
+
+
+# The lexer skips whitespace, `#` comments and `"""` blocks between tokens, so
+# the parser still reads `ceil` followed by any of them and `(` as a call.
+@pytest.mark.parametrize(
+    "separator",
+    ["", " ", "\t", "\n  ", "\r\n", "\x0c", " # ...\n  ", ' """...""" '],
+)
+def test_call_is_seen_past_what_the_lexer_skips(
+    tmp_path: Path, separator: str
+) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(root, {"rounded": f"ceil{separator}(wages)"})
+
+    assert inferred_input_names(root) == {"wages"}
+
+
+def test_function_name_read_as_a_value_is_an_input(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    # Only a following `(` makes a call: the parser reads `floor` and `sum`
+    # here as inputs, and a `(` inside a comment or an unclosed `"""` block
+    # is no token.
+    write_formula_module(
+        root,
+        {
+            "value_named_like_functions": "ceil(floor) + sum",
+            "comment_parenthesis": "max # (\n+ 1",
+            "unclosed_block": 'min """ (',
+        },
+    )
+
+    assert inferred_input_names(root) == {"floor", "sum", "max", "min"}
 
 
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:

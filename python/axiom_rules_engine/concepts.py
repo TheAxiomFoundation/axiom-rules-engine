@@ -42,16 +42,15 @@ FORMULA_KEYWORDS = {
     "is",
     "let",
     "match",
-    "max",
-    "min",
     "not",
     "or",
-    "round",
-    "sum",
     "then",
     "true",
 }
 PREDICATE_TERMS = {"anchor", "candidate"}
+# The formula lexer (`Lexer::tokenise` in src/formula.rs) skips these bytes,
+# `#` comments, and `"""` blocks between tokens.
+LEXER_WHITESPACE = " \t\n\x0c\r"
 
 
 @dataclass(frozen=True)
@@ -486,14 +485,43 @@ def _infer_input_names(
         for version in versions:
             if not isinstance(version, dict) or not isinstance(version.get("formula"), str):
                 continue
-            for identifier in IDENTIFIER_RE.findall(version["formula"]):
+            formula = version["formula"]
+            for match in IDENTIFIER_RE.finditer(formula):
+                identifier = match.group()
                 if (
                     identifier not in rule_names
                     and identifier not in FORMULA_KEYWORDS
                     and identifier not in reserved
+                    and not _next_token_is_open_paren(formula, match.end())
                 ):
                     inputs.add(identifier)
     return inputs
+
+
+def _next_token_is_open_paren(formula: str, position: int) -> bool:
+    """Whether the formula's next token after ``position`` is ``(``.
+
+    The formula parser reads any name followed by ``(`` as a function call
+    (`Parser::parse_postfix` in src/formula.rs), never as a value, whatever
+    the name. The same name without ``(`` is an ordinary read, so a
+    function's name used alone can still name an input.
+    """
+    while position < len(formula):
+        if formula.startswith('"""', position):
+            close = formula.find('"""', position + 3)
+            if close == -1:
+                return False
+            position = close + 3
+        elif formula[position] == "#":
+            newline = formula.find("\n", position)
+            if newline == -1:
+                return False
+            position = newline
+        elif formula[position] in LEXER_WHITESPACE:
+            position += 1
+        else:
+            return formula[position] == "("
+    return False
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
