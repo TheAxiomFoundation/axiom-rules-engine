@@ -1,10 +1,13 @@
-"""Every dump of a compiled artifact is one the engine loads.
+"""Every dump of a compiled artifact is one the engine loads, and the model
+accepts every artifact the engine loads.
 
 The engine's loader refuses an artifact that lacks a key its schema requires,
 so the Python model must require that key too. A key the model defaults is
 left out of an ``exclude_defaults`` dump while it holds its default, and out
-of an ``exclude_unset`` dump when it was never set. The schema test walks
-each artifact model against the schema the engine publishes for its format
+of an ``exclude_unset`` dump when it was never set. In the other direction, a
+key the schema leaves optional is one the engine reads when it is absent, so
+the model must not require it either. The schema tests walk each artifact
+model against the schema the engine publishes for its format
 (``schemas/compiled-artifact.v<N>.schema.json``, which ``cargo test --features
 schema`` keeps equal to the Rust types). The end-to-end tests run the engine
 binary the repository builds (``target/debug/axiom-rules-engine``). They skip
@@ -12,6 +15,8 @@ without it, except in CI, which builds it.
 """
 from __future__ import annotations
 
+import copy
+import itertools
 import json
 import os
 import typing
@@ -24,7 +29,12 @@ from axiom_rules_engine import (
     AxiomRulesEngine,
     CompiledExecutionRequest,
     CompiledProgram,
+    CompiledProgramMetadata,
+    Dataset,
+    ExecutionResponse,
     FastPathMetadata,
+    LegacyCompiledProgramMetadataV2,
+    LegacyCompiledProgramV2,
     models,
 )
 
@@ -117,37 +127,90 @@ def _may_describe(model: type[BaseModel], schema: dict, defs: dict) -> bool:
     return True
 
 
-def _defaulted_but_required(
-    model: type[BaseModel], schema: dict, defs: dict, path: str
+def _keys_where(
+    differs: typing.Callable[[bool, bool], bool],
+    model: type[BaseModel],
+    schema: dict,
+    defs: dict,
+    path: str,
 ) -> list[str]:
-    """Every key ``schema`` requires that ``model`` defaults, at any depth."""
+    """Every key, at any depth, for which ``differs(schema requires it,
+    model requires it)``."""
     required = set(schema.get("required", []))
     properties = schema.get("properties", {})
     found = []
     for name, field in model.model_fields.items():
         key = field.alias or name
-        if key in required and not field.is_required():
+        if differs(key in required, field.is_required()):
             found.append(f"{path}.{key}")
         if key not in properties:
             continue
         for nested in _nested_models(field.annotation):
             for candidate in _object_schemas(properties[key], defs):
                 if _may_describe(nested, candidate, defs):
-                    found += _defaulted_but_required(nested, candidate, defs, f"{path}.{key}")
+                    found += _keys_where(differs, nested, candidate, defs, f"{path}.{key}")
     return found
 
 
-@pytest.mark.parametrize("model", ARTIFACT_MODELS, ids=lambda model: model.__name__)
-def test_the_model_requires_every_key_the_engine_requires(model) -> None:
+def _defaulted_but_required(
+    model: type[BaseModel], schema: dict, defs: dict, path: str
+) -> list[str]:
+    """Every key ``schema`` requires that ``model`` defaults, at any depth."""
+    return _keys_where(
+        lambda schema_requires, model_requires: schema_requires and not model_requires,
+        model,
+        schema,
+        defs,
+        path,
+    )
+
+
+def _required_but_optional(
+    model: type[BaseModel], schema: dict, defs: dict, path: str
+) -> list[str]:
+    """Every key ``model`` requires that ``schema`` leaves optional, at any
+    depth."""
+    return _keys_where(
+        lambda schema_requires, model_requires: model_requires and not schema_requires,
+        model,
+        schema,
+        defs,
+        path,
+    )
+
+
+def _mismatches(model: type[BaseModel], walk) -> list[str]:
+    """``walk`` over ``model`` and the schema the engine publishes for the
+    model's artifact format."""
     (version,) = typing.get_args(model.model_fields["artifact_format_version"].annotation)
     schema_path = SCHEMAS / f"compiled-artifact.v{version}.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     defs = schema.get("$defs") or schema.get("definitions") or {}
     roots = [root for root in _object_schemas(schema, defs) if _may_describe(model, root, defs)]
     assert roots, f"{schema_path.name} has no object schema for {model.__name__}"
-    assert [
-        key for root in roots for key in _defaulted_but_required(model, root, defs, model.__name__)
-    ] == []
+    return [key for root in roots for key in walk(model, root, defs, model.__name__)]
+
+
+@pytest.mark.parametrize("model", ARTIFACT_MODELS, ids=lambda model: model.__name__)
+def test_the_model_requires_every_key_the_engine_requires(model) -> None:
+    assert _mismatches(model, _defaulted_but_required) == []
+
+
+@pytest.mark.parametrize("model", ARTIFACT_MODELS, ids=lambda model: model.__name__)
+def test_the_model_requires_only_keys_the_engine_requires(model) -> None:
+    assert _mismatches(model, _required_but_optional) == []
+
+
+def test_the_reverse_walk_finds_a_format_2_model_that_requires_the_catalog() -> None:
+    # The format-2 model as it was, sharing format 3's metadata.
+    required_catalog = create_model(
+        "RequiredCatalogV2",
+        __base__=LegacyCompiledProgramV2,
+        metadata=(CompiledProgramMetadata, ...),
+    )
+    assert _mismatches(required_catalog, _required_but_optional) == [
+        "RequiredCatalogV2.metadata.input_catalog"
+    ]
 
 
 class _Leaf(BaseModel):
@@ -346,3 +409,225 @@ def test_the_engine_and_the_model_both_refuse_an_artifact_without_blockers(
         )
     with pytest.raises(ValidationError, match="blockers"):
         CompiledProgram.model_validate(artifact)
+
+
+@needs_binary
+@pytest.mark.parametrize(
+    ("catalog", "refusal"),
+    [
+        ("absent", "format 3 requires `metadata.input_catalog`"),
+        (None, "invalid type: null, expected a sequence"),
+    ],
+    ids=["absent", "null"],
+)
+def test_the_engine_and_the_model_both_refuse_a_format_3_artifact_without_a_catalog(
+    compiled_artifact, tmp_path: Path, catalog, refusal: str
+) -> None:
+    written, compiled = compiled_artifact
+    artifact = json.loads(written.read_text(encoding="utf-8"))
+    if catalog == "absent":
+        del artifact["metadata"]["input_catalog"]
+    else:
+        artifact["metadata"]["input_catalog"] = catalog
+    stripped = tmp_path / "without-catalog.json"
+    stripped.write_text(json.dumps(artifact), encoding="utf-8")
+    with pytest.raises(RuntimeError, match=refusal):
+        AxiomRulesEngine(binary_path=BINARY).execute_compiled(
+            artifact_path=stripped, request=_request(compiled)
+        )
+    with pytest.raises(ValidationError, match="input_catalog"):
+        CompiledProgram.model_validate(artifact)
+
+
+# Format 2. Engines that predate the catalog wrote no `input_catalog`, and the
+# engine's format-2 loader fills an absent one from the program. It refuses a
+# null one, and checks a present one, `[]` included, against the program. So
+# the format-2 model accepts an absent catalog, and every dump keeps it absent:
+# a default of `[]` would turn an artifact the engine runs into one it refuses.
+
+FORMAT_2 = REPO / "tests" / "fixtures" / "artifacts" / "format2"
+# Real format-2 compiler output, and the older format-2 shapes the directory's
+# README describes, one of which has no catalog.
+FORMAT_2_ARTIFACTS = sorted(
+    [
+        *(FORMAT_2 / "compiled").glob("*.json"),
+        *(FORMAT_2 / "legacy-reload" / "inputs").glob("*.json"),
+    ]
+)
+FLAT_TAX = (
+    FORMAT_2 / "compiled" / "tests__fixtures__rulespec__other__flat_tax__rules.compiled.json"
+)
+DUMPS = {
+    "default": {},
+    "exclude_defaults": {"exclude_defaults": True},
+    "exclude_unset": {"exclude_unset": True},
+    "exclude_none": {"exclude_none": True},
+}
+ABSENT = object()
+
+
+def _with_catalog(artifact: dict, catalog: typing.Any) -> dict:
+    """``artifact`` with ``catalog`` as its catalog, or without one."""
+    changed = copy.deepcopy(artifact)
+    changed["metadata"].pop("input_catalog", None)
+    if catalog is not ABSENT:
+        changed["metadata"]["input_catalog"] = catalog
+    return changed
+
+
+def _catalogs(artifact: dict) -> dict[str, typing.Any]:
+    """The catalog as written, when there is one, none, and an empty one."""
+    catalogs = {"absent": ABSENT, "empty": []}
+    if "input_catalog" in artifact["metadata"]:
+        catalogs["as-written"] = artifact["metadata"]["input_catalog"]
+    return catalogs
+
+
+def _dump(model: BaseModel, mode: str, options: dict) -> str:
+    if mode == "json":
+        return model.model_dump_json(**options)
+    return json.dumps(model.model_dump(**options))
+
+
+def test_the_format_2_artifacts_include_published_ones_without_a_catalog() -> None:
+    without = [
+        path.name
+        for path in FORMAT_2_ARTIFACTS
+        if "input_catalog" not in json.loads(path.read_text(encoding="utf-8"))["metadata"]
+    ]
+    assert FLAT_TAX in FORMAT_2_ARTIFACTS
+    assert "dialect-absent-catalog.json" in without
+    assert "dialect-v0.1-maintenance.json" in without
+
+
+@pytest.mark.parametrize("path", FORMAT_2_ARTIFACTS, ids=lambda path: path.name)
+def test_every_format_2_dump_writes_the_catalog_it_read(path: Path) -> None:
+    # Every combination of the dump options, in both modes: the catalog is
+    # written exactly when one was read, as it was read, never as null.
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    flags = ["exclude_defaults", "exclude_unset", "exclude_none"]
+    for catalog in _catalogs(artifact).values():
+        legacy = LegacyCompiledProgramV2.model_validate(_with_catalog(artifact, catalog))
+        for chosen in itertools.product([False, True], repeat=len(flags)):
+            for mode in ["python", "json"]:
+                written = json.loads(_dump(legacy, mode, dict(zip(flags, chosen))))
+                if catalog is ABSENT:
+                    assert "input_catalog" not in written["metadata"]
+                else:
+                    assert written["metadata"]["input_catalog"] == catalog
+                assert LegacyCompiledProgramV2.model_validate(written).metadata == legacy.metadata
+
+
+def test_the_format_2_model_refuses_a_null_catalog() -> None:
+    artifact = _with_catalog(json.loads(FLAT_TAX.read_text(encoding="utf-8")), None)
+    with pytest.raises(ValidationError, match="never null"):
+        LegacyCompiledProgramV2.model_validate(artifact)
+    with pytest.raises(ValidationError, match="never null"):
+        LegacyCompiledProgramV2.model_validate_json(json.dumps(artifact))
+
+
+def test_format_3_metadata_still_requires_the_catalog() -> None:
+    metadata = {
+        "evaluation_order": [],
+        "fast_path": {"strategy": "generic_bulk", "compatible": True, "blockers": []},
+    }
+    with pytest.raises(ValidationError, match="input_catalog"):
+        CompiledProgramMetadata.model_validate(metadata)
+    # Format-2 metadata without a catalog does not pass for format 3's.
+    with pytest.raises(ValidationError):
+        CompiledProgramMetadata.model_validate(LegacyCompiledProgramMetadataV2.model_validate(metadata))
+
+
+def test_the_format_2_metadata_serialization_schema_is_the_models_own() -> None:
+    serialization = LegacyCompiledProgramMetadataV2.model_json_schema(mode="serialization")
+    validation = LegacyCompiledProgramMetadataV2.model_json_schema(mode="validation")
+    assert serialization["properties"].keys() == validation["properties"].keys()
+    assert "input_catalog" in serialization["properties"]
+
+
+def _flat_tax_request() -> CompiledExecutionRequest:
+    return CompiledExecutionRequest.model_validate(
+        {
+            "mode": "explain",
+            "dataset": {
+                "inputs": [
+                    {
+                        "name": "income",
+                        "entity": "Person",
+                        "entity_id": "p1",
+                        "interval": {"start": "2025-01-01", "end": "2025-12-31"},
+                        "value": {"kind": "decimal", "value": "5000"},
+                    }
+                ]
+            },
+            "queries": [
+                {
+                    "entity_id": "p1",
+                    "period": {"period_kind": "tax_year", "start": "2025-01-01", "end": "2025-12-31"},
+                    "outputs": ["income_tax", "net_income", "high_income"],
+                }
+            ],
+        }
+    )
+
+
+@needs_binary
+@pytest.mark.parametrize("mode", ["python", "json"])
+@pytest.mark.parametrize("dump", DUMPS.values(), ids=DUMPS.keys())
+def test_the_engine_runs_every_dump_of_a_format_2_artifact_without_a_catalog(
+    tmp_path: Path, dump: dict, mode: str
+) -> None:
+    engine = AxiomRulesEngine(binary_path=BINARY)
+    request = _flat_tax_request()
+    expected = engine.execute_compiled(
+        artifact_path=FLAT_TAX, request=request, accept_artifact_format=2
+    )
+    (result,) = expected.results
+    assert result.outputs["income_tax"].value.value == "800"
+    assert result.outputs["high_income"].outcome == "holds"
+    artifact = json.loads(FLAT_TAX.read_text(encoding="utf-8"))
+    del artifact["metadata"]["input_catalog"]
+    legacy = LegacyCompiledProgramV2.model_validate(artifact)
+    assert legacy.metadata.input_catalog is None
+    dumped = tmp_path / "dumped.json"
+    dumped.write_text(_dump(legacy, mode, dump), encoding="utf-8")
+    assert "input_catalog" not in json.loads(dumped.read_text(encoding="utf-8"))["metadata"]
+    assert (
+        engine.execute_compiled(artifact_path=dumped, request=request, accept_artifact_format=2)
+        == expected
+    )
+
+
+def _outcome(engine: AxiomRulesEngine, path: Path) -> ExecutionResponse | str:
+    """What the format-2 loader makes of ``path``: the response to an empty
+    request, or the refusal with the path taken out."""
+    empty = CompiledExecutionRequest(mode="explain", dataset=Dataset(), queries=[])
+    try:
+        return engine.execute_compiled(artifact_path=path, request=empty, accept_artifact_format=2)
+    except RuntimeError as error:
+        return str(error).replace(str(path), "<artifact>")
+
+
+@needs_binary
+@pytest.mark.parametrize("path", FORMAT_2_ARTIFACTS, ids=lambda path: path.name)
+def test_the_engine_reads_every_format_2_dump_as_it_reads_the_artifact(
+    path: Path, tmp_path: Path
+) -> None:
+    # For each catalog, every dump loads exactly when the artifact does: an
+    # absent catalog and the one written load, and an empty one over a
+    # program with inputs is refused both ways.
+    engine = AxiomRulesEngine(binary_path=BINARY)
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    for name, catalog in _catalogs(artifact).items():
+        source = tmp_path / f"{name}.json"
+        changed = _with_catalog(artifact, catalog)
+        source.write_text(json.dumps(changed), encoding="utf-8")
+        expected = _outcome(engine, source)
+        if name != "empty":
+            assert not isinstance(expected, str), expected
+        legacy = LegacyCompiledProgramV2.model_validate(changed)
+        for dump, options in DUMPS.items():
+            for mode in ["python", "json"]:
+                dumped = tmp_path / f"{name}-{dump}-{mode}.json"
+                dumped.write_text(_dump(legacy, mode, options), encoding="utf-8")
+                assert _outcome(engine, dumped) == expected, (name, dump, mode)
