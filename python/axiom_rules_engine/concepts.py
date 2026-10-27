@@ -31,6 +31,7 @@ CORPUS_CITATION_PATH_RE = re.compile(
     r"(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\-–]*[A-Za-z0-9.:\-–])?)+$"
 )
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 NUMBER_RE = re.compile(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?")
 STRING_RES = {
     quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*{quote}?", re.DOTALL)
@@ -509,9 +510,9 @@ def _formula_tokens(formula: str) -> list[str]:
 
     `\"\"\"` blocks, `#` comments and whitespace yield no token, so the
     words in them name nothing. A string literal yields `STRING_TOKEN`, a
-    name or number yields its text, and any other character is a token of
-    its own. Unlike the lexer, this keeps `a/b` as three tokens rather than
-    one path, and a date as numbers and dashes.
+    name, date or number yields its text, and any other character is a token
+    of its own. Unlike the lexer, this keeps `a/b` as three tokens rather
+    than one path.
     """
     tokens: list[str] = []
     position = 0
@@ -529,8 +530,10 @@ def _formula_tokens(formula: str) -> list[str]:
             position = STRING_RES[character].match(formula, position).end()
             tokens.append(STRING_TOKEN)
         else:
-            match = IDENTIFIER_RE.match(formula, position) or NUMBER_RE.match(
-                formula, position
+            match = (
+                IDENTIFIER_RE.match(formula, position)
+                or DATE_RE.match(formula, position)
+                or NUMBER_RE.match(formula, position)
             )
             token = match.group() if match else character
             tokens.append(token)

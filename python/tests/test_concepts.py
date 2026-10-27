@@ -339,6 +339,20 @@ def test_words_in_strings_and_comments_name_no_input(
     assert inferred_input_names(root) == inputs
 
 
+# A name starts where the lexer's previous token ends: a date is ten bytes, and
+# a number keeps its underscores.
+@pytest.mark.parametrize(
+    ("formula", "inputs"),
+    [("2026-01-01_x", {"_x"}), ("1_000_x", {"x"}), ("1.5_x", {"x"})],
+)
+def test_names_start_where_the_lexer_starts_them(
+    formula: str, inputs: set[str]
+) -> None:
+    rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules, {"r"}) == inputs
+
+
 class SearchCountingFormula(str):
     """A formula that counts the characters its `find` calls search."""
 
@@ -370,9 +384,9 @@ def test_inference_searches_each_comment_once(text: str) -> None:
     assert formula.searched <= len(formula)
 
 
-# Every case above, checked against the inputs the compiled program reads. A
-# fixture the compiler refuses is valid up to the refusal named here, which is
-# where its inputs stop being checkable.
+# The fixture groups above, checked against the inputs the compiled program
+# reads. A fixture the compiler refuses is valid up to the refusal named here,
+# which is where its inputs stop being checkable.
 COMPILE_REFUSALS = {
     "input_for_year(wages, 2024)": (
         "dense compilation does not yet support selected-year input"
