@@ -889,4 +889,60 @@ fn a_filtered_entity_rule_read_through_anchor_runs_on_the_anchors_id() {
     }
     assert_eq!(find(&interface, "age").entities, kinds(&["Person"]));
     assert_eq!(find(&interface, "head_age").entities, kinds(&["Household"]));
+    // The Unit rules' own entity also yields household ids, so only the
+    // relation's reads show that the predicate references them.
+    let adults_of = interface
+        .relations
+        .iter()
+        .find(|relation| relation.name == "adults_of")
+        .unwrap();
+    assert_eq!(
+        adults_of.provenance,
+        RelationProvenance::Derived {
+            rule: "adults_of".to_string(),
+            source_relation: "member_of_household".to_string(),
+            reads: RelationReads {
+                inputs: kinds(&["age"]),
+                rules: kinds(&["unit_opted_in", "unit_score"]),
+                relations: vec![],
+            },
+        }
+    );
+}
+
+/// An unqualified read of a filtered-entity rule in a predicate runs on the
+/// related id unless the rule's entity is the derivation's declared current
+/// kind. Here `CareUnit` filters `Person`, the related kind, so its rule runs
+/// on person ids only, never on the current household's.
+#[test]
+fn an_unqualified_filtered_entity_rule_in_a_predicate_runs_on_the_related_id() {
+    let interface = derive(json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "guardian_of", "arity": 2, "slot_entities": ["Person", "Person"]},
+            {"name": "care_unit", "arity": 2, "derivation": {
+                "source_relation": "guardian_of",
+                "current_slot": 0, "related_slot": 1,
+                "entity": "CareUnit",
+                "slot_entities": ["Person", "Person"],
+                "predicate": cmp(input("cares"), "eq", boolean(true))
+            }},
+            {"name": "covered_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": derived_ref("care_unit_covered")
+            }}
+        ],
+        "derived": [
+            judgment_rule("care_unit_covered", "CareUnit",
+                cmp(input("covered"), "eq", boolean(true))),
+            scalar_rule("covered_count", "Household", json!({
+                "kind": "count_related", "relation": "covered_members",
+                "current_slot": 1, "related_slot": 0
+            }))
+        ]
+    }));
+    assert_eq!(find(&interface, "covered").entities, kinds(&["Person"]));
+    assert_eq!(find(&interface, "cares").entities, kinds(&["Person"]));
 }
