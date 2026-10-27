@@ -151,7 +151,9 @@ written bare, as if it were a value or an input, refuses
 - in a term comparison.
 
 Outside predicates, these names stay ordinary identifiers. Section 2 shows
-that no corpus predicate uses them.
+that no corpus predicate uses them. No declaration may take `anchor` or
+`candidate` as its name ([rulespec.md](rulespec.md#declaration-names)), so a
+term never hides one.
 
 ### 3.2 Qualified reads
 

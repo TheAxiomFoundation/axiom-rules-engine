@@ -416,8 +416,9 @@ fn a_bare_boolean_parameter_is_a_judgment_of_the_parameter() {
 }
 
 /// The period built-ins are dates and come first in scalar position, so a
-/// bare one is refused as a judgment, in a predicate and in a rule body, even
-/// where a Boolean parameter shares its name.
+/// bare one is refused as a judgment, in a predicate and in a rule body. A
+/// Boolean parameter of the same name is refused before lowering
+/// (`tests/declaration_names.rs`).
 #[test]
 fn a_bare_period_built_in_is_refused_as_a_judgment() {
     for name in ["period_start", "period_end"] {
@@ -456,12 +457,17 @@ fn a_bare_period_built_in_is_refused_as_a_judgment() {
         formula: {rule_formula}
 "#
                 );
+                let refusal = if shadowed.is_empty() {
+                    format!("`{name}` is a date")
+                } else {
+                    format!("[reserved_declaration_name] `{name}` is declared")
+                };
                 for extra in [predicate, rule] {
                     let error = compile(&people_module(&extra))
                         .expect_err("a period built-in is not a judgment")
                         .to_string();
                     assert!(
-                        error.contains(&format!("`{name}` is a date")),
+                        error.contains(&refusal),
                         "{formula} shadowed={}: {error}",
                         !shadowed.is_empty()
                     );
@@ -476,8 +482,10 @@ fn a_bare_period_built_in_is_refused_as_a_judgment() {
 /// makes decides the bare form: a period built-in (a date) is refused, a rule
 /// is a judgment of the rule, and a parameter or input is the comparison
 /// itself. The one addition is a relation name in a predicate, which tests
-/// membership. Checked for every kind a name can have, and for a name
-/// declared both as a parameter and as a rule, in predicates and rule bodies.
+/// membership. Checked for every kind a name can have, in predicates and rule
+/// bodies. A declared period built-in, and a name declared both as a
+/// parameter and as a rule, are refused before lowering
+/// (`tests/declaration_names.rs`), in both forms.
 #[test]
 fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
     const PARAMETER: &str = "    kind: parameter\n    dtype: Bool\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"true\"\n";
@@ -528,6 +536,22 @@ fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
                 };
                 let case = format!("{name} {declaration:?} in_predicate={in_predicate}");
                 let bare = lowered(name);
+                // A reserved name is refused at its first declaration,
+                // before any clash with a second one.
+                let refusal = if !declaration.is_empty() && name.starts_with("period_") {
+                    Some("[reserved_declaration_name]")
+                } else if declaration.len() > 1 {
+                    Some("[declaration_name_clash]")
+                } else {
+                    None
+                };
+                if let Some(refusal) = refusal {
+                    for form in [bare, lowered(&format!("{name} == true"))] {
+                        let error = form.expect_err(&case);
+                        assert!(error.contains(refusal), "{case}: {error}");
+                    }
+                    continue;
+                }
                 let compared = lowered(&format!("{name} == true"))
                     .unwrap_or_else(|error| panic!("{case}: {error}"));
                 let read = compared["left"]["kind"]
