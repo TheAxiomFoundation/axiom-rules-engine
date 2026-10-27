@@ -8,10 +8,14 @@ of an ``exclude_unset`` dump when it was never set. In the other direction, a
 key the schema leaves optional is one the engine reads when it is absent, so
 the model must not require it either. The schema tests walk each artifact
 model against the schema the engine publishes for its format
-(``schemas/compiled-artifact.v<N>.schema.json``, which ``cargo test --features
-schema`` keeps equal to the Rust types). The end-to-end tests run the engine
-binary the repository builds (``target/debug/axiom-rules-engine``). They skip
-without it, except in CI, which builds it.
+(``schemas/compiled-artifact.v<N>.schema.json``: ``cargo test --features
+schema`` keeps format 3's equal to the Rust types, closed to what the format-3
+loader requires; format 2's is archived as the engine wrote it, since the
+format-2 loader still reads that format). They see only which keys a field's
+type and default require, not a requirement a validator adds. The end-to-end
+tests run the engine binary the repository builds
+(``target/debug/axiom-rules-engine``). They skip without it, except in CI,
+which builds it.
 """
 from __future__ import annotations
 
@@ -534,7 +538,8 @@ def test_format_3_metadata_still_requires_the_catalog() -> None:
     }
     with pytest.raises(ValidationError, match="input_catalog"):
         CompiledProgramMetadata.model_validate(metadata)
-    # Format-2 metadata without a catalog does not pass for format 3's.
+    # Format-2 metadata is a different class, not a subclass, so an instance
+    # without a catalog cannot pass for format 3's unvalidated.
     with pytest.raises(ValidationError):
         CompiledProgramMetadata.model_validate(LegacyCompiledProgramMetadataV2.model_validate(metadata))
 
