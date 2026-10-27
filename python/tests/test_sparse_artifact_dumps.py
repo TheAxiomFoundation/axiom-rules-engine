@@ -446,8 +446,9 @@ def test_the_engine_and_the_model_both_refuse_a_format_3_artifact_without_a_cata
 # a default of `[]` would turn an artifact the engine runs into one it refuses.
 
 FORMAT_2 = REPO / "tests" / "fixtures" / "artifacts" / "format2"
-# Real format-2 compiler output, and the older format-2 shapes the directory's
-# README describes, one of which has no catalog.
+# Real format-2 compiler output, and payloads built from it in the older
+# format-2 shapes the directory's README describes, two of them without a
+# catalog.
 FORMAT_2_ARTIFACTS = sorted(
     [
         *(FORMAT_2 / "compiled").glob("*.json"),
@@ -489,7 +490,7 @@ def _dump(model: BaseModel, mode: str, options: dict) -> str:
     return json.dumps(model.model_dump(**options))
 
 
-def test_the_format_2_artifacts_include_published_ones_without_a_catalog() -> None:
+def test_the_format_2_artifacts_include_ones_without_a_catalog() -> None:
     without = [
         path.name
         for path in FORMAT_2_ARTIFACTS
