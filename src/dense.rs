@@ -502,8 +502,9 @@ enum CompiledScalarExpr {
     },
     /// Cross-period reduction, evaluated only by the lifetime executor. `value`
     /// is compiled as an ordinary per-period scalar (evaluated once per supplied
-    /// period); `n` (SumTopN only) is compiled likewise and read at the
-    /// reference period. The per-period executor rejects this node.
+    /// period); `n` (SumTopN only) is compiled likewise, evaluated in every
+    /// period and required to be period-invariant before its reference-period
+    /// value is used. The per-period executor rejects this node.
     OverPeriods {
         kind: OverPeriodsKind,
         value: Box<CompiledScalarExpr>,
@@ -671,8 +672,8 @@ struct RuleCommencement {
 }
 
 impl RuleCommencement {
-    fn rows(&self, period: &Period, enforce: bool, mask: &RowMask) -> (RowMask, RowErrors) {
-        if enforce && period.start < self.effective_from {
+    fn rows(&self, period: &Period, mask: &RowMask) -> (RowMask, RowErrors) {
+        if period.start < self.effective_from {
             let mut errors = RowErrors::new();
             errors.record_all(
                 mask,
@@ -884,7 +885,7 @@ impl DenseCompiledProgram {
         let requested = self.resolve_outputs(outputs)?;
         let batch = self.bind_batch(batch)?;
         let row_count = batch.row_count;
-        let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch, true);
+        let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch);
         let all = RowMask::all(row_count);
         let mut evaluated = Vec::with_capacity(requested.len());
         for (output, derived_index) in requested {
@@ -961,6 +962,12 @@ impl DenseCompiledProgram {
     /// a derived referenced outside a reduction means its body inlined in this
     /// same lifetime context, and a bare period-invariant input binds its
     /// common value.
+    ///
+    /// Reached rules must have commenced at their evaluation period's start:
+    /// each individual period inside reductions (including top-N counts), and
+    /// the reference period for lifetime-level rules and requested outputs.
+    /// Earlier periods fail with `EvalError::MissingDerivedFormulaVersion`,
+    /// as on the per-period entry points; untaken branches remain unaffected.
     pub fn execute_lifetime_f64(
         &self,
         periods: &[Period],
@@ -3525,10 +3532,6 @@ struct DenseExecutor<'a, N: DenseNum> {
     program: &'a DenseCompiledProgram,
     period: &'a Period,
     batch: DenseBoundBatch,
-    /// Enforce each rule's commencement date (#84): a row that reaches a rule
-    /// before it commences fails. The per-period entry points do; the
-    /// lifetime executor's per-period executors never have.
-    enforce_commencement: bool,
     scalar_cache: Vec<Option<DerivedColumn<DenseColumn>>>,
     judgment_cache: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
     /// Each relation's members for the candidates it was last resolved for,
@@ -3614,12 +3617,7 @@ impl<N: DenseNum> ColumnAxis<N, CompiledRelatedScalarExpr> for RelatedAxis<'_, '
 }
 
 impl<'a, N: DenseNum> DenseExecutor<'a, N> {
-    fn new(
-        program: &'a DenseCompiledProgram,
-        period: &'a Period,
-        batch: DenseBoundBatch,
-        enforce_commencement: bool,
-    ) -> Self {
+    fn new(program: &'a DenseCompiledProgram, period: &'a Period, batch: DenseBoundBatch) -> Self {
         Self {
             program,
             period,
@@ -3627,7 +3625,6 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
             relation_members: vec![None; program.relations.len()],
             batch,
-            enforce_commencement,
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             visits: 0,
@@ -3712,8 +3709,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     /// empty mask.
     fn commenced_rows(&self, derived_index: usize, mask: &RowMask) -> (RowMask, RowErrors) {
         let derived = &self.program.derived[derived_index];
-        if self.enforce_commencement
-            && let Some(effective_from) = derived.effective_from
+        if let Some(effective_from) = derived.effective_from
             && self.period.start < effective_from
         {
             let mut errors = RowErrors::new();
@@ -3817,7 +3813,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
             CompiledScalarExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (live, mut errors) = rule.rows(self.period, mask);
                 let (values, formula_errors) = self.eval_scalar_expr(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((values, errors))
@@ -4419,7 +4415,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let length = self.batch.relations[relation].related_count;
         match expr {
             CompiledRelatedJudgmentExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (live, mut errors) = rule.rows(self.period, mask);
                 let (values, formula_errors) =
                     self.eval_related_predicate(relation, value, &live)?;
                 errors.absorb(formula_errors);
@@ -4499,7 +4495,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let length = self.batch.relations[relation].related_count;
         match expr {
             CompiledRelatedScalarExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (live, mut errors) = rule.rows(self.period, mask);
                 let (values, formula_errors) =
                     self.resolve_related_scalar(relation, value, &live)?;
                 errors.absorb(formula_errors);
@@ -4763,7 +4759,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
             CompiledJudgmentExpr::Commenced { rule, value } => {
-                let (live, mut errors) = rule.rows(self.period, self.enforce_commencement, mask);
+                let (live, mut errors) = rule.rows(self.period, mask);
                 let (values, formula_errors) = self.eval_judgment_expr(value, &live)?;
                 errors.absorb(formula_errors);
                 Ok((values, errors))
@@ -4874,7 +4870,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let period_executors = periods
             .iter()
             .zip(bound)
-            .map(|(period, batch)| DenseExecutor::new(program, period, batch, false))
+            .map(|(period, batch)| DenseExecutor::new(program, period, batch))
             .collect();
         Self {
             program,
@@ -4931,11 +4927,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 EvalError::ExpectedScalar(derived.name.clone()),
             ));
         };
-        let (column, errors) = self.eval_scalar(expr, mask)?;
-        let mut errors = errors.within_rule(&derived.label);
+        let (live, mut errors) =
+            self.period_executors[self.reference_period].commenced_rows(derived_index, mask);
+        let (column, formula_errors) = self.eval_scalar(expr, &live)?;
+        errors.absorb(formula_errors.within_rule(&derived.label));
         let column = match derived.rounding {
             Some(rounding) => {
-                round_dense_column::<N>(column, rounding, &mask.without(&errors), &mut errors)
+                round_dense_column::<N>(column, rounding, &live.without(&errors), &mut errors)
             }
             None => column,
         };
@@ -4977,19 +4975,20 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
     fn compute_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let program = self.program;
         let derived = &program.derived[derived_index];
-        match &derived.semantics {
-            CompiledSemantics::Judgment(expr) => self
-                .eval_judgment(expr, mask)
-                .map(|(values, errors)| (values, errors.within_rule(&derived.label))),
-            CompiledSemantics::Scalar(_) => {
-                let (_, errors) = fail_numeric::<N>(
-                    self.row_count,
-                    mask,
-                    EvalError::ExpectedJudgment(derived.name.clone()),
-                );
-                Ok((vec![JudgmentOutcome::NotHolds; self.row_count], errors))
-            }
-        }
+        let placeholder = vec![JudgmentOutcome::NotHolds; self.row_count];
+        let CompiledSemantics::Judgment(expr) = &derived.semantics else {
+            let (_, errors) = fail_numeric::<N>(
+                self.row_count,
+                mask,
+                EvalError::ExpectedJudgment(derived.name.clone()),
+            );
+            return Ok((placeholder, errors));
+        };
+        let (live, mut errors) =
+            self.period_executors[self.reference_period].commenced_rows(derived_index, mask);
+        let (values, formula_errors) = self.eval_judgment(expr, &live)?;
+        errors.absorb(formula_errors.within_rule(&derived.label));
+        Ok((values, errors))
     }
 
     fn eval_scalar(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
@@ -5017,7 +5016,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((broadcast_scalar_literal::<N>(value, len), RowErrors::new()))
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
-            CompiledScalarExpr::Commenced { value, .. } => self.eval_scalar(value, mask),
+            CompiledScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) =
+                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (column, formula_errors) = self.eval_scalar(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((column, errors))
+            }
             CompiledScalarExpr::Round { value, rounding } => {
                 eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
             }
@@ -5464,7 +5469,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 Ok((outcomes, errors))
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
-            CompiledJudgmentExpr::Commenced { value, .. } => self.eval_judgment(value, mask),
+            CompiledJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) =
+                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (values, formula_errors) = self.eval_judgment(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }

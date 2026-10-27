@@ -265,7 +265,7 @@ fn empty_dense_source_chains_share_masks_and_skip_later_filters() {
     }
     let bound = dense.bind_batch(batch(&[vec![-1; width]])).unwrap();
     let period = Period::month(2026, 1);
-    let mut executor = DenseExecutor::<Decimal>::new(&dense, &period, bound, false);
+    let mut executor = DenseExecutor::<Decimal>::new(&dense, &period, bound);
     let (members, errors) = executor
         .relation_members(length - 1, &RowMask::all(width))
         .unwrap();
