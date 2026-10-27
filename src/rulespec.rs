@@ -3702,14 +3702,21 @@ struct Declaration<'a> {
 /// something else. Formula lowering reads `period_start` and `period_end` as
 /// the period's dates before any declaration (`lower_to_scalar`), and reserves
 /// `anchor` and `candidate` as terms inside a derived relation's predicate
-/// (`term_named`).
+/// (`term_named`). The lexer reads a keyword (`true`, `and`, `if`, ...) as a
+/// literal or syntax, never as a name; a parameter or rule cannot take one
+/// (`validate_source_name`), but a relation or an input could.
 fn reserved_name_reason(name: &str) -> Option<&'static str> {
+    if crate::formula::keyword(name).is_some() {
+        return Some(
+            "it is a formula keyword, which a formula reads as a literal or as syntax, never as a declaration",
+        );
+    }
     Some(match name {
         "period_start" => {
-            "a bare `period_start` always reads the start date of the period being computed, never a declaration"
+            "a bare `period_start` means the start date of the period being computed, never a declaration"
         }
         "period_end" => {
-            "a bare `period_end` always reads the end date of the period being computed, never a declaration"
+            "a bare `period_end` means the end date of the period being computed, never a declaration"
         }
         "anchor" => {
             "in a derived relation's predicate, `anchor` names the term for the id the relation is read from, never a declaration"

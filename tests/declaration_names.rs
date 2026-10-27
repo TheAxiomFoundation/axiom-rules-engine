@@ -5,8 +5,8 @@
 //! everything it imports:
 //!
 //! * a parameter, derived rule, data relation, derived relation or input named
-//!   `period_start`, `period_end`, `anchor` or `candidate`
-//!   (`reserved_declaration_name`);
+//!   `period_start`, `period_end`, `anchor`, `candidate` or a formula keyword
+//!   such as `true` (`reserved_declaration_name`);
 //! * one name declared with two kinds: a parameter and a derived rule, a
 //!   relation and either, or an input and any of them
 //!   (`declaration_name_clash`).
@@ -253,6 +253,38 @@ fn every_kind_of_declaration_is_refused_a_reserved_name() {
                 error.contains(&reserved_refusal(name, kind.label())),
                 "{name} {kind:?}: {error}"
             );
+        }
+    }
+}
+
+/// A formula keyword is never read as a name: the lexer reads `true` and
+/// `false` as literals and the rest as syntax. A parameter or rule could
+/// never take one, because its name is written into the formula source, so
+/// it is still refused, by that check or by this one (a parameter table's
+/// name is not written there). A relation or an input could take one, and
+/// is now refused as for a built-in. Names are quoted, so YAML keeps `true`
+/// a string.
+#[test]
+fn a_formula_keyword_is_refused_as_a_declaration_name() {
+    const KEYWORDS: [&str; 15] = [
+        "entity", "amend", "from", "to", "match", "if", "elif", "else", "and", "or", "not", "true",
+        "True", "false", "False",
+    ];
+    for name in KEYWORDS {
+        let quoted = format!("'{name}'");
+        for kind in KINDS {
+            let error = compile(&module(&[(quoted.as_str(), kind)], ""))
+                .expect_err(&format!("{name} {kind:?}"));
+            let refused = match kind.role() {
+                Role::Relation | Role::Input => error.contains(&reserved_refusal(name, kind.label())),
+                Role::Parameter | Role::Rule => {
+                    error.contains(&reserved_refusal(name, kind.label()))
+                        || error.contains(&format!(
+                            "RuleSpec rule {name:?} has name {name:?}; it must be exactly one identifier or path"
+                        ))
+                }
+            };
+            assert!(refused, "{name} {kind:?}: {error}");
         }
     }
 }

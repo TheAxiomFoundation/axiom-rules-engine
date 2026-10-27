@@ -180,7 +180,7 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing. Four changes affect existing programs:
+Unqualified reads keep today's routing. Five changes affect existing programs:
 - A bare parameter name in a predicate, or tested as a judgment in a rule
   body, used to read an input of that name and now reads the parameter (3.3).
   That held when nothing else had the name. A parameter that shared a rule's
@@ -201,12 +201,17 @@ Unqualified reads keep today's routing. Four changes affect existing programs:
 - A declaration that a bare name cannot read is refused before lowering
   (`docs/rulespec.md`, "Declaration names"). That covers a parameter, rule,
   relation or input named `period_start`, `period_end`, `anchor` or
-  `candidate` (`reserved_declaration_name`). It also covers a name declared
+  `candidate`, and a relation or input named after a formula keyword such as
+  `true` (`reserved_declaration_name`). It also covers a name declared
   as two of a parameter, a rule, a relation and an input
   (`declaration_name_clash`). Such a program used to compile, and one bare
   name reached only one of its declarations. On 2026-10-27 no corpus module
   declares a reserved name, and one declares a clash (rulespec-us#1953); main
   already refuses that module for another reason.
+- A `parameter` record with an entity or a computed formula lowers to a
+  rule. A predicate used to read its bare name, and `t.name`, as an input of
+  that name. It now reads the rule, as a rule body does (3.3). On 2026-10-27
+  the corpus has 299 such records and no predicate that reads one.
 
 ### 3.3 Parameters in predicates
 
@@ -589,7 +594,7 @@ constructs.
 - A test checks that a path artifact never also writes `source_relation`.
   `RelationDerivationSpec` does not deny unknown fields, so writing both would
   let an older engine silently ignore the path.
-- A program that uses none of the additions and makes none of the four
+- A program that uses none of the additions and makes none of the five
   changes in 3.2 compiles to the same bytes as before.
 - If #155's format 3 (#250) merges first, this work adds to format 3 and
   needs no separate version bump.
@@ -912,10 +917,11 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change.** There are four exceptions. A bare
+- **Unqualified reads do not change.** There are five exceptions. A bare
   parameter name in a predicate, or tested as a judgment in a rule body, now
   reads the parameter (3.3). A bare period built-in tested as a judgment is
   now refused (3.2). A bare `anchor` or `candidate` in a derived relation's
   predicate is now refused (3.1). A declaration that a bare name cannot read,
-  because a built-in, a term or another declaration takes the name, is now
-  refused (3.2).
+  because a built-in, a term, a keyword or another declaration takes the
+  name, is now refused (3.2). A predicate reads a `parameter` record that
+  lowers to a rule as that rule, not as an input (3.2).

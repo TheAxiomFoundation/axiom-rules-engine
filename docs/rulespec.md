@@ -378,7 +378,8 @@ slot). `t.name` reads a value at a term's id:
 A predicate reads the module's parameters as a rule body does: parameter
 tables, scalar parameters, and entity-free rules with literal values, which
 lowering turns into parameters. A `parameter` record with an entity or a
-computed formula lowers to a rule, and a predicate reads it as a rule too.
+computed formula lowers to a rule, and a predicate now reads it as a rule
+too, bare or through a term; it used to read an input of that name.
 
 ```yaml
   - name: older_relative_of
@@ -436,8 +437,10 @@ a predicate, a relation named `anchor` or `candidate` used to be read through
 `.`: `sum(anchor.age)` aggregated over it and is now refused, and
 `min(anchor.age)` took its minimum and now reads the anchor's own `age`. Such
 a relation can no longer be declared, so no program that compiles keeps
-either old meaning. No declaration may take a reserved name, and no name may
-be declared as two of a parameter, a rule, a relation and an input
+either old meaning. A predicate that reads a `parameter` record with an
+entity or a computed formula used to read an input of that name and now
+reads the rule. No declaration may take a reserved name, and no name may be
+declared as two of a parameter, a rule, a relation and an input
 ([Declaration names](#declaration-names)). A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
@@ -822,17 +825,18 @@ each mode's contract.
 
 ## Declaration names
 
-Each name declared in a module's import-merged closure has one meaning, and a
-bare read of it reaches the declaration. The compiler refuses two kinds of
-declaration that would break this, before it lowers any formula, in the
-default and the strict mode alike.
+Each name declared in a module's import-merged closure has one meaning:
+wherever a formula may read that kind of declaration bare, a bare read of the
+name reaches it. The compiler refuses two kinds of declaration that would
+break this, before it lowers any formula, in the default and the strict mode
+alike.
 
 **A name declared as two things** (`declaration_name_clash`). A bare name
 reads one declaration, in a fixed order: a parameter, then a rule, then (in a
 predicate's judgment position) a relation, then an input. A name declared as
-two of these would read only the first, and the other would still compile and
-be requestable, but no bare read would reach it. Each declaration counts as
-lowering reads it:
+two of these would read only the first. The other would still compile (a
+hidden rule could still be requested by name), but no bare read would reach
+it. Each declaration counts as lowering reads it:
 
 - a parameter table, or a `parameter` or `derived` record with no entity and
   only literal versions, is a parameter;
@@ -847,10 +851,15 @@ merge with a diagnostic (an error in strict mode), and a rule declared twice
 is an error.
 
 **A reserved name** (`reserved_declaration_name`). A bare `period_start` or
-`period_end` always reads the start or end date of the period being computed,
-and in a derived relation's predicate a bare `anchor` or `candidate` names a
-term. No parameter, rule, relation or item of `inputs:` may take one of these
-four names.
+`period_end` means the start or end date of the period being computed: a
+scalar read returns the date, and a judgment read is refused. In a derived
+relation's predicate, a bare `anchor` or `candidate` names a term. The lexer
+reads a formula keyword as a literal (`true`, `True`, `false`, `False`) or as
+syntax (`and`, `or`, `not`, `if`, `elif`, `else`, `match`, `entity`, `amend`,
+`from`, `to`). No parameter, rule, relation or item of `inputs:` may take any
+of these names. A parameter or rule could never take a keyword, because its
+name is written into the formula source, so the keyword check adds relations
+and inputs.
 
 Refusing a reserved name costs the routes that do not read it bare. Before
 the refusal, a declaration named `period_start` was still reached by a table
@@ -858,17 +867,25 @@ index (`period_start[0]`), a related read (`sum(member_of.period_start)`), a
 `where` clause or summed field (`count_where(member_of, period_start)`,
 `sum_where(member_of, period_start, adult)`), an aggregation over a relation
 of that name (`sum(period_start.age)`, `len(period_start)`), and a request for
-the rule by name, while every bare read of it silently returned the date. A
+the rule by name. Meanwhile every bare scalar read of it silently returned
+the date, and a bare judgment read was refused. A
 declaration named `anchor` or `candidate` was reached by every route outside
 predicates; inside one, a bare or qualified read was refused and
 `min(anchor.age)` read the term's own `age`. Imports merge whole modules, so
 a declaration's name reaches every importer's predicates. Renaming the
 declaration keeps every route, with the same lowering.
 
-Three things are not checked:
+Five things are not checked:
 
 - `source_relation` records: formulas never read their names, which are
   cited by `#` id;
+- a relation or input whose name is not a formula identifier or path, such
+  as `member-of`: no formula can write it, so it has no bare read to lose.
+  Such a relation can still be a derived relation's `source_relation`. A
+  parameter's or rule's name must already be one identifier or path;
+- a derived relation's `member_relation` alias (`members` in the SNAP
+  example above): in rules of its filtered entity it names that derived
+  relation. It is a scoped name, not a declaration;
 - undeclared names: outside predicates `anchor + 1` still reads an input
   named `anchor`, as above;
 - `ProgramSpec` JSON: each of its reads names its kind (`parameter_lookup`,
