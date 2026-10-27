@@ -418,20 +418,27 @@ until relation atoms are supported (#214). Outside predicates the two names
 are ordinary identifiers: `anchor + 1` in a rule body reads an input named
 `anchor`, and `anchor.age` there is a field access, which RuleSpec rejects.
 No declaration may take either name ([Declaration names](#declaration-names)).
-A
-compiled program that carries a read through a term anywhere but a derived
+A compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
 Unqualified reads keep the routing above. A bare parameter name now reads the
 parameter in two places where it used to read an input of that name: anywhere
 in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
-in a rule body as in a predicate. A bare `period_start` or `period_end`
-tested as a judgment, which used to read a rule, a relation or an input of
-that name, is refused. A judgment resolves a bare name in the order a scalar
-does, and a scalar reads the built-in date first, so neither name is a
-judgment. No declaration may take either name, and no name may be declared
-both as a parameter and as a rule ([Declaration names](#declaration-names)). A program with none of these, and with no term, compiles to the
+in a rule body as in a predicate. That held when nothing else had the name: a
+parameter that shared a rule's name used to read the rule there, and in a
+predicate one that shared a relation's name tested membership. Such a program
+is now refused at declaration. A bare `period_start` or `period_end` tested
+as a judgment, which used to read a rule, a relation or an input of that
+name, is refused. A judgment resolves a bare name in the order a scalar does,
+and a scalar reads the built-in date first, so neither name is a judgment. In
+a predicate, a relation named `anchor` or `candidate` used to be read through
+`.`: `sum(anchor.age)` aggregated over it and is now refused, and
+`min(anchor.age)` took its minimum and now reads the anchor's own `age`. Such
+a relation can no longer be declared, so no program that compiles keeps
+either old meaning. No declaration may take a reserved name, and no name may
+be declared as two of a parameter, a rule, a relation and an input
+([Declaration names](#declaration-names)). A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
