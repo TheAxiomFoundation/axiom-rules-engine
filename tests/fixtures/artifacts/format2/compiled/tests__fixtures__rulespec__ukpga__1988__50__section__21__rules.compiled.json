@@ -1,0 +1,1251 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Housing Act 1988 s.21 — validity of a notice seeking possession of an\nassured shorthold tenancy (post-Deregulation Act 2015 regime).\n\nTop-level output is a statutory conclusion (`section_21_notice_valid`\n: holds / not_holds / undetermined) rather than a monetary amount. No\narithmetic on the question asked — only a cascade of legal judgments,\nabsence conditions, and named time windows composed from several Acts:\n\n  HA 1988 s.19A + Sch 2A          tenancy must be an AST\n  HA 2004 s.213(3)                deposit protected within 30 days\n  HA 2004 s.213(6)                prescribed information within 30 days\n  HA 2004 s.215                   s.21 barred if scheme duties unmet\n  DerA 2015 s.38 + SI 2015/1646   EPC / gas safety / How-to-Rent guide\n  HA 2004 Parts 2/3 + DerA s.41   licensing duty\n  DerA 2015 s.33                  retaliatory-eviction bar\n  HA 1988 s.21(4B)                no notice in the first four months\n\nThe retaliation bar is expressed with the `count_where` filtered-\naggregation extension: each CouncilNotice carries an input\n`is_in_retaliation_window: Boolean` pre-computed by the caller (the\nserved-on date falls 0–180 days before the s.21 notice was served)."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "council_notice_of_tenancy",
+        "arity": 2,
+        "slot_entities": [
+          "CouncilNotice",
+          "Tenancy"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "deposit_protection_window_days",
+        "unit": null,
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2007-04-06",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 30
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "earliest_notice_tenancy_age_days",
+        "unit": null,
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 120
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "tenancy_is_assured_shorthold",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 1988 s.19A + Sch 2A",
+        "source_url": "https://www.legislation.gov.uk/ukpga/1988/50/section/19A",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "is_assured_shorthold"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "is_assured_shorthold"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "days_from_deposit_receipt_to_protection",
+        "entity": "Tenancy",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.213(3)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "days_between",
+          "from": {
+            "kind": "input",
+            "name": "deposit_received_date"
+          },
+          "to": {
+            "kind": "input",
+            "name": "deposit_protected_date"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "days_between",
+              "from": {
+                "kind": "input",
+                "name": "deposit_received_date"
+              },
+              "to": {
+                "kind": "input",
+                "name": "deposit_protected_date"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "days_from_deposit_receipt_to_info",
+        "entity": "Tenancy",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.213(6)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "days_between",
+          "from": {
+            "kind": "input",
+            "name": "deposit_received_date"
+          },
+          "to": {
+            "kind": "input",
+            "name": "prescribed_info_given_date"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "days_between",
+              "from": {
+                "kind": "input",
+                "name": "deposit_received_date"
+              },
+              "to": {
+                "kind": "input",
+                "name": "prescribed_info_given_date"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "deposit_protected_in_time",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.213(3)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "days_from_deposit_receipt_to_protection"
+          },
+          "op": "lte",
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "deposit_protection_window_days",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "days_from_deposit_receipt_to_protection"
+              },
+              "op": "lte",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "deposit_protection_window_days",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "prescribed_info_in_time",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.213(6)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "days_from_deposit_receipt_to_info"
+          },
+          "op": "lte",
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "deposit_protection_window_days",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "days_from_deposit_receipt_to_info"
+              },
+              "op": "lte",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "deposit_protection_window_days",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "no_deposit_taken",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.213(1)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "not",
+          "item": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "deposit_taken"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "deposit_taken"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "deposit_requirements_met",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.215",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2004/34/section/215",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "or",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "no_deposit_taken"
+            },
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "deposit_protected_in_time"
+                },
+                {
+                  "kind": "derived",
+                  "name": "prescribed_info_in_time"
+                }
+              ]
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "or",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "no_deposit_taken"
+                },
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "derived",
+                      "name": "deposit_protected_in_time"
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "prescribed_info_in_time"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "epc_requirement_met",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Deregulation Act 2015 s.38 + SI 2015/1646 reg 2(1)(b)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "epc_given_before_tenancy"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "epc_given_before_tenancy"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "gas_safety_requirement_met",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 2015/1646 reg 2(1)(a)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "gas_safety_given_before_occupation"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "gas_safety_given_before_occupation"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "how_to_rent_requirement_met",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Deregulation Act 2015 s.39 + SI 2015/1646 reg 3",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "how_to_rent_guide_given"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "how_to_rent_guide_given"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "licensing_not_required",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 Parts 2/3",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "not",
+          "item": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "property_requires_licence"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "property_requires_licence"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "landlord_holds_licence",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 2004 s.61 / s.85",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "landlord_has_licence"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "landlord_has_licence"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "licensing_requirement_met",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Deregulation Act 2015 s.41",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2015/20/section/41",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "or",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "licensing_not_required"
+            },
+            {
+              "kind": "derived",
+              "name": "landlord_holds_licence"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "or",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "licensing_not_required"
+                },
+                {
+                  "kind": "derived",
+                  "name": "landlord_holds_licence"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "qualifying_council_notices",
+        "entity": "Tenancy",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Deregulation Act 2015 s.33(2)(a) — 6-month lookback",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2015/20/section/33",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "council_notice_of_tenancy",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_in_retaliation_window"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "council_notice_of_tenancy",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_in_retaliation_window"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "no_retaliation_bar",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Deregulation Act 2015 s.33",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "qualifying_council_notices"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "qualifying_council_notices"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "tenancy_age_days_at_notice",
+        "entity": "Tenancy",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 1988 s.21(4B)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "days_between",
+          "from": {
+            "kind": "input",
+            "name": "tenancy_start_date"
+          },
+          "to": {
+            "kind": "input",
+            "name": "notice_served_date"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "days_between",
+              "from": {
+                "kind": "input",
+                "name": "tenancy_start_date"
+              },
+              "to": {
+                "kind": "input",
+                "name": "notice_served_date"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "not_served_too_early",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 1988 s.21(4B)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "tenancy_age_days_at_notice"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "earliest_notice_tenancy_age_days",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "tenancy_age_days_at_notice"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "earliest_notice_tenancy_age_days",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "section_21_notice_valid",
+        "entity": "Tenancy",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Housing Act 1988 s.21 as modified by Deregulation Act 2015 Pt 3 Ch 1",
+        "source_url": "https://www.legislation.gov.uk/ukpga/1988/50/section/21",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "and",
+                      "items": [
+                        {
+                          "kind": "and",
+                          "items": [
+                            {
+                              "kind": "and",
+                              "items": [
+                                {
+                                  "kind": "and",
+                                  "items": [
+                                    {
+                                      "kind": "derived",
+                                      "name": "tenancy_is_assured_shorthold"
+                                    },
+                                    {
+                                      "kind": "derived",
+                                      "name": "deposit_requirements_met"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "kind": "derived",
+                                  "name": "epc_requirement_met"
+                                }
+                              ]
+                            },
+                            {
+                              "kind": "derived",
+                              "name": "gas_safety_requirement_met"
+                            }
+                          ]
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "how_to_rent_requirement_met"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "licensing_requirement_met"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "no_retaliation_bar"
+                }
+              ]
+            },
+            {
+              "kind": "derived",
+              "name": "not_served_too_early"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2015-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "and",
+                      "items": [
+                        {
+                          "kind": "and",
+                          "items": [
+                            {
+                              "kind": "and",
+                              "items": [
+                                {
+                                  "kind": "and",
+                                  "items": [
+                                    {
+                                      "kind": "and",
+                                      "items": [
+                                        {
+                                          "kind": "derived",
+                                          "name": "tenancy_is_assured_shorthold"
+                                        },
+                                        {
+                                          "kind": "derived",
+                                          "name": "deposit_requirements_met"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "kind": "derived",
+                                      "name": "epc_requirement_met"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "kind": "derived",
+                                  "name": "gas_safety_requirement_met"
+                                }
+                              ]
+                            },
+                            {
+                              "kind": "derived",
+                              "name": "how_to_rent_requirement_met"
+                            }
+                          ]
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "licensing_requirement_met"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "no_retaliation_bar"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "not_served_too_early"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "days_from_deposit_receipt_to_info",
+      "days_from_deposit_receipt_to_protection",
+      "deposit_protected_in_time",
+      "epc_requirement_met",
+      "gas_safety_requirement_met",
+      "how_to_rent_requirement_met",
+      "landlord_holds_licence",
+      "licensing_not_required",
+      "licensing_requirement_met",
+      "no_deposit_taken",
+      "prescribed_info_in_time",
+      "deposit_requirements_met",
+      "qualifying_council_notices",
+      "no_retaliation_bar",
+      "tenancy_age_days_at_notice",
+      "not_served_too_early",
+      "tenancy_is_assured_shorthold",
+      "section_21_notice_valid"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": false,
+      "blockers": [
+        "days_from_deposit_receipt_to_protection: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_from_deposit_receipt_to_protection: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_from_deposit_receipt_to_info: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_from_deposit_receipt_to_info: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "tenancy_age_days_at_notice: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "tenancy_age_days_at_notice: bulk fast mode does not yet support days_between; explain mode and the generic dense path do"
+      ]
+    },
+    "input_catalog": [
+      {
+        "slot": "deposit_protected_date",
+        "canonical_request_name": "deposit_protected_date",
+        "request_names": [
+          "deposit_protected_date"
+        ]
+      },
+      {
+        "slot": "deposit_received_date",
+        "canonical_request_name": "deposit_received_date",
+        "request_names": [
+          "deposit_received_date"
+        ]
+      },
+      {
+        "slot": "deposit_taken",
+        "canonical_request_name": "deposit_taken",
+        "request_names": [
+          "deposit_taken"
+        ]
+      },
+      {
+        "slot": "epc_given_before_tenancy",
+        "canonical_request_name": "epc_given_before_tenancy",
+        "request_names": [
+          "epc_given_before_tenancy"
+        ]
+      },
+      {
+        "slot": "gas_safety_given_before_occupation",
+        "canonical_request_name": "gas_safety_given_before_occupation",
+        "request_names": [
+          "gas_safety_given_before_occupation"
+        ]
+      },
+      {
+        "slot": "how_to_rent_guide_given",
+        "canonical_request_name": "how_to_rent_guide_given",
+        "request_names": [
+          "how_to_rent_guide_given"
+        ]
+      },
+      {
+        "slot": "is_assured_shorthold",
+        "canonical_request_name": "is_assured_shorthold",
+        "request_names": [
+          "is_assured_shorthold"
+        ]
+      },
+      {
+        "slot": "is_in_retaliation_window",
+        "canonical_request_name": "is_in_retaliation_window",
+        "request_names": [
+          "is_in_retaliation_window"
+        ]
+      },
+      {
+        "slot": "landlord_has_licence",
+        "canonical_request_name": "landlord_has_licence",
+        "request_names": [
+          "landlord_has_licence"
+        ]
+      },
+      {
+        "slot": "notice_served_date",
+        "canonical_request_name": "notice_served_date",
+        "request_names": [
+          "notice_served_date"
+        ]
+      },
+      {
+        "slot": "prescribed_info_given_date",
+        "canonical_request_name": "prescribed_info_given_date",
+        "request_names": [
+          "prescribed_info_given_date"
+        ]
+      },
+      {
+        "slot": "property_requires_licence",
+        "canonical_request_name": "property_requires_licence",
+        "request_names": [
+          "property_requires_licence"
+        ]
+      },
+      {
+        "slot": "tenancy_start_date",
+        "canonical_request_name": "tenancy_start_date",
+        "request_names": [
+          "tenancy_start_date"
+        ]
+      }
+    ]
+  }
+}

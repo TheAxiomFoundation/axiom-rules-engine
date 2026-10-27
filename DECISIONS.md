@@ -4,6 +4,102 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-10 — Format 3 carries the program interface and separate producer identities
+
+**Decision.** `ARTIFACT_FORMAT_VERSION` is 3. Compiled artifacts carry
+`program.interface`: an entity roster, input slots and relation
+descriptors derived from the embedded program. The loader re-derives the
+block and requires equality. Four identities have separate fields:
+`artifact_format_version`, `engine_version`, `engine_build` (commit and dirty
+flag), and `source_closure` (the hashes of every RuleSpec module text read,
+with an aggregate digest). Only the format identity gates loading; the
+other identities record the producer and source. An IR compile omits
+`source_closure`.
+
+The default loader accepts format 3 only. Format 2 requires the named
+`from_legacy_format_2_*` loader or the corresponding CLI, Python or wasm
+opt-in, and remains format 2 in memory with no interface. Its normalizations
+and retired fast-path metadata tolerance are preserved. `migrate artifact`
+continues to read and write format 2. The v2 schema is archived; the current
+schema describes format 3.
+
+RuleSpec's `inputs:` block declares an election with strict
+`election: {actor, provision}` metadata. Lowering stores sorted
+`ProgramSpec.input_declarations`, omitted when empty, so the interface is
+derived from the program alone. `interface.inputs[].election` is null for a
+fact. An election must name an input read by its declaring module; actor
+and provision must be well formed; declarations sharing a slot must agree.
+An unused parameter `indexed_by` label in the catalog is insufficient evidence
+of a read.
+Malformed, unsorted, duplicate or unknown IR declarations are refused. The
+engine never defaults an election: any `input_or_else` read of its slot
+is a compile error. Evaluation uses the supplied value; the simulation
+layer chooses whether to branch over an election and must not optimize a fact.
+
+**Why.** Hosts need a dependable description of the inputs and entities
+required to execute a program, and separate identities for wire compatibility,
+producer provenance and RuleSpec source. Format 2 does not require that
+description or those identities. It also tolerates missing fields and older
+emission shapes that format 3 deliberately closes. An old engine could ignore
+the new fields while a host relied on them, so a capability string alone
+cannot establish this contract.
+
+The 2026-10-04 decision kept format 2 because advisory `fast_path` metadata
+could remain valid under a retired analysis. The 2026-09-25 decision kept it
+because existing safely typed artifacts already met the tightened relation
+contract. Here every artifact gains required content and a loader-checked
+interface; neither reason preserves the new contract at format 2. The
+explicit compatibility loader retains safe existing artifacts without
+claiming they carry the format-3 interface.
+
+**Consequences.**
+
+- For source without elections, `program` with the interface removed and
+  `metadata` retain format 2's executable content. Elections add inert
+  declarations. No evaluator reads the interface or election declarations.
+- The derivation is frozen for every program a format-3 engine can already
+  load. Changing one of those programs' interfaces requires a format bump
+  and a compatibility derivation. A construct older engines refuse to
+  deserialize can extend the derivation and `RelationProvenance` for programs
+  using it without changing published artifacts; a derived relation without
+  `source_relation` (#214) is one such planned extension.
+- Stage-3 aggregation validates each embedded artifact through its own
+  loader and compares regenerated phase-two `program` and `metadata`.
+  Producer builds, versions and formats may differ. The source digest still
+  hashes the loaded source artifact's serialization, preserving legacy
+  digests across an engine rebuild.
+- `engine_build` uses a dependency-free build script that tolerates missing
+  git information. Artifacts are byte deterministic for a fixed build,
+  source and compile options. The identities and consistency checks do not
+  certify source authenticity; that remains in the signed release and
+  supervisor chain.
+
+**Alternatives.** Keeping format 2 or adding a 2-to-3 restamping command
+would assert identities that only recompilation can establish. Comparing
+whole phase-two artifacts would tie stage-3 loading to the running build;
+comparing executable content preserves its validity across rebuilds. An
+unfrozen derivation would let a later engine refuse previously published
+artifacts when its inferred interface changed.
+
+The independent review narrowed the interface's claims. Every potential
+read site contributes, including sites without type evidence; dtype claims
+are one way, integer includes whole decimals, and a null default means no
+uniform fallback. Entity flow retains direct `Scalar` queries alongside
+cross-entity references. An unresolved filtered alias has a null target,
+and filtering a kind to itself leaves supplied instances. Lookup slots
+record traversal direction without asserting cardinality; derived relations
+still accept supplied tuples. Slot kinds stay positional, nullable keys
+remain required, and id templates preserve kind spelling. Legacy byte
+preservation distinguishes canonical round trips from normalized dialects.
+
+The interface lives beside `ProgramSpec` in memory and is appended through
+an artifact wire struct, avoiding serde flattening's integer-key buffering.
+The later election requirement adds the one necessary program field:
+`input_declarations`, because the loader must derive elections from program
+content. Programs without elections still serialize that IR as before.
+General input dtype, default and domain declarations remain deferred;
+`only_related` and `input_for_year` retain their existing declaration checks.
+
 ## 2026-10-13 — An empty `min`/`max` and a non-singleton `only` over related entities fail rather than default
 
 **Decision.** `min(r.f)` and `max(r.f)` (and `min_where` / `max_where`) over

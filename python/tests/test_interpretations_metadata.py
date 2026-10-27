@@ -13,7 +13,9 @@ from axiom_rules_engine.models import CompiledProgram, Dataset, ExecutionRequest
 
 def _artifact() -> dict:
     return {
-        "artifact_format_version": 2,
+        "artifact_format_version": 3,
+        "engine_version": "0.2.2",
+        "engine_build": {"commit": None, "dirty": None},
         "program": {
             "module": {
                 "interpretations": [
@@ -43,6 +45,7 @@ def _artifact() -> dict:
             "relations": [],
             "parameters": [],
             "derived": [],
+            "interface": {"entities": [], "inputs": [], "relations": []},
         },
         "metadata": {
             "evaluation_order": [],
@@ -77,5 +80,7 @@ def test_loader_retains_interpretations_in_execution_requests(
 def test_compiled_program_model_retains_interpretations() -> None:
     artifact = _artifact()
     compiled = CompiledProgram.model_validate(artifact)
-    restored = CompiledProgram.model_validate_json(compiled.model_dump_json())
+    restored = CompiledProgram.model_validate_json(
+        compiled.model_dump_json(exclude_unset=True)
+    )
     assert restored.program.model_dump()["module"] == artifact["program"]["module"]

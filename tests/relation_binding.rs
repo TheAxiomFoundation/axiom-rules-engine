@@ -458,13 +458,18 @@ fn legacy_artifact_executing_against_its_declaration_is_refused() {
         "{error}"
     );
 
-    // The same program as an earlier engine serialized it: refused at load.
-    let fresh = artifact();
+    // The same program as an earlier engine serialized it (format 2):
+    // refused at load.
+    let mut fresh = artifact();
+    fresh.artifact_format_version = 2;
+    fresh.engine_build = None;
+    fresh.source_closure = None;
+    fresh.interface = None;
     let mut legacy = serde_json::to_value(&fresh).unwrap();
     legacy["program"] = serde_json::to_value(&program).unwrap();
     let legacy = serde_json::to_string(&legacy).unwrap();
-    let error =
-        CompiledProgramArtifact::from_json_str(&legacy).expect_err("the loader refuses it too");
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_str(&legacy)
+        .expect_err("the loader refuses it too");
     assert!(error.to_string().contains("migrate artifact"), "{error}");
 
     // Retyping in executed order makes it load and bind its executed order.

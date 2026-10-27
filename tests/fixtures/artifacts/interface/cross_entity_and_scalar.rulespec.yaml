@@ -1,0 +1,32 @@
+format: rulespec/v1
+rules:
+  - name: uprating_factor
+    kind: parameter
+    dtype: Rate
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 1 + uprating_rate
+  - name: personal_allowance
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: base_allowance * uprating_factor
+  - name: tax_unit_allowance
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: personal_allowance + spouse_allowance
+  - name: household_uprated_rent
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-01-01'
+        formula: rent * uprating_factor
