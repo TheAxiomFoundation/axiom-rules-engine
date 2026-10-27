@@ -646,6 +646,26 @@ impl Collector<'_> {
         )
     }
 
+    /// The value an extremum or `only` reads from each member it selects,
+    /// with `demand` on that value, and the selecting `where` clause.
+    fn related_value(
+        &mut self,
+        (relation, current_slot, related_slot): (&str, usize, usize),
+        value: &RelatedValueRef,
+        where_clause: Option<&JudgmentExpr>,
+        demand: Demand,
+    ) {
+        self.lookup(relation, current_slot);
+        let related = self.related_flow(relation, current_slot, related_slot);
+        match value {
+            RelatedValueRef::Input(name) => self.site(name, &related, demand, None, None),
+            RelatedValueRef::Derived(name) => self.reference(name, &related, None),
+        }
+        if let Some(where_clause) = where_clause {
+            self.judgment(where_clause, &related, None);
+        }
+    }
+
     fn scalar(
         &mut self,
         expr: &ScalarExpr,
@@ -752,9 +772,13 @@ impl Collector<'_> {
                     RelatedValueRef::Derived(name) => self.reference(name, &related, None),
                 }
             }
-            // `min`/`max`/`only` over related entities return a related
-            // value as it is, so the value meets the demand placed on the
-            // aggregate.
+            // `min`/`max` over related entities read every selected member's
+            // value and return the winner as it is. A losing value is only
+            // compared, so a whole-number demand on the aggregate is a number
+            // demand on each member: `min(1.0, 1.5)` is a whole number. Any
+            // other demand carries to each member as it is, because the
+            // members must all be numbers or all be dates: a member of
+            // another type fails the aggregate or makes its winner fail.
             ScalarExpr::ExtremeRelated {
                 relation,
                 current_slot,
@@ -762,23 +786,26 @@ impl Collector<'_> {
                 value,
                 where_clause,
                 ..
+            } => {
+                let member = match demand {
+                    Demand::Integer => Demand::Number,
+                    other => other,
+                };
+                let selection = (relation.as_str(), *current_slot, *related_slot);
+                self.related_value(selection, value, where_clause.as_deref(), member);
             }
-            | ScalarExpr::SingleRelated {
+            // `only` over related entities reads the one selected member's
+            // value and returns it as it is, so the value meets the demand
+            // placed on the aggregate.
+            ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
                 value,
                 where_clause,
             } => {
-                self.lookup(relation, *current_slot);
-                let related = self.related_flow(relation, *current_slot, *related_slot);
-                match value {
-                    RelatedValueRef::Input(name) => self.site(name, &related, demand, None, None),
-                    RelatedValueRef::Derived(name) => self.reference(name, &related, None),
-                }
-                if let Some(where_clause) = where_clause {
-                    self.judgment(where_clause, &related, None);
-                }
+                let selection = (relation.as_str(), *current_slot, *related_slot);
+                self.related_value(selection, value, where_clause.as_deref(), demand);
             }
             ScalarExpr::If {
                 condition,

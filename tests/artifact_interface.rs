@@ -565,3 +565,124 @@ fn canonical_selected_year_input_uses_its_runtime_slot() {
     assert_eq!(input.legal_id, legal_id);
     assert_eq!(input.entities, kinds(&["Person"]));
 }
+
+/// Invariant 6: `min`/`max` over related entities compare every selected
+/// member's value but return only the winner, so a fractional losing value
+/// is read successfully where the aggregate is a table index or a day
+/// offset. The members' slot is therefore `decimal`, not `integer`. `only`
+/// returns its one member's value, which keeps the index's `integer`.
+#[test]
+fn an_extremum_types_its_losing_members_as_numbers() {
+    use axiom_rules_engine::api::{ApiError, ExecutionRequest, execute_request};
+    use axiom_rules_engine::compile::CompiledProgramArtifact;
+    use axiom_rules_engine::engine::EvalError;
+
+    let related = |kind: &str, relation: &str, current: usize, slot: &str| {
+        let mut node = json!({
+            "kind": kind, "relation": relation, "current_slot": current,
+            "related_slot": 1 - current, "value": input(slot)
+        });
+        if kind == "extreme_related" {
+            node["extreme"] = json!(if slot == "rank" { "min" } else { "max" });
+        }
+        node
+    };
+    let lookup =
+        |index: Value| json!({"kind":"parameter_lookup","parameter":"table","index":index});
+    let program = json!({
+        "relations": [
+            {"name":"members","arity":2,"slot_entities":["Person","Household"]},
+            {"name":"links","arity":2,"slot_entities":["Household","Household"]}
+        ],
+        "parameters": [{"name":"table","unit":null,"versions":[{"effective_from":"2020-01-01",
+            "values":{"1":{"kind":"integer","value":10}}}]}],
+        "derived": [
+            scalar_rule("least", "Household", lookup(related("extreme_related", "members", 1, "rank"))),
+            scalar_rule("latest", "Household", json!({"kind":"date_add_days",
+                "date":{"kind":"period_start"},
+                "days":related("extreme_related", "members", 1, "days")})),
+            scalar_rule("linked", "Household", lookup(related("single_related", "links", 0, "link_rank")))
+        ]
+    });
+    let artifact = CompiledProgramArtifact::compile(self::program(program.clone())).unwrap();
+    let interface = artifact.interface.as_ref().unwrap();
+    for (slot, dtype) in [
+        ("rank", InputDType::Decimal),
+        ("days", InputDType::Decimal),
+        ("link_rank", InputDType::Integer),
+    ] {
+        let input = find(interface, slot);
+        assert_eq!(input.dtype, Some(dtype), "{slot}");
+        assert_eq!(input.values, None, "{slot}: no domain through an aggregate");
+    }
+
+    // Person:2's value loses each extremum and is not a whole number.
+    let cell = |slot: &str, id: &str, value: Value| {
+        let kind = id.split(':').next().unwrap();
+        json!({"name":slot,"entity":kind,"entity_id":id,
+            "interval":{"start":"2020-01-01","end":"2030-12-31"},"value":value})
+    };
+    let decimal = |value: &str| json!({"kind":"decimal","value":value});
+    let cells = vec![
+        cell("rank", "Person:1", decimal("1.0")),
+        cell("rank", "Person:2", decimal("1.5")),
+        cell("days", "Person:1", decimal("1")),
+        cell("days", "Person:2", decimal("0.5")),
+        cell(
+            "link_rank",
+            "Household:2",
+            json!({"kind":"integer","value":1}),
+        ),
+    ];
+    let tuple = |relation: &str, from: &str, to: &str| json!({"name":relation,"tuple":[from,to],"interval":{"start":"2020-01-01","end":"2030-12-31"}});
+    let run = |mode: &str, inputs: &[Value]| {
+        let request: ExecutionRequest = serde_json::from_value(json!({
+            "mode": mode, "program": program,
+            "dataset": {"inputs": inputs, "relations": [
+                tuple("members", "Person:1", "Household:1"),
+                tuple("members", "Person:2", "Household:1"),
+                tuple("links", "Household:1", "Household:2")
+            ]},
+            "queries": [{"entity_id":"Household:1",
+                "period":{"period_kind":"month","start":"2026-01-01","end":"2026-01-31"},
+                "outputs":["least","latest","linked"]}]
+        }))
+        .unwrap();
+        execute_request(request)
+    };
+    for mode in ["explain", "fast"] {
+        let response = serde_json::to_value(run(mode, &cells).unwrap()).unwrap();
+        let outputs = &response["results"][0]["outputs"];
+        assert_eq!(
+            outputs["least"]["value"],
+            json!({"kind":"integer","value":10}),
+            "{mode}"
+        );
+        assert_eq!(
+            outputs["latest"]["value"],
+            json!({"kind":"date","value":"2026-01-02"}),
+            "{mode}"
+        );
+        assert_eq!(
+            outputs["linked"]["value"],
+            json!({"kind":"integer","value":10}),
+            "{mode}"
+        );
+    }
+    // Each fractional loser is read: without it the evaluation misses it.
+    for slot in ["rank", "days"] {
+        let without = cells
+            .iter()
+            .filter(|cell| !(cell["name"] == slot && cell["entity_id"] == "Person:2"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                run("explain", &without),
+                Err(ApiError::Eval(EvalError::MissingInput { name, entity_id, .. }))
+                    if name == slot && entity_id == "Person:2"
+            ),
+            "{slot}"
+        );
+    }
+}

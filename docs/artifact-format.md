@@ -315,8 +315,12 @@ The `over_periods` suppression covers every nested expression in its
 operands; parameter-index domains and defaults remain structurally derived.
 
 `input_for_year` keeps the demand of its expression position. The input
-value of `extreme_related` and `single_related` also keeps the enclosing
-position's demand, with no parameter-index domain inferred through the
+value of `single_related` also keeps the enclosing position's demand, because
+the aggregate returns the one selected member's value. The input value of
+`extreme_related` keeps that demand too, except that an `integer` demand
+becomes `number`: the aggregate compares every selected member's value but
+returns only the winner, so `min` of `1.0` and `1.5` meets a table index
+although `1.5` does not. Neither infers a parameter-index domain through the
 aggregate. This deliberately makes no additional claim from a selected-year
 input's declared dtype or an extremum's own runtime restrictions.
 

@@ -132,6 +132,8 @@ struct Health {
     reached_typed: BTreeMap<String, usize>,
     reached_invalid_kinds: BTreeMap<String, BTreeSet<String>>,
     reached_domain: usize,
+    /// Second-instance probes whose cell a query read as a related member.
+    reached_members: usize,
     observed_kinds: BTreeSet<String>,
     shapes: BTreeSet<u8>,
     elections: usize,
@@ -598,7 +600,10 @@ fn successful_batch_observations(
 
 /// Invariant 6: an out-of-dtype input cannot be read successfully, and a
 /// whole number outside a closed parameter domain cannot be read successfully.
-/// Every rule is probed with all potentially read other inputs supplied. The
+/// Each invalid value replaces every cell of its slot, and separately only the
+/// second instance of each kind, which a query reads only as a related member
+/// beside a valid first instance. Every rule is probed with all potentially
+/// read other inputs supplied. The
 /// original program is used in both modes; unreachable records are pruned,
 /// and each invalid target remains supplied even when the query cannot read it.
 /// Successful unrelated rules are batched by entity kind using the union of
@@ -663,11 +668,22 @@ fn generated_dtype_and_closed_domains_are_sound() {
                             .as_ref()
                             .map(|_| (ScalarValueSpec::Integer { value: 999 }, true)),
                     );
-                for (bad, domain) in probes {
+                // Each value is probed in every cell of the slot, and in the
+                // second instance of each kind alone. Queries run on first
+                // instances, so the second reaches a query only as a related
+                // member, beside first-instance members that stay valid: an
+                // aggregate must reject one invalid member among valid ones.
+                let probes = probes.flat_map(|(bad, domain)| {
+                    [false, true].map(|second_only| (bad.clone(), domain, second_only))
+                });
+                for (bad, domain, second_only) in probes {
+                    let target = |name: &str, entity_id: &str| {
+                        name == input.name && (!second_only || entity_id.ends_with(":2"))
+                    };
                     let bad_records = full
                         .inputs
                         .iter()
-                        .filter(|record| record.name == input.name)
+                        .filter(|record| target(&record.name, &record.entity_id))
                         .cloned()
                         .map(|mut record| {
                             record.value = bad.clone();
@@ -685,7 +701,7 @@ fn generated_dtype_and_closed_domains_are_sound() {
                         let mut absent_bound = prepared.bound.clone();
                         absent_bound
                             .inputs
-                            .retain(|record| record.name != input.name);
+                            .retain(|record| !target(&record.name, &record.entity_id));
                         let mut invalid_bound = absent_bound.clone();
                         // Retain the invalid target even outside the query closure:
                         // an erroneous eager read must remain observable.
@@ -697,11 +713,18 @@ fn generated_dtype_and_closed_domains_are_sound() {
                         check_and_record_sound_pair(
                             &health, input, &bad, domain, &before, &after, false,
                         )?;
+                        if second_only
+                            && matches!(&before, Err(EvalError::MissingInput { name, .. }) if name == &input.name)
+                        {
+                            health.borrow_mut().reached_members += 1;
+                        }
                         if !prepared.slots.contains(&input.name) && before.is_ok() {
                             groups.entry(prepared.kind.clone()).or_default().push(index);
                         } else {
                             let mut absent = prepared.data.clone();
-                            absent.inputs.retain(|record| record.name != input.name);
+                            absent
+                                .inputs
+                                .retain(|record| !target(&record.name, &record.entity_id));
                             let mut invalid = absent.clone();
                             invalid.inputs.extend(bad_records.iter().cloned());
                             let (before, _) = api_observation(execute(
@@ -813,6 +836,10 @@ fn generated_dtype_and_closed_domains_are_sound() {
     assert!(
         health.reached_domain >= 8,
         "closed-domain target reads must be reached"
+    );
+    assert!(
+        health.reached_members >= 8,
+        "an invalid member beside valid ones must be reached"
     );
     for dtype in [
         InputDType::Bool,
