@@ -30,30 +30,63 @@ CORPUS_CITATION_PATH_RE = re.compile(
     r"[a-z][a-z0-9-]*"
     r"(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\-–]*[A-Za-z0-9.:\-–])?)+$"
 )
-IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A name as the lexer reads one: an identifier, or a path of identifiers
+# joined by `/` with nothing between them (`Lexer::tokenise` in src/formula.rs).
+NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 NUMBER_RE = re.compile(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?")
 STRING_RES = {
     quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*{quote}?", re.DOTALL)
     for quote in "\"'"
 }
+# The lexer's two-character operators, each one token.
+OPERATORS = ("=>", "<=", ">=", "==", "!=", "->")
+# The words `keyword()` in src/formula.rs lexes as keywords, never as names.
 FORMULA_KEYWORDS = {
+    "False",
+    "True",
+    "amend",
     "and",
-    "as",
-    "case",
+    "elif",
     "else",
+    "entity",
     "false",
+    "from",
     "if",
-    "in",
-    "is",
-    "let",
     "match",
     "not",
     "or",
-    "then",
+    "to",
     "true",
 }
 PREDICATE_TERMS = {"anchor", "candidate"}
+# `lower_to_scalar` reads these names as the period's dates.
+PERIOD_BUILTINS = {"period_end", "period_start"}
+# The call arguments `lower_to_scalar` reads as a relation.
+RELATION_ARGUMENTS = {
+    (function, 0)
+    for function in (
+        "count_where",
+        "len",
+        "max_where",
+        "min_where",
+        "only_related",
+        "sum_where",
+    )
+}
+# The call arguments `lower_to_scalar` reads by name (`expect_var`), as an
+# input unless a rule has that name: a period built-in's name included.
+NAMED_INPUT_ARGUMENTS = {
+    ("count_where", 1),
+    ("input_for_year", 0),
+    ("max_where", 1),
+    ("max_where", 2),
+    ("min_where", 1),
+    ("min_where", 2),
+    ("only_related", 1),
+    ("sum_where", 1),
+    ("sum_where", 2),
+}
 # The bytes the formula lexer skips as whitespace (`u8::is_ascii_whitespace`).
 LEXER_WHITESPACE = " \t\n\x0c\r"
 STRING_TOKEN = '"'
@@ -494,11 +527,10 @@ def _infer_input_names(
             tokens = _formula_tokens(version["formula"])
             for index, token in enumerate(tokens):
                 if (
-                    IDENTIFIER_RE.fullmatch(token)
+                    _is_name(token)
                     and token not in rule_names
-                    and token not in FORMULA_KEYWORDS
                     and token not in reserved
-                    and not _is_called(tokens, index)
+                    and _reads_input(tokens, index)
                 ):
                     inputs.add(token)
     return inputs
@@ -506,13 +538,12 @@ def _infer_input_names(
 
 def _formula_tokens(formula: str) -> list[str]:
     """Split a formula as `Lexer::tokenise` in src/formula.rs does, as far
-    as names and parentheses go.
+    as names, operators and parentheses go.
 
     `\"\"\"` blocks, `#` comments and whitespace yield no token, so the
-    words in them name nothing. A string literal yields `STRING_TOKEN`, a
-    name, date or number yields its text, and any other character is a token
-    of its own. Unlike the lexer, this keeps `a/b` as three tokens rather
-    than one path.
+    words in them name nothing. A string literal yields `STRING_TOKEN`; a
+    name (a path such as `a/b` included), date, number or two-character
+    operator yields its text; and any other character is a token of its own.
     """
     tokens: list[str] = []
     position = 0
@@ -531,34 +562,139 @@ def _formula_tokens(formula: str) -> list[str]:
             tokens.append(STRING_TOKEN)
         else:
             match = (
-                IDENTIFIER_RE.match(formula, position)
+                NAME_RE.match(formula, position)
                 or DATE_RE.match(formula, position)
                 or NUMBER_RE.match(formula, position)
             )
-            token = match.group() if match else character
+            if match:
+                token = match.group()
+            elif formula.startswith(OPERATORS, position):
+                token = formula[position : position + 2]
+            else:
+                token = character
             tokens.append(token)
             position += len(token)
     return tokens
 
 
-def _is_called(tokens: list[str], index: int) -> bool:
-    """Whether the name at ``tokens[index]`` is a function being called.
+def _is_name(token: str) -> bool:
+    return NAME_RE.fullmatch(token) is not None and token not in FORMULA_KEYWORDS
 
-    The parser calls any name followed by ``(``, and a name wrapped in
-    grouping parentheses is still that name, so ``(len)(x)`` calls ``len``
-    (`parse_primary` and `parse_postfix` in src/formula.rs). The same name
-    anywhere else reads a value, whatever it is called.
+
+def _reads_input(tokens: list[str], index: int) -> bool:
+    """Whether the lowering reads the name at ``tokens[index]`` as an input
+    when no rule has that name (`Parser` and `lower_to_scalar` in
+    src/formula.rs).
+
+    - A name after ``.`` is a field: the input an aggregation reads on each
+      related entity, or one a predicate term reads. ``len(r.f)`` counts
+      ``r`` and reads no field.
+    - A name followed by ``(``, ``[`` or ``.``, perhaps through grouping
+      parentheses as in ``(len)(x)``, is a function, a parameter table, or a
+      relation or term.
+    - ``_ =>`` is the match wildcard (`parse_match`).
+    - A relation argument, such as ``count_where``'s first, is a relation.
+    - ``period_start`` and ``period_end`` are the period's dates, except in
+      an argument read by name, such as ``count_where``'s second.
+
+    Any other name reads a value, whatever it is called.
     """
-    closing = index + 1
-    while closing < len(tokens) and tokens[closing] == ")":
-        closing += 1
-    depth = closing - index - 1
-    return (
-        closing < len(tokens)
-        and tokens[closing] == "("
-        and depth <= index
-        and all(token == "(" for token in tokens[index - depth : index])
-    )
+    if index > 0 and tokens[index - 1] == ".":
+        start = _field_object_start(tokens, index - 1)
+        return start is None or _call_argument(tokens, start, index + 1) != ("len", 0)
+    if tokens[index] == "_" and tokens[index + 1 : index + 2] == ["=>"]:
+        return False
+    end = _grouped(tokens, index, index + 1)[1]
+    if end < len(tokens) and tokens[end] in ("(", "[", "."):
+        return False
+    argument = _call_argument(tokens, index, index + 1)
+    if argument in RELATION_ARGUMENTS:
+        return False
+    return tokens[index] not in PERIOD_BUILTINS or argument in NAMED_INPUT_ARGUMENTS
+
+
+def _grouped(tokens: list[str], start: int, end: int) -> tuple[int, int]:
+    """Widen ``tokens[start:end]`` over the parentheses that wrap it.
+
+    `parse_primary` returns a parenthesized expression unchanged, so what
+    follows the widened span is what follows the expression. The span can
+    also take in a call's own parentheses, as in ``f(x)``; that changes what
+    follows it only where a call is called, indexed or read through, which
+    the lowering refuses.
+    """
+    while (
+        start > 0
+        and end < len(tokens)
+        and tokens[start - 1] == "("
+        and tokens[end] == ")"
+    ):
+        start, end = start - 1, end + 1
+    return start, end
+
+
+def _called_function(tokens: list[str], opening: int) -> str | None:
+    """The function the ``(`` at ``tokens[opening]`` calls, or ``None`` when
+    it groups.
+
+    `parse_postfix` calls any name that ``(`` follows, through grouping
+    parentheses as in ``(max)(x)``.
+    """
+    name = opening - 1
+    while name >= 0 and tokens[name] == ")":
+        name -= 1
+    if name < 0 or not _is_name(tokens[name]):
+        return None
+    return tokens[name] if _grouped(tokens, name, name + 1)[1] == opening else None
+
+
+def _call_argument(
+    tokens: list[str], start: int, end: int
+) -> tuple[str, int] | None:
+    """The function and position of the call argument that is exactly
+    ``tokens[start:end]``, perhaps in grouping parentheses, or ``None``."""
+    while (
+        start > 0
+        and end < len(tokens)
+        and tokens[start - 1] == "("
+        and tokens[end] == ")"
+    ):
+        function = _called_function(tokens, start - 1)
+        if function is not None:
+            return function, 0
+        start, end = start - 1, end + 1
+    if (
+        start == 0
+        or end == len(tokens)
+        or tokens[start - 1] not in ("(", ",")
+        or tokens[end] not in (",", ")")
+    ):
+        return None
+    position = depth = 0
+    opening = start - 1
+    while opening >= 0:
+        if tokens[opening] == ")":
+            depth += 1
+        elif tokens[opening] == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        elif tokens[opening] == "," and depth == 0:
+            position += 1
+        opening -= 1
+    function = _called_function(tokens, opening) if opening >= 0 else None
+    return None if function is None else (function, position)
+
+
+def _field_object_start(tokens: list[str], dot: int) -> int | None:
+    """Where the name read through the ``.`` at ``tokens[dot]`` starts,
+    with its grouping parentheses, or ``None`` when no name precedes it."""
+    name = dot - 1
+    while name >= 0 and tokens[name] == ")":
+        name -= 1
+    if name < 0 or not _is_name(tokens[name]):
+        return None
+    start, end = _grouped(tokens, name, name + 1)
+    return start if end == dot else None
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
