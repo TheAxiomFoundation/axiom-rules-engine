@@ -2183,7 +2183,18 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         },
         Expr::Var(name) => {
             ctx.reject_term_name(name, "tested as a judgment")?;
-            if ctx.derived.contains(name) {
+            // A bare parameter name holds when the parameter is true, read as
+            // `lower_to_scalar` reads it.
+            if ctx.scalars.contains(name) {
+                JudgmentExprSpec::Comparison {
+                    left: Box::new(ScalarExprSpec::ParameterLookup {
+                        parameter: name.clone(),
+                        index: Box::new(lit_int_spec(0)),
+                    }),
+                    op: ComparisonOpSpec::Eq,
+                    right: Box::new(lit_bool_spec(true)),
+                }
+            } else if ctx.derived.contains(name) {
                 JudgmentExprSpec::Derived { name: name.clone() }
             } else if ctx.relation_predicates.contains(name) {
                 let (current_slot, related_slot) = infer_slots(name);

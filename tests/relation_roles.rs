@@ -351,6 +351,70 @@ fn an_entity_free_literal_rule_is_a_parameter_in_a_predicate() {
     assert_eq!(output(&response, "grown_relative_of_count"), json!(2));
 }
 
+/// A bare Boolean parameter in judgment position reads the parameter, as it
+/// does as a value: in a predicate, under `not`, `and` and `or`, and in a rule
+/// body. The dataset has no input of that name, so an input read fails.
+#[test]
+fn a_bare_boolean_parameter_is_a_judgment_of_the_parameter() {
+    let declarations = [
+        "    kind: parameter\n    dtype: Bool\n",
+        "    kind: derived\n    dtype: Bool\n",
+    ];
+    // p1's relatives are 45, 35 and 12.
+    let predicates = [
+        ("bare", "enabled", [0, 3]),
+        ("negated", "not enabled", [3, 0]),
+        ("conjoined", "enabled and candidate.age > 20", [0, 2]),
+        ("disjoined", "enabled or candidate.age > 40", [1, 3]),
+        ("rule_body", "candidate.enabled_person", [0, 3]),
+    ];
+    for declaration in declarations {
+        for (index, value) in [false, true].into_iter().enumerate() {
+            let mut extra = format!(
+                r#"
+  - name: enabled
+{declaration}    versions:
+      - effective_from: 2026-01-01
+        formula: "{value}"
+  - name: enabled_person
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: enabled
+"#
+            );
+            for (name, formula, _) in predicates {
+                extra += &relative_relation(name, PERSON_SLOTS, formula);
+            }
+            let program = program_of(&compile(&people_module(&extra)).expect("module compiles"));
+            assert_eq!(
+                predicate_of(&program, "bare")["left"]["kind"],
+                json!("parameter_lookup"),
+                "{declaration}"
+            );
+            let dataset = family();
+            let outputs = predicates
+                .iter()
+                .map(|(name, _, _)| format!("{name}_count"))
+                .collect::<Vec<_>>();
+            let outputs = outputs.iter().map(String::as_str).collect::<Vec<_>>();
+            for mode in ["explain", "fast"] {
+                let response = run(mode, &program, &dataset, "p1", &outputs);
+                for (name, _, expected) in predicates {
+                    assert_eq!(
+                        output(&response, &format!("{name}_count")),
+                        json!(expected[index]),
+                        "{mode} {name} enabled={value} {declaration}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Dense compiles a parameter read in a predicate; only a read through a term
 /// needs explain or fast.
 #[test]

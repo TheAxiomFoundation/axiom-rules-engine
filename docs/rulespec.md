@@ -419,11 +419,12 @@ are ordinary identifiers: `anchor + 1` in a rule body reads an input named
 compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
-Unqualified reads keep the routing above. A program whose predicates use no
-term and read no parameter name compiles to the same artifact as before terms
-existed. A bare parameter name in a predicate used to read an input of that
-name and now reads the parameter ([relation-roles.md](relation-roles.md)
-§3.3). Explain and bulk fast mode evaluate reads through terms, and a trace
+Unqualified reads keep the routing above. A bare parameter name now reads the
+parameter in two places where it used to read an input of that name: anywhere
+in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
+formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
+in a rule body as in a predicate. A program with neither, and with no term,
+compiles to the same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
 reads through a term, naming the qualified read and #218; a root that reaches
