@@ -4,12 +4,13 @@
 //! declaration of that name. RuleSpec lowering refuses, over a module and
 //! everything it imports:
 //!
-//! * a parameter, derived rule, data relation, derived relation or input named
+//! * a parameter, derived rule, data relation or derived relation named
 //!   `period_start`, `period_end`, `anchor`, `candidate` or a formula keyword
 //!   such as `true` (`reserved_declaration_name`);
-//! * one name declared with two kinds: a parameter and a derived rule, a
-//!   relation and either, or an input and any of them
-//!   (`declaration_name_clash`).
+//! * one name declared with two kinds: a parameter and a derived rule, or a
+//!   relation and either (`declaration_name_clash`).
+//!
+//! An `inputs:` entry describes an input; it is not a declaration.
 //!
 //! The property states the invariant: no name a program can declare has two
 //! meanings, or loses its bare read to a built-in or a term. A module passes
@@ -37,7 +38,6 @@ enum Role {
     Parameter,
     Rule,
     Relation,
-    Input,
 }
 
 /// Every way a RuleSpec module can declare a name a formula reads.
@@ -57,11 +57,9 @@ enum Kind {
     EntityParameter,
     DataRelation,
     DerivedRelation,
-    /// An item of `inputs:`.
-    Input,
 }
 
-const KINDS: [Kind; 9] = [
+const KINDS: [Kind; 8] = [
     Kind::Parameter,
     Kind::ParameterTable,
     Kind::LiteralRule,
@@ -70,7 +68,6 @@ const KINDS: [Kind; 9] = [
     Kind::EntityParameter,
     Kind::DataRelation,
     Kind::DerivedRelation,
-    Kind::Input,
 ];
 
 impl Kind {
@@ -79,7 +76,6 @@ impl Kind {
             Kind::Parameter | Kind::ParameterTable | Kind::LiteralRule => Role::Parameter,
             Kind::Rule | Kind::EntityFreeRule | Kind::EntityParameter => Role::Rule,
             Kind::DataRelation | Kind::DerivedRelation => Role::Relation,
-            Kind::Input => Role::Input,
         }
     }
 
@@ -96,11 +92,10 @@ impl Kind {
             }
             Kind::DataRelation => "a data relation",
             Kind::DerivedRelation => "a derived relation",
-            Kind::Input => "an input",
         }
     }
 
-    /// The `rules:` entry declaring `name`, or the `inputs:` item for an input.
+    /// The `rules:` entry declaring `name`.
     fn declare(self, name: &str) -> String {
         let versions = |formula: &str| {
             format!(
@@ -141,35 +136,21 @@ impl Kind {
                 "  - name: {name}\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: relative_of\n      slot_entities: [Person, Person]\n      current_slot: 0\n      related_slot: 1\n{}",
                 versions("candidate.age > 0")
             ),
-            Kind::Input => format!(
-                "  - name: {name}\n    entity: Person\n    dtype: Boolean\n    period: Month\n"
-            ),
         }
     }
 }
 
 /// A module with `relative_of` over `[Person, Person]` and `member_of` over
-/// `[Person, Household]`, the declarations in
-/// order (rules, then inputs), and `extra` rules.
+/// `[Person, Household]`, the declarations in order, and `extra` rules.
 fn module(declarations: &[(&str, Kind)], extra: &str) -> String {
     let mut rules = String::from(
         "  - name: relative_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Person]\n  - name: member_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Household]\n",
     );
-    let mut inputs = String::new();
     for (name, kind) in declarations {
-        if *kind == Kind::Input {
-            inputs += &kind.declare(name);
-        } else {
-            rules += &kind.declare(name);
-        }
+        rules += &kind.declare(name);
     }
     rules += extra;
-    let inputs = if inputs.is_empty() {
-        String::new()
-    } else {
-        format!("inputs:\n{inputs}")
-    };
-    format!("format: rulespec/v1\n{inputs}rules:\n{rules}")
+    format!("format: rulespec/v1\nrules:\n{rules}")
 }
 
 fn compile(source: &str) -> Result<Value, String> {
@@ -220,12 +201,6 @@ fn every_pair_of_kinds_sharing_a_name_is_refused_when_their_reads_differ() {
     for first in KINDS {
         for second in KINDS {
             let result = compile(&module(&[("shared", first), ("shared", second)], ""));
-            // Rules come before inputs in a module, so an input is reported second.
-            let (earlier, later) = if first == Kind::Input {
-                (second, first)
-            } else {
-                (first, second)
-            };
             let case = format!("{first:?} then {second:?}");
             if first.role() == second.role() {
                 if let Err(error) = &result {
@@ -234,7 +209,7 @@ fn every_pair_of_kinds_sharing_a_name_is_refused_when_their_reads_differ() {
             } else {
                 let error = result.expect_err(&case);
                 assert!(
-                    error.contains(&clash_refusal("shared", earlier.label(), later.label())),
+                    error.contains(&clash_refusal("shared", first.label(), second.label())),
                     "{case}: {error}"
                 );
             }
@@ -261,8 +236,8 @@ fn every_kind_of_declaration_is_refused_a_reserved_name() {
 /// `false` as literals and the rest as syntax. A parameter or rule could
 /// never take one, because its name is written into the formula source, and
 /// it keeps that refusal (`InvalidFormulaField`, pinned for tables by
-/// `tests/source_string_audit.rs`). A relation or an input could take one,
-/// and is now refused as for a built-in. Names are quoted, so YAML keeps
+/// `tests/source_string_audit.rs`). A relation could take one, and is now
+/// refused as for a built-in. Names are quoted, so YAML keeps
 /// `true` a string.
 #[test]
 fn a_formula_keyword_is_refused_as_a_declaration_name() {
@@ -276,7 +251,7 @@ fn a_formula_keyword_is_refused_as_a_declaration_name() {
             let error = compile(&module(&[(quoted.as_str(), kind)], ""))
                 .expect_err(&format!("{name} {kind:?}"));
             let refused = match kind.role() {
-                Role::Relation | Role::Input => error.contains(&reserved_refusal(name, kind.label())),
+                Role::Relation => error.contains(&reserved_refusal(name, kind.label())),
                 Role::Parameter | Role::Rule => error.contains(&format!(
                     "RuleSpec rule {name:?} has name {name:?}; it must be exactly one identifier or path"
                 )),
@@ -346,6 +321,53 @@ fn an_undeclared_reserved_name_keeps_its_documented_reads() {
         rule["expr"]["items"][0],
         json!({"kind": "input", "name": "anchor"})
     );
+}
+
+/// An `inputs:` entry describes an input, which a formula reads wherever no
+/// declaration takes the name; the entry declares nothing. One that shares a
+/// declaration's name, or takes a reserved name or a keyword, compiles to the
+/// program compiled without it. An entry with an `election` must name an
+/// input its module reads (`tests/input_elections.rs`), and a bare read of a
+/// declared name reads the declaration, so such an entry is refused.
+#[test]
+fn an_inputs_entry_is_not_a_declaration() {
+    let with_entry = |source: &str, name: &str, election: bool| {
+        let mut entry = format!(
+            "inputs:\n  - name: {name}\n    entity: Person\n    dtype: Boolean\n    period: Month\n"
+        );
+        if election {
+            entry += "    election:\n      actor: Household\n      provision: us/regulation/7/273/1/b/3\n";
+        }
+        source.replacen(
+            "format: rulespec/v1\n",
+            &format!("format: rulespec/v1\n{entry}"),
+            1,
+        )
+    };
+    for kind in KINDS {
+        let source = module(&[("shared", kind)], &probes(0, "shared", kind));
+        assert_eq!(
+            compile(&with_entry(&source, "shared", false)),
+            compile(&source),
+            "{kind:?}"
+        );
+        let error = compile(&with_entry(&source, "shared", true))
+            .expect_err(&format!("{kind:?}: an election on a declared name"));
+        assert!(
+            error.contains(
+                "input `shared`: carries an election, but no rule or derived-relation predicate of this module reads an input of that name"
+            ),
+            "{kind:?}: {error}"
+        );
+    }
+    let source = module(&[], "");
+    for name in RESERVED.into_iter().chain(["'true'"]) {
+        assert_eq!(
+            compile(&with_entry(&source, name, false)),
+            compile(&source),
+            "{name}"
+        );
+    }
 }
 
 /// A `parameter` record that lowers to a rule (one with an entity, or a
@@ -451,28 +473,6 @@ fn a_clash_across_imports_is_refused_and_names_both_modules() {
     // The federal module alone has one meaning per name.
     load_rulespec_with_source("us:policies/usda/snap/deductions", &source)
         .expect("the federal module compiles alone");
-
-    // An imported input and a local parameter clash the same way.
-    let state_input = STATE.replace("snap_standard_deduction", "household_size");
-    let source = InMemoryModuleSource(HashMap::from([
-        (
-            "us:policies/usda/snap/deductions".to_string(),
-            FEDERAL.to_string(),
-        ),
-        (
-            "us-tn:regulations/snap/standard-deduction".to_string(),
-            state_input,
-        ),
-    ]));
-    let error = load_rulespec_with_source("us-tn:regulations/snap/standard-deduction", &source)
-        .expect_err("an input and a parameter share a name")
-        .to_string();
-    assert!(
-        error.contains(
-            "[declaration_name_clash] `household_size` is declared in `us-tn:regulations/snap/standard-deduction` as a parameter and in `us:policies/usda/snap/deductions` as an input"
-        ),
-        "{error}"
-    );
 }
 
 static NONCE: AtomicU64 = AtomicU64::new(0);
@@ -530,16 +530,12 @@ const POOL: [&str; 6] = [
     "candidate",
 ];
 
-/// The refusal the check must give for `declarations`, in module order (rules,
-/// then inputs): the first declaration that takes a reserved name or differs
-/// in kind from an earlier declaration of its name.
+/// The refusal the check must give for `declarations`, in module order: the
+/// first declaration that takes a reserved name or differs in kind from an
+/// earlier declaration of its name.
 fn expected_refusal(declarations: &[(&str, Kind)]) -> Option<String> {
-    let ordered = declarations
-        .iter()
-        .filter(|(_, kind)| *kind != Kind::Input)
-        .chain(declarations.iter().filter(|(_, kind)| *kind == Kind::Input));
     let mut first = BTreeMap::<&str, Kind>::new();
-    for (name, kind) in ordered {
+    for (name, kind) in declarations {
         if RESERVED.contains(name) {
             return Some(reserved_refusal(name, kind.label()));
         }
@@ -603,10 +599,6 @@ fn expected_reads(name: &str, role: Role) -> (Value, Option<Value>) {
         Role::Rule => (
             json!({"kind": "derived", "name": name}),
             Some(json!({"kind": "derived", "name": name})),
-        ),
-        Role::Input => (
-            is_true(json!({"kind": "input", "name": name})),
-            Some(json!({"kind": "input", "name": name})),
         ),
         Role::Relation => (json!({"kind": "relation_member"}), None),
     }

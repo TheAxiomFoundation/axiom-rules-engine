@@ -444,7 +444,7 @@ a relation can no longer be declared, so no program that compiles keeps
 either old meaning. A predicate that reads a `parameter` record with an
 entity or a computed formula used to read an input of that name and now
 reads the rule. No declaration may take a reserved name, and no name may be
-declared as two of a parameter, a rule, a relation and an input
+declared as two of a parameter, a rule and a relation
 ([Declaration names](#declaration-names)). A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
@@ -843,8 +843,8 @@ alike.
 
 **A name declared as two things** (`declaration_name_clash`). A bare name
 reads one declaration, in a fixed order: a parameter, then a rule, then (in a
-predicate's judgment position) a relation, then an input. A name declared as
-two of these would read only the first. The other would still compile (a
+predicate's judgment position) a relation; a name no declaration takes reads
+an input. A name declared as two of these would read only the first. The other would still compile (a
 hidden rule could still be requested by name), but no bare read would reach
 it. Each declaration counts as lowering reads it:
 
@@ -852,8 +852,7 @@ it. Each declaration counts as lowering reads it:
   only literal versions, is a parameter;
 - any other `parameter` or `derived` record is a rule, so a `parameter` with
   an entity clashes with a scalar parameter, not with a rule;
-- a `data_relation` or `derived_relation` is a relation;
-- an item of `inputs:` is an input.
+- a `data_relation` or `derived_relation` is a relation.
 
 The error names both declarations' modules. Two declarations that read the
 same way are left to the existing checks: compatible duplicate parameters
@@ -866,10 +865,9 @@ scalar read returns the date, and a judgment read is refused. In a derived
 relation's predicate, a bare `anchor` or `candidate` names a term. The lexer
 reads a formula keyword as a literal (`true`, `True`, `false`, `False`) or as
 syntax (`and`, `or`, `not`, `if`, `elif`, `else`, `match`, `entity`, `amend`,
-`from`, `to`). No parameter, rule, relation or item of `inputs:` may take any
-of these names. A parameter or rule could never take a keyword, because its
-name is written into the formula source, so the keyword check adds relations
-and inputs.
+`from`, `to`). No parameter, rule or relation may take any of these names. A
+parameter or rule could never take a keyword, because its name is written
+into the formula source, so the keyword check adds relations.
 
 Refusing a reserved name costs the routes that do not read it bare. Before
 the refusal, a declaration named `period_start` was still reached by a table
@@ -889,15 +887,20 @@ Five things are not checked:
 
 - `source_relation` records: formulas never read their names, which are
   cited by `#` id;
-- a relation or input whose name is not a formula identifier or path, such
-  as `member-of`: no formula can write it, so it has no bare read to lose.
+- a relation whose name is not a formula identifier or path, such as
+  `member-of`: no formula can write it, so it has no bare read to lose.
   Such a relation can still be a derived relation's `source_relation`. A
   parameter's or rule's name must already be one identifier or path;
 - a derived relation's `member_relation` alias (`members` in the SNAP
   example above): in rules of its filtered entity it names that derived
   relation. It is a scoped name, not a declaration;
-- undeclared names: outside predicates `anchor + 1` still reads an input
-  named `anchor`, as above;
+- undeclared names, including the inputs an `inputs:` block describes.
+  Inputs are inferred from reads, and an entry does not change which
+  declaration or input a name reads: outside predicates `anchor + 1` reads an
+  input named `anchor`, as above, with or without an entry. An entry whose
+  `election` names an input that no rule or derived-relation predicate of its
+  module reads is refused
+  ([Input declarations and elections](#input-declarations-and-elections));
 - `ProgramSpec` JSON: each of its reads names its kind (`parameter_lookup`,
   `derived`, `input`, `relation_member`, `period_start`), so no name chooses
   between declarations.

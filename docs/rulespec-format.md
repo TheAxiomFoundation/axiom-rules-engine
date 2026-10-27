@@ -205,9 +205,9 @@ derived rule is read as a judgment, and otherwise a free input is compared
 against `true`. Inside a `derived_relation` predicate, `anchor` and
 `candidate` name terms and are refused bare, and a relation name, after the
 rules, tests membership; ordinary rules have neither. A declaration may not
-take a reserved name or be declared as two of a parameter, a rule, a relation
-and an input ([declaration names](rulespec.md#declaration-names)), so this
-order never chooses between two declarations.
+take a reserved name or be declared as two of a parameter, a rule and a
+relation ([declaration names](rulespec.md#declaration-names)), so this order
+never chooses between two declarations.
 
 Undeclared names are not an error at lowering time — a typo becomes an input
 the engine then reports as missing. Compile queries can surface the

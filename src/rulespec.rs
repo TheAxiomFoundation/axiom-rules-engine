@@ -2735,8 +2735,11 @@ impl RulesDocument {
     /// of one kind are left to the checks that already handle them:
     /// compatible parameters merge, and a second rule or relation of a name
     /// fails to compile. A source relation is a provenance record that no
-    /// formula reads by name, so it is not checked. A rule whose kind or
-    /// definition is invalid is skipped here; lowering refuses it.
+    /// formula reads by name, so it is not checked. Nor is an `inputs:`
+    /// entry: inputs are inferred from reads, the entry only describes one,
+    /// and `input_declarations` refuses an election on a slot no formula of
+    /// its module reads. A rule whose kind or definition is invalid is
+    /// skipped here; lowering refuses it.
     fn validate_declaration_names(&self, classes: &[Option<bool>]) -> Result<(), RuleSpecError> {
         let rules = self.rules.iter().zip(classes).filter_map(|(rule, class)| {
             let (role, label) = match rule.kind.as_ref()? {
@@ -2767,26 +2770,9 @@ impl RulesDocument {
                 path: rule.source_path(),
             })
         });
-        let inputs = std::iter::once((self.input_origin.as_deref(), &self.inputs))
-            .chain(
-                self.imported_input_declarations
-                    .iter()
-                    .map(|(origin, block)| (origin.as_deref(), block)),
-            )
-            .filter_map(|(origin, block)| Some((origin, block.as_sequence()?)))
-            .flat_map(|(origin, items)| {
-                items.iter().filter_map(move |item| {
-                    Some(Declaration {
-                        name: item.get("name")?.as_str()?,
-                        role: DeclaredAs::Input,
-                        label: "an input",
-                        path: origin.unwrap_or("<memory>").to_string(),
-                    })
-                })
-            });
 
         let mut first = HashMap::<&str, Declaration>::new();
-        for declaration in rules.chain(inputs) {
+        for declaration in rules {
             if let Some(reason) = reserved_name_reason(declaration.name) {
                 return Err(RuleSpecError::ReservedDeclarationName {
                     kind: declaration.label,
@@ -3866,7 +3852,6 @@ enum DeclaredAs {
     Parameter,
     Rule,
     Relation,
-    Input,
 }
 
 /// One name a module declares, for [`RulesDocument::validate_declaration_names`].
@@ -3883,7 +3868,7 @@ struct Declaration<'a> {
 /// `anchor` and `candidate` as terms inside a derived relation's predicate
 /// (`term_named`). The lexer reads a keyword (`true`, `and`, `if`, ...) as a
 /// literal or syntax, never as a name; a parameter or rule cannot take one
-/// (`validate_source_name`), but a relation or an input could.
+/// (`validate_source_name`), but a relation could.
 fn reserved_name_reason(name: &str) -> Option<&'static str> {
     if crate::formula::keyword(name).is_some() {
         return Some(

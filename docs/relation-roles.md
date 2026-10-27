@@ -199,12 +199,11 @@ Unqualified reads keep today's routing. Five changes affect existing programs:
   reads the anchor's own `age`. Such a relation can no longer be declared
   (next change), so no program that compiles keeps either old meaning.
 - A declaration that a bare name cannot read is refused before lowering
-  (`docs/rulespec.md`, "Declaration names"). That covers a parameter, rule,
-  relation or input named `period_start`, `period_end`, `anchor` or
-  `candidate`, and a relation or input named after a formula keyword such as
-  `true` (`reserved_declaration_name`). It also covers a name declared
-  as two of a parameter, a rule, a relation and an input
-  (`declaration_name_clash`). Such a program used to compile, and one bare
+  (`docs/rulespec.md`, "Declaration names"). That covers a parameter, rule
+  or relation named `period_start`, `period_end`, `anchor` or `candidate`,
+  and a relation named after a formula keyword such as `true`
+  (`reserved_declaration_name`). It also covers a name declared as two of a
+  parameter, a rule and a relation (`declaration_name_clash`). Such a program used to compile, and one bare
   name reached only one of its declarations. On 2026-10-27 no corpus module
   declares a reserved name, and one declares a clash (rulespec-us#1953); main
   already refuses that module for another reason.
