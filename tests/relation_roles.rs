@@ -768,10 +768,8 @@ fn refusal(formula: &str) -> String {
 #[test]
 fn a_bare_term_is_refused_as_a_value() {
     for formula in [
-        "anchor > 3",
         "candidate",
         "not anchor",
-        "age >= anchor",
         "band_of_age[candidate] == 1",
         "anchor[0] == 1",
         "len(candidate) > 0",
@@ -785,6 +783,15 @@ fn a_bare_term_is_refused_as_a_value() {
         let error = refusal(formula);
         assert!(
             error.contains("[relation_term_used_as_value]"),
+            "{formula}: {error}"
+        );
+    }
+    // PR 2 recognizes a term in a comparison and gives the more specific
+    // refusal for comparing an entity id with a scalar value.
+    for formula in ["anchor > 3", "age >= anchor"] {
+        let error = refusal(formula);
+        assert!(
+            error.contains("[relation_term_compared_with_value]"),
             "{formula}: {error}"
         );
     }
@@ -851,7 +858,11 @@ fn a_qualified_read_of_a_parameter_or_relation_is_refused() {
         );
     }
     let error = refusal("candidate.relative_of");
-    assert!(error.contains("relation atoms"), "{error}");
+    assert!(
+        error.contains("`candidate.relative_of` reads relation `relative_of`")
+            && error.contains("test the relation with an atom"),
+        "{error}"
+    );
 }
 
 /// Outside predicates, `anchor` and `candidate` stay ordinary names: a bare
