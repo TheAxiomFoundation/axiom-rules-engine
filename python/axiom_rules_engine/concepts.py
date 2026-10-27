@@ -30,7 +30,12 @@ CORPUS_CITATION_PATH_RE = re.compile(
     r"[a-z][a-z0-9-]*"
     r"(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\-–]*[A-Za-z0-9.:\-–])?)+$"
 )
-IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+NUMBER_RE = re.compile(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?")
+STRING_RES = {
+    quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*{quote}?", re.DOTALL)
+    for quote in "\"'"
+}
 FORMULA_KEYWORDS = {
     "and",
     "as",
@@ -48,9 +53,9 @@ FORMULA_KEYWORDS = {
     "true",
 }
 PREDICATE_TERMS = {"anchor", "candidate"}
-# The formula lexer (`Lexer::tokenise` in src/formula.rs) skips these bytes,
-# `#` comments, and `"""` blocks between tokens.
+# The bytes the formula lexer skips as whitespace (`u8::is_ascii_whitespace`).
 LEXER_WHITESPACE = " \t\n\x0c\r"
+STRING_TOKEN = '"'
 
 
 @dataclass(frozen=True)
@@ -485,43 +490,72 @@ def _infer_input_names(
         for version in versions:
             if not isinstance(version, dict) or not isinstance(version.get("formula"), str):
                 continue
-            formula = version["formula"]
-            for match in IDENTIFIER_RE.finditer(formula):
-                identifier = match.group()
+            tokens = _formula_tokens(version["formula"])
+            for index, token in enumerate(tokens):
                 if (
-                    identifier not in rule_names
-                    and identifier not in FORMULA_KEYWORDS
-                    and identifier not in reserved
-                    and not _next_token_is_open_paren(formula, match.end())
+                    IDENTIFIER_RE.fullmatch(token)
+                    and token not in rule_names
+                    and token not in FORMULA_KEYWORDS
+                    and token not in reserved
+                    and not _is_called(tokens, index)
                 ):
-                    inputs.add(identifier)
+                    inputs.add(token)
     return inputs
 
 
-def _next_token_is_open_paren(formula: str, position: int) -> bool:
-    """Whether the formula's next token after ``position`` is ``(``.
+def _formula_tokens(formula: str) -> list[str]:
+    """Split a formula as `Lexer::tokenise` in src/formula.rs does, as far
+    as names and parentheses go.
 
-    The formula parser reads any name followed by ``(`` as a function call
-    (`Parser::parse_postfix` in src/formula.rs), never as a value, whatever
-    the name. The same name without ``(`` is an ordinary read, so a
-    function's name used alone can still name an input.
+    `\"\"\"` blocks, `#` comments and whitespace yield no token, so the
+    words in them name nothing. A string literal yields `STRING_TOKEN`, a
+    name or number yields its text, and any other character is a token of
+    its own. Unlike the lexer, this keeps `a/b` as three tokens rather than
+    one path, and a date as numbers and dashes.
     """
+    tokens: list[str] = []
+    position = 0
     while position < len(formula):
+        character = formula[position]
         if formula.startswith('"""', position):
             close = formula.find('"""', position + 3)
-            if close == -1:
-                return False
-            position = close + 3
-        elif formula[position] == "#":
+            position = len(formula) if close == -1 else close + 3
+        elif character == "#":
             newline = formula.find("\n", position)
-            if newline == -1:
-                return False
-            position = newline
-        elif formula[position] in LEXER_WHITESPACE:
+            position = len(formula) if newline == -1 else newline
+        elif character in LEXER_WHITESPACE:
             position += 1
+        elif character in STRING_RES:
+            position = STRING_RES[character].match(formula, position).end()
+            tokens.append(STRING_TOKEN)
         else:
-            return formula[position] == "("
-    return False
+            match = IDENTIFIER_RE.match(formula, position) or NUMBER_RE.match(
+                formula, position
+            )
+            token = match.group() if match else character
+            tokens.append(token)
+            position += len(token)
+    return tokens
+
+
+def _is_called(tokens: list[str], index: int) -> bool:
+    """Whether the name at ``tokens[index]`` is a function being called.
+
+    The parser calls any name followed by ``(``, and a name wrapped in
+    grouping parentheses is still that name, so ``(len)(x)`` calls ``len``
+    (`parse_primary` and `parse_postfix` in src/formula.rs). The same name
+    anywhere else reads a value, whatever it is called.
+    """
+    closing = index + 1
+    while closing < len(tokens) and tokens[closing] == ")":
+        closing += 1
+    depth = closing - index - 1
+    return (
+        closing < len(tokens)
+        and tokens[closing] == "("
+        and depth <= index
+        and all(token == "(" for token in tokens[index - depth : index])
+    )
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

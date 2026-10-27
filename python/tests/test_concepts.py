@@ -9,6 +9,7 @@ import yaml
 from axiom_rules_engine import CompiledDenseProgram
 from axiom_rules_engine.cli import main
 from axiom_rules_engine.concepts import (
+    _infer_input_names,
     discover_concepts,
     search_concepts,
     show_concept,
@@ -227,7 +228,42 @@ FUNCTION_CALLS = [
     ("max_where(member_of_household, age, is_adult)", {"age", "is_adult"}),
     ("exactly_one(is_adult, is_student)", {"is_adult", "is_student"}),
 ]
-# What some calls need to compile: a result dtype other than Money, or an
+# The parser calls a name wrapped in grouping parentheses too.
+GROUPED_CALLS = [
+    ("(ceil)(wages)", {"wages"}),
+    ("(max)(wages, 0)", {"wages"}),
+    ("((len))(member_of_household)", set()),
+    ("max((floor)(wages), 0)", {"wages"}),
+]
+# The lexer skips whitespace, `#` comments and `"""` blocks between tokens, so
+# the parser still reads `ceil` followed by any of them and `(` as a call.
+SEPARATORS = [
+    "",
+    " ",
+    "\t",
+    "\n  ",
+    "\r\n",
+    "\x0c",
+    " # rounds up\n  ",
+    ' """Rounds up.""" ',
+]
+# Only a call makes a name a function: the parser reads `floor`, `sum` and a
+# grouped `max` here as inputs, and a `(` inside a comment or an unclosed
+# `"""` block is no token.
+BARE_FUNCTION_NAMES = [
+    ("ceil(floor) + sum", {"floor", "sum"}),
+    ("(max) + 1", {"max"}),
+    ("max # (\n+ 1", {"max"}),
+    ('min """ (', {"min"}),
+]
+# String literals, comments and `"""` blocks name nothing.
+TEXT_CASES = [
+    ('"max"', set()),
+    ('"Aged (65+)"', set()),
+    ("wages # then floor(wages)", {"wages"}),
+    ('"""Rounded down, as floor(x) would."""\nfloor(wages)', {"wages"}),
+]
+# What some formulas need to compile: a result dtype other than Money, or an
 # input declaration.
 CALL_DTYPES = {
     "date_add_days(birth_date, 1)": "Date",
@@ -235,8 +271,19 @@ CALL_DTYPES = {
     "date_add_years(birth_date, 18)": "Date",
     "only_related(member_of_household, is_adult)": "Boolean",
     "exactly_one(is_adult, is_student)": "Judgment",
+    '"max"': "Text",
+    '"Aged (65+)"': "Text",
 }
 CALL_INPUTS = {
+    "input_for_year(wages, 2024)": [
+        {
+            "name": "wages",
+            "entity": "Household",
+            "dtype": "Money",
+            "unit": "USD",
+            "period": "Year",
+        }
+    ],
     "only_related(member_of_household, is_adult)": [
         {"name": "is_adult", "entity": "Person", "dtype": "Boolean"}
     ],
@@ -252,7 +299,7 @@ def write_call_module(root: Path, formula: str) -> Path:
     )
 
 
-@pytest.mark.parametrize(("formula", "inputs"), FUNCTION_CALLS)
+@pytest.mark.parametrize(("formula", "inputs"), FUNCTION_CALLS + GROUPED_CALLS)
 def test_no_function_name_is_inferred_as_an_input(
     tmp_path: Path, formula: str, inputs: set[str]
 ) -> None:
@@ -260,11 +307,6 @@ def test_no_function_name_is_inferred_as_an_input(
     write_call_module(root, formula)
 
     assert inferred_input_names(root) == inputs
-
-
-# The lexer skips whitespace, `#` comments and `"""` blocks between tokens, so
-# the parser still reads `ceil` followed by any of them and `(` as a call.
-SEPARATORS = ["", " ", "\t", "\n  ", "\r\n", "\x0c", " # ...\n  ", ' """...""" ']
 
 
 @pytest.mark.parametrize("separator", SEPARATORS)
@@ -277,15 +319,6 @@ def test_call_is_seen_past_what_the_lexer_skips(
     assert inferred_input_names(root) == {"wages"}
 
 
-# Only a following `(` makes a call: the parser reads `floor` and `sum` here as
-# inputs, and a `(` inside a comment or an unclosed `"""` block is no token.
-BARE_FUNCTION_NAMES = [
-    ("ceil(floor) + sum", {"floor", "sum"}),
-    ("max # (\n+ 1", {"max"}),
-    ('min """ (', {"min"}),
-]
-
-
 @pytest.mark.parametrize(("formula", "inputs"), BARE_FUNCTION_NAMES)
 def test_function_name_read_as_a_value_is_an_input(
     tmp_path: Path, formula: str, inputs: set[str]
@@ -296,25 +329,65 @@ def test_function_name_read_as_a_value_is_an_input(
     assert inferred_input_names(root) == inputs
 
 
-def not_dense_compilable(formula: str, inputs: set[str], reason: str):
-    return pytest.param(formula, inputs, marks=pytest.mark.skip(reason=reason))
+@pytest.mark.parametrize(("formula", "inputs"), TEXT_CASES)
+def test_words_in_strings_and_comments_name_no_input(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, formula)
+
+    assert inferred_input_names(root) == inputs
 
 
-# The cases above, checked against the inputs the compiled program reads.
+class SearchCountingFormula(str):
+    """A formula that counts the characters its `find` calls search."""
+
+    searched = 0
+
+    def find(self, sub, start=0, end=None):  # type: ignore[override]
+        index = super().find(sub, start, len(self) if end is None else end)
+        stop = len(self) if index == -1 else index + len(sub)
+        self.searched += stop - start
+        return index
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x" + " # x" * 2_000,
+        'x """' + " x #" * 2_000 + '"""',
+        "x # x\n" * 2_000,
+    ],
+    ids=["comment", "block", "comment lines"],
+)
+def test_inference_searches_each_comment_once(text: str) -> None:
+    # Each name inside a comment once searched the rest of the comment again,
+    # which made a long comment take quadratic time.
+    formula = SearchCountingFormula(text)
+    rules = [{"name": "long", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules, {"long"}) == {"x"}
+    assert formula.searched <= len(formula)
+
+
+# Every case above, checked against the inputs the compiled program reads. A
+# fixture the compiler refuses is valid up to the refusal named here, which is
+# where its inputs stop being checkable.
+COMPILE_REFUSALS = {
+    "input_for_year(wages, 2024)": (
+        "dense compilation does not yet support selected-year input"
+    ),
+    'min """ (': "block is never closed",
+}
 COMPILED_CASES = [
-    not_dense_compilable(
-        formula, inputs, "dense compilation does not support input_for_year yet"
-    )
-    if formula.startswith("input_for_year(")
-    else (formula, inputs)
-    for formula, inputs in FUNCTION_CALLS
-]
-COMPILED_CASES += [(f"ceil{separator}(wages)", {"wages"}) for separator in SEPARATORS]
-COMPILED_CASES += [
-    not_dense_compilable(formula, inputs, "RuleSpec rejects an unclosed block")
-    if '"""' in formula
-    else (formula, inputs)
-    for formula, inputs in BARE_FUNCTION_NAMES
+    (formula, inputs, COMPILE_REFUSALS.get(formula))
+    for formula, inputs in [
+        *FUNCTION_CALLS,
+        *GROUPED_CALLS,
+        *((f"ceil{separator}(wages)", {"wages"}) for separator in SEPARATORS),
+        *BARE_FUNCTION_NAMES,
+        *TEXT_CASES,
+    ]
 ]
 
 
@@ -322,13 +395,20 @@ COMPILED_CASES += [
     NativeCompiledDenseProgram is None,
     reason="axiom_rules_engine_dense extension is not built",
 )
-@pytest.mark.parametrize(("formula", "inputs"), COMPILED_CASES)
+@pytest.mark.parametrize(("formula", "inputs", "refusal"), COMPILED_CASES)
 def test_inferred_inputs_are_the_compiled_program_inputs(
-    tmp_path: Path, formula: str, inputs: set[str]
+    tmp_path: Path, formula: str, inputs: set[str], refusal: str | None
 ) -> None:
     root = canonical_root(tmp_path)
     path = write_call_module(root, formula)
+    assert inferred_input_names(root) == inputs
 
+    if refusal is not None:
+        with pytest.raises(ValueError, match=refusal):
+            CompiledDenseProgram.from_file(
+                path, rulespec_roots=[root], entity="Household"
+            )
+        return
     program = CompiledDenseProgram.from_file(
         path, rulespec_roots=[root], entity="Household"
     )
@@ -336,7 +416,6 @@ def test_inferred_inputs_are_the_compiled_program_inputs(
         name for relation in program.relations for name in relation.related_inputs
     }
     assert compiled == inputs
-    assert inferred_input_names(root) == inputs
 
 
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:
