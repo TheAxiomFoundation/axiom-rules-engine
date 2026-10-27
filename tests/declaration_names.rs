@@ -260,10 +260,10 @@ fn every_kind_of_declaration_is_refused_a_reserved_name() {
 /// A formula keyword is never read as a name: the lexer reads `true` and
 /// `false` as literals and the rest as syntax. A parameter or rule could
 /// never take one, because its name is written into the formula source, so
-/// it is still refused, by that check or by this one (a parameter table's
-/// name is not written there). A relation or an input could take one, and
-/// is now refused as for a built-in. Names are quoted, so YAML keeps `true`
-/// a string.
+/// it is still refused: a parameter table by this check, which classifies
+/// it without writing it, and any other parameter or rule by that one. A
+/// relation or an input could take one, and is now refused as for a
+/// built-in. Names are quoted, so YAML keeps `true` a string.
 #[test]
 fn a_formula_keyword_is_refused_as_a_declaration_name() {
     const KEYWORDS: [&str; 15] = [

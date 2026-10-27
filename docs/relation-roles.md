@@ -185,8 +185,8 @@ Unqualified reads keep today's routing. Five changes affect existing programs:
   body, used to read an input of that name and now reads the parameter (3.3).
   That held when nothing else had the name. A parameter that shared a rule's
   name read the rule, and in a predicate one that shared a relation's name
-  tested membership; such a program is now refused at declaration (the last
-  change below).
+  tested membership; such a program is now refused at declaration (the
+  declaration-name change below).
 - A bare `period_start` or `period_end` tested as a judgment used to resolve
   as any bare name did: to a rule of that name, else (in a predicate) a
   relation, else an input. It is now refused. Both are dates. Scalar position
