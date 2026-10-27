@@ -1381,9 +1381,9 @@ fn stamp_meta(schema: &mut Value, id_stem: &str, title: &str, description: &str)
 mod tests {
     /// The archived artifact schemas never change: `emit-schemas` writes them
     /// back from the checked-in bytes, so only an edit to a file could move
-    /// one, and this pins each file's SHA-256. The v2 archive is the schema
-    /// `main` emitted at 841b9b65, still format 2; re-pin it to `main`'s
-    /// last format-2 schema when this lands.
+    /// one, and this pins each file's SHA-256. The v2 archive is the last
+    /// schema `main` emitted for format 2, at `e1d4a67c` (#268, which added
+    /// the relation-role nodes).
     #[test]
     fn archived_artifact_schemas_are_frozen() {
         for (name, text, sha256) in [
@@ -1395,7 +1395,7 @@ mod tests {
             (
                 "compiled-artifact.v2.schema.json",
                 include_str!("../schemas/compiled-artifact.v2.schema.json"),
-                "0cacd1047e41ed3de544f63188a8da1a4c8eb3333c5d830a55e2001970803723",
+                "d066179dee8dba247bcf4940e6edd11203b6200e50b4526c09cbc6c114d4fbf6",
             ),
         ] {
             assert_eq!(
