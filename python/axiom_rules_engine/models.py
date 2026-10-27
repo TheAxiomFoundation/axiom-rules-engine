@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 
 ExecutionMode = Literal["explain", "fast"]
@@ -233,6 +240,15 @@ class CompiledProgram(BaseModel):
         if value is None:
             raise ValueError("source_closure is omitted when there is none, never null")
         return value
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_source_closure(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Every dump omits an absent closure, so a loaded artifact saves as
+        # one the engine and this model accept.
+        data = handler(self)
+        if self.source_closure is None:
+            data.pop("source_closure", None)
+        return data
 
 
 class LegacyCompiledProgramV2(BaseModel):

@@ -152,6 +152,15 @@ def test_format_3_interface_objects_have_exactly_their_keys() -> None:
             CompiledProgram.model_validate({**_format_3(), **extra})
 
 
+def test_a_dump_omits_an_absent_source_closure() -> None:
+    # The model's default dumps load again: an absent closure stays omitted,
+    # never null, in Python and in JSON mode.
+    sourceless = CompiledProgram.model_validate(_format_3())
+    assert "source_closure" not in sourceless.model_dump()
+    assert "source_closure" not in json.loads(sourceless.model_dump_json())
+    assert CompiledProgram.model_validate_json(sourceless.model_dump_json()) == sourceless
+
+
 def _request() -> CompiledExecutionRequest:
     return CompiledExecutionRequest(
         mode="explain",
@@ -275,6 +284,24 @@ def test_compile_output_is_a_format_3_compiled_program(compiled_artifacts) -> No
     LegacyCompiledProgramV2.model_validate_json(format_2.read_text())
     with pytest.raises(ValidationError):
         CompiledProgram.model_validate_json(format_2.read_text())
+
+
+@needs_binary
+def test_the_engine_runs_the_models_default_dumps(compiled_artifacts, tmp_path: Path) -> None:
+    format_3, _, compiled = compiled_artifacts
+    (income,) = compiled.program.interface.inputs
+    request = _income_request(income.legal_id)
+    engine = AxiomRulesEngine(binary_path=BINARY)
+    expected = engine.execute_compiled(artifact_path=format_3, request=request)
+    with_closure = tmp_path / "with-closure.json"
+    with_closure.write_text(compiled.model_dump_json(), encoding="utf-8")
+    assert engine.execute_compiled(artifact_path=with_closure, request=request) == expected
+    sourceless = tmp_path / "sourceless.json"
+    sourceless.write_text(
+        CompiledProgram.model_validate(_format_3()).model_dump_json(), encoding="utf-8"
+    )
+    empty = CompiledExecutionRequest(mode="explain", dataset=Dataset(), queries=[])
+    assert engine.execute_compiled(artifact_path=sourceless, request=empty).results == []
 
 
 @needs_binary
