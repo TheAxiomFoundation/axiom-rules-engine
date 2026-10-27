@@ -687,6 +687,54 @@ fn an_extremum_types_its_losing_members_as_numbers() {
     }
 }
 
+/// The `where` clause of `min`, `max` and `only` is read at each member, so
+/// its inputs list the related kind with a judgment's dtype.
+#[test]
+fn an_aggregates_where_clause_is_read_at_each_member() {
+    let related = |kind: &str, relation: &str, current: usize, value: &str, flag: &str| {
+        let mut node = json!({
+            "kind": kind, "relation": relation, "current_slot": current,
+            "related_slot": 1 - current, "value": input(value),
+            "where": cmp(input(flag), "eq", boolean(true))
+        });
+        if kind == "extreme_related" {
+            node["extreme"] = json!(if flag == "lowest_counted" {
+                "min"
+            } else {
+                "max"
+            });
+        }
+        node
+    };
+    let lookup =
+        |index: Value| json!({"kind":"parameter_lookup","parameter":"table","index":index});
+    let interface = derive(json!({
+        "relations": [
+            {"name":"members","arity":2,"slot_entities":["Person","Household"]},
+            {"name":"links","arity":2,"slot_entities":["Household","Household"]}
+        ],
+        "parameters": [{"name":"table","unit":null,"versions":[{"effective_from":"2020-01-01",
+            "values":{"1":{"kind":"integer","value":10}}}]}],
+        "derived": [
+            scalar_rule("lowest", "Household",
+                lookup(related("extreme_related", "members", 1, "rank", "lowest_counted"))),
+            scalar_rule("highest", "Household",
+                lookup(related("extreme_related", "members", 1, "rank", "highest_counted"))),
+            scalar_rule("linked", "Household",
+                lookup(related("single_related", "links", 0, "link_rank", "link_counted")))
+        ]
+    }));
+    for (slot, entity) in [
+        ("lowest_counted", "Person"),
+        ("highest_counted", "Person"),
+        ("link_counted", "Household"),
+    ] {
+        let input = find(&interface, slot);
+        assert_eq!(input.entities, kinds(&[entity]), "{slot}");
+        assert_eq!(input.dtype, Some(InputDType::Bool), "{slot}");
+    }
+}
+
 /// Reads through a term run on the term's id, whatever the rule's entity:
 /// `anchor.x` on the derivation's current kind and `candidate.x` on its
 /// related kind. The relation's `reads` list them as it lists unqualified

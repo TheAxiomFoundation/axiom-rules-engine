@@ -24,6 +24,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+/// Second-instance probes each related-member slot of the scaffold must get.
+/// Each is reached in every generated program (32 probes at these settings);
+/// half of that leaves room for a generator change without passing a slot
+/// that is reached only by coincidence.
+const MEMBER_FLOOR: usize = 16;
+
 fn runner(cases: u32, seed: u8) -> TestRunner {
     TestRunner::new_with_rng(
         Config {
@@ -132,8 +138,9 @@ struct Health {
     reached_typed: BTreeMap<String, usize>,
     reached_invalid_kinds: BTreeMap<String, BTreeSet<String>>,
     reached_domain: usize,
-    /// Second-instance probes whose cell a query read as a related member.
-    reached_members: usize,
+    /// Second-instance probes whose cell a query read as a related member,
+    /// by slot.
+    reached_members: BTreeMap<String, usize>,
     observed_kinds: BTreeSet<String>,
     shapes: BTreeSet<u8>,
     elections: usize,
@@ -673,8 +680,9 @@ fn generated_dtype_and_closed_domains_are_sound() {
                 // Each value is probed in every cell of the slot, and in the
                 // second instance of each kind alone. Queries run on first
                 // instances, so the second reaches a query only as a related
-                // member, beside first-instance members that stay valid: an
-                // aggregate must reject one invalid member among valid ones.
+                // member. Where the relation also has a first-instance member,
+                // that one stays valid: an aggregate must reject one invalid
+                // member among valid ones.
                 let probes = probes.flat_map(|(bad, domain)| {
                     [false, true].map(|second_only| (bad.clone(), domain, second_only))
                 });
@@ -718,7 +726,11 @@ fn generated_dtype_and_closed_domains_are_sound() {
                         if second_only
                             && matches!(&before, Err(EvalError::MissingInput { name, .. }) if name == &input.name)
                         {
-                            health.borrow_mut().reached_members += 1;
+                            *health
+                                .borrow_mut()
+                                .reached_members
+                                .entry(input.name.clone())
+                                .or_default() += 1;
                         }
                         if !prepared.slots.contains(&input.name) && before.is_ok() {
                             groups.entry(prepared.kind.clone()).or_default().push(index);
@@ -840,9 +852,31 @@ fn generated_dtype_and_closed_domains_are_sound() {
         "closed-domain target reads must be reached"
     );
     assert!(
-        health.reached_members >= 8,
+        health.reached_members.values().sum::<usize>() >= 8,
         "an invalid member beside valid ones must be reached"
     );
+    // Every aggregate's member reads, and the `where` clauses of `max` and
+    // `only`, are reached as related members.
+    for slot in [
+        "member_amount",
+        "where_flag",
+        "member_rank",
+        "rank_counted",
+        "member_day",
+        "link_rank",
+        "link_counted",
+    ] {
+        assert!(
+            health
+                .reached_members
+                .get(slot)
+                .copied()
+                .unwrap_or_default()
+                >= MEMBER_FLOOR,
+            "`{slot}` must be reached as a related member: {:?}",
+            health.reached_members
+        );
+    }
     for dtype in [
         InputDType::Bool,
         InputDType::Text,

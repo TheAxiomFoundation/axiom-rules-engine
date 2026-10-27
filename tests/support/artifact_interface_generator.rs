@@ -409,6 +409,7 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
     // member's value, which keeps the index's whole-number demand. Neither
     // closes a domain through the aggregate. An invalid `0.5` loses the
     // `max` to a valid `1`, so the soundness probes reach a losing member.
+    // The `where` clauses of `max` and `only` are read at each member.
     let rank = b.read(
         "member_rank",
         Demand::Number,
@@ -416,7 +417,14 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
         None,
         None,
     );
-    b.rule("greatest_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"extreme_related","extreme":"max","relation":"members","current_slot":1,"related_slot":0,"value":rank}}),false);
+    let rank_counted = b.read(
+        "rank_counted",
+        Demand::Bool,
+        Context::Kind("Person".into()),
+        None,
+        None,
+    );
+    b.rule("greatest_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"extreme_related","extreme":"max","relation":"members","current_slot":1,"related_slot":0,"value":rank,"where":cmp(rank_counted,"eq",boolean(true))}}),false);
     let day = b.read(
         "member_day",
         Demand::Date,
@@ -438,7 +446,14 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
         None,
         None,
     );
-    b.rule("linked_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"single_related","relation":"links","current_slot":0,"related_slot":1,"value":link_rank}}),false);
+    let link_counted = b.read(
+        "link_counted",
+        Demand::Bool,
+        Context::Kind("Household".into()),
+        None,
+        None,
+    );
+    b.rule("linked_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"single_related","relation":"links","current_slot":0,"related_slot":1,"value":link_rank,"where":cmp(link_counted,"eq",boolean(true))}}),false);
     let self_flag = b.read(
         "self_flag",
         Demand::Bool,
