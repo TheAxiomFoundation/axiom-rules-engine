@@ -178,9 +178,10 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing. Three changes affect existing programs:
+Unqualified reads keep today's routing. Four changes affect existing programs:
 - A bare parameter name in a predicate, or tested as a judgment in a rule
-  body, used to read an input of that name and now reads the parameter (3.3).
+  body, used to resolve as any bare name did: to a rule of that name, else
+  (in a predicate) a relation, else an input. It now reads the parameter (3.3).
 - A bare `period_start` or `period_end` tested as a judgment used to resolve
   as any bare name did: to a rule of that name, else (in a predicate) a
   relation, else an input. It is now refused. Both are dates. Scalar position
@@ -188,6 +189,10 @@ Unqualified reads keep today's routing. Three changes affect existing programs:
   position now does the same.
 - A bare `anchor` or `candidate` in a derived relation's predicate was an
   ordinary name and is now refused (3.1).
+- A relation named `anchor` or `candidate` before `.` in a predicate now
+  names the term. For example, `sum(anchor.age)` is refused, while
+  `min(anchor.age)` reads the anchor's own `age` instead of taking the
+  minimum over a typed relation named `anchor`.
 
 ### 3.3 Parameters in predicates
 
@@ -253,7 +258,10 @@ an atom (`relation_name_shadows_builtin`).
 ### 3.5 Term comparison
 
 `t1 == t2` and `t1 != t2`, where both sides are terms of the same kind,
-compare ids. The result is always determined, because ids are given, not
+compare ids. Different kinds refuse with `relation_term_kind_mismatch`; a
+term compared with a value refuses with `relation_term_compared_with_value`.
+Other comparison operators refuse with `relation_term_comparison_operator`.
+The result is always determined, because ids are given, not
 derived. It expresses "a member other than his or her parent" in 7 CFR
 273.1(b)(1)(iii), and "anyone but the applicant" in a quantified set.
 
@@ -570,7 +578,7 @@ constructs.
 - A test checks that a path artifact never also writes `source_relation`.
   `RelationDerivationSpec` does not deny unknown fields, so writing both would
   let an older engine silently ignore the path.
-- A program that uses none of the additions and makes none of the three
+- A program that uses none of the additions and makes none of the four
   changes in 3.2 compiles to the same bytes as before.
 - If #155's format 3 (#250) merges first, this work adds to format 3 and
   needs no separate version bump.
@@ -893,8 +901,9 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change.** There are three exceptions. A bare
+- **Unqualified reads do not change.** There are four exceptions. A bare
   parameter name in a predicate, or tested as a judgment in a rule body, now
   reads the parameter (3.3). A bare period built-in tested as a judgment is
   now refused (3.2). A bare `anchor` or `candidate` in a derived relation's
-  predicate is now refused (3.1).
+  predicate is now refused (3.1). A relation named `anchor` or `candidate`
+  before `.` in a predicate now names the term (3.2).

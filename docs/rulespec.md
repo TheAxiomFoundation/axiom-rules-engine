@@ -416,28 +416,62 @@ forms, and `only_related`), which have no relation context
 not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
 are the scalar minimum and maximum of one qualified read. Reading a
 parameter, `period_start` or `period_end` through a term is refused with
-`relation_role_entity_mismatch`; reading a relation through a term is refused
-until relation atoms are supported (#214). Outside predicates the two names
+`relation_role_entity_mismatch`; reading a relation through a term is refused:
+use a relation atom. Outside predicates the two names
 are ordinary identifiers: `anchor + 1` in a rule body reads an input named
 `anchor`, and `anchor.age` there is a field access, which RuleSpec rejects. A
 compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
 Unqualified reads keep the routing above. A bare parameter name now reads the
-parameter in two places where it used to read an input of that name: anywhere
+parameter in two places where it used to resolve to a rule of that name,
+else (in a predicate) a relation, else an input: anywhere
 in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
 in a rule body as in a predicate. A bare `period_start` or `period_end`
 tested as a judgment, which used to read a rule, a relation or an input of
 that name, is refused. A judgment resolves a bare name in the order a scalar
 does, and a scalar reads the built-in date first, so neither name is a
-judgment even where a parameter, a rule or a relation shares it. A program with none of these, and with no term, compiles to the
-same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
+judgment even where a parameter, a rule or a relation shares it. A relation
+named `anchor` or `candidate` before `.` in a predicate now names the term:
+`sum(anchor.age)` is refused, and `min(anchor.age)` reads the anchor's own
+`age` instead of taking the minimum over that typed relation. A program with
+none of these changes, and with no term, compiles to the same artifact as
+before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
-reads through a term, naming the qualified read and #218; a root that reaches
-no such relation compiles. Dense does compile parameter reads in a predicate. See [relation-roles.md](relation-roles.md) for the
-design.
+uses a qualified read, relation atom or term comparison, naming the construct
+and #218; a root that reaches no such relation compiles. Dense does compile
+parameter reads in a predicate.
+
+A relation atom, `R(t1, ..., tn)`, tests exactly those term ids in the declared
+relation's slot order. For example, `relative_of(candidate, anchor)` tests the
+reverse pair without the ambiguity of a bare same-kind membership test.
+A data atom holds when a supplied tuple matches every id and covers the
+evaluation period. A derived atom requires arity 2 and tests whether its
+related-slot term belongs to the relation's members for its current-slot term.
+Each atom requires declared slot kinds (`relation_atom_needs_typed_relation`),
+the same number of terms as slots (`relation_atom_arity_mismatch`), and a
+matching kind at each slot (`relation_atom_kind_mismatch`). A relation whose
+name is also a built-in function, such as `len`, cannot be used as an atom
+(`relation_name_shadows_builtin`). A bare relation name keeps its meaning.
+
+Two terms of the same kind can compare ids with `==` or `!=`:
+`candidate != anchor` excludes the anchor from its own candidates. Different
+kinds refuse with `relation_term_kind_mismatch`, and a term compared with a
+value refuses with `relation_term_compared_with_value`. An atom or term
+comparison belongs only in a derived relation's predicate; rules and
+aggregation `where` clauses refuse it with `relation_role_outside_scope`.
+
+A program using qualified reads, parameters in predicates, atoms or term
+comparisons refuses supplied
+tuples under any derived relation's name
+(`supplied_tuples_for_derived_relation`). Its members resolver also ignores
+such tuples for direct Rust callers of `Engine::new`. Programs using none of
+these constructs retain the union of supplied and derived members. Request
+binding also refuses `relation_binding: lenient` when the program uses an
+atom (`lenient_binding_with_relation_roles`). See
+[relation-roles.md](relation-roles.md) for the design and derived-atom cost.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach
