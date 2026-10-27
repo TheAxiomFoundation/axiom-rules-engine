@@ -989,7 +989,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let hint = if derivation.slot_entities.is_empty() {
-                " Declare the derived relation's `slot_entities` so the predicate can read the current id"
+                " Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec) so the predicate can read the current id"
             } else {
                 ""
             };
@@ -1246,7 +1246,7 @@ impl<'a> Checker<'a> {
                         name,
                         name,
                         format!(
-                            "the predicate of derived relation `{name}` reads `{term}.{read_name}`, but the derivation declares no kind for slot {slot}, so `{term}` has none. Declare the derived relation's `slot_entities`; kinds taken from its source are not stamped onto a relation whose slots share one kind"
+                            "the predicate of derived relation `{name}` reads `{term}.{read_name}`, but the derivation declares no kind for slot {slot}, so `{term}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
                         ),
                     );
                     continue;

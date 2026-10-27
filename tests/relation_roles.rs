@@ -868,17 +868,30 @@ rules:
 
 #[test]
 fn a_cycle_through_a_qualified_rule_read_is_refused() {
-    for term in ["anchor", "candidate"] {
-        let extra = format!(
-            r#"
-  - name: loops
+    // The scalar form (`t.rule > 0`) and the judgment form (`t.rule`, a bare
+    // judgment) lower to different expression variants, each with its own
+    // dependency edge.
+    let forms = [
+        ("loops", "Integer", "len(looping_relative_of)", ".loops > 0"),
+        (
+            "loops_j",
+            "Judgment",
+            "len(looping_relative_of) > 0",
+            ".loops_j",
+        ),
+    ];
+    for (rule, dtype, body, read) in forms {
+        for term in ["anchor", "candidate"] {
+            let extra = format!(
+                r#"
+  - name: {rule}
     kind: derived
     entity: Person
-    dtype: Integer
+    dtype: {dtype}
     period: Month
     versions:
       - effective_from: 2026-01-01
-        formula: len(looping_relative_of)
+        formula: {body}
   - name: looping_relative_of
     kind: derived_relation
     derived_relation:
@@ -889,14 +902,19 @@ fn a_cycle_through_a_qualified_rule_read_is_refused() {
       related_slot: 1
     versions:
       - effective_from: 2026-01-01
-        formula: {term}.loops > 0
+        formula: {term}{read}
 "#
-        );
-        let error = compile(&people_module(&extra)).expect_err("the cycle is refused");
-        assert!(
-            matches!(&error, CompileError::CyclicDependency { cycle } if cycle.contains("loops")),
-            "{term}: {error}"
-        );
+            );
+            let error = compile(&people_module(&extra)).expect_err("the cycle is refused");
+            assert!(
+                matches!(
+                    &error,
+                    CompileError::CyclicDependency { cycle }
+                        if cycle.split(", ").any(|name| name == rule)
+                ),
+                "{rule} {term}: {error}"
+            );
+        }
     }
 }
 

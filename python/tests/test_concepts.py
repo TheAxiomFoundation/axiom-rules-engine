@@ -86,6 +86,59 @@ def test_discover_concepts_from_rulespec_file(tmp_path: Path) -> None:
     assert by_id["us:statutes/26/62#input.wages"].status == "inferred"
 
 
+def test_predicate_terms_are_not_inferred_inputs(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_rulespec(
+        root,
+        "us/statutes/26/62.yaml",
+        """
+format: rulespec/v1
+module:
+  summary: Internal Revenue Code section 62 defines adjusted gross income.
+  source_verification:
+    corpus_citation_path: us/statutes/26/62
+rules:
+  - name: relative_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: older_relative_of
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relative_of
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: candidate.age > anchor.age
+  - name: anchor_plus_one
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: anchor + 1
+""",
+    )
+
+    inputs = {
+        concept.concept_id
+        for concept in discover_concepts([root])
+        if concept.kind == "input"
+    }
+
+    # Outside a predicate `anchor` is an ordinary identifier, so it still
+    # infers an input there.
+    assert inputs == {
+        "us:statutes/26/62#input.age",
+        "us:statutes/26/62#input.anchor",
+    }
+
+
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:
     root = canonical_root(tmp_path)
     write_rulespec(root, "us/statutes/26/62.yaml", rulespec_body())

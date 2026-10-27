@@ -43,7 +43,7 @@ use super::{CompileError, evaluation_order, evaluation_order_reference};
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
     JudgmentExprSpec, OverPeriodsKindSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, TermSpec,
 };
 
 const DEFAULT_CASES: u32 = 1_000;
@@ -1174,6 +1174,56 @@ fn a_cycle_only_the_routed_check_sees_is_still_refused() {
             }
         ))
     );
+}
+
+/// A rule read through a term is a dependency in both forms: the judgment
+/// form (`candidate.f`, a bare judgment) and the scalar form
+/// (`candidate.f >= 0`). `e` counts over `R`, whose predicate reads `f`:
+/// when `f` reads `e` the two form a cycle, and when `f` reads nothing it is
+/// listed before `e`.
+#[test]
+fn a_rule_read_through_a_term_is_a_dependency_in_both_forms() {
+    for term in [TermSpec::Anchor, TermSpec::Candidate] {
+        let judgment = JudgmentExprSpec::RoleDerived {
+            term,
+            name: "f".to_string(),
+        };
+        let scalar = JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::RoleDerived {
+                term,
+                name: "f".to_string(),
+            }),
+            op: ComparisonOpSpec::Gte,
+            right: Box::new(integer(0)),
+        };
+        for predicate in [judgment, scalar] {
+            let cycle = Err(format!(
+                "{:?}",
+                CompileError::CyclicDependency {
+                    cycle: "e, f".to_string()
+                }
+            ));
+            let ordered = Ok(vec!["f".to_string(), "e".to_string()]);
+            for (body, expected) in [(derived("e"), cycle), (integer(1), ordered)] {
+                let program = ProgramSpec {
+                    relations: vec![
+                        base_relation("members"),
+                        derived_relation("R", "members", predicate.clone()),
+                    ],
+                    derived: vec![
+                        scalar_rule("e", count_related("R".to_string(), None)),
+                        scalar_rule("f", body),
+                    ],
+                    ..ProgramSpec::default()
+                };
+                assert_eq!(
+                    assert_matches_reference(&program),
+                    expected,
+                    "{predicate:?}"
+                );
+            }
+        }
+    }
 }
 
 /// The first rule in program order with an unknown dependency reports its

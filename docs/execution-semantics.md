@@ -201,8 +201,9 @@ related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 
 A derived relation's predicate that reads through a term (`anchor.name`,
-`candidate.name`) makes the dense compiler reject the program, naming the
-qualified read and #218; explain and fast evaluate it. Parameter reads in a
+`candidate.name`) makes the dense compiler reject any root entity whose rules
+reach that relation, naming the qualified read and #218; a root that reaches
+no such relation compiles. Explain and fast evaluate it. Parameter reads in a
 predicate compile in dense as in a rule body.
 
 Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
