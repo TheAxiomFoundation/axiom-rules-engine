@@ -476,26 +476,23 @@ fn a_bare_period_built_in_is_refused_as_a_judgment() {
 /// makes decides the bare form: a period built-in (a date) is refused, a rule
 /// is a judgment of the rule, and a parameter or input is the comparison
 /// itself. The one addition is a relation name in a predicate, which tests
-/// membership. Checked for every kind a name can have, in predicates and rule
-/// bodies.
+/// membership. Checked for every kind a name can have, and for a name
+/// declared both as a parameter and as a rule, in predicates and rule bodies.
 #[test]
 fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
-    let declarations = [
-        "",
-        "    kind: parameter\n    dtype: Bool\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"true\"\n",
-        "    kind: derived\n    entity: Person\n    dtype: Judgment\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: age >= 18\n",
-    ];
+    const PARAMETER: &str = "    kind: parameter\n    dtype: Bool\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"true\"\n";
+    const RULE: &str = "    kind: derived\n    entity: Person\n    dtype: Judgment\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: age >= 18\n";
+    let declarations: [&[&str]; 4] = [&[], &[PARAMETER], &[RULE], &[PARAMETER, RULE]];
     let mut kinds = std::collections::BTreeSet::new();
     for name in ["period_start", "period_end", "flag", "older_relative_of"] {
         for declaration in declarations {
             if name == "older_relative_of" && !declaration.is_empty() {
                 continue;
             }
-            let declared = if declaration.is_empty() {
-                String::new()
-            } else {
-                format!("\n  - name: {name}\n{declaration}")
-            };
+            let declared = declaration
+                .iter()
+                .map(|body| format!("\n  - name: {name}\n{body}"))
+                .collect::<String>();
             for in_predicate in [true, false] {
                 let lowered = |formula: &str| {
                     let extra = if in_predicate {
@@ -531,17 +528,17 @@ fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
                 };
                 let case = format!("{name} {declaration:?} in_predicate={in_predicate}");
                 let bare = lowered(name);
-                let compared = match lowered(&format!("{name} == true")) {
-                    Ok(compared) => compared,
-                    Err(_) => {
-                        assert!(bare.is_err(), "{case}: {bare:?}");
-                        continue;
-                    }
-                };
+                let compared = lowered(&format!("{name} == true"))
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
                 let read = compared["left"]["kind"]
                     .as_str()
                     .expect("a read")
                     .to_string();
+                let branch = if in_predicate && name == "older_relative_of" {
+                    "relation_member".to_string()
+                } else {
+                    read.clone()
+                };
                 match read.as_str() {
                     "period_start" | "period_end" => {
                         let error = bare.expect_err(&case);
@@ -563,21 +560,25 @@ fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
                     }
                     _ => assert_eq!(bare.expect(&case), compared, "{case}"),
                 }
-                kinds.insert(read);
+                kinds.insert((branch, in_predicate));
             }
         }
     }
-    // Every kind of read occurs, so no branch above passes vacuously.
-    assert_eq!(
-        kinds.into_iter().collect::<Vec<_>>(),
-        [
-            "derived",
-            "input",
-            "parameter_lookup",
-            "period_end",
-            "period_start"
-        ]
-    );
+    // Every branch above runs in both positions (membership only in a
+    // predicate), so none passes vacuously.
+    let reads = [
+        "derived",
+        "input",
+        "parameter_lookup",
+        "period_end",
+        "period_start",
+    ];
+    let expected = reads
+        .iter()
+        .flat_map(|read| [(read.to_string(), false), (read.to_string(), true)])
+        .chain([("relation_member".to_string(), true)])
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(kinds, expected);
 }
 
 /// A bare parameter of another type compares that value with `true`, so
