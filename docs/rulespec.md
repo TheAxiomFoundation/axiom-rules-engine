@@ -137,6 +137,9 @@ zero. Relation entity typing is therefore mandatory:
   `derived_relation_slots_diverge`, `filtered_entity_kind_conflict`, and
   `relation_slot_kind_is_filtered_entity` (a slot declares a filtered entity
   such as `SnapUnit` rather than the kind of the ids it is queried with).
+  Reads through a predicate's terms add `relation_roles_need_slot_kinds`,
+  `relation_role_entity_mismatch`, and `relation_role_outside_scope` (see
+  the terms of a derived relation's predicate, below).
 - **Load and request.** The same check runs when a compiled artifact loads
   (`from_json_*`, `run-compiled`, the Python and wasm bindings), when a request
   carries a raw `ProgramSpec`, and when the dense compiler builds from a
@@ -229,10 +232,12 @@ no longer loads; see the next section.
 #### Migrating compiled artifacts
 
 Artifacts compiled before typing became mandatory keep format version 2.
-Those whose executed relations pass the typing check (or that execute none)
-load as before. One that executes an untyped relation, or reads a typed one
-against its declared kinds, fails to load with a message naming the
-migration. Recompiling from typed source is the durable fix; for an
+This engine loads format 2 only through the explicit compatibility path
+(`run-compiled --accept-artifact-format 2`, Rust's
+`from_legacy_format_2_*`, or Python's `accept_artifact_format=2`). Executed
+relations must still pass the typing check. One that executes an untyped
+relation, or reads a typed one against its declared kinds, fails with a
+message naming the migration. Recompiling from typed source is the durable fix; for an
 artifact whose source cannot be recompiled yet:
 
 ```bash
@@ -268,6 +273,8 @@ declared-order resolution) is refused unless an override in executed order
 retypes it; to change an orientation, recompile. The rewritten
 artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
 capabilities` lists `relation_entity_typing` for engines that enforce this.
+The migration command continues to write format 2; recompilation from
+RuleSpec produces format 3 with its checked interface and producer identities.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides
@@ -358,6 +365,80 @@ the household, and a `Person` rule in a `where` clause over a
 person-to-person relation is evaluated for each related person. See
 [execution-semantics.md](execution-semantics.md).
 
+A predicate can also name the record it reads. Inside a derived relation's
+predicate, two **terms** name entity ids: `anchor`, the id the relation is read
+from (its current slot), and `candidate`, the id being tested (its related
+slot). `t.name` reads a value at a term's id:
+
+- `t.rule` evaluates a derived rule at `t`'s id. The rule's entity must be the
+  kind of `t`'s slot, where a filtered entity such as `SnapUnit` counts as its
+  source's current kind (`relation_role_entity_mismatch`). An entity-free rule
+  reads no id; read it unqualified.
+- `t.input` reads an input at `t`'s id. Inputs declare no kind, so this read is
+  not kind-checked: a misspelt input compiles and fails at evaluation as a
+  missing input, as a bare read does. An input read only through a term enters
+  the input catalog as a bare read does.
+
+A predicate reads the module's parameters as a rule body does: parameter
+tables, scalar parameters, and entity-free rules with literal values, which
+lowering turns into parameters.
+
+```yaml
+  - name: older_relative_of
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relative_of
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: 2026-01-01
+        formula: candidate.age >= anchor.age + minimum_gap
+```
+
+Here `minimum_gap` is a scalar parameter. Both slots of `relative_of` hold
+`Person` ids, so a bare `age` reads the candidate's and a bare `Person` rule
+the anchor's; the terms reach either side. A term's kind is the
+derivation's `slot_entities` at the term's slot. A derivation that omits
+them takes them from a source whose two slots hold different kinds, but not
+from a source whose slots share a kind such as `[Person, Person]`, so such a
+derivation must declare them or a read through a term is refused
+(`relation_roles_need_slot_kinds`).
+
+Inside a predicate, `anchor` and `candidate` are reserved. A term written bare
+(as a value, a judgment, a parameter index, an aggregated relation, or after
+another term's `.`) is refused with `relation_term_used_as_value`. A read
+through a term may not appear in an aggregation's `where` clause or
+aggregated value (`count`, `sum`, `min`, `max`, `only` and their `_where`
+forms, and `only_related`), which have no relation context
+(`relation_role_outside_scope`). Because `anchor` and `candidate` name terms,
+not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
+are the scalar minimum and maximum of one qualified read. Reading a
+parameter, `period_start` or `period_end` through a term is refused with
+`relation_role_entity_mismatch`; reading a relation through a term is refused
+until relation atoms are supported (#214). Outside predicates the two names
+are ordinary identifiers: `anchor + 1` in a rule body reads an input named
+`anchor`, and `anchor.age` there is a field access, which RuleSpec rejects. A
+compiled program that carries a read through a term anywhere but a derived
+relation's predicate fails relation typing with `relation_role_outside_scope`.
+
+Unqualified reads keep the routing above. A bare parameter name now reads the
+parameter in two places where it used to read an input of that name: anywhere
+in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
+formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
+in a rule body as in a predicate. A bare `period_start` or `period_end`
+tested as a judgment, which used to read a rule, a relation or an input of
+that name, is refused. A judgment resolves a bare name in the order a scalar
+does, and a scalar reads the built-in date first, so neither name is a
+judgment even where a parameter, a rule or a relation shares it. A program with none of these, and with no term, compiles to the
+same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
+records a rule read through a term at the term's id. The dense compiler
+rejects a root entity whose rules reach a derived relation whose predicate
+reads through a term, naming the qualified read and #218; a root that reaches
+no such relation compiles. Dense does compile parameter reads in a predicate. See [relation-roles.md](relation-roles.md) for the
+design.
+
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach
 cannot fail that row or the batch. See
@@ -429,9 +510,15 @@ slot, and it is then canonical. Otherwise the lexicographically first exact
 atomic `<module>#input.<slot>` owner is canonical. Multiple owner names are
 equivalent inputs to one slot; arbitrary prefixes and `<target>#<slot>` aliases
 are not accepted. This is a deterministic runtime-input catalog, not a source
-manifest. Artifact loading also recomputes compiler-derived metadata and checks
-it for consistency with the embedded program; source-tamper evidence belongs to
-the signed-corpus-release and supervisor chain.
+manifest. Format-3 artifacts additionally carry `program.interface`, whose
+input entries use these canonical names and describe entity flow, conservative
+type demands, uniform defaults, closed parameter-index domains and elections.
+Its entity and relation entries describe instance sources, tuple slot kinds,
+traversal and provenance. Loading re-derives the interface and metadata from
+the embedded program and checks consistency. `engine_build` identifies the
+producer build, and `source_closure` hashes the RuleSpec texts read, including
+imports. Source authenticity remains in the signed-corpus-release and
+supervisor chain. See [the artifact format reference](artifact-format.md).
 
 Filesystem search is one host strategy, not part of the core. A host can
 instead supply module text directly through the `source::ModuleSource` trait
@@ -653,6 +740,85 @@ versions:
 replaces the four-branch expansion whose leaf-reference count grows with the
 square of the option count.
 
+### Minimum, maximum and exactly-one over related entities
+
+Beside `len(relation)`, `sum(relation.field)`, `count_where(relation,
+predicate)` and `sum_where(relation, field, predicate)`, scalar formulas take
+three more aggregates over the entities a relation relates to the rule's
+entity:
+
+| Function | Value |
+|---|---|
+| `min(relation.field)` / `max(relation.field)` | the least / greatest `field` over the related entities |
+| `min_where(relation, field, predicate)` / `max_where(relation, field, predicate)` | the same over the related entities whose `predicate` holds |
+| `only(relation.field)` | `field` of the one related entity |
+
+`min` and `max` aggregate only when their single argument is a relation field
+access; every other form (`min(a, b)`, `max(x)`, `min(members.age, 3)`) keeps
+its scalar meaning. `field` is an input or a derived scalar rule of the related
+entity, and a `_where` predicate is a Boolean input or a derived judgment on
+it, exactly as for `sum` and `sum_where`. The members are resolved as `sum`
+resolves them: the distinct related ids, a derived relation's filter, then the
+`where` clause, evaluated for each member. The relation's direction comes from
+its declared slot kinds, as for every aggregate.
+
+- `min` and `max` compare numbers numerically and yield a decimal, as `sum`
+  does, and compare dates chronologically and yield a date. A Boolean or text
+  value is a type error.
+- `only` yields the member's value with its own kind (integer, decimal, text,
+  Boolean or date).
+- None of them invents a value. `min` or `max` with no selected member fails
+  with `EmptyRelatedAggregate`; `only` fails with `MissingRelation` when there
+  is no member and with `AmbiguousRelation`, which reports the count,
+  when there are several. Each error names the relation, the entity and the
+  period. A rule whose law gives the empty case a value says so with a guard;
+  conditionals are lazy, so the guarded form never fails:
+
+```yaml
+rules:
+  - name: member_of_family
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Family]
+  - name: youngest_child_age
+    kind: derived
+    entity: Family
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2026-04-01'
+        formula: |-
+          if len(member_of_family) > 0: min(member_of_family.age)
+          else: 0
+  - name: family_income_of_child
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    versions:
+      - effective_from: '2026-04-01'
+        formula: only(member_of_family.family_income)
+```
+
+Here `youngest_child_age` reads each member's `age` from the family; a family
+with no member takes the `else` branch, which the encoder writes from the law
+(0 here only for the example). `family_income_of_child` reads from the person
+side, so it runs for each person: a person in exactly one family reads that
+family's `family_income`, and a person in none or in two fails rather than
+reading 0.
+
+They serialize as the expression kinds `extreme_related` (with `extreme:
+min | max`) and `single_related`. `only(r.f)` is not
+[`only_related(r, f)`](only-related.md), which projects a Boolean input only
+and serializes as its own kind; where both apply they give the same value and
+the same errors. An engine whose `capabilities` lists
+`related_min_max_only` loads them; an earlier engine refuses an artifact that
+uses them on load, and a program that uses none of them compiles to the same
+bytes as before. Explain, fast and dense evaluate them; see
+[execution semantics](execution-semantics.md) for the evaluation order and
+each mode's contract.
+
 ## Currency rounding
 
 A `derived` rule whose `unit` is a currency may declare an output-rounding
@@ -694,6 +860,56 @@ explain-mode traces, a rounded node reports the applied `rounding` mode and,
 when rounding changed the value, the `pre_rounding_value`, so the rounding step
 is auditable.
 
+## Input declarations and elections
+
+A module's top-level `inputs:` block describes the inputs its rules read, as
+a list of entries with `name` or as a mapping from name to entry. The engine
+ignores descriptive keys for ordinary inferred inputs. A block without an
+`election` contributes no election declarations. A module that uses
+`only_related` or `input_for_year` also needs the block to declare those
+inputs and satisfy their separate checks; see
+[only-related.md](only-related.md) and
+[rulespec-format.md](rulespec-format.md).
+
+`election` marks an input as a choice the law gives a named actor, rather
+than a fact:
+
+```yaml
+inputs:
+  - name: is_boarder
+    entity: Person
+    dtype: Boolean
+    period: Month
+  - name: provider_requests_boarder_inclusion
+    entity: Person
+    dtype: Boolean
+    period: Month
+    election:
+      actor: Household
+      provision: us/regulation/7/273/1/b/3
+```
+
+`actor` is the entity kind that makes the choice, an UpperCamelCase label
+that need not be a kind the program evaluates on. `provision` is the corpus
+citation path of the provision that gives it. `election` takes exactly those
+two keys. The entry must have a name, and the name must be an input that a
+rule or derived-relation predicate of the same module reads. The engine
+evaluates the value it is given and never defaults an election, so reading
+an election with `input_or_else` is a compile error. Two modules that read
+one input slot may both declare it an election only with the same actor and
+provision. The compiled artifact reports each input's election, or null for
+a fact, in `program.interface` ([artifact-format.md](artifact-format.md)), so
+a simulator knows which inputs it may branch over; it must not optimize over
+a fact.
+
+Lowering carries elections in `ProgramSpec.input_declarations`, a list of
+`{input, election}` entries sorted by the declaring module's input request
+name. The field is last and omitted when empty; raw `ProgramSpec` programs
+may supply it too. Compilation refuses unsorted or repeated declarations,
+unknown request names, malformed election metadata, disagreeing declarations
+of one slot, and any defaulted read of an election. The loader checks the
+same declarations when it re-derives `program.interface`.
+
 ## Source pinning and provenance
 
 The `module:` block can carry inert metadata that grounds the module in source
@@ -707,6 +923,13 @@ formula semantics or execution results. The lowered `ProgramSpec` keeps the
 (merged) root module's metadata on `program.module`, and compiled artifacts pass
 it through their JSON, so tooling can read it from a loaded module or artifact
 without re-parsing the YAML.
+
+`module.interpretations` carries structured readings of ambiguous,
+conflicting, or nonliteral source text. It is also preserved on
+`program.module` and in compiled artifacts without affecting output names,
+compilation, or results. The [format reference](rulespec-format.md#interpretations)
+documents its shape, status-dependent fields, load-time validation, and
+encoder responsibilities for verbatim corpus excerpts.
 
 ```yaml
 module:
@@ -764,7 +987,7 @@ Known hard gaps:
   predicates. These should be closed in RuleSpec and `ProgramSpec`, not by
   adding another source format.
 
-## Why This Instead Of Direct `ProgramSpec` YAML
+## Why RuleSpec is the external format
 
 `ProgramSpec` is the engine's typed IR inside compiled artifacts, not a
 filesystem authoring format or alternate loader surface. RuleSpec keeps

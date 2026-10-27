@@ -10,11 +10,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    JudgmentExpr, Program, RelatedValueRef, RelationSchema, SCALAR_ENTITY, ScalarExpr,
+    JudgmentExpr, Program, RelatedValueRef, RelationDerivation, RelationSchema, SCALAR_ENTITY,
+    ScalarExpr, Term,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelationTypingCode {
+    OnlyRelatedShape,
     /// An executed relation declares no slot entity kinds.
     UntypedRelation,
     /// A declared slot entity list does not have one kind per slot.
@@ -43,11 +45,20 @@ pub enum RelationTypingCode {
     /// A relation slot declares a filtered entity (a derived relation's
     /// `entity`) instead of the kind of the ids that entity is queried with.
     FilteredEntitySlotKind,
+    /// A derived relation's predicate reads through a term (`anchor.x`), but
+    /// the derivation declares no slot kind for that term.
+    RelationRolesNeedSlotKinds,
+    /// A rule read through a term has an entity other than the term's kind.
+    RelationRoleEntityMismatch,
+    /// A read through a term sits outside a derived relation's predicate, or
+    /// inside an aggregation's `where` clause, where no term is bound.
+    RelationRoleOutsideScope,
 }
 
 impl RelationTypingCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::OnlyRelatedShape => "only_related_shape",
             Self::UntypedRelation => "untyped_relation",
             Self::SlotEntityCount => "relation_slot_entity_count",
             Self::SlotOutOfRange => "relation_slot_out_of_range",
@@ -60,6 +71,9 @@ impl RelationTypingCode {
             Self::FilteredEntityKindConflict => "filtered_entity_kind_conflict",
             Self::UnknownRelation => "unknown_relation",
             Self::FilteredEntitySlotKind => "relation_slot_kind_is_filtered_entity",
+            Self::RelationRolesNeedSlotKinds => "relation_roles_need_slot_kinds",
+            Self::RelationRoleEntityMismatch => "relation_role_entity_mismatch",
+            Self::RelationRoleOutsideScope => "relation_role_outside_scope",
         }
     }
 }
@@ -116,6 +130,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
     let mut checker = Checker::for_typing(program);
     checker.filtered_entity_conflicts();
     checker.walk();
+    checker.relation_roles();
     if checker.violations.is_empty() {
         Ok(())
     } else {
@@ -209,6 +224,49 @@ impl<'p> EffectiveSlotEntities<'p> {
     pub fn get(&self, relation: &str) -> Option<&'p [String]> {
         self.kinds.get(relation).copied().flatten()
     }
+}
+
+/// The slots an aggregation over `relation` traverses: a derived relation's
+/// own slots, whichever slots the node names, else the node's.
+pub(crate) fn traversed_slots(
+    program: &Program,
+    relation: &str,
+    current_slot: usize,
+    related_slot: usize,
+) -> (usize, usize) {
+    match program
+        .relations
+        .get(relation)
+        .and_then(|schema| schema.derivation.as_ref())
+    {
+        Some(derivation) => (derivation.current_slot, derivation.related_slot),
+        None => (current_slot, related_slot),
+    }
+}
+
+/// The kinds of the current and related ids a derived relation's predicate
+/// is evaluated with: its effective slot kinds at the derivation's slots.
+/// `slot_kinds` is shared across calls, so a chain of n derived relations
+/// costs n steps rather than one walk per link.
+pub(crate) fn predicate_slot_kinds(
+    slot_kinds: &EffectiveSlotEntities<'_>,
+    name: &str,
+    derivation: &RelationDerivation,
+) -> (Option<String>, Option<String>) {
+    let kinds = slot_kinds.get(name);
+    let slot = |slot: usize| kinds.and_then(|kinds| kinds.get(slot)).cloned();
+    (slot(derivation.current_slot), slot(derivation.related_slot))
+}
+
+/// Whether `derivation`'s predicate evaluates a rule of `entity` on the
+/// current id: its entity is the derivation's declared current kind
+/// (`RelationEvalContext::entity_id_for` in the explain evaluator). Every
+/// other rule the predicate reads runs on the related id.
+pub(crate) fn predicate_routes_to_current(derivation: &RelationDerivation, entity: &str) -> bool {
+    derivation
+        .slot_entities
+        .get(derivation.current_slot)
+        .is_some_and(|kind| kind == entity)
 }
 
 /// The known current-slot kinds of every derived relation filtering to each
@@ -698,25 +756,21 @@ impl<'a> Checker<'a> {
         // derivation's slots; only tuples supplied under the derived
         // relation's own name use the aggregate's. The two must agree or
         // explain and the bulk path read different positions.
-        let (current, related) = match derivation {
-            Some(derivation) => {
-                if (current_slot, related_slot)
-                    != (derivation.current_slot, derivation.related_slot)
-                {
-                    self.push(
-                        RelationTypingCode::DerivedRelationSlotsDiverge,
-                        relation,
-                        citing,
-                        format!(
-                            "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
-                            derivation.current_slot, derivation.related_slot
-                        ),
-                    );
-                }
-                (derivation.current_slot, derivation.related_slot)
-            }
-            None => (current_slot, related_slot),
-        };
+        let (current, related) =
+            traversed_slots(self.program, relation, current_slot, related_slot);
+        if let Some(derivation) = derivation
+            && (current_slot, related_slot) != (current, related)
+        {
+            self.push(
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                relation,
+                citing,
+                format!(
+                    "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
+                    derivation.current_slot, derivation.related_slot
+                ),
+            );
+        }
 
         let mut related_entity = None;
         if let Some(kinds) = kinds.as_ref() {
@@ -957,7 +1011,6 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        let routed_current = derivation.slot_entities.get(derivation.current_slot);
         let routed_related = derivation.slot_entities.get(derivation.related_slot);
         let mut referenced = BTreeSet::new();
         collect_judgment_derived(&derivation.predicate, &mut referenced);
@@ -967,7 +1020,7 @@ impl<'a> Checker<'a> {
             };
             let entity = rule.entity.as_str();
             if entity == SCALAR_ENTITY
-                || routed_current.is_some_and(|kind| kind == entity)
+                || predicate_routes_to_current(derivation, entity)
                 || routed_related.is_some_and(|kind| kind == entity)
                 || entity == effective_related
                 || self.id_kind(entity) == effective_related
@@ -975,7 +1028,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let hint = if derivation.slot_entities.is_empty() {
-                " Declare the derived relation's `slot_entities` so the predicate can read the current id"
+                " Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec) so the predicate can read the current id"
             } else {
                 ""
             };
@@ -992,6 +1045,34 @@ impl<'a> Checker<'a> {
 
     fn scalar(&mut self, expr: &ScalarExpr, context: Context<'_>) {
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if current_slot == related_slot
+                    || *current_slot > 1
+                    || *related_slot > 1
+                    || !matches!(value, RelatedValueRef::Input(_))
+                    || self
+                        .program
+                        .relations
+                        .get(relation)
+                        .is_some_and(|schema| schema.arity != 2)
+                {
+                    self.push(RelationTypingCode::OnlyRelatedShape, relation, context.citing,
+                        "only_related requires an input reference and distinct slots of a binary relation".into());
+                }
+                self.aggregation(
+                    relation,
+                    *current_slot,
+                    *related_slot,
+                    Some(value),
+                    None,
+                    context,
+                );
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1006,6 +1087,21 @@ impl<'a> Checker<'a> {
                 context,
             ),
             ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -1082,11 +1178,15 @@ impl<'a> Checker<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
             | ScalarExpr::PeriodStart
             | ScalarExpr::PeriodEnd => {}
+            // Reads through a term are checked by `relation_roles`, over every
+            // rule and derived relation, used or not.
+            ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {}
         }
     }
 
@@ -1107,8 +1207,265 @@ impl<'a> Checker<'a> {
                 }
             }
             JudgmentExpr::Not(item) => self.judgment(item, context),
-            JudgmentExpr::Derived(_) => {}
+            JudgmentExpr::Derived(_) | JudgmentExpr::RoleDerived { .. } => {}
         }
+    }
+
+    /// Check every read through a term (`anchor.x`, `candidate.x`) in every
+    /// rule and derived relation, used or not, so a program is refused the
+    /// same way whatever it executes. A read through a term must sit in a
+    /// derived relation's predicate, outside any aggregation's `where`
+    /// clause; that derivation must declare the term's slot kind; and a rule
+    /// read through a term must have the term's kind.
+    fn relation_roles(&mut self) {
+        let mut names = self.program.derived.keys().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let derived = &self.program.derived[name];
+            let citing = derived.id.as_deref().unwrap_or(&derived.name);
+            let mut reads = Vec::new();
+            for semantics in std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics))
+            {
+                match semantics {
+                    crate::model::DerivedSemantics::Scalar(expr) => {
+                        collect_scalar_role_reads(expr, None, &mut reads)
+                    }
+                    crate::model::DerivedSemantics::Judgment(expr) => {
+                        collect_judgment_role_reads(expr, None, &mut reads)
+                    }
+                }
+            }
+            for read in reads {
+                let place = match read.aggregated {
+                    Some(relation) => format!(
+                        "inside the `where` clause of an aggregation over `{relation}`, where no term is bound"
+                    ),
+                    None => "outside any derived relation's predicate".to_string(),
+                };
+                self.push(
+                    RelationTypingCode::RelationRoleOutsideScope,
+                    read.aggregated.unwrap_or_default(),
+                    citing,
+                    format!(
+                        "`{citing}` reads `{}.{}` {place}; a read through a term may appear only in a derived relation's predicate, outside any aggregation's `where` clause",
+                        read.term.as_str(),
+                        read.name
+                    ),
+                );
+            }
+        }
+        let program = self.program;
+        for (name, schema) in &program.relations {
+            let Some(derivation) = &schema.derivation else {
+                continue;
+            };
+            let mut reads = Vec::new();
+            collect_judgment_role_reads(&derivation.predicate, None, &mut reads);
+            for read in reads {
+                let (term, read_name) = (read.term.as_str(), read.name);
+                if let Some(relation) = read.aggregated {
+                    self.push(
+                        RelationTypingCode::RelationRoleOutsideScope,
+                        relation,
+                        name,
+                        format!(
+                            "the predicate of derived relation `{name}` reads `{term}.{read_name}` inside the `where` clause of an aggregation over `{relation}`, where no term is bound; read the value outside the aggregation"
+                        ),
+                    );
+                    continue;
+                }
+                let slot = match read.term {
+                    Term::Anchor => derivation.current_slot,
+                    Term::Candidate => derivation.related_slot,
+                };
+                let Some(kind) = derivation.slot_entities.get(slot) else {
+                    self.push(
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        name,
+                        name,
+                        format!(
+                            "the predicate of derived relation `{name}` reads `{term}.{read_name}`, but the derivation declares no kind for slot {slot}, so `{term}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
+                        ),
+                    );
+                    continue;
+                };
+                if !read.rule {
+                    // Inputs have no declared kind, so an input read through a
+                    // term is not checked.
+                    continue;
+                }
+                let Some(rule) = program.derived.get(read_name) else {
+                    continue;
+                };
+                let entity = rule.entity.as_str();
+                if entity == kind || self.id_kind(entity) == kind {
+                    continue;
+                }
+                let detail = if entity == SCALAR_ENTITY {
+                    format!(
+                        "`{read_name}` has no entity (`{SCALAR_ENTITY}`), so it reads no id; read it unqualified"
+                    )
+                } else {
+                    "a rule read through a term must have that term's kind".to_string()
+                };
+                self.push(
+                    RelationTypingCode::RelationRoleEntityMismatch,
+                    name,
+                    name,
+                    format!(
+                        "the predicate of derived relation `{name}` reads `{term}.{read_name}`: `{read_name}` has entity `{entity}`, but `{term}` is a `{kind}` id (slot {slot}); {detail}"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// A read through a term, found by [`collect_judgment_role_reads`].
+struct RoleRead<'p> {
+    term: Term,
+    name: &'p str,
+    /// A derived rule, rather than an input.
+    rule: bool,
+    /// The relation of the innermost aggregation whose `where` clause holds
+    /// the read, or `None` when no aggregation encloses it.
+    aggregated: Option<&'p str>,
+}
+
+/// Every read through a term in `expr`, with the relation of the innermost
+/// aggregation whose `where` clause holds it. `aggregated` is that relation
+/// for the expression itself.
+fn collect_judgment_role_reads<'p>(
+    expr: &'p JudgmentExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+) {
+    match expr {
+        JudgmentExpr::Comparison { left, right, .. } => {
+            collect_scalar_role_reads(left, aggregated, out);
+            collect_scalar_role_reads(right, aggregated, out);
+        }
+        JudgmentExpr::RoleDerived { term, name } => out.push(RoleRead {
+            term: *term,
+            name,
+            rule: true,
+            aggregated,
+        }),
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+            for item in items {
+                collect_judgment_role_reads(item, aggregated, out);
+            }
+        }
+        JudgmentExpr::Not(item) => collect_judgment_role_reads(item, aggregated, out),
+        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+    }
+}
+
+fn collect_scalar_role_reads<'p>(
+    expr: &'p ScalarExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+) {
+    match expr {
+        ScalarExpr::RoleInput { term, name } => out.push(RoleRead {
+            term: *term,
+            name,
+            rule: false,
+            aggregated,
+        }),
+        ScalarExpr::RoleDerived { term, name } => out.push(RoleRead {
+            term: *term,
+            name,
+            rule: true,
+            aggregated,
+        }),
+        ScalarExpr::CountRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            if let Some(where_clause) = where_clause {
+                collect_judgment_role_reads(where_clause, Some(relation), out);
+            }
+        }
+        ScalarExpr::ParameterLookup { index, .. }
+        | ScalarExpr::Ceil(index)
+        | ScalarExpr::Floor(index) => collect_scalar_role_reads(index, aggregated, out),
+        ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+            for item in items {
+                collect_scalar_role_reads(item, aggregated, out);
+            }
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right)
+        | ScalarExpr::DateAddDays {
+            date: left,
+            days: right,
+        }
+        | ScalarExpr::DateAddMonths {
+            date: left,
+            months: right,
+        }
+        | ScalarExpr::DateAddYears {
+            date: left,
+            years: right,
+        }
+        | ScalarExpr::DaysBetween {
+            from: left,
+            to: right,
+        } => {
+            collect_scalar_role_reads(left, aggregated, out);
+            collect_scalar_role_reads(right, aggregated, out);
+        }
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_judgment_role_reads(condition, aggregated, out);
+            collect_scalar_role_reads(then_expr, aggregated, out);
+            collect_scalar_role_reads(else_expr, aggregated, out);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_role_reads(subject, aggregated, out);
+            for pattern in patterns {
+                collect_scalar_role_reads(pattern, aggregated, out);
+            }
+        }
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            collect_scalar_role_reads(value, aggregated, out);
+            if let Some(n) = n {
+                collect_scalar_role_reads(n, aggregated, out);
+            }
+        }
+        // `only_related` reads a named input at the related id, and an
+        // aggregated value is a name, not an expression, so neither holds a
+        // term.
+        ScalarExpr::OnlyRelated { .. }
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
+        | ScalarExpr::Input(_)
+        | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::Derived(_)
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd => {}
     }
 }
 
@@ -1150,7 +1507,9 @@ fn collect_judgment_derived(expr: &JudgmentExpr, out: &mut BTreeSet<String>) {
         JudgmentExpr::Derived(name) => {
             out.insert(name.clone());
         }
-        JudgmentExpr::RelationMember { .. } => {}
+        // A rule read through a term runs on that term's id, not a routed
+        // one; `Checker::relation_roles` checks its kind.
+        JudgmentExpr::RelationMember { .. } | JudgmentExpr::RoleDerived { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_derived(item, out);
@@ -1216,9 +1575,16 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
                 collect_scalar_derived(n, out);
             }
         }
+        ScalarExpr::OnlyRelated { .. } => {}
+        // As in `collect_judgment_derived`, a read through a term is not
+        // routed.
+        ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {}
         ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
+        | ScalarExpr::ExtremeRelated { .. }
+        | ScalarExpr::SingleRelated { .. }
         | ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::PeriodStart

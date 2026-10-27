@@ -10,11 +10,12 @@
 //!   versions.
 //! - `rulespec-test.v1` — the companion `*.test.yaml` format: the case list
 //!   the jurisdiction-repo and `axiom-encode` harnesses run against a module.
-//! - `compiled-artifact.v2` — [`crate::compile::CompiledProgramArtifact`], the
-//!   current compiled program (embedding the `ProgramSpec` IR) that ships to
-//!   consumers. `compiled-artifact.v1` remains published unchanged so stored
-//!   v1 artifacts have a stable historical schema, but this engine does not
-//!   execute them.
+//! - `compiled-artifact.v3` — [`crate::compile::CompiledProgramArtifact`], the
+//!   current compiled program (embedding the `ProgramSpec` IR and its
+//!   `program.interface` block) that ships to consumers. `compiled-artifact.v2`
+//!   and `compiled-artifact.v1` remain published unchanged so stored artifacts
+//!   have a stable historical schema. This engine runs a format-2 artifact
+//!   only through its format-2 compatibility loader, and does not execute v1.
 //! - `execution-request.v1`, `compiled-execution-request.v1`, and
 //!   `execution-response.v1` describe the served JSON boundary, including
 //!   strict-by-default relation binding and its response metadata echo.
@@ -58,6 +59,7 @@ pub struct NamedSchema {
 /// `$id` prefix so the published schemas resolve as a coherent family.
 const ID_BASE: &str = "https://schemas.axiom-foundation.org/rules-engine";
 const CORPUS_CITATION_PATH_PATTERN: &str = "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$";
+const INTERPRETATION_ID_PATTERN: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 
 /// All published schemas, in a stable order. The golden-file test writes
 /// each `schema` to `schemas/<file_name>` and asserts the checked-in copy is
@@ -79,6 +81,10 @@ pub fn all_schemas() -> Vec<NamedSchema> {
         },
         NamedSchema {
             file_name: "compiled-artifact.v2.schema.json",
+            schema: archived_compiled_artifact_v2_schema(),
+        },
+        NamedSchema {
+            file_name: "compiled-artifact.v3.schema.json",
             schema: compiled_artifact_schema(),
         },
         NamedSchema {
@@ -154,9 +160,23 @@ fn archived_compiled_artifact_v1_schema() -> Value {
         .expect("archived compiled-artifact.v1 schema is valid JSON")
 }
 
+/// Archived v2 schema: the bytes `emit-schemas` wrote for artifact format 2
+/// before format 3 (#125, #155). It is loaded from the checked-in file for the
+/// same reason as v1: format-2 artifacts are still read, through the format-2
+/// compatibility loader, and their schema must not move with current types.
+/// It leaves the top-level keys open, so it accepts a format-2 payload that
+/// carries `engine_build`, `source_closure` or `program.interface`, which the
+/// compatibility loader refuses.
+#[cfg(feature = "schema")]
+fn archived_compiled_artifact_v2_schema() -> Value {
+    serde_json::from_str(include_str!("../schemas/compiled-artifact.v2.schema.json"))
+        .expect("archived compiled-artifact.v2 schema is valid JSON")
+}
+
 /// JSON Schema for the current [`crate::compile::CompiledProgramArtifact`],
-/// generated from the `schemars` derive so it tracks the serde types
-/// automatically.
+/// artifact format 3, generated from the `schemars` derive so it tracks the
+/// serde types automatically, then closed to what the format-3 loader
+/// requires ([`close_format_3_artifact_schema`]).
 ///
 /// Known, deliberate divergences from raw serde acceptance (documented in the
 /// PR and in `docs/schema-alignment.md`):
@@ -171,18 +191,37 @@ fn archived_compiled_artifact_v1_schema() -> Value {
 ///   higher-authority source check.
 /// - `max` / `min` `items` deserialize from an empty list, but
 ///   `ProgramSpec::to_program` refuses one, so the schema says `minItems: 1`.
+/// - The wire struct defaults `engine_version`, `engine_build`,
+///   `source_closure`, `program.interface` and `metadata.input_catalog`,
+///   because the format-2 compatibility loader reads the same struct. The
+///   format-3 loader requires `engine_version`, `engine_build`,
+///   `program.interface` and `metadata.input_catalog`, refuses a null for
+///   any of them or for `source_closure`, refuses an unknown top-level key
+///   and refuses `program.extends` in any form, so the schema says the same.
+/// - Checks no JSON Schema can state are the loader's alone:
+///   `program.interface` must equal what the engine derives from the
+///   program and `metadata` what it computes; `source_closure.modules` must
+///   be sorted by target without repeats and list the root, and `digest`
+///   must be the digest of those modules. The module-target pattern
+///   approximates `validate_module_target`, which also refuses `.` and `..`
+///   segments and a final segment ending in `.yaml`, `.yml` or `.test`.
 #[cfg(feature = "schema")]
 pub fn compiled_artifact_schema() -> Value {
     let mut schema = serde_json::to_value(schema_for!(crate::compile::CompiledProgramArtifact))
         .expect("artifact schema serializes");
     harden_compiled_artifact_schema(&mut schema);
+    close_format_3_artifact_schema(&mut schema);
     stamp_meta(
         &mut schema,
-        "compiled-artifact.v2",
+        "compiled-artifact.v3",
         "Axiom compiled program artifact",
-        "A compiled RuleSpec program: the ProgramSpec IR plus evaluation \
-         order and fast-path metadata, stamped with an artifact format \
-         version. Produced by `axiom-rules-engine compile`.",
+        "A compiled RuleSpec program, artifact format 3: the ProgramSpec IR \
+         with its interface block (entity roster, input slots and \
+         relations), evaluation order, fast-path metadata and input \
+         catalog, stamped with the artifact format version, the compiling \
+         engine's version and build, and the digests of the RuleSpec module \
+         texts it was compiled from. Produced by `axiom-rules-engine \
+         compile`.",
     );
     schema
 }
@@ -333,22 +372,12 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
                     && properties.contains_key("parameters")
                     && properties.contains_key("derived")
                 {
-                    // The removed composition directive. The loader tolerates
-                    // exactly one shape — the key absent, or present as null
-                    // (v0.1-maintenance-line engines serialize it
-                    // unconditionally) — and the schema must say the same
-                    // thing: `not required` here would reject every published
-                    // artifact the engine accepts.
-                    properties.insert(
-                        "extends".to_string(),
-                        json!({
-                            "type": "null",
-                            "description": "Removed composition directive; \
-                             tolerated only as null. Compose before \
-                             compilation — any non-null value is rejected \
-                             at load."
-                        }),
-                    );
+                    // The removed composition directive. The format-2
+                    // compatibility loader tolerates a null one, which
+                    // v0.1-maintenance-line engines serialized
+                    // unconditionally (the archived v2 schema says so); the
+                    // format-3 loader refuses the key in any form.
+                    forbidden.push("extends");
                 }
                 if let Some(Value::Object(version)) = properties.get_mut("artifact_format_version")
                 {
@@ -364,10 +393,11 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
                     digest.insert("pattern".to_string(), json!("^[0-9a-fA-F]{64}$"));
                 }
                 if let Some(Value::Object(id)) = properties.get_mut("id") {
-                    id.insert(
-                        "pattern".to_string(),
-                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$"),
-                    );
+                    // Explicit metadata ID patterns also apply to alternatives;
+                    // only executable IDs need the canonical rule-ID default.
+                    id.entry("pattern").or_insert_with(|| {
+                        json!("^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+#[A-Za-z0-9_.-]+$")
+                    });
                 }
                 if let Some(Value::Object(slot)) = properties.get_mut("slot") {
                     slot.insert("pattern".to_string(), json!("^[A-Za-z_][A-Za-z0-9_]*$"));
@@ -413,6 +443,121 @@ fn harden_compiled_artifact_schema(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// Close the derived artifact schema to format 3, as `validate_format_3_shape`
+/// and the identity checks in `src/compile.rs` do: an exact top-level key set;
+/// `engine_version`, `engine_build`, `program.interface` and
+/// `metadata.input_catalog` required and never null; `source_closure` an
+/// object when present; and the identity fields' spelling.
+#[cfg(feature = "schema")]
+fn close_format_3_artifact_schema(schema: &mut Value) {
+    const COMMIT: &str = "^[0-9a-f]{40}$";
+    const SHA256: &str = "^[0-9a-f]{64}$";
+    const MODULE_TARGET: &str = "^[a-z]{2}(?:-[a-z0-9]+)*:(?:legislation|policies|regulations|statutes)/(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+$";
+
+    fn object<'a>(value: &'a mut Value, path: &[&str]) -> &'a mut serde_json::Map<String, Value> {
+        path.iter()
+            .fold(value, |value, key| {
+                value
+                    .get_mut(*key)
+                    .unwrap_or_else(|| panic!("artifact schema has `{}`", path.join(".")))
+            })
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("artifact schema `{}` is an object", path.join(".")))
+    }
+    fn require(schema: &mut serde_json::Map<String, Value>, keys: &[&str]) {
+        let required = schema
+            .entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("`required` is an array");
+        for key in keys {
+            if !required.iter().any(|existing| existing == key) {
+                required.push(json!(key));
+            }
+        }
+    }
+
+    let root = schema
+        .as_object_mut()
+        .expect("artifact schema is an object");
+    root.insert("additionalProperties".to_string(), json!(false));
+    require(root, &["engine_version", "engine_build"]);
+    let properties = object(schema, &["properties"]);
+    properties.insert(
+        "engine_version".to_string(),
+        json!({
+            "type": "string",
+            "description": "The semantic version of the engine that compiled the artifact."
+        }),
+    );
+    properties.insert(
+        "engine_build".to_string(),
+        json!({ "$ref": "#/$defs/EngineBuild" }),
+    );
+    properties.insert(
+        "source_closure".to_string(),
+        json!({
+            "$ref": "#/$defs/SourceClosure",
+            "description": "Omitted when the artifact was compiled from a ProgramSpec, which has no RuleSpec source."
+        }),
+    );
+
+    let program = object(schema, &["$defs", "ArtifactProgram"]);
+    require(program, &["interface"]);
+    object(schema, &["$defs", "ArtifactProgram", "properties"]).insert(
+        "interface".to_string(),
+        json!({
+            "$ref": "#/$defs/ProgramInterface",
+            "description": "The program's entity roster, input slots and relations, derived from the program; the loader re-derives it and refuses an artifact whose block differs. Execution never reads it."
+        }),
+    );
+    require(
+        object(schema, &["$defs", "CompiledProgramMetadata"]),
+        &["input_catalog"],
+    );
+
+    let build = object(schema, &["$defs", "EngineBuild"]);
+    build.insert(
+        "if".to_string(),
+        json!({ "properties": { "commit": { "type": "null" } } }),
+    );
+    build.insert(
+        "then".to_string(),
+        json!({ "properties": { "dirty": { "type": "null" } } }),
+    );
+    object(schema, &["$defs", "EngineBuild", "properties", "commit"])
+        .insert("pattern".to_string(), json!(COMMIT));
+    // The modules list the root, so there is at least one, and under a
+    // canonical root none is originless.
+    let closure = object(schema, &["$defs", "SourceClosure"]);
+    closure.insert(
+        "if".to_string(),
+        json!({ "properties": { "root": { "type": "string" } } }),
+    );
+    closure.insert(
+        "then".to_string(),
+        json!({ "properties": { "modules": { "items": {
+            "properties": { "target": { "type": "string" } }
+        } } } }),
+    );
+    object(schema, &["$defs", "SourceClosure", "properties", "modules"])
+        .insert("minItems".to_string(), json!(1));
+    object(schema, &["$defs", "SourceClosure", "properties", "root"])
+        .insert("pattern".to_string(), json!(MODULE_TARGET));
+    object(schema, &["$defs", "SourceClosure", "properties", "digest"])
+        .insert("pattern".to_string(), json!("^sha256:[0-9a-f]{64}$"));
+    object(
+        schema,
+        &["$defs", "SourceClosureModule", "properties", "target"],
+    )
+    .insert("pattern".to_string(), json!(MODULE_TARGET));
+    object(
+        schema,
+        &["$defs", "SourceClosureModule", "properties", "sha256"],
+    )
+    .insert("pattern".to_string(), json!(SHA256));
 }
 
 /// `{ "type": ["string", "integer"] }` — the accepted JSON for a decimal
@@ -545,6 +690,7 @@ pub fn rulespec_module_schema() -> Value {
                 }
             })),
             "module": nullable_object(module_metadata_schema()),
+            "inputs": input_declarations_schema(),
             "units": nullable_array(unit_spec_schema()),
             // Top-level `relations:` deserializes but is rejected at lowering
             // (`TopLevelRelationsUnsupported`). It is included so that files
@@ -572,6 +718,48 @@ pub fn rulespec_module_schema() -> Value {
     schema
 }
 
+/// `inputs:` block. The loader keeps it as a raw YAML value: every key but
+/// `election` is inert and unvalidated, so the block may be any value and
+/// its entries any shape until one carries an `election`. An entry is a list
+/// item with `name`, or a mapping value keyed by the name. That the name is
+/// an input slot the module reads requires the engine's load-time
+/// validation.
+fn input_declarations_schema() -> Value {
+    let election = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actor", "provision"],
+        "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+        "properties": {
+            "actor": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Za-z0-9]*$",
+                "description": "The entity kind that makes the choice."
+            },
+            "provision": {
+                "type": "string",
+                "pattern": CORPUS_CITATION_PATH_PATTERN,
+                "description": "The corpus citation path of the provision that gives the choice."
+            }
+        }
+    });
+    let carries_election = json!({ "type": "object", "required": ["election"] });
+    json!({
+        "description": "Declarations about the module's inputs. Inert except `election`: a list of entries with `name`, or a mapping from name to entry.",
+        "items": {
+            "if": carries_election,
+            "then": {
+                "required": ["name"],
+                "properties": { "name": { "type": "string" }, "election": election }
+            }
+        },
+        "additionalProperties": {
+            "if": carries_election,
+            "then": { "properties": { "election": election } }
+        }
+    })
+}
+
 /// `module:` block — [`crate::rulespec::ModuleMetadata`]. Every field is
 /// optional and inert. Unknown subfields are ignored (no
 /// `deny_unknown_fields`), which is why real files can hang `proof_validation`
@@ -588,10 +776,124 @@ fn module_metadata_schema() -> Value {
             "summary": { "type": "string" },
             "status": { "type": "string" },
             "source_verification": nullable_object(source_verification_schema()),
+            "interpretations": interpretations_schema(),
             "encoding_provenance": nullable_object(encoding_provenance_schema()),
             "validation": nullable_array(validation_record_schema())
         }
     })
+}
+
+/// Typed, inert readings of ambiguous or conflicting source provisions.
+/// Identity uniqueness and references to this document's rule names require
+/// the engine's load-time validation; the schema enforces the local shape.
+fn interpretations_schema() -> Value {
+    json!({
+        "type": "array",
+        "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. Interpretation IDs must be unique within the module, alternative IDs must be unique within each interpretation, and affects must name rules defined in the same document. These identity and reference constraints require engine load-time validation. Corpus excerpt verification is the encoder's responsibility.",
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "question", "texts", "reading", "alternatives", "basis", "status", "affects"],
+            "properties": {
+                "id": { "type": "string", "pattern": INTERPRETATION_ID_PATTERN },
+                "question": non_blank_string_schema(),
+                "texts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["corpus_citation_path", "excerpt"],
+                        "properties": {
+                            "corpus_citation_path": { "type": "string", "pattern": CORPUS_CITATION_PATH_PATTERN },
+                            "excerpt": non_blank_string_schema()
+                        }
+                    }
+                },
+                "reading": non_blank_string_schema(),
+                "alternatives": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["id", "reading"],
+                        "properties": {
+                            "id": { "type": "string", "pattern": INTERPRETATION_ID_PATTERN },
+                            "reading": non_blank_string_schema(),
+                            "effect": { "type": "string" }
+                        }
+                    }
+                },
+                "basis": non_blank_string_schema(),
+                "status": { "type": "string", "enum": ["open", "ruled", "confirmed", "contradicted"] },
+                "ruling": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["by", "date", "record"],
+                    "properties": {
+                        "by": non_blank_string_schema(),
+                        "date": date_schema(),
+                        "record": https_record_schema()
+                    }
+                },
+                "confirmation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["by", "date", "excerpt"],
+                    "properties": {
+                        "by": non_blank_string_schema(),
+                        "date": date_schema(),
+                        "excerpt": non_blank_string_schema(),
+                        "record": https_record_schema()
+                    }
+                },
+                "affects": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string" }
+                }
+            },
+            "oneOf": [
+                {
+                    "properties": { "status": { "const": "open" } },
+                    "not": { "anyOf": [{ "required": ["ruling"] }, { "required": ["confirmation"] }] }
+                },
+                {
+                    "properties": { "status": { "const": "ruled" } },
+                    "required": ["ruling"],
+                    "not": { "required": ["confirmation"] }
+                },
+                {
+                    "properties": { "status": { "enum": ["confirmed", "contradicted"] } },
+                    "required": ["ruling", "confirmation"]
+                }
+            ]
+        }
+    })
+}
+
+/// Apply the same strict metadata contract wherever `ModuleMetadata` is
+/// embedded in a derived schema, including compiled artifacts and requests.
+/// A field-level schema keeps serde's defaulted list optional while avoiding
+/// nullable `Option` schemas for blocks that reject supplied null values.
+#[cfg(feature = "schema")]
+pub fn interpretations_json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    interpretations_schema()
+        .try_into()
+        .expect("interpretations fragment is an object schema")
+}
+
+fn non_blank_string_schema() -> Value {
+    // Match the Unicode White_Space definition used by the loader's str::trim.
+    json!({
+        "type": "string",
+        "pattern": r"[^\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]"
+    })
+}
+
+fn https_record_schema() -> Value {
+    json!({ "type": "string", "pattern": "^https://" })
 }
 
 /// `module.source_verification` — [`crate::rulespec::SourceVerification`].
@@ -1073,4 +1375,34 @@ fn stamp_meta(schema: &mut Value, id_stem: &str, title: &str, description: &str)
     // not guaranteed — these are set for content, not position.
     object.insert("title".to_string(), json!(title));
     object.insert("description".to_string(), json!(description));
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod tests {
+    /// The archived artifact schemas never change: `emit-schemas` writes them
+    /// back from the checked-in bytes, so only an edit to a file could move
+    /// one, and this pins each file's SHA-256. The v2 archive is the last
+    /// schema `main` emitted for format 2, at `e1d4a67c` (#268, which added
+    /// the relation-role nodes).
+    #[test]
+    fn archived_artifact_schemas_are_frozen() {
+        for (name, text, sha256) in [
+            (
+                "compiled-artifact.v1.schema.json",
+                include_str!("../schemas/compiled-artifact.v1.schema.json"),
+                "c0d9b9518a784579095610164fb912fbec88a0da2d83ab698ff71427eddd5cf0",
+            ),
+            (
+                "compiled-artifact.v2.schema.json",
+                include_str!("../schemas/compiled-artifact.v2.schema.json"),
+                "d066179dee8dba247bcf4940e6edd11203b6200e50b4526c09cbc6c114d4fbf6",
+            ),
+        ] {
+            assert_eq!(
+                crate::digest::hex(&crate::digest::sha256(text.as_bytes())),
+                sha256,
+                "{name} is an archive; it must not change"
+            );
+        }
+    }
 }

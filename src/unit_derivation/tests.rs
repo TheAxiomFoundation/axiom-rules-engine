@@ -3016,8 +3016,12 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
             ),
         ),
         (
-            "/phase_two_artifact/engine_version",
-            serde_json::json!("tampered-engine"),
+            "/phase_two_artifact/program/relations/0/slot_entities",
+            serde_json::json!(["Household", "Person"]),
+        ),
+        (
+            "/phase_two_artifact/metadata/evaluation_order",
+            serde_json::json!(["tampered"]),
         ),
         (
             "/source_artifact_digest",
@@ -3039,6 +3043,26 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
                 .is_err(),
             "registry accepted artifact mutation at `{pointer}`"
         );
+    }
+
+    // The phase-two check compares executable content: the stored
+    // artifact's identity is its own, so another engine's stamp loads.
+    for (pointer, replacement) in [
+        (
+            "/phase_two_artifact/engine_version",
+            serde_json::json!("0.0.1"),
+        ),
+        (
+            "/phase_two_artifact/engine_build",
+            serde_json::json!({"commit": "0123456789abcdef0123456789abcdef01234567", "dirty": true}),
+        ),
+    ] {
+        let mut rebuilt = pristine.clone();
+        *rebuilt.pointer_mut(pointer).unwrap() = replacement;
+        let mut registry = UnitDerivationDocumentRegistry::default();
+        registry
+            .register_aggregation_json(&serde_json::to_string(&rebuilt).unwrap())
+            .unwrap_or_else(|error| panic!("`{pointer}` from another build must load: {error}"));
     }
 
     let mut registry = UnitDerivationDocumentRegistry::default();

@@ -1366,6 +1366,20 @@ impl EvidenceCollector<'_> {
     fn scalar(&self, expr: &crate::model::ScalarExpr, entity: Option<&str>, slots: &mut Evidence) {
         use crate::model::ScalarExpr;
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => self.aggregate(
+                relation,
+                *current_slot,
+                *related_slot,
+                Some(value),
+                None,
+                entity,
+                slots,
+            ),
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1381,6 +1395,21 @@ impl EvidenceCollector<'_> {
                 slots,
             ),
             ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -1446,10 +1475,16 @@ impl EvidenceCollector<'_> {
                     self.scalar(n, entity, slots);
                 }
             }
+            // Qualified reads belong to derived-relation predicates, which
+            // give no evidence; one in a rule body is refused at compile
+            // (`relation_role_outside_scope`).
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
+            | ScalarExpr::RoleInput { .. }
+            | ScalarExpr::RoleDerived { .. }
             | ScalarExpr::PeriodStart
             | ScalarExpr::PeriodEnd => {}
         }
@@ -1473,7 +1508,9 @@ impl EvidenceCollector<'_> {
                 }
             }
             JudgmentExpr::Not(item) => self.judgment(item, entity, slots),
-            JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+            JudgmentExpr::Derived(_)
+            | JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::RelationMember { .. } => {}
         }
     }
 }

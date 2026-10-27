@@ -310,7 +310,7 @@ fn a_compiled_artifact_with_a_relation_routed_cycle_is_refused_at_load() {
         derived: vec![household_rule("e", count("R"))],
         ..ProgramSpec::default()
     };
-    let artifact = serde_json::json!({
+    let format_2 = serde_json::json!({
         "artifact_format_version": 2,
         "engine_version": env!("CARGO_PKG_VERSION"),
         "program": program,
@@ -321,7 +321,26 @@ fn a_compiled_artifact_with_a_relation_routed_cycle_is_refused_at_load() {
         }
     });
     let error =
-        axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(&artifact.to_string())
+        axiom_rules_engine::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(
+            &format_2.to_string(),
+        )
+        .expect_err("the artifact is refused");
+    assert!(
+        matches!(&error, CompileError::CyclicDependency { cycle } if cycle == "e"),
+        "{error:?}"
+    );
+
+    // The same program written as format 3: the check runs before the
+    // interface is compared.
+    let mut format_3 = format_2;
+    format_3["artifact_format_version"] = serde_json::json!(3);
+    format_3["engine_build"] = serde_json::json!({"commit": null, "dirty": null});
+    format_3["program"]["interface"] = serde_json::to_value(
+        axiom_rules_engine::interface::derive_interface(&program).expect("the interface derives"),
+    )
+    .unwrap();
+    let error =
+        axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(&format_3.to_string())
             .expect_err("the artifact is refused");
     assert!(
         matches!(&error, CompileError::CyclicDependency { cycle } if cycle == "e"),
@@ -491,7 +510,10 @@ fn cycle_detection_agrees_with_a_model_of_every_small_program() {
 #[test]
 fn an_artifact_compiled_before_this_check_still_loads_and_runs() {
     const ARTIFACT: &str = r#"{"artifact_format_version":2,"engine_version":"0.2.2","metadata":{"evaluation_order":["e","z"],"fast_path":{"blockers":[],"compatible":true,"strategy":"generic_bulk"},"input_catalog":[]},"program":{"derived":[{"dtype":"integer","entity":"Household","expr":{"current_slot":0,"kind":"count_related","related_slot":1,"relation":"R","where":null},"name":"e","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null},{"dtype":"integer","entity":"Household","expr":{"kind":"literal","value":{"kind":"integer","value":1}},"name":"z","period":null,"semantics":"scalar","source":null,"source_url":null,"unit":null}],"parameters":[],"relations":[{"arity":2,"name":"member"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"derived","name":"z"},"op":"gte","right":{"kind":"literal","value":{"kind":"integer","value":0}}},"related_slot":1,"source_relation":"member"},"name":"S"},{"arity":2,"derivation":{"current_slot":0,"predicate":{"kind":"comparison","left":{"kind":"literal","value":{"kind":"integer","value":1}},"op":"eq","right":{"kind":"literal","value":{"kind":"integer","value":1}}},"related_slot":1,"source_relation":"S"},"name":"R"}],"units":[]}}"#;
-    let refused = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(ARTIFACT)
+    let refused =
+        axiom_rules_engine::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(
+            ARTIFACT,
+        )
         .expect_err("the untyped artifact is refused");
     assert!(
         matches!(
@@ -519,8 +541,9 @@ fn an_artifact_compiled_before_this_check_still_loads_and_runs() {
         [("member", &households)]
     );
     let typed = serde_json::to_string(&migration.artifact).expect("the artifact serialises");
-    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::from_json_str(&typed)
-        .expect("a previously compiled acyclic artifact still loads once typed");
+    let artifact =
+        axiom_rules_engine::compile::CompiledProgramArtifact::from_legacy_format_2_json_str(&typed)
+            .expect("a previously compiled acyclic artifact still loads once typed");
     assert_eq!(artifact.metadata.evaluation_order, ["e", "z"]);
     let recompiled =
         axiom_rules_engine::compile::CompiledProgramArtifact::compile(artifact.program.clone())

@@ -6,8 +6,10 @@ mod bulk;
 pub mod compile;
 pub mod dense;
 pub mod depth;
+mod digest;
 pub mod engine;
 mod formula;
+pub mod interface;
 mod lazy;
 pub mod migrate;
 pub mod model;
@@ -16,6 +18,7 @@ pub mod relation_typing;
 pub mod rulespec;
 #[cfg(feature = "schema")]
 pub mod schema;
+pub mod selected_year;
 pub mod source;
 pub mod spec;
 #[cfg(feature = "unit-derivation")]

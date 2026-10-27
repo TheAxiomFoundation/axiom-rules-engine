@@ -154,7 +154,9 @@ impl<'a> PhaseTwoEngine<'a> {
     ) {
         use crate::model::ScalarExpr;
         match expr {
-            ScalarExpr::Derived(name) => {
+            // A rule read through a term contributes the rule's reasons as an
+            // unqualified read does; neither routes the walk by entity.
+            ScalarExpr::Derived(name) | ScalarExpr::RoleDerived { name, .. } => {
                 self.collect_derived_reduction_reasons(name, entity_id, period, visiting, reasons)
             }
             ScalarExpr::ParameterLookup { index, .. }
@@ -191,6 +193,20 @@ impl<'a> PhaseTwoEngine<'a> {
                 self.collect_scalar_reduction_reasons(left, entity_id, period, visiting, reasons);
                 self.collect_scalar_reduction_reasons(right, entity_id, period, visiting, reasons);
             }
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                ..
+            } => {
+                self.collect_relation_reasons(
+                    relation,
+                    *current_slot,
+                    entity_id,
+                    period,
+                    visiting,
+                    reasons,
+                );
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -198,6 +214,18 @@ impl<'a> PhaseTwoEngine<'a> {
                 ..
             }
             | ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 where_clause,
@@ -249,8 +277,10 @@ impl<'a> PhaseTwoEngine<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
+            | ScalarExpr::RoleInput { .. }
             | ScalarExpr::PeriodStart
             | ScalarExpr::PeriodEnd => {}
         }
@@ -270,7 +300,7 @@ impl<'a> PhaseTwoEngine<'a> {
                 self.collect_scalar_reduction_reasons(left, entity_id, period, visiting, reasons);
                 self.collect_scalar_reduction_reasons(right, entity_id, period, visiting, reasons);
             }
-            JudgmentExpr::Derived(name) => {
+            JudgmentExpr::Derived(name) | JudgmentExpr::RoleDerived { name, .. } => {
                 self.collect_derived_reduction_reasons(name, entity_id, period, visiting, reasons)
             }
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {

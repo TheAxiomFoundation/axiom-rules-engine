@@ -1,0 +1,173 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "selected_year_inputs": [
+      {
+        "id": "income",
+        "slot": "income",
+        "entity": "Person",
+        "dtype": "money",
+        "period": "Year",
+        "unit": "CAD"
+      }
+    ],
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      },
+      {
+        "name": "CAD",
+        "kind": "currency",
+        "minor_units": 2
+      }
+    ],
+    "relations": [],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "out",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "CAD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "input_for_year",
+          "input": "income",
+          "year": 2025
+        },
+        "versions": [
+          {
+            "effective_from": "2026-07-01",
+            "effective_to": "2026-07-31",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "input_for_year",
+              "input": "income",
+              "year": 2025
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "out"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": false,
+      "blockers": [
+        "out: selected-year input requires Explain",
+        "out: selected-year input requires Explain"
+      ]
+    },
+    "input_catalog": [
+      {
+        "slot": "income",
+        "canonical_request_name": "income",
+        "request_names": [
+          "income"
+        ]
+      }
+    ]
+  }
+}

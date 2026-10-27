@@ -4,14 +4,18 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
+from axiom_rules_engine import CompiledDenseProgram
 from axiom_rules_engine.cli import main
 from axiom_rules_engine.concepts import (
+    _infer_input_names,
     discover_concepts,
     search_concepts,
     show_concept,
     validate_concept_id,
 )
+from axiom_rules_engine.dense import NativeCompiledDenseProgram
 
 
 def write_rulespec(root: Path, relative: str, body: str) -> Path:
@@ -84,6 +88,348 @@ def test_discover_concepts_from_rulespec_file(tmp_path: Path) -> None:
     )
     assert by_id["us:statutes/26/62#input.wages"].kind == "input"
     assert by_id["us:statutes/26/62#input.wages"].status == "inferred"
+
+
+def test_predicate_terms_are_not_inferred_inputs(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_rulespec(
+        root,
+        "us/statutes/26/62.yaml",
+        """
+format: rulespec/v1
+module:
+  summary: Internal Revenue Code section 62 defines adjusted gross income.
+  source_verification:
+    corpus_citation_path: us/statutes/26/62
+rules:
+  - name: relative_of
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Person]
+  - name: older_relative_of
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relative_of
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: candidate.age > anchor.age
+  - name: anchor_plus_one
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: anchor + 1
+""",
+    )
+
+    inputs = {
+        concept.concept_id
+        for concept in discover_concepts([root])
+        if concept.kind == "input"
+    }
+
+    # Outside a predicate `anchor` is an ordinary identifier, so it still
+    # infers an input there.
+    assert inputs == {
+        "us:statutes/26/62#input.age",
+        "us:statutes/26/62#input.anchor",
+    }
+
+
+def write_formula_module(
+    root: Path,
+    formulas: dict[str, str],
+    *,
+    dtype: str = "Money",
+    inputs: list[dict[str, str]] | None = None,
+) -> Path:
+    document: dict[str, object] = {"format": "rulespec/v1"}
+    if inputs:
+        document["inputs"] = inputs
+    rules: list[dict[str, object]] = [
+        {
+            "name": "member_of_household",
+            "kind": "data_relation",
+            "data_relation": {"arity": 2, "arguments": ["Person", "Household"]},
+        }
+    ]
+    for name, formula in formulas.items():
+        rules.append(
+            {
+                "name": name,
+                "kind": "derived",
+                "entity": "Household",
+                "dtype": dtype,
+                "period": "Month",
+                "versions": [{"effective_from": "2026-01-01", "formula": formula}],
+            }
+        )
+    document["rules"] = rules
+    return write_rulespec(
+        root,
+        "us/statutes/7/2014.yaml",
+        yaml.safe_dump(document, sort_keys=False),
+    )
+
+
+def inferred_input_names(root: Path) -> set[str]:
+    prefix = "us:statutes/7/2014#input."
+    return {
+        concept.concept_id.removeprefix(prefix)
+        for concept in discover_concepts([root])
+        if concept.kind == "input"
+    }
+
+
+def test_function_calls_are_not_inferred_inputs(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(
+        root,
+        {"has_several_members": "len(member_of_household) >= 2 and income < limit"},
+        dtype="Judgment",
+    )
+
+    assert inferred_input_names(root) == {"income", "limit"}
+
+
+# Each function the formula lowering accepts (`lower_to_scalar` and
+# `lower_to_judgment` in src/formula.rs), called as documented there, with the
+# inputs the call reads.
+FUNCTION_CALLS = [
+    ("max(wages, 0)", {"wages"}),
+    ("min(wages, cap)", {"wages", "cap"}),
+    ("max(member_of_household.age)", {"age"}),
+    ("min(member_of_household.age)", {"age"}),
+    ("ceil(wages)", {"wages"}),
+    ("floor(wages)", {"wages"}),
+    ("days_between(birth_date, assessment_date)", {"birth_date", "assessment_date"}),
+    ("date_add_days(birth_date, 1)", {"birth_date"}),
+    ("date_add_months(birth_date, 1)", {"birth_date"}),
+    ("date_add_years(birth_date, 18)", {"birth_date"}),
+    ("sum_over_periods(wages)", {"wages"}),
+    ("max_over_periods(wages)", {"wages"}),
+    ("count_over_periods(is_adult)", {"is_adult"}),
+    ("sum_top_n_over_periods(wages, 35)", {"wages"}),
+    ("len(member_of_household)", set()),
+    ("sum(member_of_household.wages)", {"wages"}),
+    ("only(member_of_household.age)", {"age"}),
+    ("input_for_year(wages, 2024)", {"wages"}),
+    ("only_related(member_of_household, is_adult)", {"is_adult"}),
+    ("count_where(member_of_household, is_adult)", {"is_adult"}),
+    ("sum_where(member_of_household, wages, is_adult)", {"wages", "is_adult"}),
+    ("min_where(member_of_household, age, is_adult)", {"age", "is_adult"}),
+    ("max_where(member_of_household, age, is_adult)", {"age", "is_adult"}),
+    ("exactly_one(is_adult, is_student)", {"is_adult", "is_student"}),
+]
+# The parser calls a name wrapped in grouping parentheses too.
+GROUPED_CALLS = [
+    ("(ceil)(wages)", {"wages"}),
+    ("(max)(wages, 0)", {"wages"}),
+    ("((len))(member_of_household)", set()),
+    ("max((floor)(wages), 0)", {"wages"}),
+]
+# The lexer skips whitespace, `#` comments and `"""` blocks between tokens, so
+# the parser still reads `ceil` followed by any of them and `(` as a call.
+SEPARATORS = [
+    "",
+    " ",
+    "\t",
+    "\n  ",
+    "\r\n",
+    "\x0c",
+    " # rounds up\n  ",
+    ' """Rounds up.""" ',
+]
+# Only a call makes a name a function: the parser reads `floor`, `sum` and a
+# grouped `max` here as inputs, and a `(` inside a comment or an unclosed
+# `"""` block is no token.
+BARE_FUNCTION_NAMES = [
+    ("ceil(floor) + sum", {"floor", "sum"}),
+    ("(max) + 1", {"max"}),
+    ("max # (\n+ 1", {"max"}),
+    ('min """ (', {"min"}),
+]
+# String literals, comments and `"""` blocks name nothing.
+TEXT_CASES = [
+    ('"max"', set()),
+    ('"Aged (65+)"', set()),
+    ("wages # then floor(wages)", {"wages"}),
+    ('"""Rounded down, as floor(x) would."""\nfloor(wages)', {"wages"}),
+]
+# What some formulas need to compile: a result dtype other than Money, or an
+# input declaration.
+CALL_DTYPES = {
+    "date_add_days(birth_date, 1)": "Date",
+    "date_add_months(birth_date, 1)": "Date",
+    "date_add_years(birth_date, 18)": "Date",
+    "only_related(member_of_household, is_adult)": "Boolean",
+    "exactly_one(is_adult, is_student)": "Judgment",
+    '"max"': "Text",
+    '"Aged (65+)"': "Text",
+}
+CALL_INPUTS = {
+    "input_for_year(wages, 2024)": [
+        {
+            "name": "wages",
+            "entity": "Household",
+            "dtype": "Money",
+            "unit": "USD",
+            "period": "Year",
+        }
+    ],
+    "only_related(member_of_household, is_adult)": [
+        {"name": "is_adult", "entity": "Person", "dtype": "Boolean"}
+    ],
+}
+
+
+def write_call_module(root: Path, formula: str) -> Path:
+    return write_formula_module(
+        root,
+        {"called": formula},
+        dtype=CALL_DTYPES.get(formula, "Money"),
+        inputs=CALL_INPUTS.get(formula),
+    )
+
+
+@pytest.mark.parametrize(("formula", "inputs"), FUNCTION_CALLS + GROUPED_CALLS)
+def test_no_function_name_is_inferred_as_an_input(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, formula)
+
+    assert inferred_input_names(root) == inputs
+
+
+@pytest.mark.parametrize("separator", SEPARATORS)
+def test_call_is_seen_past_what_the_lexer_skips(
+    tmp_path: Path, separator: str
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, f"ceil{separator}(wages)")
+
+    assert inferred_input_names(root) == {"wages"}
+
+
+@pytest.mark.parametrize(("formula", "inputs"), BARE_FUNCTION_NAMES)
+def test_function_name_read_as_a_value_is_an_input(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, formula)
+
+    assert inferred_input_names(root) == inputs
+
+
+@pytest.mark.parametrize(("formula", "inputs"), TEXT_CASES)
+def test_words_in_strings_and_comments_name_no_input(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, formula)
+
+    assert inferred_input_names(root) == inputs
+
+
+# A name starts where the lexer's previous token ends: a date is ten bytes, and
+# a number keeps its underscores.
+@pytest.mark.parametrize(
+    ("formula", "inputs"),
+    [("2026-01-01_x", {"_x"}), ("1_000_x", {"x"}), ("1.5_x", {"x"})],
+)
+def test_names_start_where_the_lexer_starts_them(
+    formula: str, inputs: set[str]
+) -> None:
+    rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules, {"r"}) == inputs
+
+
+class SearchCountingFormula(str):
+    """A formula that counts the characters its `find` calls search."""
+
+    searched = 0
+
+    def find(self, sub, start=0, end=None):  # type: ignore[override]
+        index = super().find(sub, start, len(self) if end is None else end)
+        stop = len(self) if index == -1 else index + len(sub)
+        self.searched += stop - start
+        return index
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "x" + " # x" * 2_000,
+        'x """' + " x #" * 2_000 + '"""',
+        "x # x\n" * 2_000,
+    ],
+    ids=["comment", "block", "comment lines"],
+)
+def test_inference_searches_each_comment_once(text: str) -> None:
+    # Each name inside a comment once searched the rest of the comment again,
+    # which made a long comment take quadratic time.
+    formula = SearchCountingFormula(text)
+    rules = [{"name": "long", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules, {"long"}) == {"x"}
+    assert formula.searched <= len(formula)
+
+
+# The fixture groups above, checked against the inputs the compiled program
+# reads. A fixture the compiler refuses is valid up to the refusal named here,
+# which is where its inputs stop being checkable.
+COMPILE_REFUSALS = {
+    "input_for_year(wages, 2024)": (
+        "dense compilation does not yet support selected-year input"
+    ),
+    'min """ (': "block is never closed",
+}
+COMPILED_CASES = [
+    (formula, inputs, COMPILE_REFUSALS.get(formula))
+    for formula, inputs in [
+        *FUNCTION_CALLS,
+        *GROUPED_CALLS,
+        *((f"ceil{separator}(wages)", {"wages"}) for separator in SEPARATORS),
+        *BARE_FUNCTION_NAMES,
+        *TEXT_CASES,
+    ]
+]
+
+
+@pytest.mark.skipif(
+    NativeCompiledDenseProgram is None,
+    reason="axiom_rules_engine_dense extension is not built",
+)
+@pytest.mark.parametrize(("formula", "inputs", "refusal"), COMPILED_CASES)
+def test_inferred_inputs_are_the_compiled_program_inputs(
+    tmp_path: Path, formula: str, inputs: set[str], refusal: str | None
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_call_module(root, formula)
+    assert inferred_input_names(root) == inputs
+
+    if refusal is not None:
+        with pytest.raises(ValueError, match=refusal):
+            CompiledDenseProgram.from_file(
+                path, rulespec_roots=[root], entity="Household"
+            )
+        return
+    program = CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Household"
+    )
+    compiled = set(program.root_inputs) | {
+        name for relation in program.relations for name in relation.related_inputs
+    }
+    assert compiled == inputs
 
 
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:

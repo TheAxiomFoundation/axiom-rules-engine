@@ -24,6 +24,7 @@ use crate::api::{
 use crate::engine::{
     ArithmeticError, Engine, EvalError, checked_add, checked_div, checked_mul, checked_sub,
     compare_scalar_values, relation_member_outside_derived_relation,
+    relation_role_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
@@ -514,6 +515,20 @@ struct BulkEvaluator<'a> {
     visits: usize,
 }
 
+/// Explain's error for a judgment node that runs only inside a derived
+/// relation's predicate, which bulk never evaluates directly.
+fn outside_derived_relation(expr: &JudgmentExpr) -> EvalError {
+    match expr {
+        JudgmentExpr::RelationMember { relation, .. } => {
+            relation_member_outside_derived_relation(relation)
+        }
+        JudgmentExpr::RoleDerived { term, name } => {
+            relation_role_outside_derived_relation(*term, name)
+        }
+        _ => unreachable!("only nodes bound by a derived relation's predicate"),
+    }
+}
+
 impl<'a> BulkEvaluator<'a> {
     fn new(
         program: &'a Program,
@@ -809,6 +824,17 @@ impl<'a> BulkEvaluator<'a> {
         (ScalarColumn::placeholder(self.len()), errors)
     }
 
+    /// Every row failing with explain's error for a read through a term
+    /// outside a derived relation's predicate. Kept out of `scalar_node`,
+    /// whose frame every nesting level pays for.
+    fn fail_role_read(&self, expr: &ScalarExpr, mask: &RowMask) -> Scalars {
+        let (ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name }) = expr
+        else {
+            unreachable!("only reads through a term")
+        };
+        self.fail_all(mask, relation_role_outside_derived_relation(*term, name))
+    }
+
     fn eval_scalar_expr(&mut self, expr: &'a ScalarExpr, mask: &RowMask) -> Flow<Scalars> {
         self.visits += 1;
         self.depth += 1;
@@ -829,9 +855,19 @@ impl<'a> BulkEvaluator<'a> {
                 }
                 Ok((ScalarColumn::broadcast(value, len), RowErrors::new()))
             }
+            ScalarExpr::InputForYear { .. } => {
+                Err(unsupported("selected-year input requires Explain").into())
+            }
             ScalarExpr::Input(name) => self.eval_input(name, None, mask),
             ScalarExpr::InputOrElse { name, default } => self.eval_input(name, Some(default), mask),
             ScalarExpr::Derived(name) => self.evaluate_scalar(name, mask),
+            // Bulk evaluates rule bodies, which have no relation context: a
+            // qualified read runs only inside a derived relation's predicate,
+            // which bulk evaluates on the explain interpreter. Every row
+            // fails with explain's error, as for `relation_member`.
+            ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {
+                Ok(self.fail_role_read(expr, mask))
+            }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 self.eval_parameter_lookup(parameter, index, mask)
             }
@@ -897,9 +933,11 @@ impl<'a> BulkEvaluator<'a> {
                 mask,
                 EvalError::OverPeriodsOutsideLifetime(kind.as_call_name()),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                self.eval_per_entity(expr, mask)
-            }
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::SingleRelated { .. } => self.eval_per_entity(expr, mask),
             // The fallback of a `match` without `_`: every row that reaches it
             // fails with explain's error, and any failure sends the request to
             // explain, which names the rule.
@@ -1148,9 +1186,10 @@ impl<'a> BulkEvaluator<'a> {
                 Ok((outcomes, errors))
             }
             JudgmentExpr::Derived(name) => self.evaluate_judgment(name, mask),
-            JudgmentExpr::RelationMember { relation, .. } => {
-                let (_, errors) =
-                    self.fail_all(mask, relation_member_outside_derived_relation(relation));
+            // As for a qualified read in `scalar_node`, every row fails with
+            // explain's error.
+            JudgmentExpr::RelationMember { .. } | JudgmentExpr::RoleDerived { .. } => {
+                let (_, errors) = self.fail_all(mask, outside_derived_relation(expr));
                 Ok((vec![JudgmentOutcome::NotHolds; len], errors))
             }
             JudgmentExpr::And(items) => {

@@ -249,6 +249,59 @@ pub enum RelatedValueRef {
     Derived(String),
 }
 
+/// Which end of the related entities' values an
+/// [`ScalarExpr::ExtremeRelated`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extreme {
+    Min,
+    Max,
+}
+
+impl Extreme {
+    /// The formula builtin that lowers to this aggregate, used in diagnostics:
+    /// `min`/`max`, or `min_where`/`max_where` when a `where` clause selects
+    /// the members.
+    pub fn call_name(self, filtered: bool) -> &'static str {
+        match (self, filtered) {
+            (Self::Min, false) => "min",
+            (Self::Max, false) => "max",
+            (Self::Min, true) => "min_where",
+            (Self::Max, true) => "max_where",
+        }
+    }
+
+    /// Whether `candidate` replaces `best` as the extreme so far. Ties keep
+    /// `best`; callers that must not depend on member order break them
+    /// separately.
+    pub fn improves<T: PartialOrd>(self, candidate: &T, best: &T) -> bool {
+        match self {
+            Self::Min => candidate < best,
+            Self::Max => candidate > best,
+        }
+    }
+}
+
+/// An end of the pair a derived relation's predicate tests: the id the
+/// relation is read from (its current slot) or the id being tested (its
+/// related slot). A term has the kind the derivation's `slot_entities` give
+/// that slot. Terms are meaningful only inside a derived relation's
+/// predicate (docs/relation-roles.md, section 3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Term {
+    Anchor,
+    Candidate,
+}
+
+impl Term {
+    /// The name a predicate spells this term with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anchor => "anchor",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
 /// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
 /// own period axis. Valid only under the lifetime execution surface
 /// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
@@ -286,6 +339,10 @@ impl OverPeriodsKind {
 
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
@@ -328,6 +385,12 @@ pub enum ScalarExpr {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -335,6 +398,29 @@ pub enum ScalarExpr {
         where_clause: Option<Box<JudgmentExpr>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The least or greatest `value` over the related entities `where`
+    /// selects (`min(r.f)`, `max_where(r, f, p)`). Members resolve as for
+    /// [`ScalarExpr::SumRelated`]. Numbers compare numerically and dates
+    /// chronologically; with no selected member the evaluation fails rather
+    /// than inventing a value.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The `value` of the one related entity `where` selects (`only(r.f)`).
+    /// Members resolve as for [`ScalarExpr::SumRelated`]; zero members or
+    /// more than one fail the evaluation, so it never returns a default.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -365,6 +451,19 @@ pub enum ScalarExpr {
         value: Box<ScalarExpr>,
         n: Option<Box<ScalarExpr>>,
     },
+    /// `t.name` for an input: the input read at the term's id. Valid only in
+    /// a derived relation's predicate, outside any aggregation's `where`
+    /// clause or aggregated value.
+    RoleInput {
+        term: Term,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule: the rule evaluated at the term's
+    /// id. The rule's entity is the term's kind (checked at compile).
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -383,6 +482,12 @@ pub enum JudgmentExpr {
     And(Vec<JudgmentExpr>),
     Or(Vec<JudgmentExpr>),
     Not(Box<JudgmentExpr>),
+    /// `t.name` for a judgment derived rule, evaluated at the term's id. The
+    /// same scope and kind rules as [`ScalarExpr::RoleDerived`] apply.
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +595,7 @@ pub struct IndexedParameter {
 
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    pub selected_year_inputs: HashMap<String, crate::selected_year::SelectedYearInput>,
     pub units: HashMap<String, UnitDef>,
     pub relations: HashMap<String, RelationSchema>,
     pub parameters: HashMap<String, IndexedParameter>,
@@ -675,6 +781,19 @@ impl Program {
     /// exact owning `<module>#input.<slot>` name. A shared slot may therefore
     /// have multiple allowed request names.
     pub fn input_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(true)
+    }
+
+    /// Request names from expression read sites, retaining their module
+    /// owners. An unused parameter's `indexed_by` label contributes nothing.
+    pub(crate) fn input_read_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(false)
+    }
+
+    fn input_catalog_with_index_labels(
+        &self,
+        include_index_labels: bool,
+    ) -> BTreeMap<String, Vec<String>> {
         let mut catalog: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for derived in self.derived.values() {
             let mut slots = HashSet::new();
@@ -717,22 +836,24 @@ impl Program {
                     .insert(request_name);
             }
         }
-        for parameter in self.parameters.values() {
-            let Some(slot) = parameter.indexed_by.as_deref() else {
-                continue;
-            };
-            let request_name = parameter
-                .id
-                .as_deref()
-                .and_then(public_rule_target)
-                .map_or_else(
-                    || slot.to_string(),
-                    |target| format!("{target}#input.{slot}"),
-                );
-            catalog
-                .entry(slot.to_string())
-                .or_default()
-                .insert(request_name);
+        if include_index_labels {
+            for parameter in self.parameters.values() {
+                let Some(slot) = parameter.indexed_by.as_deref() else {
+                    continue;
+                };
+                let request_name = parameter
+                    .id
+                    .as_deref()
+                    .and_then(public_rule_target)
+                    .map_or_else(
+                        || slot.to_string(),
+                        |target| format!("{target}#input.{slot}"),
+                    );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
+            }
         }
         catalog
             .into_iter()
@@ -780,12 +901,25 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         | ScalarExpr::Derived(_)
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::InputForYear { input, .. } => {
+            slots.insert(
+                input
+                    .rsplit_once("#input.")
+                    .map_or(input.as_str(), |(_, slot)| slot),
+            );
+        }
         ScalarExpr::Input(name) => {
             slots.insert(name.as_str());
         }
         ScalarExpr::InputOrElse { name, .. } => {
             slots.insert(name.as_str());
         }
+        // An input read only through a term enters the catalog as a bare
+        // read does, under the owning relation's request name.
+        ScalarExpr::RoleInput { name, .. } => {
+            slots.insert(name.as_str());
+        }
+        ScalarExpr::RoleDerived { .. } => {}
         ScalarExpr::ParameterLookup { index, .. } => {
             collect_input_slots_from_scalar_expr(index, slots);
         }
@@ -819,12 +953,27 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
         }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
+        }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {
                 collect_input_slots_from_judgment_expr(where_clause, slots);
             }
         }
         ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..
@@ -869,7 +1018,9 @@ fn collect_input_slots_from_judgment_expr<'a>(
             collect_input_slots_from_scalar_expr(left, slots);
             collect_input_slots_from_scalar_expr(right, slots);
         }
-        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+        JudgmentExpr::Derived(_)
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::RelationMember { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_input_slots_from_judgment_expr(item, slots);

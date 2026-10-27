@@ -38,6 +38,81 @@
         "null"
       ]
     },
+    "inputs": {
+      "additionalProperties": {
+        "if": {
+          "required": [
+            "election"
+          ],
+          "type": "object"
+        },
+        "then": {
+          "properties": {
+            "election": {
+              "additionalProperties": false,
+              "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+              "properties": {
+                "actor": {
+                  "description": "The entity kind that makes the choice.",
+                  "pattern": "^[A-Z][A-Za-z0-9]*$",
+                  "type": "string"
+                },
+                "provision": {
+                  "description": "The corpus citation path of the provision that gives the choice.",
+                  "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "actor",
+                "provision"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      },
+      "description": "Declarations about the module's inputs. Inert except `election`: a list of entries with `name`, or a mapping from name to entry.",
+      "items": {
+        "if": {
+          "required": [
+            "election"
+          ],
+          "type": "object"
+        },
+        "then": {
+          "properties": {
+            "election": {
+              "additionalProperties": false,
+              "description": "The input is a choice the law gives `actor` under `provision`. The engine evaluates the value it is given and never defaults one.",
+              "properties": {
+                "actor": {
+                  "description": "The entity kind that makes the choice.",
+                  "pattern": "^[A-Z][A-Za-z0-9]*$",
+                  "type": "string"
+                },
+                "provision": {
+                  "description": "The corpus citation path of the provision that gives the choice.",
+                  "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "actor",
+                "provision"
+              ],
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      }
+    },
     "module": {
       "additionalProperties": true,
       "description": "Descriptive, inert module metadata. Never affects lowering, compilation, or execution.",
@@ -68,6 +143,209 @@
             "object",
             "null"
           ]
+        },
+        "interpretations": {
+          "description": "Descriptive readings adopted where source text is ambiguous, conflicting, or read other than literally. Never affects execution. Interpretation IDs must be unique within the module, alternative IDs must be unique within each interpretation, and affects must name rules defined in the same document. These identity and reference constraints require engine load-time validation. Corpus excerpt verification is the encoder's responsibility.",
+          "items": {
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "ruling"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "confirmation"
+                      ]
+                    }
+                  ]
+                },
+                "properties": {
+                  "status": {
+                    "const": "open"
+                  }
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "confirmation"
+                  ]
+                },
+                "properties": {
+                  "status": {
+                    "const": "ruled"
+                  }
+                },
+                "required": [
+                  "ruling"
+                ]
+              },
+              {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "confirmed",
+                      "contradicted"
+                    ]
+                  }
+                },
+                "required": [
+                  "ruling",
+                  "confirmation"
+                ]
+              }
+            ],
+            "properties": {
+              "affects": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "alternatives": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "effect": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                      "type": "string"
+                    },
+                    "reading": {
+                      "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "reading"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "basis": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "confirmation": {
+                "additionalProperties": false,
+                "properties": {
+                  "by": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "date": {
+                    "format": "date",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "type": "string"
+                  },
+                  "excerpt": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "record": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "by",
+                  "date",
+                  "excerpt"
+                ],
+                "type": "object"
+              },
+              "id": {
+                "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                "type": "string"
+              },
+              "question": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "reading": {
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "ruling": {
+                "additionalProperties": false,
+                "properties": {
+                  "by": {
+                    "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                    "type": "string"
+                  },
+                  "date": {
+                    "format": "date",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "type": "string"
+                  },
+                  "record": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "by",
+                  "date",
+                  "record"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "open",
+                  "ruled",
+                  "confirmed",
+                  "contradicted"
+                ],
+                "type": "string"
+              },
+              "texts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "corpus_citation_path": {
+                      "pattern": "^[a-z]{2,3}(?:-[a-z0-9]+)*/[a-z][a-z0-9-]*(?:/[A-Za-z0-9](?:[A-Za-z0-9 .:\\-–]*[A-Za-z0-9.:\\-–])?)+$",
+                      "type": "string"
+                    },
+                    "excerpt": {
+                      "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "corpus_citation_path",
+                    "excerpt"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "question",
+              "texts",
+              "reading",
+              "alternatives",
+              "basis",
+              "status",
+              "affects"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         },
         "kind": {
           "type": "string"

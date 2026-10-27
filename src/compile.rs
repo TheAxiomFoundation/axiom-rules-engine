@@ -4,12 +4,14 @@ use std::fs;
 #[cfg(feature = "fs")]
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::interface::ProgramInterface;
+use crate::rulespec::ModuleMetadata;
 use crate::spec::{
     DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
-    ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, ScalarExprSpec,
+    ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec, RelationSpec, ScalarExprSpec, UnitSpec,
 };
 
 #[derive(Debug, Error)]
@@ -59,7 +61,7 @@ pub enum CompileError {
         path: String,
         error: serde_json::Error,
     },
-    #[error("compiled artefact `{path}` violates the v2 contract: {message}")]
+    #[error("compiled artefact `{path}` violates the artifact contract: {message}")]
     InvalidArtifactContract { path: String, message: String },
     #[error("failed to load RuleSpec module `{path}`: {error}")]
     RuleSpec {
@@ -84,14 +86,25 @@ pub enum CompileError {
         path: String,
         report: crate::relation_typing::RelationTypingReport,
     },
+    /// The default loader reads [`ARTIFACT_FORMAT_VERSION`] only. The message
+    /// says which side is older and how to go on.
     #[error(
-        "compiled artefact `{path}` has artifact_format_version {found}, but this engine requires exact version {supported}; recompile the program with this engine"
+        "{}",
+        artifact_format_mismatch(.path, *.found, *.supported, .artifact_engine_version.as_deref())
     )]
     UnsupportedArtifactFormatVersion {
         path: String,
         found: u32,
         supported: u32,
+        /// The `engine_version` the artifact records, if any.
+        artifact_engine_version: Option<String>,
     },
+    /// The format-2 compatibility loader reads format 2 only.
+    #[error(
+        "compiled artefact `{path}` is artifact format {found}, and the format-2 compatibility loader reads format 2 only{}",
+        legacy_loader_hint(*.found)
+    )]
+    LegacyArtifactFormat { path: String, found: u32 },
     #[cfg(feature = "fs")]
     #[error("failed to read corpus provisions `{path}`: {error}")]
     ReadProvisionsFile { path: String, error: std::io::Error },
@@ -103,12 +116,70 @@ pub enum CompileError {
     },
 }
 
-/// Format version stamped into every artifact this engine compiles.
-/// Artifact v2 is the sole accepted contract. It adds executable
-/// `effective_to` bounds to parameter and derived versions. Missing, older,
-/// and newer versions are rejected at load so a v1 engine cannot silently
-/// ignore those bounds and a v2 engine cannot guess at a v1 artifact.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
+/// Format version stamped into every artifact this engine compiles, and the
+/// only one the default loader ([`CompiledProgramArtifact::from_json_str`])
+/// reads. Format 3 adds `program.interface`, `engine_build` and
+/// `source_closure` to format 2 (`docs/artifact-format.md`). Missing, older
+/// and newer versions are rejected, with a message that names the older
+/// side; format 2 loads only through the separately named compatibility
+/// loader and stays format 2 in memory.
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+
+/// Older formats a separately named compatibility loader reads.
+pub const LEGACY_ARTIFACT_FORMATS: [u32; 1] = [LEGACY_FORMAT_2];
+
+const LEGACY_FORMAT_2: u32 = 2;
+
+/// The top-level keys of a format-3 artifact.
+const FORMAT_3_KEYS: [&str; 6] = [
+    "artifact_format_version",
+    "engine_version",
+    "engine_build",
+    "source_closure",
+    "program",
+    "metadata",
+];
+
+fn legacy_loader_hint(found: u32) -> &'static str {
+    if found == ARTIFACT_FORMAT_VERSION {
+        "; load it with the default loader"
+    } else {
+        ""
+    }
+}
+
+/// Which side of a format mismatch is older, and how to go on.
+fn artifact_format_mismatch(
+    path: &str,
+    found: u32,
+    supported: u32,
+    artifact_engine_version: Option<&str>,
+) -> String {
+    let engine = format!(
+        "{}, build {}",
+        env!("CARGO_PKG_VERSION"),
+        EngineBuild::current()
+    );
+    let written = artifact_engine_version.map_or_else(
+        || "written by an engine that did not record its version".to_string(),
+        |version| format!("written by engine {version}"),
+    );
+    if found > supported {
+        return format!(
+            "this engine ({engine}) is older than compiled artefact `{path}` (format {found}, {written}): it reads format {supported}; upgrade the engine"
+        );
+    }
+    let ways_forward = if LEGACY_ARTIFACT_FORMATS.contains(&found) {
+        format!(
+            "Recompile it with this engine, or run it unchanged through the format-{found} compatibility loader (CLI `--accept-artifact-format {found}`; Rust `CompiledProgramArtifact::from_legacy_format_2_json_str`; Python `accept_artifact_format={found}`; wasm `execute_legacy_format_2`)"
+        )
+    } else {
+        format!("Recompile it with this engine; no loader in this engine reads format {found}")
+    };
+    format!(
+        "compiled artefact `{path}` is older than this engine: it is artifact format {found} ({written}) and this engine ({engine}) reads format {supported}. {ways_forward}"
+    )
+}
 
 /// Whether an artefact load enforces mandatory relation entity typing. Only
 /// the migration tool defers it, to type an artefact the loader rejects.
@@ -161,20 +232,378 @@ impl std::fmt::Display for CompileDiagnostic {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A compiled program. On the wire (`ArtifactWire`) the interface sits
+/// inside `program`, at `program.interface`; in memory it is a field beside
+/// the `ProgramSpec`, which does not change, so a raw `ExecutionRequest`
+/// program never carries one.
+#[derive(Clone, Debug)]
 pub struct CompiledProgramArtifact {
     pub artifact_format_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The semantic version of the engine that compiled the artifact.
     pub engine_version: Option<String>,
+    /// The build of the engine that compiled the artifact.
+    pub engine_build: Option<EngineBuild>,
+    /// The RuleSpec module texts the program was lowered from; `None` for a
+    /// program compiled from a `ProgramSpec`.
+    pub source_closure: Option<SourceClosure>,
     pub program: ProgramSpec,
+    /// The program's entity roster, input slots and relations
+    /// ([`crate::interface`]), derived by every compile. Execution never
+    /// reads it.
+    pub interface: Option<ProgramInterface>,
     pub metadata: CompiledProgramMetadata,
     /// Compile-time warnings are intentionally not part of the executable
     /// artifact contract. They are available to the invoking host and emitted
     /// by `compile_summary_lines`, while serialized artifact bytes stay stable.
-    #[serde(skip)]
-    #[cfg_attr(feature = "schema", schemars(skip))]
     pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// Which build of the engine compiled an artifact, stamped by `build.rs`.
+/// Two builds with the same `engine_version` can differ here, and builds that
+/// differ here write artifacts that differ in this field alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
+#[serde(deny_unknown_fields)]
+pub struct EngineBuild {
+    /// The commit the engine was built from (40 lowercase hex digits), or
+    /// null when the build could not know it.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub commit: Option<String>,
+    /// Whether the engine's `src/`, `build.rs`, `Cargo.toml` or `Cargo.lock`
+    /// differed from that commit; null when unknown, and always null when
+    /// `commit` is.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub dirty: Option<bool>,
+}
+
+const STAMPED_COMMIT: &str = env!("AXIOM_RULES_ENGINE_STAMPED_COMMIT");
+const STAMPED_DIRTY: &str = env!("AXIOM_RULES_ENGINE_STAMPED_DIRTY");
+
+impl EngineBuild {
+    /// This engine's build.
+    pub fn current() -> Self {
+        let commit = (!STAMPED_COMMIT.is_empty()).then(|| STAMPED_COMMIT.to_string());
+        let dirty = match STAMPED_DIRTY {
+            "true" if commit.is_some() => Some(true),
+            "false" if commit.is_some() => Some(false),
+            _ => None,
+        };
+        Self { commit, dirty }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(commit) = &self.commit
+            && !is_lower_hex(commit, 40)
+        {
+            return Err(format!(
+                "engine_build.commit `{commit}` is not 40 lowercase hex digits"
+            ));
+        }
+        if self.commit.is_none() && self.dirty.is_some() {
+            return Err("engine_build.dirty must be null when engine_build.commit is".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// `5d63e8f`, `5d63e8f (dirty)`, or `unknown`.
+impl std::fmt::Display for EngineBuild {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.commit {
+            None => formatter.write_str("unknown"),
+            Some(commit) => {
+                formatter.write_str(commit.get(..7).unwrap_or(commit))?;
+                match self.dirty {
+                    Some(true) => formatter.write_str(" (dirty)"),
+                    Some(false) => Ok(()),
+                    None => formatter.write_str(" (dirty unknown)"),
+                }
+            }
+        }
+    }
+}
+
+/// Which RuleSpec text an artifact was compiled from: every module text the
+/// loader read to lower the program, the root included. It identifies module
+/// text and nothing else; a corpus provision index, which fills `source_url`
+/// fields after compilation, is not in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
+#[serde(deny_unknown_fields)]
+pub struct SourceClosure {
+    /// The root module's canonical target; null for an originless root (an
+    /// in-memory string, or a composition file).
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub root: Option<String>,
+    /// One entry per module text, sorted by target, an originless root first.
+    pub modules: Vec<SourceClosureModule>,
+    /// `sha256:` and the SHA-256 of `axiom-rules-engine/source-closure/v1\n`
+    /// followed by one `<target>\t<sha256>\n` line per module, in order
+    /// (an empty target for an originless root).
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::interface::require_every_key)
+)]
+#[serde(deny_unknown_fields)]
+pub struct SourceClosureModule {
+    /// The module's canonical target; null for an originless root.
+    #[serde(deserialize_with = "crate::interface::required_nullable")]
+    pub target: Option<String>,
+    /// The SHA-256 of the module's exact text, 64 lowercase hex digits.
+    pub sha256: String,
+}
+
+const SOURCE_CLOSURE_DOMAIN: &str = "axiom-rules-engine/source-closure/v1\n";
+
+impl SourceClosure {
+    fn from_texts(texts: crate::rulespec::RuleSpecSourceTexts) -> Self {
+        let mut modules = texts
+            .modules
+            .into_iter()
+            .map(|(target, sha256)| SourceClosureModule { target, sha256 })
+            .collect::<Vec<_>>();
+        modules.sort_by(|left, right| left.target.cmp(&right.target));
+        let digest = source_closure_digest(&modules);
+        Self {
+            root: texts.root,
+            modules,
+            digest,
+        }
+    }
+
+    /// The shape format 3 requires: canonical targets and digests, the root
+    /// among the modules, sorted unique targets, and a digest that is the
+    /// digest of the listed modules. It does not read any source.
+    fn validate(&self) -> Result<(), String> {
+        for module in &self.modules {
+            if let Some(target) = &module.target
+                && crate::rulespec::validate_module_target(target).is_err()
+            {
+                return Err(format!(
+                    "source_closure lists `{target}`, which is not a canonical module target"
+                ));
+            }
+            if !is_lower_hex(&module.sha256, 64) {
+                return Err(format!(
+                    "source_closure digest `{}` is not 64 lowercase hex digits",
+                    module.sha256
+                ));
+            }
+        }
+        if !self
+            .modules
+            .windows(2)
+            .all(|pair| pair[0].target < pair[1].target)
+        {
+            return Err(
+                "source_closure.modules must be sorted by target, without repeats".to_string(),
+            );
+        }
+        if !self.modules.iter().any(|module| module.target == self.root) {
+            return Err("source_closure.modules must list its root".to_string());
+        }
+        if self.root.is_some() && self.modules.iter().any(|module| module.target.is_none()) {
+            return Err(
+                "source_closure lists an originless module under a canonical root".to_string(),
+            );
+        }
+        if self.digest != source_closure_digest(&self.modules) {
+            return Err("source_closure.digest is not the digest of its modules".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn source_closure_digest(modules: &[SourceClosureModule]) -> String {
+    let mut preimage = SOURCE_CLOSURE_DOMAIN.as_bytes().to_vec();
+    for module in modules {
+        preimage.extend_from_slice(module.target.as_deref().unwrap_or("").as_bytes());
+        preimage.push(b'\t');
+        preimage.extend_from_slice(module.sha256.as_bytes());
+        preimage.push(b'\n');
+    }
+    format!(
+        "sha256:{}",
+        crate::digest::hex(&crate::digest::sha256(&preimage))
+    )
+}
+
+/// The serialized artifact. `program` repeats `ProgramSpec`'s fields in
+/// order, with their serde attributes, and appends `interface`, so the block
+/// sits at `program.interface` while `ProgramSpec` itself is unchanged. It
+/// does not use `#[serde(flatten)]`: flattening buffers values, and the
+/// buffered form cannot read the integer keys of a parameter table.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "CompiledProgramArtifact"))]
+struct ArtifactWire {
+    artifact_format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine_build: Option<EngineBuild>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_closure: Option<SourceClosure>,
+    program: ArtifactProgramWire,
+    metadata: CompiledProgramMetadata,
+}
+
+/// `ProgramSpec` plus `interface`, as written inside an artifact.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "ArtifactProgram"))]
+struct ArtifactProgramWire {
+    /// As `ProgramSpec`'s field of the same name, first so the two serialize
+    /// in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
+    /// Module-level metadata (source pinning, encoding provenance,
+    /// validation status) carried through RuleSpec lowering for tooling and
+    /// artifact pass-through. Load/compile boundaries validate it; execution
+    /// semantics do not depend on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module: Option<ModuleMetadata>,
+    #[serde(default)]
+    units: Vec<UnitSpec>,
+    #[serde(default)]
+    relations: Vec<RelationSpec>,
+    #[serde(default)]
+    parameters: Vec<IndexedParameterSpec>,
+    #[serde(default)]
+    derived: Vec<DerivedSpec>,
+    /// As `ProgramSpec`'s field of the same name, last of its fields so the
+    /// two serialize in the same order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_declarations: Vec<crate::spec::InputDeclarationSpec>,
+    /// The program's entity roster, input slots and relations. Execution
+    /// never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interface: Option<ProgramInterface>,
+}
+
+/// [`ArtifactWire`], borrowed, for serialization.
+#[derive(Serialize)]
+struct ArtifactWireRef<'a> {
+    artifact_format_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_version: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine_build: Option<&'a EngineBuild>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_closure: Option<&'a SourceClosure>,
+    program: ArtifactProgramWireRef<'a>,
+    metadata: &'a CompiledProgramMetadata,
+}
+
+/// [`ArtifactProgramWire`], borrowed, for serialization.
+#[derive(Serialize)]
+struct ArtifactProgramWireRef<'a> {
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    selected_year_inputs: &'a [crate::selected_year::SelectedYearInput],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module: Option<&'a ModuleMetadata>,
+    units: &'a [UnitSpec],
+    relations: &'a [RelationSpec],
+    parameters: &'a [IndexedParameterSpec],
+    derived: &'a [DerivedSpec],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    input_declarations: &'a [crate::spec::InputDeclarationSpec],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<&'a ProgramInterface>,
+}
+
+fn slice_is_empty<T>(items: &&[T]) -> bool {
+    items.is_empty()
+}
+
+impl<'a> ArtifactProgramWireRef<'a> {
+    fn new(program: &'a ProgramSpec, interface: Option<&'a ProgramInterface>) -> Self {
+        Self {
+            selected_year_inputs: &program.selected_year_inputs,
+            module: program.module.as_ref(),
+            units: &program.units,
+            relations: &program.relations,
+            parameters: &program.parameters,
+            derived: &program.derived,
+            input_declarations: &program.input_declarations,
+            interface,
+        }
+    }
+}
+
+impl Serialize for CompiledProgramArtifact {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ArtifactWireRef {
+            artifact_format_version: self.artifact_format_version,
+            engine_version: self.engine_version.as_ref(),
+            engine_build: self.engine_build.as_ref(),
+            source_closure: self.source_closure.as_ref(),
+            program: ArtifactProgramWireRef::new(&self.program, self.interface.as_ref()),
+            metadata: &self.metadata,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompiledProgramArtifact {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ArtifactWire::deserialize(deserializer)?;
+        Ok(Self {
+            artifact_format_version: wire.artifact_format_version,
+            engine_version: wire.engine_version,
+            engine_build: wire.engine_build,
+            source_closure: wire.source_closure,
+            program: ProgramSpec {
+                selected_year_inputs: wire.program.selected_year_inputs,
+                module: wire.program.module,
+                units: wire.program.units,
+                relations: wire.program.relations,
+                parameters: wire.program.parameters,
+                derived: wire.program.derived,
+                input_declarations: wire.program.input_declarations,
+            },
+            interface: wire.program.interface,
+            metadata: wire.metadata,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
+/// The artifact's schema is the wire struct's, so it describes the block at
+/// `program.interface`.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for CompiledProgramArtifact {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        ArtifactWire::schema_name()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        ArtifactWire::schema_id()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ArtifactWire::json_schema(generator)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,10 +618,11 @@ pub struct CompiledProgramMetadata {
     /// the artifact and keeps this value unchanged, with a
     /// `stale_fast_path_metadata` diagnostic.
     pub fast_path: FastPathMetadata,
-    /// Defaulted only so an artifact that predates the catalog can be read at
-    /// all. Absence is filled from the embedded program in `from_json_source`;
-    /// a catalog that IS present is still checked against the program, so an
-    /// explicit `[]` remains a mismatch rather than a way to skip the check.
+    /// Required in format 3. Defaulted only so a format-2 artifact that
+    /// predates the catalog can be read at all: the format-2 compatibility
+    /// loader fills an absent one from the embedded program. A catalog that
+    /// IS present is still checked against the program, so an explicit `[]`
+    /// remains a mismatch rather than a way to skip the check.
     #[serde(default)]
     pub input_catalog: Vec<CompiledInputCatalogEntry>,
 }
@@ -231,7 +661,7 @@ impl CompiledProgramArtifact {
         program: ProgramSpec,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
-        Self::compile_at(program, "<program>", options)
+        Self::compile_at(program, "<program>", options, None)
     }
 
     fn compile_rulespec_outcome(
@@ -267,7 +697,8 @@ impl CompiledProgramArtifact {
             }
         }
 
-        let mut artifact = Self::compile_at(outcome.program, path, options)?;
+        let source_closure = outcome.source.map(SourceClosure::from_texts);
+        let mut artifact = Self::compile_at(outcome.program, path, options, source_closure)?;
         artifact.diagnostics.splice(0..0, rulespec_diagnostics);
         Ok(artifact)
     }
@@ -276,45 +707,111 @@ impl CompiledProgramArtifact {
         mut program: ProgramSpec,
         path: &str,
         options: CompileOptions,
+        source_closure: Option<SourceClosure>,
     ) -> Result<Self, CompileError> {
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
         // re-check the same invariant via `to_program`.
+        crate::selected_year::validate(&program)?;
         program.validate_rounding()?;
         program.validate_effective_ranges()?;
         let diagnostics = normalize_parameter_duplicates(&mut program, path, options)?;
         let metadata = compiled_metadata(&program)?;
-        crate::relation_typing::check_program(&program.to_program()?).map_err(|report| {
+        let model = program.to_program()?;
+        crate::relation_typing::check_program(&model).map_err(|report| {
             CompileError::RelationTyping {
                 path: path.to_string(),
                 report,
             }
         })?;
+        let interface = crate::interface::derive_from_model(&model, &program.input_declarations)?;
         Ok(Self {
             artifact_format_version: ARTIFACT_FORMAT_VERSION,
             engine_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            engine_build: Some(EngineBuild::current()),
+            source_closure,
             program,
+            interface: Some(interface),
             metadata,
             diagnostics,
         })
     }
 
-    fn check_format_version(
+    /// The format-3 checks, after the raw shape checks of `from_json_source`:
+    /// the identities' shapes, the program checks compilation runs, metadata
+    /// equal to what this engine computes, relation typing, and the stored
+    /// `program.interface` equal, as JSON, to what this engine derives.
+    fn check_format_3(
+        mut self,
+        path: &str,
+        options: CompileOptions,
+        stored_interface: &serde_json::Value,
+    ) -> Result<Self, CompileError> {
+        let engine_build = self
+            .engine_build
+            .as_ref()
+            .ok_or_else(|| invalid_artifact_contract(path, "format 3 requires `engine_build`"))?;
+        engine_build
+            .validate()
+            .map_err(|message| invalid_artifact_contract(path, message))?;
+        if let Some(source_closure) = &self.source_closure {
+            source_closure
+                .validate()
+                .map_err(|message| invalid_artifact_contract(path, message))?;
+        }
+        self.program.validate_provenance()?;
+        self.program.validate_rounding()?;
+        self.program.validate_effective_ranges()?;
+        self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
+        // A derived-metadata consistency check, as in format 2, without the
+        // retired fast-path rule sets: every format-3 artifact was compiled
+        // under this engine's analysis.
+        if self.metadata != compiled_metadata(&self.program)? {
+            return Err(invalid_artifact_contract(
+                path,
+                "metadata does not match the compiled program",
+            ));
+        }
+        let model = self.program.to_program()?;
+        crate::relation_typing::check_program(&model).map_err(|report| {
+            CompileError::RelationTyping {
+                path: path.to_string(),
+                report,
+            }
+        })?;
+        // Compared as JSON so a value that deserializes to the same thing
+        // but is written differently is refused too.
+        let interface =
+            crate::interface::derive_from_model(&model, &self.program.input_declarations)?;
+        let derived = serde_json::to_value(&interface).map_err(CompileError::SerializeArtifact)?;
+        if derived != *stored_interface {
+            return Err(invalid_artifact_contract(
+                path,
+                "program.interface does not match the interface this engine derives from the embedded program",
+            ));
+        }
+        self.interface = Some(interface);
+        Ok(self)
+    }
+
+    /// The format-2 checks the default loader ran before format 3,
+    /// unchanged.
+    fn check_format_2(
         mut self,
         path: &str,
         options: CompileOptions,
         fill_absent_catalog: bool,
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
-        if self.artifact_format_version != ARTIFACT_FORMAT_VERSION {
-            return Err(CompileError::UnsupportedArtifactFormatVersion {
+        if self.artifact_format_version != LEGACY_FORMAT_2 {
+            return Err(CompileError::LegacyArtifactFormat {
                 path: path.to_string(),
                 found: self.artifact_format_version,
-                supported: ARTIFACT_FORMAT_VERSION,
             });
         }
         self.program.validate_provenance()?;
+        crate::selected_year::validate(&self.program)?;
         self.program.validate_rounding()?;
         self.program.validate_effective_ranges()?;
         self.diagnostics = normalize_parameter_duplicates(&mut self.program, path, options)?;
@@ -516,22 +1013,98 @@ impl CompiledProgramArtifact {
         })
     }
 
+    /// The default loader: format 3 only. A missing version is a parse
+    /// error, as before format 3; any other version is refused with a
+    /// message naming the older side.
     fn from_json_source(
         source: &str,
         path: &str,
         options: CompileOptions,
     ) -> Result<Self, CompileError> {
-        Self::from_json_source_gated(source, path, options, RelationTypingGate::Enforce)
+        let value = parse_artifact_json(source, path)?;
+        let Some(found) = declared_format(&value) else {
+            return Err(deserialize_artifact::<Self>(value, path)
+                .err()
+                .unwrap_or_else(|| {
+                    invalid_artifact_contract(path, "artifact_format_version must be an integer")
+                }));
+        };
+        if found != ARTIFACT_FORMAT_VERSION {
+            return Err(CompileError::UnsupportedArtifactFormatVersion {
+                path: path.to_string(),
+                found,
+                supported: ARTIFACT_FORMAT_VERSION,
+                artifact_engine_version: value
+                    .get("engine_version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            });
+        }
+        validate_format_3_shape(&value, path)?;
+        validate_raw_artifact_contract(&value, path)?;
+        let stored_interface = value["program"]["interface"].clone();
+        let artifact: Self = deserialize_artifact(value, path)?;
+        artifact.check_format_3(path, options, &stored_interface)
     }
 
-    /// Load an artefact without the mandatory relation typing gate, so the
-    /// migration tool can type an artefact the loader would reject. Every
-    /// other contract check still runs.
+    /// The format-2 compatibility loader. It reads format 2 only, with every
+    /// format-2 dialect tolerance the default loader had before format 3: a
+    /// null `program.extends`, an absent `metadata.input_catalog` (filled
+    /// from the program after duplicate parameters are normalized), an
+    /// absent `engine_version`, `metadata.fast_path` computed under a retired
+    /// rule set (kept, with a `stale_fast_path_metadata` diagnostic), and the
+    /// relation typing gate with its pointer to `migrate artifact`. It
+    /// refuses a format-2 payload carrying `program.interface`,
+    /// `program.input_declarations`, `engine_build` or `source_closure`.
+    ///
+    /// The result is still format 2: `artifact_format_version` is 2 and
+    /// `interface`, `engine_build` and `source_closure` are `None`, so nothing
+    /// downstream can mistake it for a format-3 artifact. It serializes as
+    /// the format-2 loader's result did, except where a dialect is
+    /// normalized.
+    pub fn from_legacy_format_2_json_str(source: &str) -> Result<Self, CompileError> {
+        Self::from_legacy_format_2_json_str_with_options(source, CompileOptions::default())
+    }
+
+    pub fn from_legacy_format_2_json_str_with_options(
+        source: &str,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        Self::from_format_2_source(source, "<memory>", options, RelationTypingGate::Enforce)
+    }
+
+    /// [`Self::from_legacy_format_2_json_str`] for a file.
+    #[cfg(feature = "fs")]
+    pub fn from_legacy_format_2_json_file(path: impl AsRef<Path>) -> Result<Self, CompileError> {
+        Self::from_legacy_format_2_json_file_with_options(path, CompileOptions::default())
+    }
+
+    #[cfg(feature = "fs")]
+    pub fn from_legacy_format_2_json_file_with_options(
+        path: impl AsRef<Path>,
+        options: CompileOptions,
+    ) -> Result<Self, CompileError> {
+        let path = path.as_ref();
+        let source = fs::read_to_string(path).map_err(|error| CompileError::ReadArtifactFile {
+            path: path.display().to_string(),
+            error,
+        })?;
+        Self::from_format_2_source(
+            &source,
+            &path.display().to_string(),
+            options,
+            RelationTypingGate::Enforce,
+        )
+    }
+
+    /// Load a format-2 artefact without the mandatory relation typing gate,
+    /// so the migration tool can type an artefact the loader would reject.
+    /// Every other contract check still runs.
     pub(crate) fn from_json_str_for_relation_migration(
         source: &str,
         path: &str,
     ) -> Result<Self, CompileError> {
-        Self::from_json_source_gated(
+        Self::from_format_2_source(
             source,
             path,
             CompileOptions::default(),
@@ -539,36 +1112,31 @@ impl CompiledProgramArtifact {
         )
     }
 
-    fn from_json_source_gated(
+    /// Format 2, with every dialect tolerance the default loader had before
+    /// format 3.
+    fn from_format_2_source(
         source: &str,
         path: &str,
         options: CompileOptions,
         typing: RelationTypingGate,
     ) -> Result<Self, CompileError> {
-        let value: serde_json::Value =
-            serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
-                path: path.to_string(),
-                error,
-            })?;
-        if let Some(found) = value
-            .get("artifact_format_version")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|version| u32::try_from(version).ok())
-            && found != ARTIFACT_FORMAT_VERSION
+        let value = parse_artifact_json(source, path)?;
+        if let Some(found) = declared_format(&value)
+            && found != LEGACY_FORMAT_2
         {
-            return Err(CompileError::UnsupportedArtifactFormatVersion {
+            return Err(CompileError::LegacyArtifactFormat {
                 path: path.to_string(),
                 found,
-                supported: ARTIFACT_FORMAT_VERSION,
             });
         }
+        reject_format_3_additions(&value, path)?;
         validate_raw_artifact_contract(&value, path)?;
         // Absence, not emptiness. `#[serde(default)]` cannot tell an omitted
         // catalog from an explicit `[]`, and the two must not be treated alike:
         // an artifact that never carried the field is readable, while one
         // asserting an empty catalog over a program with inputs is making a
         // false claim the consistency check below has to catch. The fill
-        // itself happens inside `check_format_version`, AFTER duplicate
+        // itself happens inside `check_format_2`, AFTER duplicate
         // normalization: reconstructing the catalog needs `to_program()`,
         // which rejects the compatible duplicates normalization exists to
         // collapse (published us-tn-snap carries them).
@@ -576,12 +1144,8 @@ impl CompiledProgramArtifact {
             .get("metadata")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|metadata| !metadata.contains_key("input_catalog"));
-        let artifact: Self =
-            serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
-                path: path.to_string(),
-                error,
-            })?;
-        artifact.check_format_version(path, options, catalog_absent, typing)
+        let artifact: Self = deserialize_artifact(value, path)?;
+        artifact.check_format_2(path, options, catalog_absent, typing)
     }
 
     /// Resolve each rule's and parameter's `corpus_citation_path` to a
@@ -748,12 +1312,7 @@ fn compiled_input_catalog(
         .input_catalog()
         .into_iter()
         .map(|(slot, request_names)| {
-            let canonical_request_name = request_names
-                .iter()
-                .find(|request_name| request_name.as_str() == slot)
-                .or_else(|| request_names.first())
-                .expect("every discovered input slot has an owning request name")
-                .clone();
+            let canonical_request_name = canonical_request_name(&slot, &request_names).to_string();
             CompiledInputCatalogEntry {
                 slot,
                 canonical_request_name,
@@ -761,6 +1320,146 @@ fn compiled_input_catalog(
             }
         })
         .collect())
+}
+
+/// The catalog's preferred request name for `slot`: the bare slot when it is
+/// one of the names, else the first of them.
+pub(crate) fn canonical_request_name<'a>(slot: &str, request_names: &'a [String]) -> &'a str {
+    request_names
+        .iter()
+        .find(|request_name| request_name.as_str() == slot)
+        .or_else(|| request_names.first())
+        .expect("every discovered input slot has an owning request name")
+}
+
+fn parse_artifact_json(source: &str, path: &str) -> Result<serde_json::Value, CompileError> {
+    serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+        path: path.to_string(),
+        error,
+    })
+}
+
+fn deserialize_artifact<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    path: &str,
+) -> Result<T, CompileError> {
+    serde_json::from_value(value).map_err(|error| CompileError::DeserializeArtifact {
+        path: path.to_string(),
+        error,
+    })
+}
+
+/// The artifact's declared format, when it is a `u32`.
+fn declared_format(value: &serde_json::Value) -> Option<u32> {
+    value
+        .get("artifact_format_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+}
+
+/// The keys format 3 closes or requires, checked on the raw JSON before it
+/// is read: a closed top-level key set; `engine_version`, `engine_build`,
+/// `program.interface` and `metadata.input_catalog` present; and
+/// `program.extends` refused outright, null included.
+fn validate_format_3_shape(value: &serde_json::Value, path: &str) -> Result<(), CompileError> {
+    let Some(artifact) = value.as_object() else {
+        return Err(invalid_artifact_contract(
+            path,
+            "an artifact is a JSON object",
+        ));
+    };
+    if let Some(key) = artifact
+        .keys()
+        .find(|key| !FORMAT_3_KEYS.contains(&key.as_str()))
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            format!(
+                "unknown top-level key `{key}`; format 3 has only {}",
+                FORMAT_3_KEYS
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    let object = |key: &str| artifact.get(key).and_then(serde_json::Value::as_object);
+    if !artifact
+        .get("engine_version")
+        .is_some_and(serde_json::Value::is_string)
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `engine_version`, a string",
+        ));
+    }
+    if object("engine_build").is_none() {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `engine_build`, an object",
+        ));
+    }
+    if artifact.contains_key("source_closure") && object("source_closure").is_none() {
+        return Err(invalid_artifact_contract(
+            path,
+            "`source_closure` is an object when present",
+        ));
+    }
+    let Some(program) = object("program") else {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `program`",
+        ));
+    };
+    if program.contains_key("extends") {
+        return Err(invalid_artifact_contract(
+            path,
+            "program.extends was removed; compose before compilation",
+        ));
+    }
+    if !program
+        .get("interface")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `program.interface`, an object",
+        ));
+    }
+    if !object("metadata").is_some_and(|metadata| metadata.contains_key("input_catalog")) {
+        return Err(invalid_artifact_contract(
+            path,
+            "format 3 requires `metadata.input_catalog`",
+        ));
+    }
+    Ok(())
+}
+
+/// A format-2 payload carrying one of format 3's additions is neither
+/// format, so the compatibility loader refuses it rather than drop the
+/// addition.
+fn reject_format_3_additions(value: &serde_json::Value, path: &str) -> Result<(), CompileError> {
+    let carried = ["engine_build", "source_closure"]
+        .into_iter()
+        .find(|key| value.get(key).is_some())
+        .or_else(|| {
+            let program = value.get("program")?;
+            [
+                ("interface", "program.interface"),
+                ("input_declarations", "program.input_declarations"),
+            ]
+            .into_iter()
+            .find(|(key, _)| program.get(key).is_some())
+            .map(|(_, location)| location)
+        });
+    match carried {
+        Some(key) => Err(invalid_artifact_contract(
+            path,
+            format!("a format-2 artifact cannot carry `{key}`, which only format 3 has"),
+        )),
+        None => Ok(()),
+    }
 }
 
 fn validate_raw_artifact_contract(
@@ -1398,11 +2097,23 @@ fn collect_fast_blockers_from_scalar_expr(
     blockers: &mut Vec<String>,
 ) {
     match expr {
+        ScalarExprSpec::InputForYear { .. } => blockers.push(format!(
+            "{derived_name}: selected-year input requires Explain"
+        )),
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. } => {}
-        ScalarExprSpec::CountRelated { .. } => {}
+        // Fast mode runs relation aggregations on the explain interpreter, so
+        // nothing inside one blocks it (a date result falls back at run time).
+        ScalarExprSpec::OnlyRelated { .. }
+        | ScalarExprSpec::CountRelated { .. }
+        | ScalarExprSpec::ExtremeRelated { .. }
+        | ScalarExprSpec::SingleRelated { .. } => {}
+        // A qualified read is valid only inside a derived relation's
+        // predicate, which fast mode runs on the explain interpreter; a rule
+        // body holding one is refused (`relation_role_outside_scope`).
+        ScalarExprSpec::RoleInput { .. } | ScalarExprSpec::RoleDerived { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_fast_blockers_from_scalar_expr(derived_name, rules, index, blockers);
         }
@@ -1504,7 +2215,9 @@ fn collect_fast_blockers_from_judgment_expr(
             collect_fast_blockers_from_scalar_expr(derived_name, rules, left, blockers);
             collect_fast_blockers_from_scalar_expr(derived_name, rules, right, blockers);
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::RelationMember { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -1548,39 +2261,69 @@ fn validate_relation_derivation_graph(program: &ProgramSpec) -> Result<(), Compi
         graph.insert(relation.name.clone(), dependencies);
     }
 
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    for relation in graph.keys() {
-        detect_relation_cycle(relation, &graph, &mut visiting, &mut visited)?;
-    }
-    Ok(())
+    detect_relation_cycle(&graph)
 }
 
-fn detect_relation_cycle(
-    relation: &str,
-    graph: &BTreeMap<String, BTreeSet<String>>,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-) -> Result<(), CompileError> {
-    if visited.contains(relation) {
-        return Ok(());
-    }
-    if !visiting.insert(relation.to_string()) {
-        let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
-        cycle.sort();
-        return Err(CompileError::CyclicRelationDependency {
-            cycle: cycle.join(", "),
-        });
-    }
-    if let Some(dependencies) = graph.get(relation) {
-        for dependency in dependencies {
-            if graph.contains_key(dependency) {
-                detect_relation_cycle(dependency, graph, visiting, visited)?;
+/// Depth-first search of the derived-relation graph for a cycle, with an
+/// explicit stack so a long chain of relations cannot overflow the call
+/// stack. Relations are visited in name order and each relation's
+/// dependencies in name order; on meeting a relation already on the current
+/// path, the error names every relation on that path, sorted.
+fn detect_relation_cycle(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+    // Nodes are derived relations by position in name order; each keeps its
+    // dependencies that are themselves derived relations, in name order.
+    let index = graph
+        .keys()
+        .enumerate()
+        .map(|(position, name)| (name.as_str(), position))
+        .collect::<HashMap<_, _>>();
+    let dependencies = graph
+        .values()
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .filter_map(|dependency| index.get(dependency.as_str()).copied())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let names = graph.keys().collect::<Vec<_>>();
+
+    let mut on_path = vec![false; names.len()];
+    let mut finished = vec![false; names.len()];
+    // The current path: each relation with the next dependency to follow.
+    let mut path = Vec::<(usize, usize)>::new();
+    for root in 0..names.len() {
+        if finished[root] {
+            continue;
+        }
+        on_path[root] = true;
+        path.push((root, 0));
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&dependency) = dependencies[node].get(*next) else {
+                on_path[node] = false;
+                finished[node] = true;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            if finished[dependency] {
+                continue;
             }
+            if on_path[dependency] {
+                let mut cycle = path
+                    .iter()
+                    .map(|&(member, _)| names[member].as_str())
+                    .collect::<Vec<_>>();
+                cycle.sort_unstable();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            on_path[dependency] = true;
+            path.push((dependency, 0));
         }
     }
-    visiting.remove(relation);
-    visited.insert(relation.to_string());
     Ok(())
 }
 
@@ -1649,8 +2392,12 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -1661,9 +2408,12 @@ fn collect_scalar_dependencies(
                 collect_judgment_dependencies(predicate, dependencies, aggregated_relations);
             }
         }
-        ScalarExprSpec::Derived { name } => {
+        // A rule read through a term is a dependency like an unqualified
+        // one: the order walk and the cycle check see it either way.
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
+        ScalarExprSpec::RoleInput { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_scalar_dependencies(index, dependencies, aggregated_relations);
         }
@@ -1701,6 +2451,18 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(to, dependencies, aggregated_relations);
         }
         ScalarExprSpec::SumRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             value,
             relation,
             where_clause,
@@ -1748,7 +2510,7 @@ fn collect_judgment_dependencies(
             collect_scalar_dependencies(left, dependencies, aggregated_relations);
             collect_scalar_dependencies(right, dependencies, aggregated_relations);
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } => {}
@@ -1768,9 +2530,12 @@ fn collect_judgment_dependencies(
 fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::ParameterLookup { index, .. }
@@ -1807,6 +2572,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             collect_relation_members_from_scalar(from, relations);
             collect_relation_members_from_scalar(to, relations);
         }
+        ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -1818,6 +2584,16 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -1860,7 +2636,7 @@ fn collect_relation_members_from_judgment(
             collect_relation_members_from_scalar(left, relations);
             collect_relation_members_from_scalar(right, relations);
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             relations.insert(relation.clone());
         }
@@ -1942,6 +2718,33 @@ pub fn compile_summary_lines(artifact: &CompiledProgramArtifact) -> BTreeMap<Str
     );
     if let Some(engine_version) = &artifact.engine_version {
         lines.insert("engine_version".to_string(), engine_version.clone());
+    }
+    if let Some(engine_build) = &artifact.engine_build {
+        lines.insert("engine_build".to_string(), engine_build.to_string());
+    }
+    if let Some(source_closure) = &artifact.source_closure {
+        lines.insert(
+            "source_closure_digest".to_string(),
+            source_closure.digest.clone(),
+        );
+        lines.insert(
+            "source_closure_modules".to_string(),
+            source_closure.modules.len().to_string(),
+        );
+    }
+    if let Some(interface) = &artifact.interface {
+        lines.insert(
+            "interface_entities".to_string(),
+            interface.entities.len().to_string(),
+        );
+        lines.insert(
+            "interface_inputs".to_string(),
+            interface.inputs.len().to_string(),
+        );
+        lines.insert(
+            "interface_relations".to_string(),
+            interface.relations.len().to_string(),
+        );
     }
     lines.insert(
         "derived_outputs".to_string(),
@@ -2197,5 +3000,231 @@ rules:
             conflict_error,
             CompileError::ConflictingParameterDeclarations { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{ArtifactProgramWireRef, CompiledProgramArtifact};
+
+    /// Every in-repo RuleSpec fixture that compiles: the sources of the
+    /// frozen format-2 artifacts under `tests/fixtures/artifacts/format2/`.
+    pub(crate) const RULESPEC_FIXTURES: [&str; 22] = [
+        "tests/fixtures/artifacts/nz_best_start_carer_sum.rulespec.yaml",
+        "tests/fixtures/artifacts/related_derived_sums.rulespec.yaml",
+        "tests/fixtures/only_related.yaml",
+        "tests/fixtures/rulespec/other/family_allowance/rules.yaml",
+        "tests/fixtures/rulespec/other/flat_tax/rules.yaml",
+        "tests/fixtures/rulespec/rounding/snap_allotment.yaml",
+        "tests/fixtures/rulespec/ssi/2021/249/regulation/71/rules.yaml",
+        "tests/fixtures/rulespec/ssi/2021/249/regulation/79/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1988/50/section/21/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1992/14/section/11/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/1998/39/section/1/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2007/3/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2008/30/section/3/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2010/4/section/18B/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2013/29/section/99/rules.yaml",
+        "tests/fixtures/rulespec/ukpga/2014/19/section/4/rules.yaml",
+        "tests/fixtures/rulespec/uksi/1987/1967/regulation/15/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2006/965/regulation/2/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2013/376/rules.yaml",
+        "tests/fixtures/rulespec/uksi/2026/148/rules.yaml",
+        "tests/fixtures/selected_year_input.yaml",
+        "tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml",
+    ];
+
+    fn compile_fixture(fixture: &str) -> CompiledProgramArtifact {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
+        let source = std::fs::read_to_string(&path).expect("fixture is readable");
+        CompiledProgramArtifact::from_rulespec_str(&source).expect("fixture compiles")
+    }
+
+    /// The wire struct without an interface serializes byte for byte as
+    /// `ProgramSpec` does, compact and pretty, for every fixture; with one,
+    /// the artifact's `program` is that object plus `interface`.
+    #[test]
+    fn the_wire_program_without_an_interface_serializes_as_program_spec() {
+        for fixture in RULESPEC_FIXTURES {
+            let artifact = compile_fixture(fixture);
+            let wire = ArtifactProgramWireRef::new(&artifact.program, None);
+            assert_eq!(
+                serde_json::to_string(&wire).unwrap(),
+                serde_json::to_string(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+            assert_eq!(
+                serde_json::to_string_pretty(&wire).unwrap(),
+                serde_json::to_string_pretty(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+            let mut value = serde_json::to_value(&artifact).unwrap();
+            let program = value["program"].as_object_mut().unwrap();
+            let interface = program.remove("interface").expect("compile derives it");
+            assert_eq!(
+                interface,
+                serde_json::to_value(artifact.interface.as_ref().unwrap()).unwrap(),
+                "{fixture}"
+            );
+            assert_eq!(
+                value["program"],
+                serde_json::to_value(&artifact.program).unwrap(),
+                "{fixture}"
+            );
+        }
+    }
+
+    /// Every compile derives the interface of the program it emits, and the
+    /// artifact reads it back from `program.interface`.
+    #[test]
+    fn compile_always_derives_the_interface() {
+        for fixture in RULESPEC_FIXTURES {
+            let artifact = compile_fixture(fixture);
+            assert_eq!(
+                artifact.interface,
+                Some(crate::interface::derive_interface(&artifact.program).unwrap()),
+                "{fixture}"
+            );
+            let reread: CompiledProgramArtifact =
+                serde_json::from_str(&serde_json::to_string(&artifact).unwrap()).unwrap();
+            assert_eq!(reread.interface, artifact.interface, "{fixture}");
+        }
+        let artifact = CompiledProgramArtifact::compile(crate::spec::ProgramSpec::default())
+            .expect("an empty program compiles");
+        assert_eq!(
+            artifact.interface,
+            Some(crate::interface::ProgramInterface {
+                entities: Vec::new(),
+                inputs: Vec::new(),
+                relations: Vec::new(),
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod relation_cycle_tests {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    use proptest::collection::{btree_set, vec};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+
+    use super::{CompileError, detect_relation_cycle};
+
+    /// The recursive search [`detect_relation_cycle`] replaced, kept as the
+    /// reference for which cycle is reported.
+    fn reference_detect(graph: &BTreeMap<String, BTreeSet<String>>) -> Result<(), CompileError> {
+        fn visit(
+            relation: &str,
+            graph: &BTreeMap<String, BTreeSet<String>>,
+            visiting: &mut HashSet<String>,
+            visited: &mut HashSet<String>,
+        ) -> Result<(), CompileError> {
+            if visited.contains(relation) {
+                return Ok(());
+            }
+            if !visiting.insert(relation.to_string()) {
+                let mut cycle = visiting.iter().cloned().collect::<Vec<String>>();
+                cycle.sort();
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: cycle.join(", "),
+                });
+            }
+            if let Some(dependencies) = graph.get(relation) {
+                for dependency in dependencies {
+                    if graph.contains_key(dependency) {
+                        visit(dependency, graph, visiting, visited)?;
+                    }
+                }
+            }
+            visiting.remove(relation);
+            visited.insert(relation.to_string());
+            Ok(())
+        }
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        for relation in graph.keys() {
+            visit(relation, graph, &mut visiting, &mut visited)?;
+        }
+        Ok(())
+    }
+
+    /// A derived-relation graph over up to nine relations whose dependencies
+    /// name other relations or a data relation outside the graph.
+    fn graph() -> impl Strategy<Value = BTreeMap<String, BTreeSet<String>>> {
+        (1_usize..10).prop_flat_map(|size| {
+            let dependency = prop_oneof![
+                6 => (0..size).prop_map(|index| format!("r{index}")),
+                1 => Just("base".to_string()),
+            ];
+            vec(btree_set(dependency, 0..3), size).prop_map(|dependencies| {
+                dependencies
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, dependencies)| (format!("r{index}"), dependencies))
+                    .collect()
+            })
+        })
+    }
+
+    fn outcome(result: Result<(), CompileError>) -> Result<(), String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn iterative_search_reports_what_the_recursive_search_reported() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 4000,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[11; 32]),
+        );
+        let cycles = std::cell::Cell::new(0_usize);
+        runner
+            .run(&graph(), |graph| {
+                let expected = outcome(reference_detect(&graph));
+                cycles.set(cycles.get() + usize::from(expected.is_err()));
+                let actual = outcome(detect_relation_cycle(&graph));
+                if actual != expected {
+                    return Err(TestCaseError::fail(format!(
+                        "iterative {actual:?}, recursive {expected:?}, graph {graph:?}"
+                    )));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(cycles.get() > 1000, "only {} cyclic graphs", cycles.get());
+    }
+
+    #[test]
+    fn a_long_chain_is_searched_without_recursing_per_link() {
+        // Names ascend toward the data relation, so the first relation in name
+        // order heads the whole chain; 50,000 links overflowed the recursion.
+        let links = 50_000;
+        let mut graph = (0..links)
+            .map(|link| {
+                let source = if link + 1 < links {
+                    format!("rel{:07}", link + 1)
+                } else {
+                    "base".to_string()
+                };
+                (format!("rel{link:07}"), BTreeSet::from([source]))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(detect_relation_cycle(&graph).is_ok());
+
+        // Closing the chain into a loop reports every relation on it.
+        graph.insert(
+            format!("rel{:07}", links - 1),
+            BTreeSet::from(["rel0000000".to_string()]),
+        );
+        let Err(CompileError::CyclicRelationDependency { cycle }) = detect_relation_cycle(&graph)
+        else {
+            panic!("a closed chain is a cycle");
+        };
+        assert_eq!(cycle.split(", ").count(), links);
     }
 }

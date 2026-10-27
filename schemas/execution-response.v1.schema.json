@@ -95,6 +95,12 @@
               ],
               "description": "The output-rounding mode the rule applied, if any. Present whenever\nthe rule declares `rounding:`, so an auditor sees the rounding step\nwas part of the determination even when the value was already whole."
             },
+            "selected_year_reads": {
+              "items": {
+                "$ref": "#/$defs/TraceSelectedYearRead"
+              },
+              "type": "array"
+            },
             "source": {
               "type": [
                 "string",
@@ -166,6 +172,12 @@
             "parameter_reads": {
               "items": {
                 "$ref": "#/$defs/TraceParameterRead"
+              },
+              "type": "array"
+            },
+            "selected_year_reads": {
+              "items": {
+                "$ref": "#/$defs/TraceSelectedYearRead"
               },
               "type": "array"
             },
@@ -621,6 +633,35 @@
         "index",
         "value",
         "effective_from"
+      ],
+      "type": "object"
+    },
+    "TraceSelectedYearRead": {
+      "properties": {
+        "entity_id": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "selected_end": {
+          "format": "date",
+          "type": "string"
+        },
+        "selected_start": {
+          "format": "date",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/ScalarValueSpec"
+        }
+      },
+      "required": [
+        "input",
+        "entity_id",
+        "selected_start",
+        "selected_end",
+        "value"
       ],
       "type": "object"
     }

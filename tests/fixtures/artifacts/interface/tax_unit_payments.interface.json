@@ -1,0 +1,85 @@
+{
+  "entities": [
+    {
+      "id_template": "Payment:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Payment"
+    },
+    {
+      "id_template": "Person:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Person"
+    },
+    {
+      "id_template": "TaxUnit:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "TaxUnit"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Payment"
+      ],
+      "legal_id": "amount",
+      "name": "amount",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Payment"
+      ],
+      "legal_id": "share",
+      "name": "share",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": [
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "member_of_tax_unit",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Person",
+        "TaxUnit"
+      ]
+    },
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "payment_to_person",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Payment",
+        "Person"
+      ]
+    }
+  ]
+}

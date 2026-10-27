@@ -29,6 +29,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// A direction lowering cannot read from declared kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DirectionError {
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
     /// A same-kind relation read from an entity occupying more than one slot.
     Aggregate {
         relation: String,
@@ -61,8 +66,24 @@ struct Relations {
 
 /// `defaulted_slots` names the derived relations whose `current_slot` or
 /// `related_slot` the source left to the legacy default.
-pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<String>) -> Result<()> {
+pub(crate) fn resolve(
+    program: &mut ProgramSpec,
+    defaulted_slots: &HashSet<String>,
+    inputs: &serde_yaml::Value,
+    input_origin: Option<&str>,
+    imported_inputs: &[(Option<String>, serde_yaml::Value)],
+) -> Result<()> {
     let relations = relations(program);
+    let mut declaration_blocks: HashMap<Option<&str>, Vec<&serde_yaml::Value>> = HashMap::new();
+    for (origin, block) in std::iter::once((input_origin, inputs)).chain(
+        imported_inputs
+            .iter()
+            .map(|(origin, value)| (origin.as_deref(), value)),
+    ) {
+        if !block.is_null() {
+            declaration_blocks.entry(origin).or_default().push(block);
+        }
+    }
     let mut names = defaulted_slots.iter().collect::<Vec<_>>();
     names.sort();
     for name in names {
@@ -85,6 +106,10 @@ pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<Strin
         let mut resolver = Resolver {
             relations: &relations,
             citing: &citing,
+            inputs: declaration_blocks
+                .get(&citing.split_once('#').map(|(origin, _)| origin))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         };
         resolver.semantics(&mut rule.semantics, &rule.entity)?;
         for version in &mut rule.versions {
@@ -126,6 +151,10 @@ pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<Strin
         let mut resolver = Resolver {
             relations: &relations,
             citing: &citing,
+            inputs: declaration_blocks
+                .get(&citing.split_once('#').map(|(origin, _)| origin))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         };
         resolver.judgment(
             &mut derivation.predicate,
@@ -214,6 +243,7 @@ fn relations(program: &ProgramSpec) -> Relations {
 struct Resolver<'a> {
     relations: &'a Relations,
     citing: &'a str,
+    inputs: &'a [&'a serde_yaml::Value],
 }
 
 type Result<T> = std::result::Result<T, DirectionError>;
@@ -226,6 +256,48 @@ type Result<T> = std::result::Result<T, DirectionError>;
 type Membership<'a> = Option<(Option<&'a str>, Option<&'a str>)>;
 
 impl Resolver<'_> {
+    fn only_related_input(&self, name: &str, owner: &str) -> Result<()> {
+        let fail = |message: &str| DirectionError::OnlyRelatedInput {
+            citing: self.citing.into(),
+            input: name.into(),
+            message: message.into(),
+        };
+        let mut matches = Vec::new();
+        for block in self.inputs {
+            if block.is_null() {
+                continue;
+            }
+            let Some(items) = block.as_sequence() else {
+                return Err(fail("inputs must be a sequence"));
+            };
+            for item in items {
+                if item.get("name").and_then(serde_yaml::Value::as_str) == Some(name) {
+                    matches.push(item);
+                }
+            }
+        }
+        let [declaration] = matches.as_slice() else {
+            return Err(fail("input declaration is missing or ambiguous"));
+        };
+        if !matches!(
+            declaration.get("dtype").and_then(serde_yaml::Value::as_str),
+            Some("Boolean" | "boolean" | "Bool" | "bool")
+        ) {
+            return Err(fail("input dtype must be Boolean"));
+        }
+        if owner.is_empty()
+            || declaration
+                .get("entity")
+                .and_then(serde_yaml::Value::as_str)
+                != Some(owner)
+        {
+            return Err(fail(
+                "input entity must equal the declared related-slot entity",
+            ));
+        }
+        Ok(())
+    }
+
     fn semantics(&mut self, expr: &mut DerivedSemanticsSpec, entity: &str) -> Result<()> {
         match expr {
             DerivedSemanticsSpec::Scalar { expr } => self.scalar(expr, entity, None),
@@ -295,6 +367,22 @@ impl Resolver<'_> {
         membership: Membership<'_>,
     ) -> Result<()> {
         match expr {
+            ScalarExprSpec::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                let owner = self.aggregate(relation, current_slot, related_slot, entity)?;
+                let crate::spec::RelatedValueRefSpec::Input { name } = value else {
+                    return Err(DirectionError::OnlyRelatedInput {
+                        citing: self.citing.into(),
+                        input: format!("{value:?}"),
+                        message: "derived values are not supported".into(),
+                    });
+                };
+                self.only_related_input(name, &owner)?;
+            }
             ScalarExprSpec::CountRelated {
                 relation,
                 current_slot,
@@ -302,6 +390,20 @@ impl Resolver<'_> {
                 where_clause,
             }
             | ScalarExprSpec::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExprSpec::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExprSpec::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -361,10 +463,15 @@ impl Resolver<'_> {
                     self.scalar(n, entity, None)?;
                 }
             }
+            // A qualified read names its term, so it has no direction to
+            // resolve: it reads the term's id whatever the slot kinds are.
             ScalarExprSpec::Literal { .. }
+            | ScalarExprSpec::InputForYear { .. }
             | ScalarExprSpec::Input { .. }
             | ScalarExprSpec::InputOrElse { .. }
             | ScalarExprSpec::Derived { .. }
+            | ScalarExprSpec::RoleInput { .. }
+            | ScalarExprSpec::RoleDerived { .. }
             | ScalarExprSpec::PeriodStart
             | ScalarExprSpec::PeriodEnd => {}
         }
@@ -437,7 +544,7 @@ impl Resolver<'_> {
                     *related_slot = related_index;
                 }
             }
-            JudgmentExprSpec::Derived { .. } => {}
+            JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         }
         Ok(())
     }
