@@ -36,9 +36,12 @@ const response = JSON.parse(engine.execute(artifactJson, JSON.stringify(request)
 ## The JSON boundary
 
 `compile(modules_json, root_target) -> artifact_json` takes
-`{"<canonical target>": "<RuleSpec YAML>", …}` and returns a compiled program
-artifact carrying `engine_version`, `artifact_format_version`, and every
-rule's durable legal id.
+`{"<canonical target>": "<RuleSpec YAML>", …}` and returns a format-3
+compiled artifact carrying `engine_version`, `engine_build`,
+`artifact_format_version`, a `source_closure` hashing the module texts read,
+and every rule's durable legal id. Its `program.interface` describes entity
+instances, input slots and elections, and relations; loading re-derives
+the block and requires equality. Only the format identity gates loading.
 
 `execute(artifact_json, request_json) -> response_json` takes a
 `CompiledExecutionRequest` — a dataset of typed input records and relation
@@ -49,6 +52,8 @@ every value cites the statute, regulation, or answer it came from.
 any other with a message that says which side is older.
 `execute_legacy_format_2(artifact_json, request_json)` runs a format-2
 artifact unchanged through the engine's format-2 compatibility loader.
+Recompile the module texts to produce format 3. Full artifact bytes are
+deterministic for fixed module texts, compile options and build identity.
 
 `engine_version()`, `engine_build()` (the commit and dirty flag `compile`
 stamps, as JSON) and `artifact_format_version()` report what this build

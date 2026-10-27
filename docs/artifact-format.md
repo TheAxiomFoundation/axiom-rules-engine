@@ -1,12 +1,10 @@
 # Compiled artifact format 3
 
-Status: design note for axiom-rules-engine#155, riding the format bump in #125.
-This file becomes the format reference when the change lands. Every statement
-about current behavior cites the code it was read from, at `main` 5d63e8f3.
-Revised after an independent review of the first draft; the review's twelve
-findings are answered in "Review record" at the end.
+This is the compiled-artifact reference for axiom-rules-engine. The generated
+[format-3 schema](../schemas/compiled-artifact.v3.schema.json) describes its
+wire shape; compilation and loading also enforce the consistency checks below.
 
-## What changes
+## Format-3 contract
 
 Format 3 adds three things to a compiled artifact and changes how artifacts
 are admitted:
@@ -20,15 +18,19 @@ are admitted:
    which side is older. Format 2 loads only through a separately named
    compatibility loader and stays format 2 in memory.
 
-Execution does not read any of it. `program` without `interface`, and
-`metadata`, are what format 2 emitted for the same source.
+Execution does not read these additions. For source without election
+declarations, `program` without `interface`, and `metadata`, are what format 2
+emits for the same source. Elections add inert `program.input_declarations`
+content, described below.
 
-## Facts the design rests on
+## Evaluation and compilation facts
 
-- **Inputs are not declared.** A formula identifier that names no parameter or
-  rule lowers to an `input` node (`docs/rulespec-format.md`, "Identifier
-  resolution"). RuleSpec has no field for an input's dtype, entity, default or
-  domain.
+- **Most inputs are inferred from expressions.** A formula identifier that
+  names no parameter or rule lowers to an `input` node
+  ([Identifier resolution](rulespec-format.md#identifier-resolution)). The
+  interface derives type demands, entity flow, defaults and domains from read
+  sites. The `inputs:` block supplies elections; the `only_related` and
+  `input_for_year` constructs also validate declarations there.
 - **An input is read by `(slot name, entity id)`.** `Engine::lookup_input`
   (`src/engine.rs`) keys on the bare slot and the id being evaluated. The
   record's `entity` label is not part of the key, so two instances of
@@ -39,7 +41,8 @@ Execution does not read any of it. `program` without `interface`, and
   A `where` clause and a summed value run on the related id
   (`fold_member`). So a rule's declared `entity` does not fix the ids its
   inputs are read on.
-- **That difference is real in the corpus.** Main compiles 4,342 of the 4,878
+- **That difference occurs in published RuleSpec.** Main at 5d63e8f3
+  compiles 4,342 of the 4,878
   atomic modules in rulespec-us at 16a667719. In those artifacts, counting
   base and version expressions, 168 rule references in 52 modules go directly
   from a rule of one named kind to a rule of another (a `TaxUnit` rule to a
@@ -56,10 +59,11 @@ Execution does not read any of it. `program` without `interface`, and
   parameter's `indexed_by` label enters the catalog whether or not an
   expression reads it (`Program::input_catalog`, `src/model.rs`); 99 such
   slots appear in those artifacts.
-- **`input_or_else` is the only declared default**, and the formula language
-  cannot produce it; none appears in those artifacts.
+- **`input_or_else` supplies an input default.** The formula language cannot
+  produce it; raw `ProgramSpec` expressions can. No such read appears in the
+  corpus measurement above.
 - **A derived relation also reads tuples supplied under its own name.**
-  `related_entity_ids_at_level` unions the filtered source members with
+  `related_entity_ids` unions the filtered source members with
   `direct_related_ids(relation, ...)`.
 - **Nothing constrains how many tuples an id appears in.** A relation schema
   holds a name, an arity, slot kinds and a derivation (`RelationSchema`,
@@ -73,16 +77,17 @@ Execution does not read any of it. `program` without `interface`, and
   other combination is a `TypeMismatch` when the node is reached. A plain
   `input` node returns its value unchecked, and `Engine::scalar_rule` caches a
   rule's value without checking it against the rule's declared dtype.
-- **Stage-3 unit aggregation compares whole artifacts.** It digests the
+- **Stage-3 unit aggregation checks executable content.** It digests the
   serialization of the source artifact it loaded (`source_artifact_digest`)
-  and compares the stored phase-two artifact, as a JSON value, with one it
-  regenerates on the running engine (`validate_compiled_artifact`,
-  `src/unit_derivation/aggregation.rs`). The second comparison already
-  includes `engine_version`; `tests/fast_path_metadata.rs` restamps that field
-  so its fixture survives a crate version cut.
+  and compares the stored phase-two artifact's `program` and `metadata` with
+  a regenerated artifact's. Both embedded artifacts must pass their own
+  loaders (`validate_compiled_artifact`,
+  `src/unit_derivation/aggregation.rs`). Producer versions and builds may
+  differ from the running engine's.
 - **The format-2 loader normalizes.** It collapses compatible duplicate
   parameters, fills an absent input catalog, and drops a null `extends`
-  (`check_format_version`, `validate_raw_artifact_contract`, `src/compile.rs`).
+  (`from_format_2_source`, `check_format_2`, `validate_raw_artifact_contract`,
+  `src/compile.rs`).
 
 ## Top-level shape
 
@@ -121,13 +126,13 @@ reason to refuse. #125 asks for the identities to stop sharing one string; it
 does not ask for a separate evaluation-semantics number, and this change does
 not add one.
 
-`engine_build` comes from a new `build.rs` that uses only `std` and never
+`engine_build` comes from `build.rs`, which uses only `std` and never
 fails a build:
 
 - `commit` is `AXIOM_RULES_ENGINE_BUILD_COMMIT` when set to 40 hex digits;
   else `git rev-parse HEAD` when the git top level is the crate directory (a
-  vendored copy inside another repository reports null, not that repository's
-  commit); else the `sha1` in `.cargo_vcs_info.json` for a published crate;
+  vendored copy inside another repository has no git identity); else the
+  `sha1` in `.cargo_vcs_info.json` for a published crate;
   else null.
 - `dirty` is true when `src/`, `build.rs`, `Cargo.toml` or `Cargo.lock` differ
   from that commit; from `.cargo_vcs_info.json`, its `dirty` flag when
@@ -135,12 +140,11 @@ fails a build:
   `AXIOM_RULES_ENGINE_BUILD_DIRTY=true|false` or null; null whenever `commit`
   is null.
 - It reruns on `rerun-if-env-changed` for both variables and
-  `rerun-if-changed` for `src`, `build.rs`, `Cargo.toml`, `Cargo.lock`,
+  `rerun-if-changed` for existing `src`, `build.rs`, `Cargo.toml`, `Cargo.lock`,
   `.cargo_vcs_info.json`, and the resolved git paths of `HEAD`, the ref it
   points to and `packed-refs` (`git rev-parse --git-path`, so a linked
   worktree resolves correctly).
-- `build.rs` joins the `include` list in `Cargo.toml`, or a published crate
-  would not build.
+- `build.rs` is in the crate's `Cargo.toml` `include` list.
 
 Compilation is byte-deterministic for a fixed build: the same source, the
 same compile options and an engine with the same `engine_build` give the same
@@ -157,8 +161,7 @@ from a `ProgramSpec` has no RuleSpec source, so `source_closure` is omitted.
 The closure identifies RuleSpec module text and nothing else: a
 `--corpus-provisions` index changes `source_url` fields and is not in it.
 
-The crate version does not move in this change; versions are cut in their own
-commits. The next cut should be 0.3.0.
+The crate version and artifact format advance independently.
 
 ## `program.interface`
 
@@ -258,15 +261,18 @@ The engine declares no cardinality for any kind or relation.
 
 ### Inputs
 
-A **read site** of a slot is any `input` or `input_or_else` node naming it, or
-a `sum_related` whose summed value is that input, in any rule's base
-expression or versions or in any derived relation's predicate. These are the
+A **read site** of a slot is any `input`, `input_or_else` or `input_for_year`
+node naming it, or a `sum_related`, `only_related`, `extreme_related` or
+`single_related` whose value is that input, in any rule's base expression or
+versions or in any derived relation's predicate. These are the
 occurrences `Program::input_catalog` collects, so the slots listed here are
 the catalog's slots minus the `indexed_by` labels no expression mentions.
 Read sites are potential reads: an unselected branch, a `no_match` pattern
 and an `over_periods` operand count, although an evaluation may never reach
 them. `legal_id` is the catalog's `canonical_request_name`; the catalog keeps
 the full `request_names` set.
+An `input_for_year` read uses its selected-year contract's runtime `slot`;
+`legal_id` remains the slot's canonical catalog request name.
 
 **`entities`** lists every entity kind whose ids a read site of the slot can
 be evaluated on. It follows evaluation flow, not the reading rule's label,
@@ -298,12 +304,21 @@ site demands one of:
 
 | Demand | Read site |
 |---|---|
-| `bool` | operand of an `eq` or `ne` comparison whose other operand is a boolean literal |
+| `bool` | value of `only_related`; operand of an `eq` or `ne` comparison whose other operand is a boolean literal or `only_related` |
 | `text` | operand of an `eq` or `ne` comparison whose other operand is a text literal |
 | `date` | date operand of `date_add_*`; operand of `days_between`; operand of a comparison whose other operand is a date literal, `period_start`, `period_end` or a `date_add_*` node |
 | `integer` | index of a `parameter_lookup`; offset operand of `date_add_*` |
 | `number` | operand of `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil` or `floor`; summed value of `sum_related`; operand of a comparison whose other operand is an integer or decimal literal or an `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`, `floor`, `count_related`, `sum_related` or `days_between` node |
 | none | every other position: the rule's value or an `if` branch; a comparison with an input, a rule, a parameter lookup or an `if`; an ordered comparison with a boolean or text literal; a `no_match` subject or pattern; anything inside an `over_periods` reduction |
+
+The `over_periods` suppression covers every nested expression in its
+operands; parameter-index domains and defaults remain structurally derived.
+
+`input_for_year` keeps the demand of its expression position. The input
+value of `extreme_related` and `single_related` also keeps the enclosing
+position's demand, with no parameter-index domain inferred through the
+aggregate. This deliberately makes no additional claim from a selected-year
+input's declared dtype or an extremum's own runtime restrictions.
 
 The slot's `dtype` is null if any read site demands none. Otherwise it is
 `bool`, `text` or `date` when every site demands that; `integer` when every
@@ -347,10 +362,13 @@ loader's re-derivation checks it.
 
 A module's top-level `inputs:` block declares its inputs, as a list of
 entries with `name` or as a mapping from name to entry. Every entry key
-except `election` is inert and unvalidated, as before this format: the
+except `election` is inert for this derivation: the
 corpus carries `entity`, `dtype`, `period`, `description` and `unit` there,
 with dtypes such as `Count` that are not engine vocabulary, and a block with
-no `election` anywhere changes nothing, whatever its shape. `election` is
+no `election` contributes no election declarations. Programs using
+`only_related` or `input_for_year` separately validate their input
+declarations ([RuleSpec](rulespec.md#input-declarations-and-elections)).
+`election` is
 strict: `{actor, provision}` and no other key, `actor` an UpperCamelCase kind
 label (it need not be a kind the program evaluates on), `provision` a
 canonical corpus citation path. The entry must have a name, and the name
@@ -376,6 +394,8 @@ last field, omitted when empty: a list sorted by `input`, each
 root. The interface derivation refuses declarations that are not in that
 form: unsorted or repeated, naming an input the program does not read, or
 malformed.
+An unused parameter `indexed_by` label is insufficient: a declaration must
+name an expression read even when the label appears in the input catalog.
 
 ### Relations
 
@@ -403,13 +423,13 @@ refusal of supplied tuples for a derived relation, ratified in
 
 ## In Rust
 
-`ProgramSpec` gains one field, `input_declarations`, last and omitted when
-empty, so a raw `ExecutionRequest.program` may carry it and the
-`execution-request.v1` schema gains it. This is deliberate and additive:
+`ProgramSpec` carries `input_declarations` last and omits it when empty.
+A raw `ExecutionRequest.program` may carry it, and the
+`execution-request.v1` schema includes it. This is deliberate and additive:
 an election is program content, compiled from the module source, and the
 loader derives the interface from the program alone. Execution never reads
 the field. A program without elections serializes as before.
-`CompiledProgramArtifact` gains `interface: Option<ProgramInterface>`,
+`CompiledProgramArtifact` carries `interface: Option<ProgramInterface>`,
 `engine_build` and `source_closure` beside `program`. Its serialization goes
 through a wire struct that repeats `ProgramSpec`'s fields in order and
 appends `interface`,
@@ -425,7 +445,7 @@ in the emitted schema.
 
 `CompiledProgramArtifact::from_json_*` reads format 3 only:
 
-- no `artifact_format_version`: rejected, as today;
+- no `artifact_format_version`: rejected;
 - a lower version: "compiled artefact `<path>` is older than this engine: it
   is artifact format 2 (written by engine 0.2.2) and this engine (0.2.2,
   build 5d63e8f) reads format 3", followed by the two ways forward: recompile,
@@ -435,13 +455,14 @@ in the emitted schema.
 - format 3: top-level keys are a closed set; `engine_version`, `engine_build`,
   `program.interface` and `metadata.input_catalog` are required;
   `program.extends` is refused outright; and `interface` must equal what this
-  engine derives from the embedded program. The existing metadata and
-  relation-typing checks are unchanged.
+  engine derives from the embedded program. Metadata must equal this
+  engine's current analysis; relation typing is checked as at compile.
 
-The format-2 dialect tolerances move out of the default loader into
+The format-2 dialect tolerances are confined to
 `from_legacy_format_2_json_str` / `_file`. That loader accepts format 2 only
-and refuses a format-2 payload that carries `interface`,
-`input_declarations`, `engine_build` or `source_closure`. What it returns is still format 2:
+and refuses a format-2 payload that carries `program.interface`,
+`program.input_declarations`, `engine_build` or `source_closure`.
+What it returns is still format 2:
 `artifact_format_version` is 2 and `interface` is `None`. The engine never
 derives an interface for it, so nothing downstream can mistake it for a
 format-3 artifact. Three separate statements hold for its bytes:
@@ -452,7 +473,14 @@ format-3 artifact. Three separate statements hold for its bytes:
   serializes exactly as main's loader result does, so every stage-3 digest of
   a loaded source artifact is what it was;
 - original wire bytes are not preserved where the dialect is normalized
-  (duplicate parameters, an absent catalog, a null `extends`), as today.
+  (duplicate parameters, an absent catalog, a null `extends`).
+
+The compatibility loader retains the format-2 tolerances: an absent
+`engine_version`, compatible duplicate parameters, an absent input catalog
+filled after normalization, null `extends`, and metadata from a retired
+fast-path rule set. It preserves accepted retired metadata and emits a
+`stale_fast_path_metadata` diagnostic. Relation typing remains mandatory,
+with the existing migration pointer for an unsafe format-2 program.
 
 There is no 2-to-3 upgrade command: a format-3 artifact states who compiled it
 and from what, and only a compile knows that.
@@ -489,16 +517,21 @@ unchanged: it is the digest of the loaded source artifact's serialization.
 The loader compares the stored interface with its own derivation, so a later
 engine that derived a different interface for the same program would refuse
 artifacts already published, which is the `fast_path` problem of 2026-10-04.
-For format 3 the derivation above is fixed. Changing what any program's
-interface contains is a new format version, whose engine reads format 3
-through a compatibility loader that keeps this derivation. That cost is why
-the derivation claims little: structural facts, and usage rules that
-transcribe what the evaluators enforce. Golden fixtures pin it.
+For format 3 the derivation above is fixed for every program a format-3
+engine can already load. Changing one of those programs' interfaces requires
+a new format version, whose engine reads format 3 through a compatibility
+loader that keeps this derivation. A later construct that older engines
+refuse to deserialize may extend the derivation and `RelationProvenance`
+for programs using that construct without a format bump: no published
+artifact changes. Examples include a new expression variant or a derived
+relation without `source_relation`, as #214 plans. The derivation therefore
+claims structural facts and usage rules that transcribe what evaluators
+enforce. Golden fixtures pin it.
 
 ## Invariants and tests
 
-1. **Executable content is unchanged.** For every program, the format-3
-   artifact's `program` without `interface`, and its `metadata`, equal the
+1. **Executable content is unchanged.** For source without elections, the
+   format-3 artifact's `program` without `interface`, and its `metadata`, equal the
    format-2 artifact main compiles. Tested against format-2 fixtures written
    by the unmodified engine at 5d63e8f3 for every in-repo RuleSpec fixture,
    and over the corpus by comparing each module with main's artifact.
@@ -510,7 +543,8 @@ transcribe what the evaluators enforce. Golden fixtures pin it.
    emits passes the loader's re-derivation; the input slots are the catalog's
    slots minus unmentioned `indexed_by` labels, with the same canonical
    names; every relation entry matches its `program.relations` entry; every
-   kind an input or relation names is in the roster. Property test, and every
+   kind an input or relation names is in the roster. Elections agree with
+   `program.input_declarations`. Property test, and every
    corpus program that compiles. This shows self-consistency; 6 and 7 test
    the derivation against the evaluator.
 4. **Format 2 is never read as format 3.** The default loader refuses every
@@ -550,7 +584,8 @@ transcribe what the evaluators enforce. Golden fixtures pin it.
 10. **Elections are declared, never defaulted.** Both forms of the `inputs:`
     block reach the interface and compile to the same artifact; any block
     in which no entry carries `election` compiles to the artifact the module
-    compiles to without it (property test); each refusal names its module
+    compiles to without it, when no declaration-sensitive primitive is used
+    (property test); each refusal names its module
     and entry; an imported module's elections are checked against its own
     rules; disagreeing declarations of one slot, an election read with
     `input_or_else`, and tampering with an `election` or with
@@ -558,25 +593,11 @@ transcribe what the evaluators enforce. Golden fixtures pin it.
     byte-identical responses with and without the declarations; and the
     module schema refuses exactly the election shapes the loader refuses.
 
-Corpus impact is reported as: modules compiled by main, modules compiled by
-the branch (the two sets must be equal), modules whose artifact gains the
-block, failures by cause, how many slots list more than one entity, and how
-many have a dtype, a default and a closed domain.
-
-## Surfaces touched
-
-`src/compile.rs`, new `src/interface.rs`, new `src/digest.rs` (the SHA-256
-routine moves out of `unit_derivation`), new `build.rs`, `Cargo.toml`
-(`include`), `src/rulespec.rs` (module hashes into the lowering outcome;
-the `inputs:` block's elections), `src/spec.rs` (`ProgramSpec.input_declarations`),
-`src/schema.rs` (format 3 generated; `compiled-artifact.v2.schema.json`
-frozen as an archive and added to the crate `include` list), `src/main.rs`,
-`src/migrate.rs`, `src/unit_derivation` (embedded artifacts and the
-phase-two comparison), `python/`, `python-ext/`, `wasm/`, the three RuleSpec
-docs, `README.md` and `DECISIONS.md`.
-
-Not touched: the evaluators, `PROGRESS.md`, workflow pins, CODEOWNERS,
-`release/v0.1`, tags.
+Corpus acceptance compares the complete sets of modules that compile and
+each module's executable content with a baseline. Its tally includes module
+and artifact counts, failures by cause, slots listing several entities or
+`Scalar`, dtype counts, defaults, closed domains, entity instance sources,
+relation provenance, and elections by actor.
 
 ## Deferred
 
@@ -588,60 +609,3 @@ Not touched: the evaluators, `PROGRESS.md`, workflow pins, CODEOWNERS,
   encoding defects is a corpus question.
 - Refusing supplied tuples for a derived relation.
 - The corpus-provisions index in the source closure.
-
-## Review record
-
-An independent review (GPT-6.1 Sol, 2026-10-10) requested changes on the first
-draft. Each finding and what the note does about it:
-
-1. A build stamp would break stage-3 loading, which compares whole
-   artifacts. Fixed: the phase-two check compares `program` and `metadata`
-   ("Stage-3 unit aggregation", invariant 9).
-2. The inferred dtype ignored read sites with no evidence (`a = x + 1`,
-   `b = x`). Fixed: any site that demands nothing makes the dtype null, bool
-   and text evidence is limited to `==` and `!=`, the claim is one-way, and
-   `integer` is stated as a whole number.
-3. `K(R)` dropped the direct query of an entity-free rule once another rule
-   referenced it. Fixed: an entity-free rule always contributes `Scalar`.
-4. An unused derived relation over an untyped source has no alias target.
-   Fixed: `of` is nullable.
-5. `lookup_slots` cannot establish a "many side". Fixed: the claim is
-   removed; the engine declares no cardinality.
-6. A null `default` does not make a missing value an error. Fixed: null means
-   no uniform default.
-7. Byte identity for the legacy loader was over-stated. Fixed: three separate
-   statements, tested separately.
-8. `derived` hid that supplied tuples are still read. Fixed:
-   `accepts_supplied_tuples`.
-9. The build script's reruns omitted the environment override. Fixed, with
-   `.cargo_vcs_info.json` and the crate `include` list.
-10. Sorting every inner list would reorder `slot_entities`. Fixed: it is
-    positional.
-11. Adding the field to `ProgramSpec` changed the raw-request schema. Fixed:
-    `ProgramSpec` is untouched; the artifact serializes through a wire
-    struct.
-12. `snake_case` was unspecified and could collide. Fixed: the template uses
-    the kind verbatim.
-
-A delta check of this revision approved it with four changes, all made:
-invariant 6 no longer treats a defaulted read as an unreached one; a filter
-of a kind to itself stays `supplied`; the artifact's schema delegates to the
-wire struct; and byte determinism is stated for a fixed build.
-
-The review also asked that read sites be defined as potential reads (done,
-matching the catalog), that parity be compared within each mode (invariant
-8), and that the reading of #125's "semantic version" be made explicit (under
-"The four identities"). Its suggestion to stop freezing the derivation is not
-taken: the loader's comparison needs one derivation per format, so the note
-keeps the freeze and narrows what is derived.
-
-### Added after review: elections
-
-Max added a requirement on #155 on 2026-10-10, after the review, and ruled
-on #134 (d1265) the same day: the interface marks which inputs are
-elections and who makes each one, so the simulation layer can tell which
-inputs it may branch over. That is `election` under "Inputs" and the
-RuleSpec `inputs:` block. It reverses finding 11 for one field:
-`ProgramSpec` gains `input_declarations`, because an election is program
-content and the interface is derived from the program alone. Execution
-never reads it, and a program without elections serializes as before.

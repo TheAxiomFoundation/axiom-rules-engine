@@ -229,10 +229,12 @@ no longer loads; see the next section.
 #### Migrating compiled artifacts
 
 Artifacts compiled before typing became mandatory keep format version 2.
-Those whose executed relations pass the typing check (or that execute none)
-load as before. One that executes an untyped relation, or reads a typed one
-against its declared kinds, fails to load with a message naming the
-migration. Recompiling from typed source is the durable fix; for an
+This engine loads format 2 only through the explicit compatibility path
+(`run-compiled --accept-artifact-format 2`, Rust's
+`from_legacy_format_2_*`, or Python's `accept_artifact_format=2`). Executed
+relations must still pass the typing check. One that executes an untyped
+relation, or reads a typed one against its declared kinds, fails with a
+message naming the migration. Recompiling from typed source is the durable fix; for an
 artifact whose source cannot be recompiled yet:
 
 ```bash
@@ -268,6 +270,8 @@ declared-order resolution) is refused unless an override in executed order
 retypes it; to change an orientation, recompile. The rewritten
 artifact's bytes differ, so republish any sha256 pins. `axiom-rules-engine
 capabilities` lists `relation_entity_typing` for engines that enforce this.
+The migration command continues to write format 2; recompilation from
+RuleSpec produces format 3 with its checked interface and producer identities.
 
 Derived relations are rule-defined views over data relations or other derived
 relations. The source relation supplies candidate tuples; the formula decides
@@ -429,9 +433,15 @@ slot, and it is then canonical. Otherwise the lexicographically first exact
 atomic `<module>#input.<slot>` owner is canonical. Multiple owner names are
 equivalent inputs to one slot; arbitrary prefixes and `<target>#<slot>` aliases
 are not accepted. This is a deterministic runtime-input catalog, not a source
-manifest. Artifact loading also recomputes compiler-derived metadata and checks
-it for consistency with the embedded program; source-tamper evidence belongs to
-the signed-corpus-release and supervisor chain.
+manifest. Format-3 artifacts additionally carry `program.interface`, whose
+input entries use these canonical names and describe entity flow, conservative
+type demands, uniform defaults, closed parameter-index domains and elections.
+Its entity and relation entries describe instance sources, tuple slot kinds,
+traversal and provenance. Loading re-derives the interface and metadata from
+the embedded program and checks consistency. `engine_build` identifies the
+producer build, and `source_closure` hashes the RuleSpec texts read, including
+imports. Source authenticity remains in the signed-corpus-release and
+supervisor chain. See [the artifact format reference](artifact-format.md).
 
 Filesystem search is one host strategy, not part of the core. A host can
 instead supply module text directly through the `source::ModuleSource` trait
@@ -777,11 +787,12 @@ is auditable.
 
 A module's top-level `inputs:` block describes the inputs its rules read, as
 a list of entries with `name` or as a mapping from name to entry. The engine
-ignores every key of an entry except `election`, and a block without an
-`election` anywhere changes nothing about how the module compiles. (A module
-that uses `only_related` or `input_for_year` also needs the block to declare
-those inputs; see [only-related.md](only-related.md) and
-[rulespec-format.md](rulespec-format.md).)
+ignores descriptive keys for ordinary inferred inputs. A block without an
+`election` contributes no election declarations. A module that uses
+`only_related` or `input_for_year` also needs the block to declare those
+inputs and satisfy their separate checks; see
+[only-related.md](only-related.md) and
+[rulespec-format.md](rulespec-format.md).
 
 `election` marks an input as a choice the law gives a named actor, rather
 than a fact:
@@ -813,6 +824,14 @@ provision. The compiled artifact reports each input's election, or null for
 a fact, in `program.interface` ([artifact-format.md](artifact-format.md)), so
 a simulator knows which inputs it may branch over; it must not optimize over
 a fact.
+
+Lowering carries elections in `ProgramSpec.input_declarations`, a list of
+`{input, election}` entries sorted by the declaring module's input request
+name. The field is last and omitted when empty; raw `ProgramSpec` programs
+may supply it too. Compilation refuses unsorted or repeated declarations,
+unknown request names, malformed election metadata, disagreeing declarations
+of one slot, and any defaulted read of an election. The loader checks the
+same declarations when it re-derives `program.interface`.
 
 ## Source pinning and provenance
 
@@ -891,7 +910,7 @@ Known hard gaps:
   predicates. These should be closed in RuleSpec and `ProgramSpec`, not by
   adding another source format.
 
-## Why This Instead Of Direct `ProgramSpec` YAML
+## Why RuleSpec is the external format
 
 `ProgramSpec` is the engine's typed IR inside compiled artifacts, not a
 filesystem authoring format or alternate loader surface. RuleSpec keeps

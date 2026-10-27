@@ -31,10 +31,19 @@ format-2 compatibility loader, which refuses every other format; recompiling
 the module text with `compile` gives the format-3 artifact. See
 [`docs/artifact-format.md`](../docs/artifact-format.md).
 
+The compiled `program.interface` describes entity instances, input slots
+(including elections), and relations. The loader re-derives it from
+the embedded program. `engine_build` identifies the compiling build, and
+`source_closure` hashes the exact module texts read, including imports.
+Only `artifact_format_version` gates loading; producer versions and builds
+are recorded for provenance.
+
 Canonical targets are the exact `<jurisdiction>:<atomic-root>/<path>` form
 (`us:policies/usda/snap/fy-2026-cola/maximum-allotments`). Imports are absolute
-canonical targets, so durable ids are identical across hosts: an artifact
-compiled in the browser matches one compiled by the CLI from the same modules.
+canonical targets, so durable ids and executable content are identical across
+hosts. Full artifact bytes match for the same module texts, compile options
+and build identity; browser and CLI builds may carry different `engine_build`
+values.
 
 Errors (unresolved imports, cycles, bad payloads, evaluation failures) are
 thrown as JS `Error`s carrying the core's error messages.
@@ -61,7 +70,7 @@ its declared kinds, is refused at load. Recompile from typed RuleSpec, or type
 it with `axiom-rules-engine migrate artifact`. This request policy does not
 change the artifact format version. See
 [dataset binding](../docs/rulespec.md#semantics) for migration details and the
-equivalent CLI and Rust API options.
+equivalent CLI and Rust options.
 
 ## Building
 
