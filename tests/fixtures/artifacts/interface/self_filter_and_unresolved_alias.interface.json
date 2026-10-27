@@ -1,0 +1,120 @@
+{
+  "entities": [
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Household"
+    },
+    {
+      "id_template": null,
+      "instances": {
+        "of": null,
+        "source": "alias",
+        "via": [
+          "linked_unit"
+        ]
+      },
+      "kind": "LinkedUnit"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "income",
+      "name": "income",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [],
+      "legal_id": "link_weight",
+      "name": "link_weight",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": [
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        0
+      ],
+      "name": "eligible_neighbours",
+      "provenance": {
+        "kind": "derived",
+        "reads": {
+          "inputs": [],
+          "relations": [],
+          "rules": [
+            "household_eligible"
+          ]
+        },
+        "rule": "eligible_neighbours",
+        "source_relation": "neighbouring_household"
+      },
+      "slot_entities": [
+        "Household",
+        "Household"
+      ]
+    },
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [],
+      "name": "linked_unit",
+      "provenance": {
+        "kind": "derived",
+        "reads": {
+          "inputs": [
+            "link_weight"
+          ],
+          "relations": [],
+          "rules": []
+        },
+        "rule": "linked_unit",
+        "source_relation": "untyped_links"
+      },
+      "slot_entities": null
+    },
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        0
+      ],
+      "name": "neighbouring_household",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Household",
+        "Household"
+      ]
+    },
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "untyped_links",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": null
+    }
+  ]
+}
