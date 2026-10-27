@@ -442,8 +442,10 @@ a version bump: older engines refuse the unknown expression kinds. Loading
 re-derives the complete interface and refuses a mismatch. The supplied-tuple
 restriction also covers programs using only qualified reads or parameters in
 predicates from PR 1, so their derived relations now report
-`accepts_supplied_tuples: false`. Programs using none of these constructs
-derive the same interface as before.
+`accepts_supplied_tuples: false`. Earlier format-3 artifacts from programs
+using only qualified reads or parameters in predicates must be recompiled:
+the loader now expects that derived-relation interface field to be false.
+Programs using none of these constructs derive the same interface as before.
 
 ## In Rust
 
