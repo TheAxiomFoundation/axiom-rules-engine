@@ -423,8 +423,12 @@ Unqualified reads keep the routing above. A bare parameter name now reads the
 parameter in two places where it used to read an input of that name: anywhere
 in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
-in a rule body as in a predicate. A program with neither, and with no term,
-compiles to the same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
+in a rule body as in a predicate. A bare `period_start` or `period_end`
+tested as a judgment, which used to read a rule, a relation or an input of
+that name, is refused. A judgment resolves a bare name in the order a scalar
+does, and a scalar reads the built-in date first, so neither name is a
+judgment even where a parameter, a rule or a relation shares it. A program with none of these, and with no term, compiles to the
+same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
 reads through a term, naming the qualified read and #218; a root that reaches

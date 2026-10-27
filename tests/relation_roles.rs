@@ -415,6 +415,203 @@ fn a_bare_boolean_parameter_is_a_judgment_of_the_parameter() {
     }
 }
 
+/// The period built-ins are dates and come first in scalar position, so a
+/// bare one is refused as a judgment, in a predicate and in a rule body, even
+/// where a Boolean parameter shares its name.
+#[test]
+fn a_bare_period_built_in_is_refused_as_a_judgment() {
+    for name in ["period_start", "period_end"] {
+        let shadow = format!(
+            r#"
+  - name: {name}
+    kind: parameter
+    dtype: Bool
+    versions:
+      - effective_from: 2026-01-01
+        formula: "true"
+"#
+        );
+        for shadowed in ["", shadow.as_str()] {
+            for (formula, rule_formula) in [
+                (name.to_string(), name.to_string()),
+                (format!("not {name}"), format!("not {name}")),
+                (
+                    format!("{name} and candidate.is_adult"),
+                    format!("{name} and is_adult"),
+                ),
+            ] {
+                let predicate = format!(
+                    "{shadowed}{}",
+                    relative_relation("refused", PERSON_SLOTS, &formula)
+                );
+                let rule = format!(
+                    r#"{shadowed}
+  - name: refused
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: {rule_formula}
+"#
+                );
+                for extra in [predicate, rule] {
+                    let error = compile(&people_module(&extra))
+                        .expect_err("a period built-in is not a judgment")
+                        .to_string();
+                    assert!(
+                        error.contains(&format!("`{name}` is a date")),
+                        "{formula} shadowed={}: {error}",
+                        !shadowed.is_empty()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A bare name tested as a judgment resolves as `name == true` does, and that
+/// comparison lowers the name in scalar position. So the read the comparison
+/// makes decides the bare form: a period built-in (a date) is refused, a rule
+/// is a judgment of the rule, and a parameter or input is the comparison
+/// itself. The one addition is a relation name in a predicate, which tests
+/// membership. Checked for every kind a name can have, and for a name
+/// declared both as a parameter and as a rule, in predicates and rule bodies.
+#[test]
+fn a_bare_judgment_resolves_a_name_as_its_comparison_with_true_does() {
+    const PARAMETER: &str = "    kind: parameter\n    dtype: Bool\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"true\"\n";
+    const RULE: &str = "    kind: derived\n    entity: Person\n    dtype: Judgment\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: age >= 18\n";
+    let declarations: [&[&str]; 4] = [&[], &[PARAMETER], &[RULE], &[PARAMETER, RULE]];
+    let mut kinds = std::collections::BTreeSet::new();
+    for name in ["period_start", "period_end", "flag", "older_relative_of"] {
+        for declaration in declarations {
+            if name == "older_relative_of" && !declaration.is_empty() {
+                continue;
+            }
+            let declared = declaration
+                .iter()
+                .map(|body| format!("\n  - name: {name}\n{body}"))
+                .collect::<String>();
+            for in_predicate in [true, false] {
+                let lowered = |formula: &str| {
+                    let extra = if in_predicate {
+                        relative_relation("tested", PERSON_SLOTS, formula)
+                    } else {
+                        format!(
+                            r#"
+  - name: tested
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: {formula}
+"#
+                        )
+                    };
+                    let artifact = compile(&people_module(&format!("{declared}{extra}")))
+                        .map_err(|error| error.to_string())?;
+                    let program = program_of(&artifact);
+                    Ok::<Value, String>(if in_predicate {
+                        predicate_of(&program, "tested").clone()
+                    } else {
+                        program["derived"]
+                            .as_array()
+                            .expect("rules")
+                            .iter()
+                            .find(|rule| rule["name"] == "tested")
+                            .expect("rule")["expr"]
+                            .clone()
+                    })
+                };
+                let case = format!("{name} {declaration:?} in_predicate={in_predicate}");
+                let bare = lowered(name);
+                let compared = lowered(&format!("{name} == true"))
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let read = compared["left"]["kind"]
+                    .as_str()
+                    .expect("a read")
+                    .to_string();
+                let branch = if in_predicate && name == "older_relative_of" {
+                    "relation_member".to_string()
+                } else {
+                    read.clone()
+                };
+                match read.as_str() {
+                    "period_start" | "period_end" => {
+                        let error = bare.expect_err(&case);
+                        assert!(error.contains("is a date"), "{case}: {error}");
+                    }
+                    "derived" => {
+                        assert_eq!(
+                            bare.expect(&case),
+                            json!({"kind": "derived", "name": name}),
+                            "{case}"
+                        );
+                    }
+                    _ if in_predicate && name == "older_relative_of" => {
+                        assert_eq!(
+                            bare.expect(&case)["kind"],
+                            json!("relation_member"),
+                            "{case}"
+                        );
+                    }
+                    _ => assert_eq!(bare.expect(&case), compared, "{case}"),
+                }
+                kinds.insert((branch, in_predicate));
+            }
+        }
+    }
+    // Every branch above runs in both positions (membership only in a
+    // predicate), so none passes vacuously.
+    let reads = [
+        "derived",
+        "input",
+        "parameter_lookup",
+        "period_end",
+        "period_start",
+    ];
+    let expected = reads
+        .iter()
+        .flat_map(|read| [(read.to_string(), false), (read.to_string(), true)])
+        .chain([("relation_member".to_string(), true)])
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(kinds, expected);
+}
+
+/// A bare parameter of another type compares that value with `true`, so
+/// evaluation fails with a type mismatch rather than reading an input.
+#[test]
+fn a_bare_non_boolean_parameter_fails_as_a_judgment() {
+    let extra = relative_relation("gap_relative_of", PERSON_SLOTS, "minimum_gap")
+        + r#"
+  - name: gap_person
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: minimum_gap
+"#;
+    let program = program_of(&compile(&people_module(&extra)).expect("module compiles"));
+    assert_eq!(
+        predicate_of(&program, "gap_relative_of")["left"]["kind"],
+        json!("parameter_lookup")
+    );
+    for output in ["gap_relative_of_count", "gap_person"] {
+        for mode in ["explain", "fast"] {
+            let queries = json!([{"entity_id": "p1", "period": month(), "outputs": [output]}]);
+            let error = execute_request(request(mode, &program, &family(), &queries))
+                .expect_err("an integer is not a judgment")
+                .to_string();
+            assert!(error.contains("type mismatch"), "{mode} {output}: {error}");
+        }
+    }
+}
+
 /// Dense compiles a parameter read in a predicate; only a read through a term
 /// needs explain or fast.
 #[test]

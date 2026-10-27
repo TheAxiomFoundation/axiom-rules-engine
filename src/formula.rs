@@ -2183,8 +2183,15 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         },
         Expr::Var(name) => {
             ctx.reject_term_name(name, "tested as a judgment")?;
-            // A bare parameter name holds when the parameter is true, read as
-            // `lower_to_scalar` reads it.
+            // A bare name resolves in `lower_to_scalar`'s order. The period
+            // built-ins come first and are dates, so neither is a judgment,
+            // whatever else shares the name; a parameter holds when it is
+            // true.
+            if matches!(name.as_str(), "period_start" | "period_end") {
+                return Err(FormulaError::lower(format!(
+                    "`{name}` is a date, so it cannot be tested as a judgment; compare it, as in `days_between(period_start, period_end) > 0`"
+                )));
+            }
             if ctx.scalars.contains(name) {
                 JudgmentExprSpec::Comparison {
                     left: Box::new(ScalarExprSpec::ParameterLookup {

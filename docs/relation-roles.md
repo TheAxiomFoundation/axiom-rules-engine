@@ -178,9 +178,16 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing. The change to existing programs is a
-bare parameter name in a predicate, or tested as a judgment in a rule body,
-which used to read an input of that name and now reads the parameter (3.3).
+Unqualified reads keep today's routing. Three changes affect existing programs:
+- A bare parameter name in a predicate, or tested as a judgment in a rule
+  body, used to read an input of that name and now reads the parameter (3.3).
+- A bare `period_start` or `period_end` tested as a judgment used to resolve
+  as any bare name did: to a rule of that name, else (in a predicate) a
+  relation, else an input. It is now refused. Both are dates. Scalar position
+  reads the built-in before anything else of the same name, and judgment
+  position now does the same.
+- A bare `anchor` or `candidate` in a derived relation's predicate was an
+  ordinary name and is now refused (3.1).
 
 ### 3.3 Parameters in predicates
 
@@ -563,8 +570,8 @@ constructs.
 - A test checks that a path artifact never also writes `source_relation`.
   `RelationDerivationSpec` does not deny unknown fields, so writing both would
   let an older engine silently ignore the path.
-- A program that uses none of the additions compiles to the same bytes as
-  before.
+- A program that uses none of the additions and makes none of the three
+  changes in 3.2 compiles to the same bytes as before.
 - If #155's format 3 (#250) merges first, this work adds to format 3 and
   needs no separate version bump.
 
@@ -886,6 +893,8 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change.** The exception is a bare parameter name
-  in a predicate, or tested as a judgment in a rule body, which now reads the
-  parameter (3.3).
+- **Unqualified reads do not change.** There are three exceptions. A bare
+  parameter name in a predicate, or tested as a judgment in a rule body, now
+  reads the parameter (3.3). A bare period built-in tested as a judgment is
+  now refused (3.2). A bare `anchor` or `candidate` in a derived relation's
+  predicate is now refused (3.1).
