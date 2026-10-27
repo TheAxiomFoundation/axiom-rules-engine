@@ -1367,6 +1367,47 @@ impl<'a> Engine<'a> {
         self.judgment_rule(name, target_entity_id, period)
     }
 
+    // Keep these arms' binding and allocation locals outside `judgment_node`:
+    // debug builds otherwise reserve them in every judgment frame, including
+    // the frames of deeply nested legacy relation predicates.
+    fn atom_judgment(
+        &mut self,
+        relation: &str,
+        terms: &[Term],
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("relation atom"))?;
+        let ids = terms
+            .iter()
+            .map(|term| context.id_of(*term))
+            .collect::<Vec<_>>();
+        Ok(if self.relation_atom_contains(relation, &ids, period)? {
+            JudgmentOutcome::Holds
+        } else {
+            JudgmentOutcome::NotHolds
+        })
+    }
+
+    fn same_entity_judgment(
+        &self,
+        left: Term,
+        right: Term,
+        negated: bool,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("term comparison"))?;
+        Ok(
+            if (context.id_of(left) == context.id_of(right)) != negated {
+                JudgmentOutcome::Holds
+            } else {
+                JudgmentOutcome::NotHolds
+            },
+        )
+    }
+
     /// The id a rule read through `term` is evaluated on, recorded as a
     /// dependency there. This and the reads above live outside
     /// `scalar_node` and `judgment_node`: every nesting level pays for those
@@ -2152,34 +2193,13 @@ impl<'a> Engine<'a> {
                 self.role_judgment_rule(*term, name, period, relation_context)
             }
             JudgmentExpr::RelationAtom { relation, terms } => {
-                let context = relation_context
-                    .ok_or_else(|| relation_construct_outside_derived_relation("relation atom"))?;
-                let ids = terms
-                    .iter()
-                    .map(|term| context.id_of(*term))
-                    .collect::<Vec<_>>();
-                Ok(if self.relation_atom_contains(relation, &ids, period)? {
-                    JudgmentOutcome::Holds
-                } else {
-                    JudgmentOutcome::NotHolds
-                })
+                self.atom_judgment(relation, terms, period, relation_context)
             }
             JudgmentExpr::SameEntity {
                 left,
                 right,
                 negated,
-            } => {
-                let context = relation_context.ok_or_else(|| {
-                    relation_construct_outside_derived_relation("term comparison")
-                })?;
-                Ok(
-                    if (context.id_of(*left) == context.id_of(*right)) != *negated {
-                        JudgmentOutcome::Holds
-                    } else {
-                        JudgmentOutcome::NotHolds
-                    },
-                )
-            }
+            } => self.same_entity_judgment(*left, *right, *negated, relation_context),
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
