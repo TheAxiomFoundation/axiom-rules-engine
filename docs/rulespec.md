@@ -445,7 +445,8 @@ either old meaning. A predicate that reads a `parameter` record with an
 entity or a computed formula used to read an input of that name and now
 reads the rule. No declaration may take a reserved name, and no name may be
 declared as two of a parameter, a rule and a relation
-([Declaration names](#declaration-names)). A program with none of these, and with no term, compiles to the
+([Declaration names](#declaration-names)).
+A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
@@ -835,18 +836,18 @@ each mode's contract.
 
 ## Declaration names
 
-Each name declared in a module's import-merged closure has one meaning:
-wherever a formula may read that kind of declaration bare, a bare read of the
-name reaches it. The compiler refuses two kinds of declaration that would
+Each name declared in a module's import-merged closure names one
+declaration, and wherever a formula may read that kind of declaration bare, a
+bare read of the name reaches it. The compiler refuses two kinds of declaration that would
 break this, before it lowers any formula, in the default and the strict mode
 alike.
 
 **A name declared as two things** (`declaration_name_clash`). A bare name
-reads one declaration, in a fixed order: a parameter, then a rule, then (in a
-predicate's judgment position) a relation; a name no declaration takes reads
-an input. A name declared as two of these would read only the first. The other would still compile (a
-hidden rule could still be requested by name), but no bare read would reach
-it. Each declaration counts as lowering reads it:
+reads, in a fixed order, a parameter, then a rule, then (in a predicate's
+judgment position) a relation, then an input. A name declared as two of a
+parameter, a rule and a relation would read only the first. The other would
+still compile (a hidden rule could still be requested by name), but no bare
+read would reach it. Each declaration counts as lowering reads it:
 
 - a parameter table, or a `parameter` or `derived` record with no entity and
   only literal versions, is a parameter;
@@ -894,13 +895,21 @@ Five things are not checked:
 - a derived relation's `member_relation` alias (`members` in the SNAP
   example above): in rules of its filtered entity it names that derived
   relation. It is a scoped name, not a declaration;
-- undeclared names, including the inputs an `inputs:` block describes.
-  Inputs are inferred from reads, and an entry does not change which
-  declaration or input a name reads: outside predicates `anchor + 1` reads an
-  input named `anchor`, as above, with or without an entry. An entry whose
-  `election` names an input that no rule or derived-relation predicate of its
-  module reads is refused
-  ([Input declarations and elections](#input-declarations-and-elections));
+- undeclared names, including the inputs an `inputs:` block describes. Its
+  entries are not declarations in the sense of this section: inputs are
+  inferred from reads, and an entry does not change which declaration or
+  input a name reads. Outside predicates `anchor + 1` reads an input named
+  `anchor`, as above, with or without an entry. An entry whose `election`
+  names an input that no rule or derived-relation predicate of its module
+  reads is refused
+  ([Input declarations and elections](#input-declarations-and-elections)).
+  A declared name can also name an input in a position that does not read
+  that declaration, and this is not refused. A bare relation name outside a
+  predicate's judgment position, as in a rule body or in
+  `shared == true`, reads an input of that name. A parameter's name in a
+  related read (`sum(member_of.x)`), in `count_where` or in `only_related`
+  also reads an input of that name. An election on such an input is
+  accepted;
 - `ProgramSpec` JSON: each of its reads names its kind (`parameter_lookup`,
   `derived`, `input`, `relation_member`, `period_start`), so no name chooses
   between declarations.

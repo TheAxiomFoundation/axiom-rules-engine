@@ -203,8 +203,9 @@ Unqualified reads keep today's routing. Five changes affect existing programs:
   or relation named `period_start`, `period_end`, `anchor` or `candidate`,
   and a relation named after a formula keyword such as `true`
   (`reserved_declaration_name`). It also covers a name declared as two of a
-  parameter, a rule and a relation (`declaration_name_clash`). Such a program used to compile, and one bare
-  name reached only one of its declarations. On 2026-10-27 no corpus module
+  parameter, a rule and a relation (`declaration_name_clash`). Such a
+  program used to compile, and one bare name reached only one of its
+  declarations. On 2026-10-27 no corpus module
   declares a reserved name, and one declares a clash (rulespec-us#1953); main
   already refuses that module for another reason.
 - A `parameter` record with an entity or a computed formula lowers to a

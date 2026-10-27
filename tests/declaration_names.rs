@@ -12,11 +12,15 @@
 //!
 //! An `inputs:` entry describes an input; it is not a declaration.
 //!
-//! The property states the invariant: no name a program can declare has two
-//! meanings, or loses its bare read to a built-in or a term. A module passes
+//! The property states the invariant: no two declarations share a name, and
+//! no declaration loses its bare read to a built-in or a term. A module passes
 //! the check exactly when every declared name is unreserved and has one kind,
 //! and then a bare read of each declared name, in every position where its
-//! kind is read bare, lowers to a read of that declaration.
+//! kind is read bare, lowers to a read of that declaration. A position that
+//! does not read a declaration's kind (a relation in a rule body, a parameter
+//! in a related read) may still read an input of the declared name; that is
+//! not checked, and `a_declared_name_can_name_an_input_where_its_kind_is_not_read`
+//! pins it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -323,51 +327,100 @@ fn an_undeclared_reserved_name_keeps_its_documented_reads() {
     );
 }
 
-/// An `inputs:` entry describes an input, which a formula reads wherever no
-/// declaration takes the name; the entry declares nothing. One that shares a
-/// declaration's name, or takes a reserved name or a keyword, compiles to the
-/// program compiled without it. An entry with an `election` must name an
-/// input its module reads (`tests/input_elections.rs`), and a bare read of a
-/// declared name reads the declaration, so such an entry is refused.
+/// `source` with an `inputs:` block holding one entry, `name`, with an
+/// `election` when asked.
+fn with_input_entry(source: &str, name: &str, election: bool) -> String {
+    let mut entry = format!(
+        "inputs:\n  - name: {name}\n    entity: Person\n    dtype: Boolean\n    period: Month\n"
+    );
+    if election {
+        entry +=
+            "    election:\n      actor: Household\n      provision: us/regulation/7/273/1/b/3\n";
+    }
+    source.replacen(
+        "format: rulespec/v1\n",
+        &format!("format: rulespec/v1\n{entry}"),
+        1,
+    )
+}
+
+const UNREAD_ELECTION: &str = "input `shared`: carries an election, but no rule or derived-relation predicate of this module reads an input of that name";
+
+/// An `inputs:` entry describes an input; it declares nothing. One that
+/// shares a declaration's name, or takes a reserved name or a keyword,
+/// compiles to the program compiled without it. An entry with an `election`
+/// must name an input its module reads (`tests/input_elections.rs`). Here
+/// `shared` is read only bare where its kind is read bare (a parameter or
+/// rule in a rule body and a predicate, a relation in a predicate's judgment
+/// position), so every read reaches the declaration and the elected entry is
+/// refused. Without the declaration the same reads are input reads, and the
+/// elected entry compiles.
 #[test]
 fn an_inputs_entry_is_not_a_declaration() {
-    let with_entry = |source: &str, name: &str, election: bool| {
-        let mut entry = format!(
-            "inputs:\n  - name: {name}\n    entity: Person\n    dtype: Boolean\n    period: Month\n"
-        );
-        if election {
-            entry += "    election:\n      actor: Household\n      provision: us/regulation/7/273/1/b/3\n";
-        }
-        source.replacen(
-            "format: rulespec/v1\n",
-            &format!("format: rulespec/v1\n{entry}"),
-            1,
-        )
-    };
+    let mut checked = 0;
     for kind in KINDS {
-        let source = module(&[("shared", kind)], &probes(0, "shared", kind));
+        let probes = probes(0, "shared", kind);
+        let source = module(&[("shared", kind)], &probes);
         assert_eq!(
-            compile(&with_entry(&source, "shared", false)),
+            compile(&with_input_entry(&source, "shared", false)),
             compile(&source),
             "{kind:?}"
         );
-        let error = compile(&with_entry(&source, "shared", true))
+        let error = compile(&with_input_entry(&source, "shared", true))
             .expect_err(&format!("{kind:?}: an election on a declared name"));
-        assert!(
-            error.contains(
-                "input `shared`: carries an election, but no rule or derived-relation predicate of this module reads an input of that name"
-            ),
-            "{kind:?}: {error}"
-        );
+        assert!(error.contains(UNREAD_ELECTION), "{kind:?}: {error}");
+        // The control: the same probes with no declaration read an input.
+        compile(&with_input_entry(&module(&[], &probes), "shared", true))
+            .unwrap_or_else(|error| panic!("{kind:?}: the probes read an input: {error}"));
+        checked += 1;
     }
     let source = module(&[], "");
     for name in RESERVED.into_iter().chain(["'true'"]) {
         assert_eq!(
-            compile(&with_entry(&source, name, false)),
+            compile(&with_input_entry(&source, name, false)),
             compile(&source),
             "{name}"
         );
+        checked += 1;
     }
+    assert_eq!(checked, KINDS.len() + RESERVED.len() + 1);
+}
+
+/// The check is about declarations and their bare reads. A position that does
+/// not read a declaration's kind may read an input of the declared name, and
+/// that input may carry an election: a relation's name in a rule body, and a
+/// parameter's name in a related read. `docs/rulespec.md` lists this under
+/// what is not checked.
+#[test]
+fn a_declared_name_can_name_an_input_where_its_kind_is_not_read() {
+    let in_rule_body = "  - name: probe\n    kind: derived\n    entity: Person\n    dtype: Judgment\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: shared\n";
+    let source = module(&[("shared", Kind::DataRelation)], in_rule_body);
+    let program = compile(&with_input_entry(&source, "shared", true))
+        .expect("a relation's name in a rule body reads an input");
+    assert_eq!(
+        find(&program["derived"], "probe")["expr"],
+        is_true(json!({"kind": "input", "name": "shared"}))
+    );
+
+    let parameter = "  - name: shared\n    kind: parameter\n    dtype: Integer\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"1\"\n";
+    let bare = "  - name: bare\n    kind: derived\n    entity: Person\n    dtype: Integer\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: shared + 1\n";
+    let related = "  - name: total\n    kind: derived\n    entity: Household\n    dtype: Integer\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: sum(member_of.shared)\n";
+    let source = module(&[], &format!("{parameter}{bare}{related}"));
+    let program = compile(&with_input_entry(&source, "shared", true))
+        .expect("a parameter's name in a related read reads an input");
+    assert_eq!(
+        find(&program["derived"], "bare")["expr"]["items"][0],
+        parameter_lookup("shared")
+    );
+    // The election is accepted only because the related read reads an input
+    // `shared`: with the bare read alone it is refused.
+    let error = compile(&with_input_entry(
+        &module(&[], &format!("{parameter}{bare}")),
+        "shared",
+        true,
+    ))
+    .expect_err("only the bare read is left");
+    assert!(error.contains(UNREAD_ELECTION), "{error}");
 }
 
 /// A `parameter` record that lowers to a rule (one with an entity, or a
@@ -641,7 +694,7 @@ fn declarations() -> impl Strategy<Value = Vec<(&'static str, Kind)>> {
 }
 
 #[test]
-fn every_declared_name_has_one_meaning_and_keeps_its_bare_read() {
+fn every_declared_name_is_one_declaration_and_keeps_its_bare_read() {
     let mut runner = TestRunner::new(Config {
         cases: 256,
         ..Config::default()
