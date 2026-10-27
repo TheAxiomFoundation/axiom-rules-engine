@@ -3,7 +3,9 @@
 //! of the order's graph. It is the oracle for the differential tests in
 //! `evaluation_order_tests`: the order is stored in artifact metadata and
 //! compared exactly when an artifact loads, so the production path must
-//! return what this returns, errors included, for every program.
+//! return what this returns, errors included, for the legacy programs in that
+//! generator. Atom programs use the full relation graph and have separate
+//! ordering regressions in `tests/relation_atom_order.rs`.
 //!
 //! Frozen: everything below the imports is the code as it stood, except that
 //! `evaluation_order`, `relation_derivation_dependencies` and
