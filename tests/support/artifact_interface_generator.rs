@@ -403,11 +403,12 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
     let reference = b.reference("person_value", Context::Kind("Person".into()));
     b.rule("member_total","Household",json!({"kind":"sum_related","relation":"members","current_slot":1,"related_slot":0,"value":reference}),false);
     b.rule("self_count","Household",json!({"kind":"count_related","relation":"selected_links","current_slot":0,"related_slot":1}),false);
-    // `min` and `max` read every member's value but return only the winner,
-    // so a whole-number demand on `min` is a number demand on each member;
-    // a date demand on `max` carries to each member. `only` returns its one
+    // `max` and `min` read every member's value but return only the winner,
+    // so a whole-number demand on `max` is a number demand on each member;
+    // a date demand on `min` carries to each member. `only` returns its one
     // member's value, which keeps the index's whole-number demand. Neither
-    // closes a domain through the aggregate.
+    // closes a domain through the aggregate. An invalid `0.5` loses the
+    // `max` to a valid `1`, so the soundness probes reach a losing member.
     let rank = b.read(
         "member_rank",
         Demand::Number,
@@ -415,7 +416,7 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
         None,
         None,
     );
-    b.rule("least_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"extreme_related","extreme":"min","relation":"members","current_slot":1,"related_slot":0,"value":rank}}),false);
+    b.rule("greatest_rank","Household",json!({"kind":"parameter_lookup","parameter":"table","index":{"kind":"extreme_related","extreme":"max","relation":"members","current_slot":1,"related_slot":0,"value":rank}}),false);
     let day = b.read(
         "member_day",
         Demand::Date,
@@ -423,11 +424,11 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
         None,
         None,
     );
-    let latest = json!({"kind":"extreme_related","extreme":"max","relation":"members","current_slot":1,"related_slot":0,"value":day});
+    let earliest = json!({"kind":"extreme_related","extreme":"min","relation":"members","current_slot":1,"related_slot":0,"value":day});
     b.rule(
-        "latest_day",
+        "earliest_day",
         "Household",
-        cmp(latest, "gte", literal("date", json!("2026-01-01"))),
+        cmp(earliest, "gte", literal("date", json!("2026-01-01"))),
         true,
     );
     let link_rank = b.read(
