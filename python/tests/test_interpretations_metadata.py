@@ -46,7 +46,7 @@ def _artifact() -> dict:
         },
         "metadata": {
             "evaluation_order": [],
-            "fast_path": {"strategy": "none", "compatible": True},
+            "fast_path": {"strategy": "none", "compatible": True, "blockers": []},
             "input_catalog": [],
         },
     }

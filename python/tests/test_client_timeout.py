@@ -73,7 +73,7 @@ def test_compiled_program_rejects_missing_and_wrong_artifact_versions() -> None:
         "program": {"units": [], "relations": [], "parameters": [], "derived": []},
         "metadata": {
             "evaluation_order": [],
-            "fast_path": {"strategy": "generic_bulk", "compatible": True},
+            "fast_path": {"strategy": "generic_bulk", "compatible": True, "blockers": []},
             "input_catalog": [],
         },
     }
