@@ -38,6 +38,10 @@ pub struct Site {
 #[derive(Clone, Debug)]
 pub struct Generated {
     pub program: ProgramSpec,
+    /// Predicates constructed with a term read, atom, term comparison or
+    /// parameter lookup. Recorded at construction, without inspecting the
+    /// resulting expression tree or the production interface.
+    pub relation_role_predicates: BTreeSet<String>,
     pub sites: Vec<Site>,
     pub references: Vec<(String, Context)>,
     pub scopes: BTreeMap<String, String>,
@@ -297,6 +301,7 @@ pub fn generate_for_soundness(choices: &[u8]) -> Generated {
 }
 
 fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) -> Generated {
+    let mut relation_role_predicates = BTreeSet::new();
     let mut b = Builder {
         compatible_inputs,
         choices,
@@ -474,6 +479,7 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
     );
     anchor_amount["kind"] = json!("role_input");
     anchor_amount["term"] = json!("anchor");
+    relation_role_predicates.insert("member_households".to_string());
     let mut candidate_ok = b.reference("household_ok", Context::Kind("Household".into()));
     candidate_ok["kind"] = json!("role_derived");
     candidate_ok["term"] = json!("candidate");
@@ -519,6 +525,7 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
     }
     Generated {
         program,
+        relation_role_predicates,
         sites: b.sites,
         references: b.references,
         scopes: b.scopes,

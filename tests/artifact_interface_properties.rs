@@ -258,7 +258,13 @@ fn generated_interface_agrees_with_construction_records() {
                 for kind in slots {
                     prop_assert!(roster.contains(kind.as_str()));
                 }
-                prop_assert!(relation.accepts_supplied_tuples);
+                // d1265 applies to every derived relation if any predicate
+                // was constructed with a relation-role feature. The oracle
+                // uses independent construction records, not the engine's
+                // expression walker or its interface result.
+                let expected_supplied_tuples =
+                    declared.derivation.is_none() || g.relation_role_predicates.is_empty();
+                prop_assert_eq!(relation.accepts_supplied_tuples, expected_supplied_tuples);
                 // `member_households` reads `members` from its Person slot;
                 // everything else reads it from its Household slot.
                 let lookup_slots = match relation.name.as_str() {
