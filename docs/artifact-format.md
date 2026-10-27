@@ -63,10 +63,11 @@ content, described below.
   produce it; raw `ProgramSpec` expressions can. No such read appears in the
   corpus measurement above.
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, parameters in predicates, relation atoms or term comparisons refuse them at
-  request binding (`supplied_tuples_for_derived_relation`), and their members
-  resolver ignores them through `Engine::new` too. Other programs union the
-  filtered source members with `direct_related_ids(relation, ...)`.
+  using qualified reads, parameters in predicates, relation atoms or term
+  comparisons refuse them at request binding
+  (`supplied_tuples_for_derived_relation`), and their members resolver ignores
+  them through `Engine::new` too. Other programs union the filtered source
+  members with `direct_related_ids(relation, ...)`.
 - **Nothing constrains how many tuples an id appears in.** A relation schema
   holds a name, an arity, slot kinds and a derivation (`RelationSchema`,
   `src/model.rs`); binding checks tuple length and slot kinds
@@ -412,18 +413,18 @@ One entry per `program.relations` entry, with its name, arity and effective
 slot kinds. `slot_entities` is null only for a relation that declares none,
 which relation typing allows only when nothing executes it.
 
-`lookup_slots` is the set of slots that aggregates, membership tests and atoms in
-the program key on, with a derived relation's traversal of its source
-counted against the source. It is empty when no expression uses the
-relation. It records direction of traversal and nothing about cardinality.
+`lookup_slots` is the set of slots that aggregates, membership tests and atoms
+in the program key on, with a derived relation's traversal of its source
+counted against the source. It is empty when no expression uses the relation.
+It records direction of traversal and nothing about cardinality.
 
 An atom records a lookup for each bound argument slot. A term comparison
 adds no lookup, input read or relation read.
 
 `accepts_supplied_tuples` is false for every derived relation in a program
-using qualified reads, parameters in predicates, relation atoms or term comparisons; otherwise it is
-true. This is a program-wide restriction, including derived relations whose
-own predicates use none of those constructs.
+using qualified reads, parameters in predicates, relation atoms or term
+comparisons; otherwise it is true. This is a program-wide restriction,
+including derived relations whose own predicates use none of those constructs.
 
 `provenance.kind` says what the declaration makes the relation: `supplied`
 for a data relation, `derived` for a `derived_relation`. `derived` carries
@@ -438,9 +439,9 @@ The judgment wire forms are
 slot order) and `{kind: same_entity, left: anchor, right: candidate, negated:
 false}`; `negated: true` encodes `!=`. They add variants to format 3 without
 a version bump: older engines refuse the unknown expression kinds. Loading
-re-derives the complete interface and refuses a mismatch. This PR also applies
-the supplied-tuple restriction to programs using only qualified reads or
-parameters in predicates from PR 1, so their derived relations now report
+re-derives the complete interface and refuses a mismatch. The supplied-tuple
+restriction also covers programs using only qualified reads or parameters in
+predicates from PR 1, so their derived relations now report
 `accepts_supplied_tuples: false`. Programs using none of these constructs
 derive the same interface as before.
 

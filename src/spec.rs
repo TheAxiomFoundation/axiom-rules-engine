@@ -63,6 +63,14 @@ pub enum SpecError {
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error(
+        "supplied_tuples_for_derived_relation: dataset relation `{relation}` is derived by the program; supply its source tuples instead"
+    )]
+    SuppliedTuplesForDerivedRelation { relation: String },
+    #[error(
+        "lenient_binding_with_relation_roles: a program using relation atoms requires strict relation binding"
+    )]
+    LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
     InvalidRelationSlotEntityCount {
         relation: String,
@@ -543,6 +551,9 @@ impl DatasetSpec {
         query_entities: &[(String, String)],
         options: DatasetBindingOptions,
     ) -> Result<DatasetBindingOutcome, SpecError> {
+        if !options.strict_relation_entities && program.uses_relation_atoms() {
+            return Err(SpecError::LenientBindingWithRelationRoles);
+        }
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -554,6 +565,18 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
+        if program.uses_relation_roles() {
+            if let Some(record) = relations.iter().find(|record| {
+                program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            }) {
+                return Err(SpecError::SuppliedTuplesForDerivedRelation {
+                    relation: record.name.clone(),
+                });
+            }
+        }
         let diagnostics =
             relation_slot_entity_diagnostics(program, &inputs, query_entities, &relations);
         if options.strict_relation_entities && !diagnostics.is_empty() {
@@ -1624,6 +1647,17 @@ pub enum JudgmentExprSpec {
         current_slot: usize,
         related_slot: usize,
     },
+    /// Test a declared relation's tuple in its slot order, inside a predicate.
+    RelationAtom {
+        relation: String,
+        terms: Vec<TermSpec>,
+    },
+    /// Compare term ids; both terms must have the same entity kind.
+    SameEntity {
+        left: TermSpec,
+        right: TermSpec,
+        negated: bool,
+    },
     And {
         items: Vec<JudgmentExprSpec>,
     },
@@ -1663,6 +1697,19 @@ impl JudgmentExprSpec {
                 right: right.to_model()?,
             }),
             Self::Derived { name } => Ok(JudgmentExpr::Derived(name.clone())),
+            Self::RelationAtom { relation, terms } => Ok(JudgmentExpr::RelationAtom {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+            }),
+            Self::SameEntity {
+                left,
+                right,
+                negated,
+            } => Ok(JudgmentExpr::SameEntity {
+                left: left.to_model(),
+                right: right.to_model(),
+                negated: *negated,
+            }),
             Self::RelationMember {
                 relation,
                 current_slot,

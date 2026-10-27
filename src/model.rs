@@ -479,6 +479,17 @@ pub enum JudgmentExpr {
         current_slot: usize,
         related_slot: usize,
     },
+    /// A tuple test whose arguments follow the relation's declared slot order.
+    RelationAtom {
+        relation: String,
+        terms: Vec<Term>,
+    },
+    /// Compare the ids of two terms of the same entity kind.
+    SameEntity {
+        left: Term,
+        right: Term,
+        negated: bool,
+    },
     And(Vec<JudgmentExpr>),
     Or(Vec<JudgmentExpr>),
     Not(Box<JudgmentExpr>),
@@ -680,6 +691,36 @@ impl Program {
             Some(UnitKind::Currency { minor_units }) => Some(*minor_units),
             _ => None,
         }
+    }
+
+    /// Whether the program opts into the relation-role supplied-tuple contract.
+    /// Inspect every version too, independent of the period being evaluated.
+    pub fn uses_relation_roles(&self) -> bool {
+        self.has_relation_construct(false)
+    }
+
+    /// Atoms require strict tuple binding, unlike qualified reads alone.
+    pub fn uses_relation_atoms(&self) -> bool {
+        self.has_relation_construct(true)
+    }
+
+    fn has_relation_construct(&self, atoms_only: bool) -> bool {
+        self.relations.values().any(|relation| {
+            relation.derivation.as_ref().is_some_and(|derivation| {
+                judgment_has_relation_construct(&derivation.predicate, atoms_only, true)
+            })
+        }) || self.derived.values().any(|derived| {
+            std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics))
+                .any(|semantics| match semantics {
+                    DerivedSemantics::Scalar(expr) => {
+                        scalar_has_relation_construct(expr, atoms_only, false)
+                    }
+                    DerivedSemantics::Judgment(expr) => {
+                        judgment_has_relation_construct(expr, atoms_only, false)
+                    }
+                })
+        })
     }
 
     pub fn resolve_derived_name(&self, reference: &str) -> Option<String> {
@@ -1009,6 +1050,76 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
     }
 }
 
+// Keep this walk exhaustive: new relation constructs must opt into binding's
+// contract even when nested in a scalar conditional or an inactive version.
+fn judgment_has_relation_construct(
+    expr: &JudgmentExpr,
+    atoms_only: bool,
+    in_predicate: bool,
+) -> bool {
+    match expr {
+        JudgmentExpr::RelationAtom { .. } => true,
+        JudgmentExpr::SameEntity { .. } | JudgmentExpr::RoleDerived { .. } => !atoms_only,
+        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => false,
+        JudgmentExpr::Comparison { left, right, .. } => {
+            scalar_has_relation_construct(left, atoms_only, in_predicate)
+                || scalar_has_relation_construct(right, atoms_only, in_predicate)
+        }
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => items
+            .iter()
+            .any(|item| judgment_has_relation_construct(item, atoms_only, in_predicate)),
+        JudgmentExpr::Not(item) => judgment_has_relation_construct(item, atoms_only, in_predicate),
+    }
+}
+
+fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool, in_predicate: bool) -> bool {
+    let scalar = |expr| scalar_has_relation_construct(expr, atoms_only, in_predicate);
+    match expr {
+        ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => !atoms_only,
+        ScalarExpr::Literal(_)
+        | ScalarExpr::Input(_)
+        | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::Derived(_)
+        | ScalarExpr::InputForYear { .. }
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd
+        | ScalarExpr::OnlyRelated { .. } => false,
+        ScalarExpr::ParameterLookup { index, .. } => (!atoms_only && in_predicate) || scalar(index),
+        ScalarExpr::Add(items) | ScalarExpr::Min(items) | ScalarExpr::Max(items) => {
+            items.iter().any(scalar)
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right) => scalar(left) || scalar(right),
+        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => scalar(value),
+        ScalarExpr::DateAddDays { date, days } => scalar(date) || scalar(days),
+        ScalarExpr::DateAddMonths { date, months } => scalar(date) || scalar(months),
+        ScalarExpr::DateAddYears { date, years } => scalar(date) || scalar(years),
+        ScalarExpr::DaysBetween { from, to } => scalar(from) || scalar(to),
+        ScalarExpr::CountRelated { where_clause, .. }
+        | ScalarExpr::SumRelated { where_clause, .. }
+        | ScalarExpr::ExtremeRelated { where_clause, .. }
+        | ScalarExpr::SingleRelated { where_clause, .. } => {
+            where_clause.as_ref().is_some_and(|predicate| {
+                judgment_has_relation_construct(predicate, atoms_only, in_predicate)
+            })
+        }
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            judgment_has_relation_construct(condition, atoms_only, in_predicate)
+                || scalar(then_expr)
+                || scalar(else_expr)
+        }
+        ScalarExpr::NoMatch { subject, patterns } => scalar(subject) || patterns.iter().any(scalar),
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            scalar(value) || n.as_ref().is_some_and(|n| scalar(n))
+        }
+    }
+}
+
 fn collect_input_slots_from_judgment_expr<'a>(
     expr: &'a JudgmentExpr,
     slots: &mut HashSet<&'a str>,
@@ -1020,7 +1131,9 @@ fn collect_input_slots_from_judgment_expr<'a>(
         }
         JudgmentExpr::Derived(_)
         | JudgmentExpr::RoleDerived { .. }
-        | JudgmentExpr::RelationMember { .. } => {}
+        | JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_input_slots_from_judgment_expr(item, slots);

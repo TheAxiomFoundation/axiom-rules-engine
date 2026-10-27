@@ -92,14 +92,15 @@ output's formula is evaluated for that entity and period as follows.
   predicate tests its term ids in `R`'s declared slots. A data atom requires
   one supplied tuple matching every id whose interval contains the period.
   A binary derived atom resolves members for the term in its current slot
-  and tests the term in its related slot. It can therefore compute another
-  anchor's members; those members are not cached between drives (#211).
-  `t1 == t2` and `t1 != t2` compare ids of the same kind and always determine
-  a result. Compilation refuses these constructs outside the predicate's
-  scope, including aggregation `where` clauses (`relation_role_outside_scope`).
+  and tests the term in its related slot. Computing another anchor's members
+  can add substantial work in nested predicates
+  ([relation-roles.md](relation-roles.md) §5; #211). `t1 == t2` and `t1 != t2`
+  compare ids of the same kind and always determine a result. Compilation
+  refuses these constructs outside the predicate's scope, including
+  aggregation `where` clauses (`relation_role_outside_scope`).
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, parameters in predicates, relation atoms or term comparisons refuse tuples
-  supplied under any derived relation's name
+  using qualified reads, parameters in predicates, relation atoms or term
+  comparisons refuse tuples supplied under any derived relation's name
   (`supplied_tuples_for_derived_relation`), and their members resolver ignores
   those tuples even through `Engine::new`. Programs using none retain the
   union of supplied tuples and filtered source members. An atom also refuses
@@ -220,8 +221,8 @@ A derived relation's predicate using a qualified read (`anchor.name`,
 `candidate.name`), relation atom or term comparison makes the dense compiler
 reject any root entity whose rules reach that relation with
 `DenseCompileError::Unsupported`, naming the construct and #218; a root that
-reaches no such relation compiles. Explain and fast evaluate it. Parameter reads in a
-predicate compile in dense as in a rule body.
+reaches no such relation compiles. Explain and fast evaluate it. Parameter
+reads in a predicate compile in dense as in a rule body.
 
 Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
 body reads on the related rows, for the related entity as explain does. Only a

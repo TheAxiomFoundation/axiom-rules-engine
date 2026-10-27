@@ -261,8 +261,8 @@ an atom (`relation_name_shadows_builtin`).
 compare ids. Different kinds refuse with `relation_term_kind_mismatch`; a
 term compared with a value refuses with `relation_term_compared_with_value`.
 Other comparison operators refuse with `relation_term_comparison_operator`.
-The result is always determined, because ids are given, not
-derived. It expresses "a member other than his or her parent" in 7 CFR
+The result is always determined, because ids are given, not derived. It
+expresses "a member other than his or her parent" in 7 CFR
 273.1(b)(1)(iii), and "anyone but the applicant" in a quantified set.
 
 ### 3.6 Bounded `exists`

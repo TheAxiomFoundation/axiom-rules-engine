@@ -1021,6 +1021,24 @@ fn format_judgment_expression(
         JudgmentExpr::RoleDerived { term, name } => {
             format!("{}.{}", term.as_str(), program.public_derived_key(name))
         }
+        JudgmentExpr::RelationAtom { relation, terms } => format!(
+            "{relation}({})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        JudgmentExpr::SameEntity {
+            left,
+            right,
+            negated,
+        } => format!(
+            "({} {} {})",
+            left.as_str(),
+            if *negated { "!=" } else { "==" },
+            right.as_str()
+        ),
         JudgmentExpr::RelationMember {
             relation,
             current_slot,

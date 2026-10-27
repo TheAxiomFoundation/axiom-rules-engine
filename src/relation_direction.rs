@@ -544,7 +544,13 @@ impl Resolver<'_> {
                     *related_slot = related_index;
                 }
             }
-            JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
+            // An atom writes the relation's slot order explicitly; changing
+            // its direction would change its meaning. A term comparison has
+            // no relation traversal to resolve.
+            JudgmentExprSpec::Derived { .. }
+            | JudgmentExprSpec::RoleDerived { .. }
+            | JudgmentExprSpec::RelationAtom { .. }
+            | JudgmentExprSpec::SameEntity { .. } => {}
         }
         Ok(())
     }

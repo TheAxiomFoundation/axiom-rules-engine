@@ -2217,7 +2217,9 @@ fn collect_fast_blockers_from_judgment_expr(
         }
         JudgmentExprSpec::Derived { .. }
         | JudgmentExprSpec::RoleDerived { .. }
-        | JudgmentExprSpec::RelationMember { .. } => {}
+        | JudgmentExprSpec::RelationMember { .. }
+        | JudgmentExprSpec::RelationAtom { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2513,7 +2515,10 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationAtom { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2636,8 +2641,11 @@ fn collect_relation_members_from_judgment(
             collect_relation_members_from_scalar(left, relations);
             collect_relation_members_from_scalar(right, relations);
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
-        JudgmentExprSpec::RelationMember { relation, .. } => {
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. }
+        | JudgmentExprSpec::RelationAtom { relation, .. } => {
             relations.insert(relation.clone());
         }
         JudgmentExprSpec::And { items }

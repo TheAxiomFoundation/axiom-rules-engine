@@ -4184,8 +4184,11 @@ fn rewrite_relation_alias_in_judgment(
             rewrite_relation_alias_in_scalar(left, alias, relation_name);
             rewrite_relation_alias_in_scalar(right, alias, relation_name);
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
-        JudgmentExprSpec::RelationMember { relation, .. } => {
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. }
+        | JudgmentExprSpec::RelationAtom { relation, .. } => {
             if relation == alias {
                 *relation = relation_name.to_string();
             }
@@ -4502,8 +4505,11 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
 
 fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<String>) {
     match expr {
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
-        JudgmentExprSpec::RelationMember { relation, .. } => {
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. }
+        | JudgmentExprSpec::RelationAtom { relation, .. } => {
             names.insert(relation.clone());
         }
         JudgmentExprSpec::Comparison { left, right, .. } => {
@@ -4802,9 +4808,19 @@ fn rewrite_judgment_relation_references(
                 derived_origin_targets,
             );
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             rewrite_relation_name(relation, origin_target, rewrites);
+        }
+        JudgmentExprSpec::RelationAtom { relation, .. } => {
+            // Atoms name declared relations, including imported declarations.
+            // Prefer a declaration in the predicate's own module, then an
+            // imported name only when it identifies exactly one relation.
+            if !rewrite_relation_name(relation, origin_target, rewrites) {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
         }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
@@ -4888,7 +4904,9 @@ fn judgment_uses_imported_derived(
         JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
-        JudgmentExprSpec::RelationMember { .. } => false,
+        JudgmentExprSpec::RelationMember { .. }
+        | JudgmentExprSpec::RelationAtom { .. }
+        | JudgmentExprSpec::SameEntity { .. } => false,
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => items.iter().any(|item| {

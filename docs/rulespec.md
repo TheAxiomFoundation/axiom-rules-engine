@@ -417,16 +417,16 @@ not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
 are the scalar minimum and maximum of one qualified read. Reading a
 parameter, `period_start` or `period_end` through a term is refused with
 `relation_role_entity_mismatch`; reading a relation through a term is refused:
-use a relation atom. Outside predicates the two names
-are ordinary identifiers: `anchor + 1` in a rule body reads an input named
+use a relation atom. Outside predicates the two names are ordinary
+identifiers: `anchor + 1` in a rule body reads an input named
 `anchor`, and `anchor.age` there is a field access, which RuleSpec rejects. A
 compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
 Unqualified reads keep the routing above. A bare parameter name now reads the
 parameter in two places where it used to resolve to a rule of that name,
-else (in a predicate) a relation, else an input: anywhere
-in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
+else (in a predicate) a relation, else an input: anywhere in a predicate
+([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
 in a rule body as in a predicate. A bare `period_start` or `period_end`
 tested as a judgment, which used to read a rule, a relation or an input of
@@ -437,8 +437,8 @@ named `anchor` or `candidate` before `.` in a predicate now names the term:
 `sum(anchor.age)` is refused, and `min(anchor.age)` reads the anchor's own
 `age` instead of taking the minimum over that typed relation. A program with
 none of these changes, and with no term, compiles to the same artifact as
-before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
-records a rule read through a term at the term's id. The dense compiler
+before terms existed. Explain and bulk fast mode evaluate reads through terms,
+and a trace records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
 uses a qualified read, relation atom or term comparison, naming the construct
 and #218; a root that reaches no such relation compiles. Dense does compile
@@ -464,8 +464,7 @@ comparison belongs only in a derived relation's predicate; rules and
 aggregation `where` clauses refuse it with `relation_role_outside_scope`.
 
 A program using qualified reads, parameters in predicates, atoms or term
-comparisons refuses supplied
-tuples under any derived relation's name
+comparisons refuses supplied tuples under any derived relation's name
 (`supplied_tuples_for_derived_relation`). Its members resolver also ignores
 such tuples for direct Rust callers of `Engine::new`. Programs using none of
 these constructs retain the union of supplied and derived members. Request

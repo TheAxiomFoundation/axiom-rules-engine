@@ -357,6 +357,14 @@ pub(crate) fn relation_role_outside_derived_relation(term: Term, name: &str) -> 
     ))
 }
 
+/// Guard role-only judgments in hand-built programs, whose constructors do
+/// not run the compiler's `relation_role_outside_scope` check.
+pub(crate) fn relation_construct_outside_derived_relation(construct: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "relation_role_outside_scope: {construct} can only be evaluated inside a derived relation's predicate, outside any aggregation's `where` clause or aggregated value"
+    ))
+}
+
 pub(crate) fn describe_match_operand(expr: &ScalarExpr) -> String {
     match expr {
         ScalarExpr::Literal(value) => describe_scalar_value(value),
@@ -938,7 +946,19 @@ impl<'a> Engine<'a> {
             (String, usize, String),
             Vec<&'a crate::model::RelationRecord>,
         > = HashMap::new();
+        let uses_relation_roles = program.uses_relation_roles();
         for record in &data.relations {
+            // Binding refuses these records. Low-level Rust callers skip
+            // binding, so exclude them from every lookup as well: programs
+            // using relation roles derive their members exclusively.
+            if uses_relation_roles
+                && program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            {
+                continue;
+            }
             for (slot, value) in record.tuple.iter().enumerate() {
                 relation_index
                     .entry((record.name.clone(), slot, value.clone()))
@@ -2131,6 +2151,35 @@ impl<'a> Engine<'a> {
             JudgmentExpr::RoleDerived { term, name } => {
                 self.role_judgment_rule(*term, name, period, relation_context)
             }
+            JudgmentExpr::RelationAtom { relation, terms } => {
+                let context = relation_context
+                    .ok_or_else(|| relation_construct_outside_derived_relation("relation atom"))?;
+                let ids = terms
+                    .iter()
+                    .map(|term| context.id_of(*term))
+                    .collect::<Vec<_>>();
+                Ok(if self.relation_atom_contains(relation, &ids, period)? {
+                    JudgmentOutcome::Holds
+                } else {
+                    JudgmentOutcome::NotHolds
+                })
+            }
+            JudgmentExpr::SameEntity {
+                left,
+                right,
+                negated,
+            } => {
+                let context = relation_context.ok_or_else(|| {
+                    relation_construct_outside_derived_relation("term comparison")
+                })?;
+                Ok(
+                    if (context.id_of(*left) == context.id_of(*right)) != *negated {
+                        JudgmentOutcome::Holds
+                    } else {
+                        JudgmentOutcome::NotHolds
+                    },
+                )
+            }
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
@@ -2711,6 +2760,81 @@ impl<'a> Engine<'a> {
                 .is_ok())
     }
 
+    /// An atom fixes every slot, rather than selecting only the two slots
+    /// used by a bare membership judgment. A derived atom reads its own
+    /// forward members for the anchor named in its current slot; that anchor
+    /// can differ from the enclosing predicate's anchor.
+    fn relation_atom_contains(
+        &mut self,
+        relation: &str,
+        ids: &[&str],
+        period: &Period,
+    ) -> Eval<bool> {
+        let program: &'a Program = self.program;
+        let schema = program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        if ids.len() != schema.arity {
+            return Err(EvalError::TypeMismatch(format!(
+                "relation atom `{relation}` has {} terms, but the relation has arity {}",
+                ids.len(),
+                schema.arity
+            ))
+            .into());
+        }
+        if let Some(derivation) = &schema.derivation {
+            if schema.arity != 2 {
+                return Err(EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` uses a derived relation of arity {}; only arity 2 is supported",
+                    schema.arity
+                ))
+                .into());
+            }
+            let current_id = ids.get(derivation.current_slot).ok_or_else(|| {
+                EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` has no current slot {}",
+                    derivation.current_slot
+                ))
+            })?;
+            let related_id = ids.get(derivation.related_slot).ok_or_else(|| {
+                EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` has no related slot {}",
+                    derivation.related_slot
+                ))
+            })?;
+            return Ok(self
+                .related_entity_ids(
+                    relation,
+                    derivation.current_slot,
+                    derivation.related_slot,
+                    current_id,
+                    period,
+                )?
+                .binary_search_by(|candidate| candidate.as_str().cmp(related_id))
+                .is_ok());
+        }
+        let Some(first_id) = ids.first() else {
+            return Err(EvalError::TypeMismatch(format!(
+                "relation atom `{relation}` needs at least one term"
+            ))
+            .into());
+        };
+        let records = self
+            .relation_index
+            .get(&(relation.to_string(), 0, (*first_id).to_string()))
+            .map_or(&[][..], Vec::as_slice);
+        self.visits += records.len();
+        Ok(records.iter().any(|record| {
+            record.interval.contains_period(period)
+                && record
+                    .tuple
+                    .iter()
+                    .map(String::as_str)
+                    .eq(ids.iter().copied())
+        }))
+    }
+
     /// `relation`'s schema, when it exists and has both slots.
     fn relation_schema(
         &self,
@@ -3258,7 +3382,11 @@ fn collect_judgment_trace_references(
         JudgmentExpr::RoleDerived { term, name } => {
             derived.push(TraceReference::Term(*term, name.clone()));
         }
-        JudgmentExpr::RelationMember { .. } => {}
+        // Relation membership contributes no rule or parameter dependency.
+        // A comparison reads only the ids already in the binding context.
+        JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_trace_references(item, derived, parameters);
