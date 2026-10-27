@@ -4,6 +4,7 @@
 //! refuses any `program.interface` other than the one it derives.
 
 use axiom_rules_engine::compile::{ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, EngineBuild};
+use axiom_rules_engine::spec::{InputDeclarationSpec, InputElection};
 use serde_json::{Value, json};
 
 const MODULE: &str = r#"
@@ -341,7 +342,17 @@ fn format_3_checks_the_shape_of_its_identities() {
 /// key with a non-null value somewhere.
 #[test]
 fn every_interface_key_is_tamper_checked() {
-    let base = serde_json::to_value(every_shape()).unwrap();
+    let mut program = every_shape().program;
+    program.input_declarations = vec![InputDeclarationSpec {
+        input: "eligible".to_string(),
+        election: InputElection {
+            actor: "Household".to_string(),
+            provision: "us/regulation/7/273/1/b/3".to_string(),
+        },
+    }];
+    let artifact = CompiledProgramArtifact::compile(program)
+        .expect("the every-shape program with an election compiles");
+    let base = serde_json::to_value(artifact).unwrap();
     load(&base).expect("the untouched artifact loads");
     let interface = base["program"]["interface"].clone();
     assert!(
@@ -368,8 +379,12 @@ fn every_interface_key_is_tamper_checked() {
     let mut objects = Vec::new();
     collect_objects(&interface, String::new(), &mut objects);
     let mut checked = 0;
+    let mut election_keys = std::collections::BTreeSet::new();
     for pointer in objects {
         let object = interface.pointer(&pointer).unwrap().as_object().unwrap();
+        if pointer.ends_with("/election") {
+            election_keys.extend(object.keys().map(String::as_str));
+        }
         let location = format!("program.interface{pointer}");
         let mut extra = base.clone();
         interface_object(&mut extra, &pointer).insert("unexpected".to_string(), json!(null));
@@ -385,6 +400,7 @@ fn every_interface_key_is_tamper_checked() {
         }
     }
     assert!(checked > 40, "{checked} keys checked");
+    assert_eq!(election_keys, ["actor", "provision"].into_iter().collect());
 }
 
 fn interface_object<'a>(

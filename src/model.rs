@@ -741,6 +741,19 @@ impl Program {
     /// exact owning `<module>#input.<slot>` name. A shared slot may therefore
     /// have multiple allowed request names.
     pub fn input_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(true)
+    }
+
+    /// Request names from expression read sites, retaining their module
+    /// owners. An unused parameter's `indexed_by` label contributes nothing.
+    pub(crate) fn input_read_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(false)
+    }
+
+    fn input_catalog_with_index_labels(
+        &self,
+        include_index_labels: bool,
+    ) -> BTreeMap<String, Vec<String>> {
         let mut catalog: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for derived in self.derived.values() {
             let mut slots = HashSet::new();
@@ -783,22 +796,24 @@ impl Program {
                     .insert(request_name);
             }
         }
-        for parameter in self.parameters.values() {
-            let Some(slot) = parameter.indexed_by.as_deref() else {
-                continue;
-            };
-            let request_name = parameter
-                .id
-                .as_deref()
-                .and_then(public_rule_target)
-                .map_or_else(
-                    || slot.to_string(),
-                    |target| format!("{target}#input.{slot}"),
-                );
-            catalog
-                .entry(slot.to_string())
-                .or_default()
-                .insert(request_name);
+        if include_index_labels {
+            for parameter in self.parameters.values() {
+                let Some(slot) = parameter.indexed_by.as_deref() else {
+                    continue;
+                };
+                let request_name = parameter
+                    .id
+                    .as_deref()
+                    .and_then(public_rule_target)
+                    .map_or_else(
+                        || slot.to_string(),
+                        |target| format!("{target}#input.{slot}"),
+                    );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
+            }
         }
         catalog
             .into_iter()

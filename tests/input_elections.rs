@@ -13,6 +13,7 @@ use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use axiom_rules_engine::source::{ModuleSource, SourceError};
 use axiom_rules_engine::spec::{InputDeclarationSpec, InputElection, ProgramSpec, SpecError};
 use proptest::prelude::*;
+use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use serde_json::{Value, json};
 
 const SNAP_BOARDER: &str =
@@ -259,24 +260,34 @@ fn inert_value() -> impl Strategy<Value = Value> {
     })
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
-
-    /// For every `inputs:` block in which no mapping carries the key
-    /// `election`, whatever its shape (wrong dtypes, stray keys, a scalar, a
-    /// mapping without `election`), the module compiles to the artifact it
-    /// compiles to without the block: the same `program` (with
-    /// `input_declarations` empty, hence omitted), `metadata` and interface.
-    #[test]
-    fn an_inputs_block_without_an_election_is_inert(block in inert_value()) {
-        let mut absent = document(SNAP_BOARDER);
-        absent.as_object_mut().unwrap().remove("inputs");
-        let baseline = without_source_closure(&compile(&yaml(&absent)));
-        prop_assert!(baseline["program"].get("input_declarations").is_none());
+/// Invariant 10: every `inputs:` block in which no mapping carries the key
+/// `election` compiles to the artifact produced without that block, whatever
+/// its shape: the same program, metadata and interface. Source-closure identity
+/// changes with the source text and is omitted from this comparison.
+#[test]
+fn an_inputs_block_without_an_election_is_inert() {
+    let mut absent = document(SNAP_BOARDER);
+    absent.as_object_mut().unwrap().remove("inputs");
+    let baseline = without_source_closure(&compile(&yaml(&absent)));
+    assert!(baseline["program"].get("input_declarations").is_none());
+    TestRunner::new_with_rng(
+        Config {
+            cases: 64,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[160; 32]),
+    )
+    .run(&inert_value(), |block| {
         let mut present = absent.clone();
         present["inputs"] = block;
-        prop_assert_eq!(without_source_closure(&compile(&yaml(&present))), baseline);
-    }
+        prop_assert_eq!(
+            without_source_closure(&compile(&yaml(&present))),
+            baseline.clone()
+        );
+        Ok(())
+    })
+    .unwrap();
 }
 
 /// The fixture without its election compiles exactly as without the block.
@@ -669,6 +680,125 @@ fn raw_declarations_must_be_canonical() {
         }))
         .is_err(),
         "an unknown key in a declaration is refused"
+    );
+}
+
+fn indexed_election_program(read_index: bool) -> ProgramSpec {
+    let expr = if read_index {
+        json!({"kind": "parameter_lookup", "parameter": "table", "index": choice_read()})
+    } else {
+        json!({"kind": "literal", "value": {"kind": "integer", "value": 1}})
+    };
+    serde_json::from_value(json!({
+        "parameters": [{"name": "table", "unit": null, "indexed_by": "choice",
+            "versions": [{"effective_from": "2026-01-01",
+                "values": {"1": {"kind": "integer", "value": 10}}}]}],
+        "derived": [{"name": "amount", "entity": "Person", "dtype": "integer",
+            "unit": null, "semantics": "scalar", "expr": expr}],
+        "input_declarations": [declaration("choice", "Household")]
+    }))
+    .expect("indexed election program deserializes")
+}
+
+/// An unused parameter index label is catalog metadata rather than a read
+/// site, so it cannot declare an election. Reading that index makes the
+/// declaration valid. Derivation, compilation and artifact loading agree.
+#[test]
+fn a_catalog_only_index_label_is_not_an_ir_election() {
+    let accepted = CompiledProgramArtifact::compile(indexed_election_program(true))
+        .expect("an index read may declare an election");
+    let choice = slot(interface(&accepted), "choice");
+    assert_eq!(choice.election, Some(boarder_election()));
+    assert_eq!(choice.values.as_deref(), Some([1].as_slice()));
+
+    let program = indexed_election_program(false);
+    let (input, message) = derive_error(&program);
+    assert_eq!(input, "choice");
+    assert_eq!(message, "names no input the program reads");
+    assert!(matches!(
+        CompiledProgramArtifact::compile(program.clone()),
+        Err(CompileError::Spec(SpecError::InputDeclaration { .. }))
+    ));
+
+    let mut undeclared = program;
+    undeclared.input_declarations.clear();
+    let artifact = CompiledProgramArtifact::compile(undeclared)
+        .expect("the unused index label is valid catalog metadata");
+    assert!(interface(&artifact).inputs.is_empty());
+    assert_eq!(artifact.metadata.input_catalog[0].slot, "choice");
+    let mut tampered = serde_json::to_value(artifact).unwrap();
+    tampered["program"]["input_declarations"] = json!([declaration("choice", "Household")]);
+    assert!(matches!(
+        CompiledProgramArtifact::from_json_str(&tampered.to_string()),
+        Err(CompileError::Spec(SpecError::InputDeclaration { .. }))
+    ));
+}
+
+fn indexed_election_module(formula: &str) -> String {
+    format!(
+        r#"format: rulespec/v1
+inputs:
+  - name: choice
+    election:
+      actor: Household
+      provision: us/regulation/7/273/1/b/3
+rules:
+  - name: table
+    kind: parameter
+    dtype: Integer
+    indexed_by: choice
+    versions:
+      - effective_from: 2026-01-01
+        values:
+          1: 10
+  - name: amount
+    kind: derived
+    entity: Person
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: {formula:?}
+"#
+    )
+}
+
+/// RuleSpec elections must name local expression reads. An unused
+/// `indexed_by` label cannot supply the evidence, including in an atomic
+/// module with a canonical origin; an actual table-index read can.
+#[test]
+fn a_catalog_only_index_label_is_not_a_rulespec_election() {
+    let target = "us:policies/test/index-election";
+    let accepted = indexed_election_module("table[choice]");
+    let compiled = compile(&accepted);
+    assert_eq!(
+        slot(interface(&compiled), "choice").election,
+        Some(boarder_election())
+    );
+    let accepted =
+        CompiledProgramArtifact::from_rulespec_with_source(target, &modules(&[(target, accepted)]))
+            .expect("an atomic module may elect its actual index input");
+    assert_eq!(
+        accepted.program.input_declarations[0].input,
+        format!("{target}#input.choice")
+    );
+
+    let source = indexed_election_module("1");
+    let message = lower_rulespec_str(&source)
+        .expect_err("an unused indexed_by label is not a local input read")
+        .to_string();
+    assert_eq!(
+        message,
+        "RuleSpec module `<root>` input `choice`: carries an election, but no rule or derived-relation predicate of this module reads an input of that name"
+    );
+    let message = rulespec_message(
+        CompiledProgramArtifact::from_rulespec_with_source(target, &modules(&[(target, source)]))
+            .expect_err("the atomic module does not read its declared election"),
+    );
+    assert_eq!(
+        message,
+        format!(
+            "RuleSpec module `{target}` input `choice`: carries an election, but no rule or derived-relation predicate of this module reads an input of that name"
+        )
     );
 }
 

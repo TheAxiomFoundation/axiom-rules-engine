@@ -2599,8 +2599,8 @@ impl RulesDocument {
     /// The elections every module's `inputs:` block declares, sorted by
     /// request name. Each is checked against the inputs its own module's
     /// rules and derived-relation predicates read: an atomic module's request
-    /// names are its own `<module>#input.<slot>`, so the catalog says which
-    /// module reads what.
+    /// names are its own `<module>#input.<slot>`, so the expression-read
+    /// catalog says which module reads what.
     fn input_declarations(
         &self,
         program: &ProgramSpec,
@@ -2618,7 +2618,10 @@ impl RulesDocument {
         }
         // A program that does not build fails compilation with its own
         // error, before any interface is derived from these declarations.
-        let catalog = program.to_program().ok().map(|model| model.input_catalog());
+        let catalog = program
+            .to_program()
+            .ok()
+            .map(|model| model.input_read_catalog());
         let mut by_input = BTreeMap::<String, InputElection>::new();
         for (origin, slot, election) in declared {
             let fail = |message: String| RuleSpecError::InputElection {

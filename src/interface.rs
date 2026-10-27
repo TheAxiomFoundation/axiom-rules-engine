@@ -3,8 +3,9 @@
 //! from the program alone. The compiler writes it and the loader re-derives
 //! and compares it (`docs/artifact-format.md`). No evaluator reads it.
 //!
-//! The derivation is part of format 3: changing what any program's interface
-//! contains is a new format version.
+//! The derivation is part of format 3 for every program a format-3 engine can
+//! already load. A construct older engines refuse to deserialize may extend
+//! it for programs using that construct without changing published artifacts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -324,6 +325,7 @@ pub(crate) fn derive_from_model(
         sites: Vec::new(),
         references: Vec::new(),
         lookup_slots: BTreeMap::new(),
+        inside_over_periods: false,
     };
     let mut rule_names = program.derived.keys().collect::<Vec<_>>();
     rule_names.sort();
@@ -391,7 +393,12 @@ pub(crate) fn derive_from_model(
     };
 
     let catalog = program.input_catalog();
-    let elections = slot_elections(&catalog, declarations)?;
+    let election_reads = if declarations.is_empty() {
+        BTreeMap::new()
+    } else {
+        program.input_read_catalog()
+    };
+    let elections = slot_elections(&election_reads, declarations)?;
     let mut sites_by_slot = BTreeMap::<&str, Vec<&ReadSite>>::new();
     for site in &collector.sites {
         sites_by_slot.entry(&site.slot).or_default().push(site);
@@ -477,9 +484,8 @@ pub(crate) fn derive_from_model(
 
 /// Each declared slot's election, with the first declaration naming it.
 /// The declarations must be sorted by `input`, each input once, each naming
-/// a request name in the program's input catalog with a well-formed
-/// election; the declarations of one slot, from different modules, must
-/// agree.
+/// a request name from an expression read site with a well-formed election;
+/// the declarations of one slot, from different modules, must agree.
 fn slot_elections<'a>(
     catalog: &'a BTreeMap<String, Vec<String>>,
     declarations: &'a [InputDeclarationSpec],
@@ -580,6 +586,7 @@ struct Collector<'a> {
     sites: Vec<ReadSite>,
     references: Vec<(String, Flow)>,
     lookup_slots: BTreeMap<String, BTreeSet<usize>>,
+    inside_over_periods: bool,
 }
 
 impl Collector<'_> {
@@ -603,7 +610,11 @@ impl Collector<'_> {
         self.sites.push(ReadSite {
             slot: slot.to_string(),
             flow: flow.clone(),
-            demand,
+            demand: if self.inside_over_periods {
+                Demand::None
+            } else {
+                demand
+            },
             default: default.cloned(),
             index_of: index_of.map(str::to_string),
         });
@@ -646,10 +657,15 @@ impl Collector<'_> {
         match expr {
             ScalarExpr::Literal(_) | ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => {}
             ScalarExpr::Input(name) => self.site(name, flow, demand, None, index_of),
-            // `input_for_year` reads the slot on the same id, for a period
-            // the formula names.
+            // The selected-year contract supplies the runtime slot; `input`
+            // may be its owning module's full request name.
             ScalarExpr::InputForYear { input, .. } => {
-                self.site(input, flow, demand, None, index_of);
+                let slot = self
+                    .program
+                    .selected_year_inputs
+                    .get(input)
+                    .map_or(input.as_str(), |declaration| declaration.slot.as_str());
+                self.site(slot, flow, demand, None, index_of);
             }
             ScalarExpr::InputOrElse { name, default } => {
                 self.site(name, flow, demand, Some(default), index_of);
@@ -783,10 +799,13 @@ impl Collector<'_> {
             // lifetime surface reads its operands across periods, so no
             // position inside one demands a type here.
             ScalarExpr::OverPeriods { value, n, .. } => {
+                let outer = self.inside_over_periods;
+                self.inside_over_periods = true;
                 self.scalar(value, flow, routing, Demand::None, None);
                 if let Some(n) = n {
                     self.scalar(n, flow, routing, Demand::None, None);
                 }
+                self.inside_over_periods = outer;
             }
         }
     }

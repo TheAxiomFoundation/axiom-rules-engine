@@ -463,3 +463,105 @@ fn collect_object_pointers(value: &Value, pointer: String, out: &mut Vec<String>
         _ => {}
     }
 }
+
+/// Invariant 3: every input inside an over-periods reduction has no dtype
+/// demand, including an input nested in arithmetic. Explain refuses the
+/// reduction before reading its operand. A uniform default is still reported.
+#[test]
+fn over_periods_operands_do_not_infer_input_dtypes() {
+    let program = program(json!({
+        "derived": [scalar_rule("lifetime_total", "Household", json!({
+            "kind": "over_periods", "over": "sum",
+            "value": add(vec![input_or_else("amount", json!({"kind":"integer","value":0}))])
+        }))]
+    }));
+    let artifact = axiom_rules_engine::compile::CompiledProgramArtifact::compile(program).unwrap();
+    let model = artifact.program.to_program().unwrap();
+    let data = axiom_rules_engine::model::DataSet {
+        inputs: vec![],
+        relations: vec![],
+    };
+    let period: axiom_rules_engine::spec::PeriodSpec = serde_json::from_value(json!({
+        "period_kind":"month", "start":"2026-01-01", "end":"2026-01-31"
+    }))
+    .unwrap();
+    assert!(matches!(
+        axiom_rules_engine::engine::Engine::new(&model, &data).evaluate_scalar(
+            "lifetime_total",
+            "Household:1",
+            &period.to_model().unwrap()
+        ),
+        Err(axiom_rules_engine::engine::EvalError::OverPeriodsOutsideLifetime(_))
+    ));
+    let input = find(artifact.interface.as_ref().unwrap(), "amount");
+    assert_eq!(input.dtype, None);
+    assert_eq!(input.dtype_basis, None);
+    assert_eq!(input.default, Some(ScalarValueSpec::Integer { value: 0 }));
+}
+
+/// Invariant 3: suppressing a reduction's nested dtype demands preserves
+/// structural parameter-index domains, and ends at the reduction boundary.
+#[test]
+fn over_periods_preserves_parameter_domains_and_outer_demands() {
+    let interface = derive(json!({
+        "parameters": [{
+            "name":"table", "indexed_by":"catalog_only", "unit":null,
+            "versions":[{"effective_from":"2020-01-01","values":{
+                "1":{"kind":"integer","value":10},
+                "3":{"kind":"integer","value":30}
+            }}]
+        }],
+        "derived":[scalar_rule("nested", "Household", add(vec![
+            json!({"kind":"over_periods","over":"sum_top_n",
+                "value":{"kind":"parameter_lookup","parameter":"table","index":input("index")},
+                "n":add(vec![input("top_n")])}),
+            input("outside")
+        ]))]
+    }));
+    let index = find(&interface, "index");
+    assert_eq!(index.dtype, None);
+    assert_eq!(index.values, Some(vec![1, 3]));
+    assert_eq!(index.values_basis, Some(ValuesBasis::ParameterIndex));
+    assert_eq!(find(&interface, "top_n").dtype, None);
+    assert_eq!(find(&interface, "outside").dtype, Some(InputDType::Decimal));
+}
+
+/// Invariant 3: a canonical selected-year input keeps its bare runtime slot
+/// in the interface and its owning module's catalog request name as legal_id.
+/// The contract id inside `input_for_year` does not create a second slot.
+#[test]
+fn canonical_selected_year_input_uses_its_runtime_slot() {
+    use axiom_rules_engine::compile::CompiledProgramArtifact;
+    use axiom_rules_engine::source::{ModuleSource, SourceError};
+
+    const TARGET: &str = "ca:policies/tests/annual";
+    const SOURCE: &str = include_str!("fixtures/selected_year_input.yaml");
+    struct AnnualSource;
+    impl ModuleSource for AnnualSource {
+        fn load(&self, target: &str) -> Result<Option<String>, SourceError> {
+            Ok((target == TARGET).then(|| SOURCE.to_string()))
+        }
+    }
+
+    let artifact = CompiledProgramArtifact::from_rulespec_with_source(TARGET, &AnnualSource)
+        .expect("canonical selected-year fixture compiles");
+    let legal_id = format!("{TARGET}#input.income");
+    assert_eq!(artifact.program.selected_year_inputs[0].id, legal_id);
+    let catalog = &artifact.metadata.input_catalog;
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].slot, "income");
+    assert_eq!(catalog[0].canonical_request_name, legal_id);
+
+    let interface = artifact.interface.as_ref().unwrap();
+    assert_eq!(
+        interface
+            .inputs
+            .iter()
+            .map(|input| input.name.as_str())
+            .collect::<Vec<_>>(),
+        ["income"]
+    );
+    let input = find(interface, "income");
+    assert_eq!(input.legal_id, legal_id);
+    assert_eq!(input.entities, kinds(&["Person"]));
+}
