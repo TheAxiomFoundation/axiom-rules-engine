@@ -176,6 +176,123 @@ fn derived_atom_targets_require_declared_kinds_even_when_their_source_is_typed()
     );
 }
 
+fn distinct_kind_rulespec(target_kinds: bool, owner_kinds: bool, predicate: &str) -> String {
+    let predicate = serde_json::to_string(predicate).unwrap();
+    let kinds = "      slot_entities: [Person, Household]\n";
+    let target = if target_kinds { kinds } else { "" };
+    let owner = if owner_kinds { kinds } else { "" };
+    format!(
+        r#"
+format: rulespec/v1
+rules:
+  - name: base
+    kind: data_relation
+    data_relation: {{arity: 2, arguments: [Person, Household]}}
+  - name: inherited
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: base
+      current_slot: 1
+      related_slot: 0
+{target}    versions:
+      - effective_from: 2026-01-01
+        formula: true
+  - name: unrelated
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: base
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: 2026-01-01
+        formula: candidate.age > 0
+  - name: selected
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: base
+      current_slot: 1
+      related_slot: 0
+{owner}    versions:
+      - effective_from: 2026-01-01
+        formula: {predicate}
+  - name: total
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(selected)
+  - name: age_value
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: age
+"#
+    )
+}
+
+#[test]
+fn rulespec_derived_atom_targets_cannot_gain_declared_kinds_from_direction_stamping() {
+    let source = distinct_kind_rulespec(false, true, "inherited(candidate, anchor)");
+    let error = CompiledProgramArtifact::from_rulespec_str(&source).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("relation_atom_needs_typed_relation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rulespec_atom_and_comparison_owners_require_declared_kinds_before_stamping() {
+    for predicate in [
+        "base(candidate, anchor)",
+        "candidate == candidate",
+        "(if candidate == candidate: 1 else: 0) == 1",
+    ] {
+        let source = distinct_kind_rulespec(true, false, predicate);
+        let error = CompiledProgramArtifact::from_rulespec_str(&source).unwrap_err();
+        assert!(
+            error.to_string().contains("relation_roles_need_slot_kinds"),
+            "{predicate}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rulespec_keeps_qualified_only_and_unrelated_distinct_kind_stamping() {
+    for (target_kinds, owner_kinds, predicate) in [
+        (false, false, "candidate.age > 0"),
+        (true, true, "inherited(candidate, anchor)"),
+    ] {
+        let source = distinct_kind_rulespec(target_kinds, owner_kinds, predicate);
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&source).unwrap();
+        let value = serde_json::to_value(&artifact.program).unwrap();
+        for name in ["inherited", "unrelated", "selected"] {
+            let relation = value["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|relation| relation["name"] == name)
+                .unwrap();
+            assert_eq!(relation["slot_entities"], json!(["Person", "Household"]));
+            assert_eq!(
+                relation["derivation"]["slot_entities"],
+                json!(["Person", "Household"])
+            );
+        }
+        let encoded = serde_json::to_string(&artifact).unwrap();
+        CompiledProgramArtifact::from_json_str(&encoded).unwrap();
+    }
+}
+
 #[test]
 fn relation_role_interface_round_trips_and_rejects_tampering() {
     let artifact = CompiledProgramArtifact::compile(program(json!({
