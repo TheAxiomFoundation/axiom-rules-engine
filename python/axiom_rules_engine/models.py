@@ -85,7 +85,10 @@ class ExecutionRequest(BaseModel):
 class FastPathMetadata(BaseModel):
     strategy: str
     compatible: bool
-    blockers: list[str] = Field(default_factory=list)
+    # Required, as the engine's artifact loader requires it. With a default,
+    # an `exclude_defaults` or `exclude_unset` dump could omit it and write an
+    # artifact the engine refuses.
+    blockers: list[str]
 
 
 class CompiledInputCatalogEntry(BaseModel):
