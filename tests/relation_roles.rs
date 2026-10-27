@@ -415,6 +415,93 @@ fn a_bare_boolean_parameter_is_a_judgment_of_the_parameter() {
     }
 }
 
+/// The period built-ins are dates and come first in scalar position, so a
+/// bare one is refused as a judgment, in a predicate and in a rule body, even
+/// where a Boolean parameter shares its name.
+#[test]
+fn a_bare_period_built_in_is_refused_as_a_judgment() {
+    for name in ["period_start", "period_end"] {
+        let shadow = format!(
+            r#"
+  - name: {name}
+    kind: parameter
+    dtype: Bool
+    versions:
+      - effective_from: 2026-01-01
+        formula: "true"
+"#
+        );
+        for shadowed in ["", shadow.as_str()] {
+            for (formula, rule_formula) in [
+                (name.to_string(), name.to_string()),
+                (format!("not {name}"), format!("not {name}")),
+                (
+                    format!("{name} and candidate.is_adult"),
+                    format!("{name} and is_adult"),
+                ),
+            ] {
+                let predicate = format!(
+                    "{shadowed}{}",
+                    relative_relation("refused", PERSON_SLOTS, &formula)
+                );
+                let rule = format!(
+                    r#"{shadowed}
+  - name: refused
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: {rule_formula}
+"#
+                );
+                for extra in [predicate, rule] {
+                    let error = compile(&people_module(&extra))
+                        .expect_err("a period built-in is not a judgment")
+                        .to_string();
+                    assert!(
+                        error.contains(&format!("`{name}` is a date")),
+                        "{formula} shadowed={}: {error}",
+                        !shadowed.is_empty()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A bare parameter of another type compares that value with `true`, so
+/// evaluation fails with a type mismatch rather than reading an input.
+#[test]
+fn a_bare_non_boolean_parameter_fails_as_a_judgment() {
+    let extra = relative_relation("gap_relative_of", PERSON_SLOTS, "minimum_gap")
+        + r#"
+  - name: gap_person
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: minimum_gap
+"#;
+    let program = program_of(&compile(&people_module(&extra)).expect("module compiles"));
+    assert_eq!(
+        predicate_of(&program, "gap_relative_of")["left"]["kind"],
+        json!("parameter_lookup")
+    );
+    for output in ["gap_relative_of_count", "gap_person"] {
+        for mode in ["explain", "fast"] {
+            let queries = json!([{"entity_id": "p1", "period": month(), "outputs": [output]}]);
+            let error = execute_request(request(mode, &program, &family(), &queries))
+                .expect_err("an integer is not a judgment")
+                .to_string();
+            assert!(error.contains("type mismatch"), "{mode} {output}: {error}");
+        }
+    }
+}
+
 /// Dense compiles a parameter read in a predicate; only a read through a term
 /// needs explain or fast.
 #[test]
