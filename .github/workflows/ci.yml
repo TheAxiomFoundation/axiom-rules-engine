@@ -229,5 +229,10 @@ jobs:
       - name: Verify native dense extension import
         run: .venv/bin/python -c "import axiom_rules_engine_dense"
 
+      # The end-to-end tests run target/debug/axiom-rules-engine. They skip
+      # without it locally, but under CI a missing binary fails them.
+      - name: Build the engine binary for the end-to-end tests
+        run: cargo build --bin axiom-rules-engine
+
       - name: Run Python tests
         run: .venv/bin/python -m pytest -q python/tests
