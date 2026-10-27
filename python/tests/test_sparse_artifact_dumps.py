@@ -18,7 +18,7 @@ import typing
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
 from axiom_rules_engine import (
     AxiomRulesEngine,
@@ -56,16 +56,21 @@ def _resolve(node: dict, defs: dict) -> dict:
     return node
 
 
-def _object_schemas(node: dict, defs: dict) -> list[dict]:
+def _object_schemas(node: dict, defs: dict, *, conjunct: bool = False) -> list[dict]:
     """The object schemas a value may take, through references, unions,
-    ``allOf`` parts and array items."""
+    ``allOf`` parts, array items and map values. An ``allOf`` part counts even
+    without properties, since its ``required`` always applies; a union
+    branch without properties is a conditional requirement and does not."""
     node = _resolve(node, defs)
-    found = [node] if "properties" in node else []
-    for key in ("anyOf", "oneOf", "allOf"):
+    found = [node] if "properties" in node or (conjunct and "required" in node) else []
+    for key in ("anyOf", "oneOf"):
         for branch in node.get(key, []):
             found += _object_schemas(branch, defs)
-    if isinstance(node.get("items"), dict):
-        found += _object_schemas(node["items"], defs)
+    for branch in node.get("allOf", []):
+        found += _object_schemas(branch, defs, conjunct=True)
+    for key in ("items", "additionalProperties"):
+        if isinstance(node.get(key), dict):
+            found += _object_schemas(node[key], defs)
     return found
 
 
@@ -121,6 +126,71 @@ def test_the_model_requires_every_key_the_engine_requires(model) -> None:
     assert [
         key for root in roots for key in _defaulted_but_required(model, root, defs, model.__name__)
     ] == []
+
+
+class _Leaf(BaseModel):
+    key: str = "default"
+
+
+class _Tagged(BaseModel):
+    kind: typing.Literal["tagged"]
+    key: str = "default"
+
+
+_LEAF_REF = {"$ref": "#/$defs/Leaf"}
+_LEAF_DEFS = {"Leaf": {"properties": {"key": {"type": "string"}}, "required": ["key"]}}
+_KEY = {"key": {"type": "string"}}
+
+
+@pytest.mark.parametrize(
+    ("annotation", "child", "found"),
+    [
+        (_Leaf, _LEAF_REF, True),
+        (_Leaf | None, {"anyOf": [_LEAF_REF, {"type": "null"}]}, True),
+        (list[_Leaf], {"type": "array", "items": _LEAF_REF}, True),
+        (dict[str, _Leaf], {"type": "object", "additionalProperties": _LEAF_REF}, True),
+        (_Leaf, {"properties": _KEY, "allOf": [{"required": ["key"]}]}, True),
+        (_Leaf, {"properties": _KEY, "oneOf": [{"required": ["key"]}, {}]}, False),
+        (
+            _Tagged,
+            {
+                "oneOf": [
+                    {"properties": {"kind": {"const": "other"}, **_KEY}, "required": ["kind", "key"]},
+                    {"properties": {"kind": {"const": "tagged"}, **_KEY}, "required": ["kind"]},
+                ]
+            },
+            False,
+        ),
+        (
+            _Tagged,
+            {
+                "oneOf": [
+                    {"properties": {"kind": {"const": "other"}, **_KEY}, "required": ["kind"]},
+                    {"properties": {"kind": {"const": "tagged"}, **_KEY}, "required": ["kind", "key"]},
+                ]
+            },
+            True,
+        ),
+    ],
+    ids=[
+        "ref",
+        "optional",
+        "array-items",
+        "map-values",
+        "required-only-allOf-part",
+        "conditional-union-branch",
+        "other-branch-of-tagged-union",
+        "own-branch-of-tagged-union",
+    ],
+)
+def test_the_schema_walk_reaches_a_defaulted_required_key_in_each_shape(
+    annotation, child: dict, found: bool
+) -> None:
+    holder = create_model("Holder", child=(annotation, ...))
+    schema = {"properties": {"child": child}, "required": ["child"]}
+    assert _defaulted_but_required(holder, schema, _LEAF_DEFS, "Holder") == (
+        ["Holder.child.key"] if found else []
+    )
 
 
 def test_fast_path_metadata_requires_blockers() -> None:
