@@ -125,7 +125,7 @@ impl ExpressionReads {
         match value {
             Value::Object(object) => {
                 match object.get("kind").and_then(Value::as_str) {
-                    Some("input" | "input_or_else") => {
+                    Some("input" | "input_or_else" | "role_input") => {
                         self.inputs
                             .insert(object["name"].as_str().unwrap().to_string());
                     }
@@ -134,7 +134,7 @@ impl ExpressionReads {
                         let slot = input.rsplit_once("#input.").map_or(input, |(_, slot)| slot);
                         self.inputs.insert(slot.to_string());
                     }
-                    Some("derived") => {
+                    Some("derived" | "role_derived") => {
                         self.rules
                             .insert(object["name"].as_str().unwrap().to_string());
                     }

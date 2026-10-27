@@ -446,8 +446,28 @@ fn generate_profile(choices: &[u8], plain_reads: bool, compatible_inputs: bool) 
         None,
         None,
     );
+    // Reads through a term run on the term's id: `anchor` on the
+    // derivation's current kind, `candidate` on its related kind. Only a
+    // Person rule reads this relation, so dense still compiles a Household
+    // root.
+    let mut anchor_amount = b.read(
+        "anchor_amount",
+        Demand::Number,
+        Context::Kind("Person".into()),
+        None,
+        None,
+    );
+    anchor_amount["kind"] = json!("role_input");
+    anchor_amount["term"] = json!("anchor");
+    let mut candidate_ok = b.reference("household_ok", Context::Kind("Household".into()));
+    candidate_ok["kind"] = json!("role_derived");
+    candidate_ok["term"] = json!("candidate");
+    let term_predicate =
+        json!({"kind":"and","items":[cmp(anchor_amount,"gte",int(0)),candidate_ok]});
+    b.rule("person_households","Person",json!({"kind":"count_related","relation":"member_households","current_slot":0,"related_slot":1}),false);
     let relations = json!([
         {"name":"members","arity":2,"slot_entities":["Person","Household"]},
+        {"name":"member_households","arity":2,"derivation":{"source_relation":"members","current_slot":0,"related_slot":1,"entity":"Person","slot_entities":["Person","Household"],"predicate":term_predicate}},
         {"name":"selected_members","arity":2,"derivation":{"source_relation":"members","current_slot":1,"related_slot":0,"entity":"Selected","slot_entities":["Person","Household"],"predicate":predicate}},
         {"name":"links","arity":2,"slot_entities":["Household","Household"]},
         {"name":"selected_links","arity":2,"derivation":{"source_relation":"links","current_slot":0,"related_slot":1,"entity":"Household","slot_entities":["Household","Household"],"predicate":cmp(self_flag,"eq",boolean(true))}}

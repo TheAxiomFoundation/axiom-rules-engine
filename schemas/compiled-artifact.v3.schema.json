@@ -1187,6 +1187,36 @@
             "items"
           ],
           "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "`t.name` for a judgment derived rule in a derived relation's\npredicate: the rule evaluated at the term's id.",
+          "properties": {
+            "kind": {
+              "const": "role_derived",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "term": {
+              "$ref": "#/$defs/TermSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "term",
+            "name"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -2804,6 +2834,66 @@
             "value"
           ],
           "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "`t.name` for an input in a derived relation's predicate: the input\nread at the term's id. An engine without relation roles refuses the\nunknown `kind` on load.",
+          "properties": {
+            "kind": {
+              "const": "role_input",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "term": {
+              "$ref": "#/$defs/TermSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "term",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "`t.name` for a scalar derived rule in a derived relation's predicate:\nthe rule evaluated at the term's id.",
+          "properties": {
+            "kind": {
+              "const": "role_derived",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "term": {
+              "$ref": "#/$defs/TermSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "term",
+            "name"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -3120,6 +3210,21 @@
         "corpus_citation_path"
       ],
       "type": "object"
+    },
+    "TermSpec": {
+      "description": "An end of the pair a derived relation's predicate tests, mirroring\n[`crate::model::Term`].",
+      "oneOf": [
+        {
+          "const": "anchor",
+          "description": "The id the relation is read from: its current slot.",
+          "type": "string"
+        },
+        {
+          "const": "candidate",
+          "description": "The id being tested: its related slot.",
+          "type": "string"
+        }
+      ]
     },
     "UnitSpec": {
       "allOf": [

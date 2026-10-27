@@ -686,3 +686,69 @@ fn an_extremum_types_its_losing_members_as_numbers() {
         );
     }
 }
+
+/// Reads through a term run on the term's id, whatever the rule's entity:
+/// `anchor.x` on the derivation's current kind and `candidate.x` on its
+/// related kind. The relation's `reads` list them as it lists unqualified
+/// reads. An unqualified read beside them keeps the predicate's routing.
+#[test]
+fn reads_through_a_term_run_on_the_terms_kind() {
+    let role_input =
+        |term: &str, name: &str| json!({"kind": "role_input", "term": term, "name": name});
+    let role_derived =
+        |term: &str, name: &str| json!({"kind": "role_derived", "term": term, "name": name});
+    let interface = derive(json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "older_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": {"kind": "and", "items": [
+                    cmp(role_input("candidate", "age"), "gte", int(18)),
+                    cmp(role_input("anchor", "head_age"), "gte", int(30)),
+                    cmp(role_derived("candidate", "member_score"), "gt", int(0)),
+                    role_derived("anchor", "household_eligible"),
+                    cmp(input("member_flag"), "eq", boolean(true))
+                ]}
+            }}
+        ],
+        "derived": [
+            judgment_rule("household_eligible", "Household", cmp(input("opt_in"), "eq", boolean(true))),
+            scalar_rule("member_score", "Person", add(vec![input("score_input"), int(0)])),
+            scalar_rule("older_count", "Household", json!({
+                "kind": "count_related", "relation": "older_members",
+                "current_slot": 1, "related_slot": 0
+            }))
+        ]
+    }));
+    for (slot, entities, dtype) in [
+        ("age", &["Person"], Some(InputDType::Decimal)),
+        ("head_age", &["Household"], Some(InputDType::Decimal)),
+        ("score_input", &["Person"], Some(InputDType::Decimal)),
+        ("opt_in", &["Household"], Some(InputDType::Bool)),
+        ("member_flag", &["Person"], Some(InputDType::Bool)),
+    ] {
+        let input = find(&interface, slot);
+        assert_eq!(input.entities, kinds(entities), "{slot}");
+        assert_eq!(input.dtype, dtype, "{slot}");
+    }
+    let older = interface
+        .relations
+        .iter()
+        .find(|relation| relation.name == "older_members")
+        .unwrap();
+    assert_eq!(older.lookup_slots, vec![1]);
+    assert_eq!(
+        older.provenance,
+        RelationProvenance::Derived {
+            rule: "older_members".to_string(),
+            source_relation: "member_of_household".to_string(),
+            reads: RelationReads {
+                inputs: kinds(&["age", "head_age", "member_flag"]),
+                rules: kinds(&["household_eligible", "member_score"]),
+                relations: vec![],
+            },
+        }
+    );
+}

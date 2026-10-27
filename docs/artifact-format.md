@@ -261,10 +261,10 @@ The engine declares no cardinality for any kind or relation.
 
 ### Inputs
 
-A **read site** of a slot is any `input`, `input_or_else` or `input_for_year`
-node naming it, or a `sum_related`, `only_related`, `extreme_related` or
-`single_related` whose value is that input, in any rule's base expression or
-versions or in any derived relation's predicate. These are the
+A **read site** of a slot is any `input`, `input_or_else`, `input_for_year`
+or `role_input` node naming it, or a `sum_related`, `only_related`,
+`extreme_related` or `single_related` whose value is that input, in any rule's
+base expression or versions or in any derived relation's predicate. These are the
 occurrences `Program::input_catalog` collects, so the slots listed here are
 the catalog's slots minus the `indexed_by` labels no expression mentions.
 Read sites are potential reads: an unselected branch, a `no_match` pattern
@@ -288,7 +288,10 @@ and it is a superset of the kinds an evaluation actually reads the slot on:
   the related slot's kind. Inside a derived relation's predicate a read site
   evaluates on the related slot's kind, and a referenced rule on the current
   slot's kind when its entity is the derivation's declared current kind,
-  otherwise on the related slot's kind. These are the context rules
+  otherwise on the related slot's kind. A read through a term
+  (`role_input`, `role_derived`) evaluates on the term's id whatever the
+  rule's entity: `anchor` on the current slot's kind, `candidate` on the
+  related slot's kind. These are the context rules
   `relation_typing::Checker` applies.
 
 Where every rule is referenced only by rules of its own entity, `entities` is
@@ -309,7 +312,7 @@ site demands one of:
 | `date` | date operand of `date_add_*`; operand of `days_between`; operand of a comparison whose other operand is a date literal, `period_start`, `period_end` or a `date_add_*` node |
 | `integer` | index of a `parameter_lookup`; offset operand of `date_add_*` |
 | `number` | operand of `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil` or `floor`; summed value of `sum_related`; operand of a comparison whose other operand is an integer or decimal literal or an `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`, `floor`, `count_related`, `sum_related` or `days_between` node |
-| none | every other position: the rule's value or an `if` branch; a comparison with an input, a rule, a parameter lookup or an `if`; an ordered comparison with a boolean or text literal; a `no_match` subject or pattern; anything inside an `over_periods` reduction |
+| none | every other position: the rule's value or an `if` branch; a comparison with an input or a rule (read directly or through a term), a parameter lookup or an `if`; an ordered comparison with a boolean or text literal; a `no_match` subject or pattern; anything inside an `over_periods` reduction |
 
 The `over_periods` suppression covers every nested expression in its
 operands; parameter-index domains and defaults remain structurally derived.

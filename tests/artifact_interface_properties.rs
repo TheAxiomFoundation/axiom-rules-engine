@@ -252,14 +252,14 @@ fn generated_interface_agrees_with_construction_records() {
                     prop_assert!(roster.contains(kind.as_str()));
                 }
                 prop_assert!(relation.accepts_supplied_tuples);
-                prop_assert_eq!(
-                    &relation.lookup_slots,
-                    &if relation.name.contains("links") {
-                        vec![0]
-                    } else {
-                        vec![1]
-                    }
-                );
+                // `member_households` reads `members` from its Person slot;
+                // everything else reads it from its Household slot.
+                let lookup_slots = match relation.name.as_str() {
+                    "links" | "selected_links" | "member_households" => vec![0],
+                    "members" => vec![0, 1],
+                    _ => vec![1],
+                };
+                prop_assert_eq!(&relation.lookup_slots, &lookup_slots);
                 match (&declared.derivation, &relation.provenance) {
                     (None, RelationProvenance::Supplied) => {}
                     (
@@ -272,14 +272,16 @@ fn generated_interface_agrees_with_construction_records() {
                     ) => {
                         prop_assert_eq!(rule, &relation.name);
                         prop_assert_eq!(source_relation, &derivation.source_relation);
-                        let (inputs, rules, relations) = if relation.name == "selected_members" {
-                            (
+                        let (inputs, rules, relations) = match relation.name.as_str() {
+                            "selected_members" => (
                                 vec!["predicate_age"],
                                 vec!["household_ok", "person_ok"],
                                 vec!["members"],
-                            )
-                        } else {
-                            (vec!["self_flag"], vec![], vec![])
+                            ),
+                            "member_households" => {
+                                (vec!["anchor_amount"], vec!["household_ok"], vec![])
+                            }
+                            _ => (vec!["self_flag"], vec![], vec![]),
                         };
                         prop_assert_eq!(
                             reads.inputs.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -440,10 +442,10 @@ fn potential_slots(program: &Value, rule: &str) -> BTreeSet<String> {
         match value {
             Value::Object(object) => {
                 match object.get("kind").and_then(Value::as_str) {
-                    Some("input" | "input_or_else") => {
+                    Some("input" | "input_or_else" | "role_input") => {
                         slots.insert(object["name"].as_str().unwrap().to_string());
                     }
-                    Some("derived") => {
+                    Some("derived" | "role_derived") => {
                         let name = object["name"].as_str().unwrap();
                         if seen_rules.insert(name.to_string()) {
                             pending.push(rules.iter().find(|entry| entry["name"] == name).unwrap());

@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{
     ComparisonOp, DerivedSemantics, JudgmentExpr, Program, RelatedValueRef, RelationDerivation,
-    SCALAR_ENTITY, ScalarExpr, ScalarValue,
+    SCALAR_ENTITY, ScalarExpr, ScalarValue, Term,
 };
 use crate::relation_typing;
 use crate::spec::{InputDeclarationSpec, InputElection, ProgramSpec, ScalarValueSpec, SpecError};
@@ -357,6 +357,7 @@ pub(crate) fn derive_from_model(
         let routing = Routing {
             derivation,
             current_kind,
+            related_kind: related_kind.clone(),
         };
         let flow = Flow::Kind(related_kind);
         let first_site = collector.sites.len();
@@ -555,6 +556,18 @@ enum Flow {
 struct Routing<'a> {
     derivation: &'a RelationDerivation,
     current_kind: Option<String>,
+    related_kind: Option<String>,
+}
+
+impl Routing<'_> {
+    /// The ids a read through `term` runs on: `anchor` is the current slot's
+    /// id and `candidate` the related slot's.
+    fn term_flow(&self, term: Term) -> Flow {
+        Flow::Kind(match term {
+            Term::Anchor => self.current_kind.clone(),
+            Term::Candidate => self.related_kind.clone(),
+        })
+    }
 }
 
 /// What a read site's position demands of the value it reads.
@@ -822,6 +835,18 @@ impl Collector<'_> {
                     self.scalar(pattern, flow, routing, Demand::None, None);
                 }
             }
+            // `t.input` and `t.rule` run on the term's id. Relation typing
+            // refuses a read through a term anywhere but a derived
+            // relation's predicate, where `routing` is set, before an
+            // interface is derived.
+            ScalarExpr::RoleInput { term, name } => {
+                let flow = routing.map_or_else(|| flow.clone(), |routing| routing.term_flow(*term));
+                self.site(name, &flow, demand, None, index_of);
+            }
+            ScalarExpr::RoleDerived { term, name } => {
+                let flow = routing.map_or_else(|| flow.clone(), |routing| routing.term_flow(*term));
+                self.references.push((name.clone(), flow));
+            }
             // Explain refuses an over-periods reduction, and the dense
             // lifetime surface reads its operands across periods, so no
             // position inside one demands a type here.
@@ -855,6 +880,10 @@ impl Collector<'_> {
                 }
             }
             JudgmentExpr::Not(item) => self.judgment(item, flow, routing),
+            JudgmentExpr::RoleDerived { term, name } => {
+                let flow = routing.map_or_else(|| flow.clone(), |routing| routing.term_flow(*term));
+                self.references.push((name.clone(), flow));
+            }
         }
     }
 }
@@ -986,6 +1015,8 @@ fn collect_scalar_relations(expr: &ScalarExpr, relations: &mut BTreeSet<String>)
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::Derived(_)
+        | ScalarExpr::RoleInput { .. }
+        | ScalarExpr::RoleDerived { .. }
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
         ScalarExpr::ParameterLookup { index: value, .. }
@@ -1076,7 +1107,7 @@ fn collect_judgment_relations(expr: &JudgmentExpr, relations: &mut BTreeSet<Stri
             collect_scalar_relations(left, relations);
             collect_scalar_relations(right, relations);
         }
-        JudgmentExpr::Derived(_) => {}
+        JudgmentExpr::Derived(_) | JudgmentExpr::RoleDerived { .. } => {}
         JudgmentExpr::RelationMember { relation, .. } => {
             relations.insert(relation.clone());
         }
