@@ -232,7 +232,19 @@ order where explain reports the first in sorted id order.
 Lifetime execution (`execute_lifetime*`) has no explain counterpart. It follows
 the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
-period. In an output that reduces over periods, a relation aggregation outside
+period. Inside a reduction, each reached rule's commencement is checked against
+that reduction period's start. The `n` argument of `sum_top_n_over_periods` is
+also evaluated and checked in every period before its invariance check. In the
+lifetime context, requested outputs and derived rules referenced outside a
+reduction are checked against the reference period's start: the chronologically
+last supplied period. A row that reaches a
+rule before its commencement fails with `MissingDerivedFormulaVersion`, naming
+the rule and the applicable period start, just as per-period dense and explain
+do for that period. Untaken branches do not fail. Lifetime uses the same dense
+compiler as per-period execution: derived rules with an `effective_to` bound or
+multiple formula versions are refused with `DenseCompileError::Unsupported`.
+
+In an output that reduces over periods, a relation aggregation outside
 the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,
 which names it.
 
