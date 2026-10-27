@@ -255,6 +255,35 @@ class CompiledProgram(BaseModel):
         return data
 
 
+class LegacyCompiledProgramMetadataV2(BaseModel):
+    """``metadata`` of a format-2 artifact. Not a subclass of
+    ``CompiledProgramMetadata``: format 3 requires the catalog, and a
+    subclass instance would pass into ``CompiledProgram`` unvalidated."""
+
+    evaluation_order: list[str]
+    fast_path: FastPathMetadata
+    # Omitted, never null, by engines that predate the catalog. The engine's
+    # format-2 loader fills an absent catalog from the program but checks a
+    # present one, `[]` included, against it, so absence must survive a dump.
+    input_catalog: list[CompiledInputCatalogEntry] | None = None
+
+    @field_validator("input_catalog", mode="before")
+    @classmethod
+    def _input_catalog_is_omitted_not_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("input_catalog is omitted when there is none, never null")
+        return value
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_input_catalog(self, handler: SerializerFunctionWrapHandler):
+        # As for `CompiledProgram.source_closure`: every dump omits an absent
+        # catalog, so a loaded artifact saves as one the engine loads.
+        data = handler(self)
+        if self.input_catalog is None:
+            data.pop("input_catalog", None)
+        return data
+
+
 class LegacyCompiledProgramV2(BaseModel):
     """A format-2 compiled artifact. The engine runs one only on request,
     through its format-2 compatibility loader (``accept_artifact_format=2``)."""
@@ -262,7 +291,7 @@ class LegacyCompiledProgramV2(BaseModel):
     artifact_format_version: Literal[2]
     engine_version: str | None = None
     program: Program
-    metadata: CompiledProgramMetadata
+    metadata: LegacyCompiledProgramMetadataV2
 
 
 class CompiledExecutionRequest(BaseModel):
