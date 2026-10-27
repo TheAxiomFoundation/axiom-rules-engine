@@ -56,18 +56,40 @@ def _resolve(node: dict, defs: dict) -> dict:
     return node
 
 
-def _object_schemas(node: dict, defs: dict, *, conjunct: bool = False) -> list[dict]:
-    """The object schemas a value may take, through references, unions,
-    ``allOf`` parts, array items and map values. An ``allOf`` part counts even
-    without properties, since its ``required`` always applies; a union
-    branch without properties is a conditional requirement and does not."""
+def _conjoin(node: dict, defs: dict) -> dict:
+    """``node`` with its ``allOf`` parts folded in: their properties and
+    required keys apply to the node itself, so a part stays under the
+    discriminator of the union branch that holds it."""
     node = _resolve(node, defs)
-    found = [node] if "properties" in node or (conjunct and "required" in node) else []
+    parts = [_conjoin(part, defs) for part in node.get("allOf", [])]
+    if not parts:
+        return node
+    merged = {key: value for key, value in node.items() if key != "allOf"}
+    for key in ("properties", "required", "anyOf", "oneOf"):
+        empty = {} if key == "properties" else []
+        combined = [node.get(key, empty), *(part.get(key, empty) for part in parts)]
+        if key == "properties":
+            folded = {name: value for each in combined for name, value in each.items()}
+        else:
+            folded = [item for each in combined for item in each]
+        if folded:
+            merged[key] = folded
+    for key in ("items", "additionalProperties"):
+        if key not in merged:
+            merged.update({key: part[key] for part in parts if key in part})
+    return merged
+
+
+def _object_schemas(node: dict, defs: dict, *, branch: bool = False) -> list[dict]:
+    """The object schemas a value may take, through references, ``allOf``
+    parts, unions, array items and map values. A union branch with no
+    properties is a conditional requirement with no discriminator to select
+    it, so it does not count."""
+    node = _conjoin(node, defs)
+    found = [node] if "properties" in node or (not branch and "required" in node) else []
     for key in ("anyOf", "oneOf"):
-        for branch in node.get(key, []):
-            found += _object_schemas(branch, defs)
-    for branch in node.get("allOf", []):
-        found += _object_schemas(branch, defs, conjunct=True)
+        for alternative in node.get(key, []):
+            found += _object_schemas(alternative, defs, branch=True)
     for key in ("items", "additionalProperties"):
         if isinstance(node.get(key), dict):
             found += _object_schemas(node[key], defs)
@@ -150,7 +172,9 @@ _KEY = {"key": {"type": "string"}}
         (list[_Leaf], {"type": "array", "items": _LEAF_REF}, True),
         (dict[str, _Leaf], {"type": "object", "additionalProperties": _LEAF_REF}, True),
         (_Leaf, {"properties": _KEY, "allOf": [{"required": ["key"]}]}, True),
+        (_Leaf, {"allOf": [_LEAF_REF]}, True),
         (_Leaf, {"properties": _KEY, "oneOf": [{"required": ["key"]}, {}]}, False),
+        (_Leaf, {"properties": _KEY, "oneOf": [{"allOf": [{"required": ["key"]}]}, {}]}, False),
         (
             _Tagged,
             {
@@ -171,6 +195,19 @@ _KEY = {"key": {"type": "string"}}
             },
             True,
         ),
+        (
+            _Tagged,
+            {
+                "oneOf": [
+                    {
+                        "properties": {"kind": {"const": "other"}, **_KEY},
+                        "allOf": [{"required": ["kind", "key"]}],
+                    },
+                    {"properties": {"kind": {"const": "tagged"}, **_KEY}, "required": ["kind"]},
+                ]
+            },
+            False,
+        ),
     ],
     ids=[
         "ref",
@@ -178,9 +215,12 @@ _KEY = {"key": {"type": "string"}}
         "array-items",
         "map-values",
         "required-only-allOf-part",
+        "allOf-of-a-ref",
         "conditional-union-branch",
+        "conditional-union-branch-of-allOf",
         "other-branch-of-tagged-union",
         "own-branch-of-tagged-union",
+        "allOf-part-in-other-branch-of-tagged-union",
     ],
 )
 def test_the_schema_walk_reaches_a_defaulted_required_key_in_each_shape(
