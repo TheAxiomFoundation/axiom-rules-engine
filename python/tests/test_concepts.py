@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from pathlib import Path
 
@@ -593,6 +594,86 @@ def test_inferred_inputs_are_the_compiled_program_inputs(
         f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
         for name in inputs
     )
+
+
+RANDOM_NAMES = [
+    "wages", "age", "then", "in", "_", "period_start", "period_end",
+    "household/size", "single", "max", "floor", "sum", "len",
+]  # fmt: skip
+RANDOM_FIELDS = ["age", "wages", "period_start", "_", "then"]
+
+
+def random_formula(rng: random.Random, depth: int) -> str:
+    """A formula over the shapes the cases above pin, nested at random."""
+
+    def name() -> str:
+        text = rng.choice(RANDOM_NAMES)
+        return f"({text})" if rng.random() < 0.15 else text
+
+    def operand() -> str:
+        roll = rng.random()
+        if depth == 0 or roll < 0.4:
+            return name()
+        if roll < 0.5:
+            return rng.choice(["1", "2.5", '"a"', "True"])
+        return random_formula(rng, depth - 1)
+
+    relation = rng.choice(["member_of_household", "(member_of_household)"])
+    shapes = [
+        lambda: f"{operand()}{rng.choice(['+', '-', '*', '/', ' / '])}{operand()}",
+        lambda: f"{rng.choice(['ceil', 'floor'])}({operand()})",
+        lambda: f"{rng.choice(['max', 'min'])}({operand()}, {operand()})",
+        lambda: f"days_between({operand()}, {operand()})",
+        lambda: f"len({relation}{rng.choice(['', '.' + rng.choice(RANDOM_FIELDS)])})",
+        lambda: f"count_where({relation}, {name()})",
+        lambda: f"sum_where({relation}, {name()}, {name()})",
+        lambda: f"{rng.choice(['sum', 'max', 'only'])}({relation}.{rng.choice(RANDOM_FIELDS)})",
+        lambda: (
+            f"(match {name()}: {rng.choice(['1', 'single', 'period_end'])} => "
+            f"{operand()}{rng.choice(['', f' _ => {operand()}'])})"
+        ),
+        lambda: f"(if {operand()}: {operand()} elif {operand()}: {operand()} else: {operand()})",
+        lambda: f"{operand()} {rng.choice(['>=', '==', 'and', 'or not'])} {operand()}",
+    ]
+    return rng.choice(shapes)()
+
+
+@pytest.mark.skipif(
+    NativeCompiledDenseProgram is None,
+    reason="axiom_rules_engine_dense extension is not built",
+)
+@pytest.mark.parametrize("seed", range(4))
+def test_random_formulas_infer_the_compiled_program_inputs(
+    tmp_path: Path, seed: int
+) -> None:
+    # For every formula the compiler accepts, under the first result dtype it
+    # accepts, inference names exactly the program's inputs.
+    rng = random.Random(seed)
+    root = canonical_root(tmp_path)
+    compiled_formulas = 0
+    for _ in range(50):
+        formula = random_formula(rng, rng.randint(1, 2))
+        for dtype in ("Money", "Judgment", "Integer", "Date"):
+            path = write_formula_module(root, {"called": formula}, dtype=dtype)
+            try:
+                program = CompiledDenseProgram.from_file(
+                    path, rulespec_roots=[root], entity="Household"
+                )
+            except ValueError:
+                continue
+            compiled_formulas += 1
+            compiled = set(program.root_inputs) | {
+                name
+                for relation in program.relations
+                for name in relation.related_inputs
+            }
+            assert inferred_input_names(root) == compiled, formula
+            assert all(
+                f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
+                for name in compiled
+            ), formula
+            break
+    assert compiled_formulas >= 25
 
 
 @pytest.mark.skipif(
