@@ -161,6 +161,27 @@ def test_a_dump_omits_an_absent_source_closure() -> None:
     assert CompiledProgram.model_validate_json(sourceless.model_dump_json()) == sourceless
 
 
+def test_a_dump_keeps_a_present_source_closure() -> None:
+    closure = {
+        "root": "us/statutes/x",
+        "modules": [{"target": "us/statutes/x", "sha256": "0" * 64}],
+        "digest": "1" * 64,
+    }
+    sourced = CompiledProgram.model_validate({**_format_3(), "source_closure": closure})
+    assert sourced.model_dump()["source_closure"] == closure
+    assert json.loads(sourced.model_dump_json())["source_closure"] == closure
+    assert CompiledProgram.model_validate_json(sourced.model_dump_json()) == sourced
+
+
+def test_the_serialization_schema_is_the_models_own() -> None:
+    # The serializer only drops an absent closure, so the schema of what a
+    # dump writes lists every field, as the validation schema does.
+    serialization = CompiledProgram.model_json_schema(mode="serialization")
+    validation = CompiledProgram.model_json_schema(mode="validation")
+    assert serialization["properties"].keys() == validation["properties"].keys()
+    assert "source_closure" in serialization["properties"]
+
+
 def _request() -> CompiledExecutionRequest:
     return CompiledExecutionRequest(
         mode="explain",
@@ -295,6 +316,10 @@ def test_the_engine_runs_the_models_default_dumps(compiled_artifacts, tmp_path: 
     expected = engine.execute_compiled(artifact_path=format_3, request=request)
     with_closure = tmp_path / "with-closure.json"
     with_closure.write_text(compiled.model_dump_json(), encoding="utf-8")
+    written = json.loads(format_3.read_text(encoding="utf-8"))
+    assert json.loads(with_closure.read_text(encoding="utf-8"))["source_closure"] == (
+        written["source_closure"]
+    )
     assert engine.execute_compiled(artifact_path=with_closure, request=request) == expected
     sourceless = tmp_path / "sourceless.json"
     sourceless.write_text(

@@ -242,9 +242,10 @@ class CompiledProgram(BaseModel):
         return value
 
     @model_serializer(mode="wrap")
-    def _omit_absent_source_closure(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+    def _omit_absent_source_closure(self, handler: SerializerFunctionWrapHandler):
         # Every dump omits an absent closure, so a loaded artifact saves as
-        # one the engine and this model accept.
+        # one the engine and this model accept. No return annotation: one
+        # would replace the model's serialization schema with a bare object.
         data = handler(self)
         if self.source_closure is None:
             data.pop("source_closure", None)
