@@ -366,6 +366,8 @@ fn a_dense_chain_compiles_and_runs_in_linear_time() {
             DenseRelationBatchSpec {
                 offsets: vec![0, 2, 3],
                 inputs: HashMap::new(),
+                related_row_count: Some(3),
+                ..Default::default()
             },
         )]),
     };

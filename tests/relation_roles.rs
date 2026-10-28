@@ -673,6 +673,7 @@ rules:
             DenseRelationBatchSpec {
                 offsets: vec![0, 3],
                 inputs: [("age".into(), DenseColumn::Integer(vec![45, 35, 12]))].into(),
+                ..Default::default()
             },
         )]
         .into(),

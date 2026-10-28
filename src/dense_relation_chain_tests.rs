@@ -168,6 +168,7 @@ fn batch(households: &[Vec<i64>]) -> DenseBatchSpec {
             DenseRelationBatchSpec {
                 offsets,
                 inputs: HashMap::from([("value".to_string(), DenseColumn::Integer(values))]),
+                ..Default::default()
             },
         )]),
     }

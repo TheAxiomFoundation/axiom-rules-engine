@@ -747,6 +747,7 @@ fn a_fractional_calendar_offset_inside_a_related_rule_fails_with_explains_error(
                             ),
                             ("offset".to_string(), offsets.clone()),
                         ]),
+                        ..Default::default()
                     },
                 )]),
             };
@@ -848,6 +849,7 @@ fn a_fractional_key_inside_a_related_rule_fails_with_explains_error() {
                 DenseRelationBatchSpec {
                     offsets: vec![0, 2],
                     inputs: HashMap::from([("bracket".to_string(), brackets.clone())]),
+                    ..Default::default()
                 },
             )]),
         };
@@ -1191,6 +1193,7 @@ rules:
                         "income".to_string(),
                         DenseColumn::Decimal(vec![Decimal::ONE, Decimal::TWO]),
                     )]),
+                    ..Default::default()
                 },
             )]),
         };

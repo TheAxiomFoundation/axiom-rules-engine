@@ -711,6 +711,7 @@ impl Generated {
                     DenseRelationBatchSpec {
                         offsets: vec![0, 2],
                         inputs: columns(2),
+                        ..Default::default()
                     },
                 ),
                 (
@@ -722,6 +723,7 @@ impl Generated {
                     DenseRelationBatchSpec {
                         offsets: vec![0, 1],
                         inputs: columns(1),
+                        ..Default::default()
                     },
                 ),
             ]),
