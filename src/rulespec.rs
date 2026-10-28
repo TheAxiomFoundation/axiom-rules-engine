@@ -218,6 +218,28 @@ pub enum RuleSpecError {
         "RuleSpec rule `{name}` declares `rounding` but has kind `{kind}`; output rounding applies only to `derived` currency rules"
     )]
     RoundingOnNonDerivedRule { name: String, kind: String },
+    /// A bare read of a reserved name never reaches a declaration of it.
+    #[error(
+        "[reserved_declaration_name] `{name}` is declared in `{path}` as {kind}, but the name is reserved: {reason}; rename it"
+    )]
+    ReservedDeclarationName {
+        kind: &'static str,
+        name: String,
+        path: String,
+        reason: &'static str,
+    },
+    /// Each bare read of a name reaches one declaration, so two declarations
+    /// of different kinds would give one name two meanings.
+    #[error(
+        "[declaration_name_clash] `{name}` is declared in `{first_path}` as {first} and in `{second_path}` as {second}; each bare `{name}` would read just one of them, so one name would mean two things; rename one"
+    )]
+    DeclarationNameClash {
+        name: String,
+        first: &'static str,
+        first_path: String,
+        second: &'static str,
+        second_path: String,
+    },
     #[error(
         "RuleSpec file `{path}` rule `{name}` declares unsupported `default`; rule-level defaults have no defined semantics, so remove it and express the fallback explicitly in the formula"
     )]
@@ -2666,15 +2688,28 @@ impl RulesDocument {
         Ok(outcome.program)
     }
 
+    /// How lowering reads each rule, in `self.rules` order: `Some(true)` for
+    /// a parameter or derived rule that `lower_module` reads as a parameter
+    /// (a parameter table, or no entity and every version a literal),
+    /// `Some(false)` for one it reads as a derived rule, and `None` for any
+    /// other kind or a definition that does not write or parse (the module's
+    /// lowering refuses it where it meets it, so errors keep their order).
+    /// Each definition is classified on its own, as `lower_module` classifies
+    /// it.
+    fn parameter_classes(&self) -> Vec<Option<bool>> {
+        self.rules
+            .iter()
+            .map(|rule| match rule.kind {
+                Some(RuleKind::Parameter | RuleKind::Derived) => rule.lowers_to_parameter(),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The names rule lowering reads as parameters in this module, which
     /// derived-relation predicates read the same way (relation roles,
-    /// section 3.3): the parameter tables, and each parameter or derived
-    /// rule whose definition `lower_module` reads as a parameter. Each
-    /// definition is classified on its own, as `lower_module` classifies it.
-    /// One that does not write or parse is left out here; the module's
-    /// lowering refuses it where it meets it, so errors keep their order.
-    /// A module without derived relations needs none of this.
-    fn predicate_parameter_names(&self) -> HashSet<String> {
+    /// section 3.3). A module without derived relations needs none of this.
+    fn predicate_parameter_names(&self, classes: &[Option<bool>]) -> HashSet<String> {
         if !self
             .rules
             .iter()
@@ -2682,27 +2717,87 @@ impl RulesDocument {
         {
             return HashSet::new();
         }
-        let mut names = HashSet::new();
-        for rule in &self.rules {
-            if !matches!(
-                rule.declared_kind(),
-                Ok(RuleKind::Parameter | RuleKind::Derived)
-            ) {
-                continue;
+        self.rules
+            .iter()
+            .zip(classes)
+            .filter(|(_, class)| **class == Some(true))
+            .map(|(rule, _)| rule.name.clone())
+            .collect()
+    }
+
+    /// Refuse a declaration that a bare name cannot read unambiguously
+    /// (docs/rulespec.md, "Declaration names"): one that takes a reserved
+    /// name, or one that shares its name with a declaration of another kind.
+    /// This runs over the import-merged closure, before anything is lowered.
+    ///
+    /// Parameters and derived rules are classed as lowering reads them, so an
+    /// entity-free rule with a literal value is a parameter here. Duplicates
+    /// of one kind are left to the checks that already handle them:
+    /// compatible parameters merge, and a second rule or relation of a name
+    /// fails to compile. A source relation is a provenance record that no
+    /// formula reads by name, so it is not checked. Nor is an `inputs:`
+    /// entry: inputs are inferred from reads, the entry only describes one,
+    /// and `input_declarations` refuses an election on a slot no formula of
+    /// its module reads. A rule whose kind or definition is invalid is
+    /// skipped here; lowering refuses it.
+    fn validate_declaration_names(&self, classes: &[Option<bool>]) -> Result<(), RuleSpecError> {
+        let rules = self.rules.iter().zip(classes).filter_map(|(rule, class)| {
+            let (role, label) = match rule.kind.as_ref()? {
+                RuleKind::Parameter | RuleKind::Derived => {
+                    let parameter = (*class)?;
+                    let declared_parameter = matches!(rule.kind, Some(RuleKind::Parameter));
+                    match (parameter, declared_parameter) {
+                        (true, true) => (DeclaredAs::Parameter, "a parameter"),
+                        (true, false) => (
+                            DeclaredAs::Parameter,
+                            "a derived rule with no entity and a literal value (a parameter once lowered)",
+                        ),
+                        (false, false) => (DeclaredAs::Rule, "a derived rule"),
+                        (false, true) => (
+                            DeclaredAs::Rule,
+                            "a parameter with an entity or a computed formula (a derived rule once lowered)",
+                        ),
+                    }
+                }
+                RuleKind::DataRelation => (DeclaredAs::Relation, "a data relation"),
+                RuleKind::DerivedRelation => (DeclaredAs::Relation, "a derived relation"),
+                RuleKind::SourceRelation | RuleKind::Unsupported(_) => return None,
+            };
+            Some(Declaration {
+                name: &rule.name,
+                role,
+                label,
+                path: rule.source_path(),
+            })
+        });
+
+        let mut first = HashMap::<&str, Declaration>::new();
+        for declaration in rules {
+            if let Some(reason) = reserved_name_reason(declaration.name) {
+                return Err(RuleSpecError::ReservedDeclarationName {
+                    kind: declaration.label,
+                    name: declaration.name.to_string(),
+                    path: declaration.path,
+                    reason,
+                });
             }
-            if rule.is_parameter_table() {
-                names.insert(rule.name.clone());
-                continue;
-            }
-            let mut definition = String::new();
-            if rule.write_formula_definition(&mut definition).is_err() {
-                continue;
-            }
-            if let Ok(found) = crate::formula::parameter_names(&definition) {
-                names.extend(found);
+            match first.get(declaration.name) {
+                Some(earlier) if earlier.role != declaration.role => {
+                    return Err(RuleSpecError::DeclarationNameClash {
+                        name: declaration.name.to_string(),
+                        first: earlier.label,
+                        first_path: earlier.path.clone(),
+                        second: declaration.label,
+                        second_path: declaration.path,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    first.insert(declaration.name, declaration);
+                }
             }
         }
-        names
+        Ok(())
     }
 
     pub fn to_program_spec_with_options(
@@ -2714,6 +2809,8 @@ impl RulesDocument {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
         self.validate_unit_declarations()?;
+        let parameter_classes = self.parameter_classes();
+        self.validate_declaration_names(&parameter_classes)?;
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
 
@@ -2721,13 +2818,20 @@ impl RulesDocument {
         let mut relation_rewrites = HashMap::new();
         let mut table_parameters = Vec::new();
         let mut table_parameter_names = HashSet::new();
+        // The names a predicate reads as rules, as rule lowering does: every
+        // derived rule, and a parameter that lowers to a rule (one with an
+        // entity, or a computed formula). `lower_judgment_formula` drops the
+        // names that lower to parameters.
         let derived_rule_names = self
             .rules
             .iter()
-            .filter_map(|rule| match rule.kind.as_ref() {
-                Some(RuleKind::Derived) => Some(rule.name.clone()),
-                _ => None,
+            .zip(&parameter_classes)
+            .filter(|(rule, class)| match rule.kind {
+                Some(RuleKind::Derived) => true,
+                Some(RuleKind::Parameter) => **class == Some(false),
+                _ => false,
             })
+            .map(|(rule, _)| rule.name.clone())
             .collect::<HashSet<String>>();
         let relation_predicate_names = self
             .rules
@@ -2737,7 +2841,7 @@ impl RulesDocument {
                 _ => None,
             })
             .collect::<HashSet<String>>();
-        let predicate_parameter_names = self.predicate_parameter_names();
+        let predicate_parameter_names = self.predicate_parameter_names(&parameter_classes);
         for rule in &self.rules {
             let kind = match rule.declared_kind() {
                 Ok(kind) => kind,
@@ -3352,6 +3456,23 @@ impl RuleDefinition {
             .any(|version| !version.values.is_empty())
     }
 
+    /// Whether lowering reads this parameter or derived rule as a parameter:
+    /// a parameter table, or a definition `lower_module` classifies as one
+    /// (no entity, and every version a literal). `None` when the definition
+    /// does not write or parse, or a table's name is not one formula token;
+    /// the module's lowering refuses it where it meets it, so its error comes
+    /// first.
+    fn lowers_to_parameter(&self) -> Option<bool> {
+        if self.is_parameter_table() {
+            return self.validate_source_name().is_ok().then_some(true);
+        }
+        let mut definition = String::new();
+        self.write_formula_definition(&mut definition).ok()?;
+        crate::formula::parameter_names(&definition)
+            .ok()
+            .map(|names| names.contains(&self.name))
+    }
+
     fn to_indexed_parameter_spec(&self) -> Result<IndexedParameterSpec, RuleSpecError> {
         let indexed_by =
             self.indexed_by
@@ -3723,6 +3844,52 @@ impl RuleDefinition {
             .or_else(|| self.sources.iter().find_map(|source| source.url.clone()));
         (citation, url)
     }
+}
+
+/// What a bare name reads when a declaration takes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclaredAs {
+    Parameter,
+    Rule,
+    Relation,
+}
+
+/// One name a module declares, for [`RulesDocument::validate_declaration_names`].
+struct Declaration<'a> {
+    name: &'a str,
+    role: DeclaredAs,
+    label: &'static str,
+    path: String,
+}
+
+/// Why a declaration may not take `name`, when a bare read of it always means
+/// something else. Formula lowering reads `period_start` and `period_end` as
+/// the period's dates before any declaration (`lower_to_scalar`), and reserves
+/// `anchor` and `candidate` as terms inside a derived relation's predicate
+/// (`term_named`). The lexer reads a keyword (`true`, `and`, `if`, ...) as a
+/// literal or syntax, never as a name; a parameter or rule cannot take one
+/// (`validate_source_name`), but a relation could.
+fn reserved_name_reason(name: &str) -> Option<&'static str> {
+    if crate::formula::keyword(name).is_some() {
+        return Some(
+            "it is a formula keyword, which a formula reads as a literal or as syntax, never as a declaration",
+        );
+    }
+    Some(match name {
+        "period_start" => {
+            "a bare `period_start` means the start date of the period being computed, never a declaration"
+        }
+        "period_end" => {
+            "a bare `period_end` means the end date of the period being computed, never a declaration"
+        }
+        "anchor" => {
+            "in a derived relation's predicate, `anchor` names the term for the id the relation is read from, never a declaration"
+        }
+        "candidate" => {
+            "in a derived relation's predicate, `candidate` names the term for the id being tested, never a declaration"
+        }
+        _ => return None,
+    })
 }
 
 fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitKindSpec) -> bool {

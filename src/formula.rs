@@ -111,7 +111,7 @@ pub struct Token {
     pub col: usize,
 }
 
-fn keyword(s: &str) -> Option<TokType> {
+pub(crate) fn keyword(s: &str) -> Option<TokType> {
     match s {
         "entity" => Some(TokType::Entity),
         "amend" => Some(TokType::Amend),

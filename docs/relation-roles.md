@@ -151,7 +151,9 @@ written bare, as if it were a value or an input, refuses
 - in a term comparison.
 
 Outside predicates, these names stay ordinary identifiers. Section 2 shows
-that no corpus predicate uses them.
+that no corpus predicate uses them. No declaration may take `anchor` or
+`candidate` as its name ([rulespec.md](rulespec.md#declaration-names)), so a
+term never hides one.
 
 ### 3.2 Qualified reads
 
@@ -178,16 +180,38 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing. Three changes affect existing programs:
+Unqualified reads keep today's routing. Five changes affect existing programs:
 - A bare parameter name in a predicate, or tested as a judgment in a rule
   body, used to read an input of that name and now reads the parameter (3.3).
+  That held when nothing else had the name. A parameter that shared a rule's
+  name read the rule, and in a predicate one that shared a relation's name
+  tested membership; such a program is now refused at declaration (the
+  declaration-name change below).
 - A bare `period_start` or `period_end` tested as a judgment used to resolve
   as any bare name did: to a rule of that name, else (in a predicate) a
   relation, else an input. It is now refused. Both are dates. Scalar position
   reads the built-in before anything else of the same name, and judgment
   position now does the same.
 - A bare `anchor` or `candidate` in a derived relation's predicate was an
-  ordinary name and is now refused (3.1).
+  ordinary name and is now refused (3.1). Read through `.`, a relation of
+  either name used to mean the relation: `sum(anchor.age)` aggregated over
+  it and is now refused, and `min(anchor.age)` took its minimum and now
+  reads the anchor's own `age`. Such a relation can no longer be declared
+  (next change), so no program that compiles keeps either old meaning.
+- A declaration that a bare name cannot read is refused before lowering
+  (`docs/rulespec.md`, "Declaration names"). That covers a parameter, rule
+  or relation named `period_start`, `period_end`, `anchor` or `candidate`,
+  and a relation named after a formula keyword such as `true`
+  (`reserved_declaration_name`). It also covers a name declared as two of a
+  parameter, a rule and a relation (`declaration_name_clash`). Such a
+  program used to compile, and one bare name reached only one of its
+  declarations. On 2026-10-27 no corpus module
+  declares a reserved name, and one declares a clash (rulespec-us#1953); main
+  already refuses that module for another reason.
+- A `parameter` record with an entity or a computed formula lowers to a
+  rule. A predicate used to read its bare name, and `t.name`, as an input of
+  that name. It now reads the rule, as a rule body does (3.3). On 2026-10-27
+  the corpus has 299 such records and no predicate that reads one.
 
 ### 3.3 Parameters in predicates
 
@@ -570,7 +594,7 @@ constructs.
 - A test checks that a path artifact never also writes `source_relation`.
   `RelationDerivationSpec` does not deny unknown fields, so writing both would
   let an older engine silently ignore the path.
-- A program that uses none of the additions and makes none of the three
+- A program that uses none of the additions and makes none of the five
   changes in 3.2 compiles to the same bytes as before.
 - If #155's format 3 (#250) merges first, this work adds to format 3 and
   needs no separate version bump.
@@ -893,8 +917,11 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change.** There are three exceptions. A bare
+- **Unqualified reads do not change.** There are five exceptions. A bare
   parameter name in a predicate, or tested as a judgment in a rule body, now
   reads the parameter (3.3). A bare period built-in tested as a judgment is
   now refused (3.2). A bare `anchor` or `candidate` in a derived relation's
-  predicate is now refused (3.1).
+  predicate is now refused (3.1). A declaration that a bare name cannot read,
+  because a built-in, a term, a keyword or another declaration takes the
+  name, is now refused (3.2). A predicate reads a `parameter` record that
+  lowers to a rule as that rule, not as an input (3.2).

@@ -198,10 +198,16 @@ A bare identifier in scalar position resolves in this order: the reserved
 names `period_start` and `period_end` (the evaluation period's bounds), then
 a declared parameter (lowered as a zero-index table lookup), then a declared
 derived rule, and otherwise a free input slot supplied by the caller at
-execution time. In judgment position the order is: a declared judgment
-derived rule, and otherwise a free Boolean input compared against `true`.
-Relation-predicate membership resolution applies only when lowering
-`derived_relation` predicate formulas, not ordinary rules.
+execution time. Judgment position resolves a bare name as `name == true`
+does: `period_start` and `period_end` are refused (a date is not a
+judgment), a declared parameter is compared against `true`, a declared
+derived rule is read as a judgment, and otherwise a free input is compared
+against `true`. Inside a `derived_relation` predicate, `anchor` and
+`candidate` name terms and are refused bare, and a relation name, after the
+rules, tests membership; ordinary rules have neither. A declaration may not
+take a reserved name or be declared as two of a parameter, a rule and a
+relation ([declaration names](rulespec.md#declaration-names)), so this order
+never chooses between two declarations.
 
 Undeclared names are not an error at lowering time — a typo becomes an input
 the engine then reports as missing. Compile queries can surface the

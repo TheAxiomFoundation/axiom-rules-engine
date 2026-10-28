@@ -381,7 +381,9 @@ slot). `t.name` reads a value at a term's id:
 
 A predicate reads the module's parameters as a rule body does: parameter
 tables, scalar parameters, and entity-free rules with literal values, which
-lowering turns into parameters.
+lowering turns into parameters. A `parameter` record with an entity or a
+computed formula lowers to a rule, and a predicate now reads it as a rule
+too, bare or through a term; it used to read an input of that name.
 
 ```yaml
   - name: older_relative_of
@@ -419,19 +421,32 @@ parameter, `period_start` or `period_end` through a term is refused with
 `relation_role_entity_mismatch`; reading a relation through a term is refused
 until relation atoms are supported (#214). Outside predicates the two names
 are ordinary identifiers: `anchor + 1` in a rule body reads an input named
-`anchor`, and `anchor.age` there is a field access, which RuleSpec rejects. A
-compiled program that carries a read through a term anywhere but a derived
+`anchor`, and `anchor.age` there is a field access, which RuleSpec rejects.
+No declaration may take either name ([Declaration names](#declaration-names)).
+A compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
 Unqualified reads keep the routing above. A bare parameter name now reads the
 parameter in two places where it used to read an input of that name: anywhere
 in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
-in a rule body as in a predicate. A bare `period_start` or `period_end`
-tested as a judgment, which used to read a rule, a relation or an input of
-that name, is refused. A judgment resolves a bare name in the order a scalar
-does, and a scalar reads the built-in date first, so neither name is a
-judgment even where a parameter, a rule or a relation shares it. A program with none of these, and with no term, compiles to the
+in a rule body as in a predicate. That held when nothing else had the name: a
+parameter that shared a rule's name used to read the rule there, and in a
+predicate one that shared a relation's name tested membership. Such a program
+is now refused at declaration. A bare `period_start` or `period_end` tested
+as a judgment, which used to read a rule, a relation or an input of that
+name, is refused. A judgment resolves a bare name in the order a scalar does,
+and a scalar reads the built-in date first, so neither name is a judgment. In
+a predicate, a relation named `anchor` or `candidate` used to be read through
+`.`: `sum(anchor.age)` aggregated over it and is now refused, and
+`min(anchor.age)` took its minimum and now reads the anchor's own `age`. Such
+a relation can no longer be declared, so no program that compiles keeps
+either old meaning. A predicate that reads a `parameter` record with an
+entity or a computed formula used to read an input of that name and now
+reads the rule. No declaration may take a reserved name, and no name may be
+declared as two of a parameter, a rule and a relation
+([Declaration names](#declaration-names)).
+A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
@@ -818,6 +833,86 @@ uses them on load, and a program that uses none of them compiles to the same
 bytes as before. Explain, fast and dense evaluate them; see
 [execution semantics](execution-semantics.md) for the evaluation order and
 each mode's contract.
+
+## Declaration names
+
+Each name declared in a module's import-merged closure names one
+declaration, and wherever a formula may read that kind of declaration bare, a
+bare read of the name reaches it. The compiler refuses two kinds of declaration that would
+break this, before it lowers any formula, in the default and the strict mode
+alike.
+
+**A name declared as two things** (`declaration_name_clash`). A bare name
+reads, in a fixed order, a parameter, then a rule, then (in a predicate's
+judgment position) a relation, then an input. A name declared as two of a
+parameter, a rule and a relation would read only the first. The other would
+still compile (a hidden rule could still be requested by name), but no bare
+read would reach it. Each declaration counts as lowering reads it:
+
+- a parameter table, or a `parameter` or `derived` record with no entity and
+  only literal versions, is a parameter;
+- any other `parameter` or `derived` record is a rule, so a `parameter` with
+  an entity clashes with a scalar parameter, not with a rule;
+- a `data_relation` or `derived_relation` is a relation.
+
+The error names both declarations' modules. Two declarations that read the
+same way are left to the existing checks: compatible duplicate parameters
+merge with a diagnostic (an error in strict mode), and a rule declared twice
+is an error.
+
+**A reserved name** (`reserved_declaration_name`). A bare `period_start` or
+`period_end` means the start or end date of the period being computed: a
+scalar read returns the date, and a judgment read is refused. In a derived
+relation's predicate, a bare `anchor` or `candidate` names a term. The lexer
+reads a formula keyword as a literal (`true`, `True`, `false`, `False`) or as
+syntax (`and`, `or`, `not`, `if`, `elif`, `else`, `match`, `entity`, `amend`,
+`from`, `to`). No parameter, rule or relation may take any of these names. A
+parameter or rule could never take a keyword, because its name is written
+into the formula source, so the keyword check adds relations.
+
+Refusing a reserved name costs the routes that do not read it bare. Before
+the refusal, a declaration named `period_start` was still reached by a table
+index (`period_start[0]`), a related read (`sum(member_of.period_start)`), a
+`where` clause or summed field (`count_where(member_of, period_start)`,
+`sum_where(member_of, period_start, adult)`), an aggregation over a relation
+of that name (`sum(period_start.age)`, `len(period_start)`), and a request for
+the rule by name. Meanwhile every bare scalar read of it silently returned
+the date, and a bare judgment read was refused. A
+declaration named `anchor` or `candidate` was reached by every route outside
+predicates; inside one, a bare or qualified read was refused and
+`min(anchor.age)` read the term's own `age`. Imports merge whole modules, so
+a declaration's name reaches every importer's predicates. Renaming the
+declaration keeps every route, with the same lowering.
+
+Five things are not checked:
+
+- `source_relation` records: formulas never read their names, which are
+  cited by `#` id;
+- a relation whose name is not a formula identifier or path, such as
+  `member-of`: no formula can write it, so it has no bare read to lose.
+  Such a relation can still be a derived relation's `source_relation`. A
+  parameter's or rule's name must already be one identifier or path;
+- a derived relation's `member_relation` alias (`members` in the SNAP
+  example above): in rules of its filtered entity it names that derived
+  relation. It is a scoped name, not a declaration;
+- undeclared names, including the inputs an `inputs:` block describes. Its
+  entries are not declarations in the sense of this section: inputs are
+  inferred from reads, and an entry does not change which declaration or
+  input a name reads. Outside predicates `anchor + 1` reads an input named
+  `anchor`, as above, with or without an entry. An entry whose `election`
+  names an input that no rule or derived-relation predicate of its module
+  reads is refused
+  ([Input declarations and elections](#input-declarations-and-elections)).
+  A declared name can also name an input in a position that does not read
+  that declaration, and this is not refused. A bare relation name outside a
+  predicate's judgment position, as in a rule body or in
+  `shared == true`, reads an input of that name. A parameter's name in a
+  related read (`sum(member_of.x)`), in `count_where` or in `only_related`
+  also reads an input of that name. An election on such an input is
+  accepted;
+- `ProgramSpec` JSON: each of its reads names its kind (`parameter_lookup`,
+  `derived`, `input`, `relation_member`, `period_start`), so no name chooses
+  between declarations.
 
 ## Currency rounding
 
