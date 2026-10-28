@@ -101,10 +101,17 @@ pub(crate) fn resolve(
             });
         }
     }
+    // Resolve predicates before stamping, recording the new constructs that
+    // require an original declaration. Legacy qualified reads alone retain
+    // their existing distinct-kind source stamping.
+    let mut atom_targets = HashSet::new();
+    let mut role_owners = HashSet::new();
     for rule in &mut program.derived {
         let citing = rule.id.clone().unwrap_or_else(|| rule.name.clone());
         let mut resolver = Resolver {
             relations: &relations,
+            atom_targets: &mut atom_targets,
+            uses_role_judgment: false,
             citing: &citing,
             inputs: declaration_blocks
                 .get(&citing.split_once('#').map(|(origin, _)| origin))
@@ -132,24 +139,11 @@ pub(crate) fn resolve(
         };
         let current = kind(slots.current_slot);
         let related = kind(slots.related_slot);
-        // Runtimes route each rule a predicate reads by the derivation's own
-        // kinds; with none, every rule runs on the related id. Stamp the
-        // source's kinds so a rule of the current entity reads the current
-        // id. A same-kind source stays unstamped: stamping would move every
-        // rule of that kind onto the current id.
-        if derivation.slot_entities.is_empty()
-            && let Some(kinds) = &slots.kinds
-            && current.is_some()
-            && current != related
-        {
-            derivation.slot_entities = kinds.clone();
-            if relation.slot_entities.is_empty() {
-                relation.slot_entities = kinds.clone();
-            }
-        }
         let citing = relation.name.clone();
         let mut resolver = Resolver {
             relations: &relations,
+            atom_targets: &mut atom_targets,
+            uses_role_judgment: false,
             citing: &citing,
             inputs: declaration_blocks
                 .get(&citing.split_once('#').map(|(origin, _)| origin))
@@ -161,6 +155,41 @@ pub(crate) fn resolve(
             related.as_deref().unwrap_or(""),
             Some((current.as_deref(), related.as_deref())),
         )?;
+        if resolver.uses_role_judgment {
+            role_owners.insert(relation.name.clone());
+        }
+    }
+    for relation in &mut program.relations {
+        let Some(slots) = relations.derived.get(&relation.name) else {
+            continue;
+        };
+        let Some(derivation) = relation.derivation.as_mut() else {
+            continue;
+        };
+        // An atom target and an owner of an atom/comparison require declared
+        // kinds. Leave originally-untyped ones unstamped so mandatory typing
+        // can report their named refusal using the source declaration.
+        if relation.slot_entities.is_empty()
+            && derivation.slot_entities.is_empty()
+            && (atom_targets.contains(&relation.name) || role_owners.contains(&relation.name))
+        {
+            continue;
+        }
+        // Runtimes route each rule a predicate reads by the derivation's own
+        // kinds; with none, every rule runs on the related id. Stamp the
+        // source's kinds so a rule of the current entity reads the current
+        // id. A same-kind source stays unstamped: stamping would move every
+        // rule of that kind onto the current id.
+        if derivation.slot_entities.is_empty()
+            && let Some(kinds) = &slots.kinds
+            && kinds.get(slots.current_slot).is_some()
+            && kinds.get(slots.current_slot) != kinds.get(slots.related_slot)
+        {
+            derivation.slot_entities = kinds.clone();
+            if relation.slot_entities.is_empty() {
+                relation.slot_entities = kinds.clone();
+            }
+        }
     }
     Ok(())
 }
@@ -242,6 +271,8 @@ fn relations(program: &ProgramSpec) -> Relations {
 
 struct Resolver<'a> {
     relations: &'a Relations,
+    atom_targets: &'a mut HashSet<String>,
+    uses_role_judgment: bool,
     citing: &'a str,
     inputs: &'a [&'a serde_yaml::Value],
 }
@@ -544,6 +575,13 @@ impl Resolver<'_> {
                     *related_slot = related_index;
                 }
             }
+            // An atom writes the relation's slot order explicitly. Record its
+            // target and owner before source kinds can be stamped onto them.
+            JudgmentExprSpec::RelationAtom { relation, .. } => {
+                self.atom_targets.insert(relation.clone());
+                self.uses_role_judgment = true;
+            }
+            JudgmentExprSpec::SameEntity { .. } => self.uses_role_judgment = true,
             JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         }
         Ok(())

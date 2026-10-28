@@ -325,6 +325,41 @@ impl<'a> PhaseTwoEngine<'a> {
                 visiting,
                 reasons,
             ),
+            JudgmentExpr::RelationAtom { relation, .. } => {
+                // This structural preflight has no predicate bindings, so
+                // inspect every unresolved tuple of the atom's relation.
+                // Its argument order must not hide a relation dependency.
+                for record in self.relation_knowledge.iter().filter(|record| {
+                    record.name == *relation && record.interval.contains_period(period)
+                }) {
+                    match &record.truth {
+                        LiftedTruth::Unknown {
+                            reasons: unresolved,
+                        }
+                        | LiftedTruth::Conflict {
+                            reasons: unresolved,
+                        } => {
+                            reasons.extend(unresolved.iter().cloned());
+                        }
+                        LiftedTruth::Holds | LiftedTruth::DoesNotHold => {}
+                    }
+                }
+                let current_slot = self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                    .map_or(0, |derivation| derivation.current_slot);
+                self.collect_relation_reasons(
+                    relation,
+                    current_slot,
+                    entity_id,
+                    period,
+                    visiting,
+                    reasons,
+                );
+            }
+            JudgmentExpr::SameEntity { .. } => {}
         }
     }
 

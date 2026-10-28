@@ -3,7 +3,9 @@
 //! of the order's graph. It is the oracle for the differential tests in
 //! `evaluation_order_tests`: the order is stored in artifact metadata and
 //! compared exactly when an artifact loads, so the production path must
-//! return what this returns, errors included, for every program.
+//! return what this returns, errors included, for the legacy programs in that
+//! generator. Atom programs use the full relation graph and have separate
+//! ordering regressions in `tests/relation_atom_order.rs`.
 //!
 //! Frozen: everything below the imports is the code as it stood, except that
 //! `evaluation_order`, `relation_derivation_dependencies` and
@@ -17,6 +19,8 @@
 //! collectors gain arms only for expression kinds added since, each read as
 //! the production collectors read it: a rule read through a term
 //! (`role_derived`) is a dependency, an input read through one is not.
+//! No generated program has an atom, so that arm is unreachable here; a term
+//! comparison reads no rule.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -417,7 +421,12 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationAtom { .. } => {
+            unreachable!(
+                "the evaluation-order generator builds no atoms; atom programs take the combined-graph order tested in tests/relation_atom_order.rs"
+            )
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {

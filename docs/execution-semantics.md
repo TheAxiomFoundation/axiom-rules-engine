@@ -88,6 +88,25 @@ output's formula is evaluated for that entity and period as follows.
   which compilation and relation typing already refuse outside a predicate
   (`relation_role_outside_scope`); an evaluator that meets one fails the
   evaluation that reaches it.
+- **Relation atoms fix slot order.** `R(t1, ..., tn)` in a derived relation's
+  predicate tests its term ids in `R`'s declared slots. A data atom requires
+  one supplied tuple matching every id whose interval contains the period.
+  A binary derived atom resolves members for the term in its current slot
+  and tests the term in its related slot. Computing another anchor's members
+  can add substantial work in nested predicates
+  ([relation-roles.md](relation-roles.md) §5; #211). `t1 == t2` and `t1 != t2`
+  compare ids of the same kind and always determine a result. Compilation
+  refuses these constructs outside the predicate's scope, including
+  aggregation `where` clauses (`relation_role_outside_scope`).
+- **Supplied derived tuples depend on the program's constructs.** Programs
+  using qualified reads, relation atoms or term comparisons refuse tuples
+  supplied under any derived relation's name
+  (`supplied_tuples_for_derived_relation`), and their members resolver ignores
+  those tuples even through `Engine::new`. Programs using none retain the
+  union of supplied tuples and filtered source members; a parameter read in a
+  predicate, which raw `ProgramSpec` could always express, is not one of these
+  constructs. An atom also refuses lenient request binding
+  (`lenient_binding_with_relation_roles`).
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -200,11 +219,12 @@ batch is its base relation's. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 
-A derived relation's predicate that reads through a term (`anchor.name`,
-`candidate.name`) makes the dense compiler reject any root entity whose rules
-reach that relation, naming the qualified read and #218; a root that reaches
-no such relation compiles. Explain and fast evaluate it. Parameter reads in a
-predicate compile in dense as in a rule body.
+A derived relation's predicate using a qualified read (`anchor.name`,
+`candidate.name`), relation atom or term comparison makes the dense compiler
+reject any root entity whose rules reach that relation with
+`DenseCompileError::Unsupported`, naming the construct and #218; a root that
+reaches no such relation compiles. Explain and fast evaluate it. Parameter
+reads in a predicate compile in dense as in a rule body.
 
 Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
 body reads on the related rows, for the related entity as explain does. Only a

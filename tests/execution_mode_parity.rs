@@ -2411,6 +2411,11 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
             visit(Ref::Derived(name))
         }
         JudgmentExprSpec::RelationMember { .. } => {}
+        // This walk collects scalar inputs, rules, parameters and
+        // aggregations. An atom names only a relation and bound ids.
+        JudgmentExprSpec::RelationAtom { .. } => {}
+        // Comparing bound ids reads no input or rule.
+        JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -3669,13 +3674,36 @@ fn fmt_judgment(expr: &JudgmentExprSpec) -> String {
             format!("{} {} {}", fmt_scalar(left), fmt_op(*op), fmt_scalar(right))
         }
         JudgmentExprSpec::Derived { name } => name.clone(),
+        JudgmentExprSpec::RoleDerived { term, name } => {
+            format!("{}.{name}", term.to_model().as_str())
+        }
         JudgmentExprSpec::RelationMember { relation, .. } => {
             format!("member_of({})", fmt_relation(relation))
         }
+        JudgmentExprSpec::RelationAtom { relation, terms } => {
+            let arguments = terms
+                .iter()
+                .map(|term| term.to_model().as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({arguments})", fmt_relation(relation))
+        }
+        JudgmentExprSpec::SameEntity {
+            left,
+            right,
+            negated,
+        } => {
+            let op = if *negated { "!=" } else { "==" };
+            format!(
+                "{} {op} {}",
+                left.to_model().as_str(),
+                right.to_model().as_str()
+            )
+        }
         JudgmentExprSpec::And { items } => format!("({})", join(items, " and ")),
         JudgmentExprSpec::Or { items } => format!("({})", join(items, " or ")),
+        JudgmentExprSpec::ExactlyOne { items } => format!("exactly_one({})", join(items, ", ")),
         JudgmentExprSpec::Not { item } => format!("not {}", fmt_judgment(item)),
-        other => format!("{other:?}"),
     }
 }
 
@@ -4347,6 +4375,9 @@ fn retired_sums_in_judgment(expr: &JudgmentExprSpec) -> usize {
         JudgmentExprSpec::Derived { .. }
         | JudgmentExprSpec::RoleDerived { .. }
         | JudgmentExprSpec::RelationMember { .. } => 0,
+        // These judgments contain only relation names and bound ids, so
+        // neither can contain a retired scalar sum.
+        JudgmentExprSpec::RelationAtom { .. } | JudgmentExprSpec::SameEntity { .. } => 0,
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {

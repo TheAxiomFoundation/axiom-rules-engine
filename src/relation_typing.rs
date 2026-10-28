@@ -53,6 +53,12 @@ pub enum RelationTypingCode {
     /// A read through a term sits outside a derived relation's predicate, or
     /// inside an aggregation's `where` clause, where no term is bound.
     RelationRoleOutsideScope,
+    RelationAtomNeedsTypedRelation,
+    RelationAtomKindMismatch,
+    RelationAtomArityMismatch,
+    DerivedRelationAtomArityUnsupported,
+    RelationNameShadowsBuiltin,
+    RelationTermKindMismatch,
 }
 
 impl RelationTypingCode {
@@ -74,6 +80,12 @@ impl RelationTypingCode {
             Self::RelationRolesNeedSlotKinds => "relation_roles_need_slot_kinds",
             Self::RelationRoleEntityMismatch => "relation_role_entity_mismatch",
             Self::RelationRoleOutsideScope => "relation_role_outside_scope",
+            Self::RelationAtomNeedsTypedRelation => "relation_atom_needs_typed_relation",
+            Self::RelationAtomKindMismatch => "relation_atom_kind_mismatch",
+            Self::RelationAtomArityMismatch => "relation_atom_arity_mismatch",
+            Self::DerivedRelationAtomArityUnsupported => "derived_relation_atom_arity_unsupported",
+            Self::RelationNameShadowsBuiltin => "relation_name_shadows_builtin",
+            Self::RelationTermKindMismatch => "relation_term_kind_mismatch",
         }
     }
 }
@@ -1201,19 +1213,22 @@ impl<'a> Checker<'a> {
                 current_slot,
                 related_slot,
             } => self.membership(relation, *current_slot, *related_slot, context),
+            JudgmentExpr::RelationAtom { relation, .. } => self.use_relation(relation),
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, context);
                 }
             }
             JudgmentExpr::Not(item) => self.judgment(item, context),
-            JudgmentExpr::Derived(_) | JudgmentExpr::RoleDerived { .. } => {}
+            JudgmentExpr::Derived(_)
+            | JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::SameEntity { .. } => {}
         }
     }
 
-    /// Check every read through a term (`anchor.x`, `candidate.x`) in every
-    /// rule and derived relation, used or not, so a program is refused the
-    /// same way whatever it executes. A read through a term must sit in a
+    /// Check every use of a term in every rule and derived relation, used
+    /// or not, so a program is refused the same way whatever it executes.
+    /// A qualified read, atom or term comparison must sit in a
     /// derived relation's predicate, outside any aggregation's `where`
     /// clause; that derivation must declare the term's slot kind; and a rule
     /// read through a term must have the term's kind.
@@ -1243,14 +1258,13 @@ impl<'a> Checker<'a> {
                     ),
                     None => "outside any derived relation's predicate".to_string(),
                 };
+                let description = read.construct.description();
                 self.push(
                     RelationTypingCode::RelationRoleOutsideScope,
                     read.aggregated.unwrap_or_default(),
                     citing,
                     format!(
-                        "`{citing}` reads `{}.{}` {place}; a read through a term may appear only in a derived relation's predicate, outside any aggregation's `where` clause",
-                        read.term.as_str(),
-                        read.name
+                        "`{citing}` uses {description} {place}; relation terms may appear only in a derived relation's predicate, outside any aggregation's `where` clause"
                     ),
                 );
             }
@@ -1263,19 +1277,29 @@ impl<'a> Checker<'a> {
             let mut reads = Vec::new();
             collect_judgment_role_reads(&derivation.predicate, None, &mut reads);
             for read in reads {
-                let (term, read_name) = (read.term.as_str(), read.name);
                 if let Some(relation) = read.aggregated {
+                    let description = read.construct.description();
                     self.push(
                         RelationTypingCode::RelationRoleOutsideScope,
                         relation,
                         name,
                         format!(
-                            "the predicate of derived relation `{name}` reads `{term}.{read_name}` inside the `where` clause of an aggregation over `{relation}`, where no term is bound; read the value outside the aggregation"
+                            "the predicate of derived relation `{name}` uses {description} inside the `where` clause of an aggregation over `{relation}`, where no term is bound; use it outside the aggregation"
                         ),
                     );
                     continue;
                 }
-                let slot = match read.term {
+                let RoleConstruct::Read {
+                    term: read_term,
+                    name: read_name,
+                    rule: is_rule,
+                } = read.construct
+                else {
+                    self.role_judgment(name, derivation, read.construct);
+                    continue;
+                };
+                let term = read_term.as_str();
+                let slot = match read_term {
                     Term::Anchor => derivation.current_slot,
                     Term::Candidate => derivation.related_slot,
                 };
@@ -1290,7 +1314,7 @@ impl<'a> Checker<'a> {
                     );
                     continue;
                 };
-                if !read.rule {
+                if !is_rule {
                     // Inputs have no declared kind, so an input read through a
                     // term is not checked.
                     continue;
@@ -1320,20 +1344,176 @@ impl<'a> Checker<'a> {
             }
         }
     }
+
+    /// The slot kind of a term is always declared by the containing
+    /// derivation, never inferred from its source or from an atom.
+    fn term_kind<'d>(
+        &mut self,
+        citing: &str,
+        derivation: &'d RelationDerivation,
+        term: Term,
+    ) -> Option<&'d str> {
+        let slot = match term {
+            Term::Anchor => derivation.current_slot,
+            Term::Candidate => derivation.related_slot,
+        };
+        match derivation.slot_entities.get(slot) {
+            Some(kind) => Some(kind),
+            None => {
+                self.push(
+                    RelationTypingCode::RelationRolesNeedSlotKinds,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` uses `{}`, but its derivation declares no kind for slot {slot}; declare `derived_relation.slot_entities`",
+                        term.as_str()
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    fn role_judgment(
+        &mut self,
+        citing: &str,
+        derivation: &RelationDerivation,
+        construct: RoleConstruct<'_>,
+    ) {
+        match construct {
+            RoleConstruct::Atom { relation, terms } => {
+                let program = self.program;
+                let Some(schema) = program.relations.get(relation) else {
+                    self.push(
+                        RelationTypingCode::UnknownRelation,
+                        relation,
+                        citing,
+                        format!("`{citing}` uses an atom on undeclared relation `{relation}`"),
+                    );
+                    return;
+                };
+                let short_name = relation
+                    .rsplit_once("#relation.")
+                    .map_or(relation, |(_, short)| short);
+                if crate::formula::is_builtin_function(short_name) {
+                    self.push(
+                        RelationTypingCode::RelationNameShadowsBuiltin,
+                        relation,
+                        citing,
+                        format!("relation `{relation}` has a built-in function name and cannot be used as an atom"),
+                    );
+                }
+                if schema.derivation.is_some() && schema.arity != 2 {
+                    self.push(
+                        RelationTypingCode::DerivedRelationAtomArityUnsupported,
+                        relation,
+                        citing,
+                        format!("an atom on derived relation `{relation}` requires arity 2, but it declares {}", schema.arity),
+                    );
+                }
+                if terms.len() != schema.arity {
+                    self.push(
+                        RelationTypingCode::RelationAtomArityMismatch,
+                        relation,
+                        citing,
+                        format!(
+                            "atom `{relation}` has {} arguments but the relation has arity {}",
+                            terms.len(),
+                            schema.arity
+                        ),
+                    );
+                }
+                // Atoms require an explicit kind declaration on the named
+                // relation; inheriting its source's kinds is insufficient.
+                let kinds = schema
+                    .derivation
+                    .as_ref()
+                    .filter(|derived| !derived.slot_entities.is_empty())
+                    .map(|derived| &derived.slot_entities)
+                    .unwrap_or(&schema.slot_entities);
+                if kinds.is_empty() {
+                    self.push(
+                        RelationTypingCode::RelationAtomNeedsTypedRelation,
+                        relation,
+                        citing,
+                        format!("atom `{relation}` requires declared slot entity kinds"),
+                    );
+                } else {
+                    // Preserve the general checks for malformed/aliased slot
+                    // kinds as well as the atom's term-to-slot kind checks.
+                    self.typed_slots(relation, citing);
+                }
+                for (slot, term) in terms.iter().enumerate() {
+                    if let (Some(actual), Some(expected)) =
+                        (self.term_kind(citing, derivation, *term), kinds.get(slot))
+                        && actual != expected
+                    {
+                        self.push(
+                            RelationTypingCode::RelationAtomKindMismatch,
+                            relation,
+                            citing,
+                            format!("atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`", term.as_str()),
+                        );
+                    }
+                }
+            }
+            RoleConstruct::SameEntity { left, right } => {
+                let left_kind = self.term_kind(citing, derivation, left);
+                let right_kind = self.term_kind(citing, derivation, right);
+                if let (Some(left_kind), Some(right_kind)) = (left_kind, right_kind)
+                    && left_kind != right_kind
+                {
+                    self.push(
+                        RelationTypingCode::RelationTermKindMismatch,
+                        citing,
+                        citing,
+                        format!("term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind", left.as_str(), right.as_str()),
+                    );
+                }
+            }
+            RoleConstruct::Read { .. } => {
+                unreachable!("qualified reads are checked by relation_roles")
+            }
+        }
+    }
 }
 
-/// A read through a term, found by [`collect_judgment_role_reads`].
+/// A construct using terms, found by [`collect_judgment_role_reads`].
 struct RoleRead<'p> {
-    term: Term,
-    name: &'p str,
-    /// A derived rule, rather than an input.
-    rule: bool,
+    construct: RoleConstruct<'p>,
     /// The relation of the innermost aggregation whose `where` clause holds
     /// the read, or `None` when no aggregation encloses it.
     aggregated: Option<&'p str>,
 }
 
-/// Every read through a term in `expr`, with the relation of the innermost
+#[derive(Clone, Copy)]
+enum RoleConstruct<'p> {
+    Read {
+        term: Term,
+        name: &'p str,
+        rule: bool,
+    },
+    Atom {
+        relation: &'p str,
+        terms: &'p [Term],
+    },
+    SameEntity {
+        left: Term,
+        right: Term,
+    },
+}
+
+impl RoleConstruct<'_> {
+    fn description(self) -> String {
+        match self {
+            Self::Read { term, name, .. } => format!("`{}.{name}`", term.as_str()),
+            Self::Atom { relation, .. } => format!("relation atom `{relation}`"),
+            Self::SameEntity { .. } => "a term comparison".to_string(),
+        }
+    }
+}
+
+/// Every construct using terms in `expr`, with the relation of the innermost
 /// aggregation whose `where` clause holds it. `aggregated` is that relation
 /// for the expression itself.
 fn collect_judgment_role_reads<'p>(
@@ -1347,9 +1527,22 @@ fn collect_judgment_role_reads<'p>(
             collect_scalar_role_reads(right, aggregated, out);
         }
         JudgmentExpr::RoleDerived { term, name } => out.push(RoleRead {
-            term: *term,
-            name,
-            rule: true,
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: true,
+            },
+            aggregated,
+        }),
+        JudgmentExpr::RelationAtom { relation, terms } => out.push(RoleRead {
+            construct: RoleConstruct::Atom { relation, terms },
+            aggregated,
+        }),
+        JudgmentExpr::SameEntity { left, right, .. } => out.push(RoleRead {
+            construct: RoleConstruct::SameEntity {
+                left: *left,
+                right: *right,
+            },
             aggregated,
         }),
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
@@ -1369,15 +1562,19 @@ fn collect_scalar_role_reads<'p>(
 ) {
     match expr {
         ScalarExpr::RoleInput { term, name } => out.push(RoleRead {
-            term: *term,
-            name,
-            rule: false,
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: false,
+            },
             aggregated,
         }),
         ScalarExpr::RoleDerived { term, name } => out.push(RoleRead {
-            term: *term,
-            name,
-            rule: true,
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: true,
+            },
             aggregated,
         }),
         ScalarExpr::CountRelated {
@@ -1509,7 +1706,10 @@ fn collect_judgment_derived(expr: &JudgmentExpr, out: &mut BTreeSet<String>) {
         }
         // A rule read through a term runs on that term's id, not a routed
         // one; `Checker::relation_roles` checks its kind.
-        JudgmentExpr::RelationMember { .. } | JudgmentExpr::RoleDerived { .. } => {}
+        JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_derived(item, out);

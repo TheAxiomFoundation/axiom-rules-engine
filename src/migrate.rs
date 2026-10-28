@@ -1510,7 +1510,11 @@ impl EvidenceCollector<'_> {
             JudgmentExpr::Not(item) => self.judgment(item, entity, slots),
             JudgmentExpr::Derived(_)
             | JudgmentExpr::RoleDerived { .. }
-            | JudgmentExpr::RelationMember { .. } => {}
+            | JudgmentExpr::RelationMember { .. }
+            // Atom slots are explicit and typed at compile/load time. They
+            // supply no direction inference to the legacy migration.
+            | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::SameEntity { .. } => {}
         }
     }
 }

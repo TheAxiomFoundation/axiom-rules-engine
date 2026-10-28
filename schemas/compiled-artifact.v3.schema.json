@@ -1088,6 +1088,73 @@
               }
             }
           ],
+          "description": "Test a declared relation's tuple in its slot order, inside a predicate.",
+          "properties": {
+            "kind": {
+              "const": "relation_atom",
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "terms": {
+              "items": {
+                "$ref": "#/$defs/TermSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "terms"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
+          "description": "Compare term ids; both terms must have the same entity kind.",
+          "properties": {
+            "kind": {
+              "const": "same_entity",
+              "type": "string"
+            },
+            "left": {
+              "$ref": "#/$defs/TermSpec"
+            },
+            "negated": {
+              "type": "boolean"
+            },
+            "right": {
+              "$ref": "#/$defs/TermSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "left",
+            "right",
+            "negated"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "corpus_citation_paths"
+                ]
+              }
+            }
+          ],
           "properties": {
             "items": {
               "items": {

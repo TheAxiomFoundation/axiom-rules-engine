@@ -23,8 +23,8 @@ use crate::api::{
 };
 use crate::engine::{
     ArithmeticError, Engine, EvalError, checked_add, checked_div, checked_mul, checked_sub,
-    compare_scalar_values, relation_member_outside_derived_relation,
-    relation_role_outside_derived_relation,
+    compare_scalar_values, relation_construct_outside_derived_relation,
+    relation_member_outside_derived_relation, relation_role_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
@@ -524,6 +524,12 @@ fn outside_derived_relation(expr: &JudgmentExpr) -> EvalError {
         }
         JudgmentExpr::RoleDerived { term, name } => {
             relation_role_outside_derived_relation(*term, name)
+        }
+        JudgmentExpr::RelationAtom { .. } => {
+            relation_construct_outside_derived_relation("relation atom")
+        }
+        JudgmentExpr::SameEntity { .. } => {
+            relation_construct_outside_derived_relation("term comparison")
         }
         _ => unreachable!("only nodes bound by a derived relation's predicate"),
     }
@@ -1188,7 +1194,10 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::Derived(name) => self.evaluate_judgment(name, mask),
             // As for a qualified read in `scalar_node`, every row fails with
             // explain's error.
-            JudgmentExpr::RelationMember { .. } | JudgmentExpr::RoleDerived { .. } => {
+            JudgmentExpr::RelationMember { .. }
+            | JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::SameEntity { .. } => {
                 let (_, errors) = self.fail_all(mask, outside_derived_relation(expr));
                 Ok((vec![JudgmentOutcome::NotHolds; len], errors))
             }

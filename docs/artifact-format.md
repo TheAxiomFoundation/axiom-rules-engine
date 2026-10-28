@@ -62,9 +62,13 @@ content, described below.
 - **`input_or_else` supplies an input default.** The formula language cannot
   produce it; raw `ProgramSpec` expressions can. No such read appears in the
   corpus measurement above.
-- **A derived relation also reads tuples supplied under its own name.**
-  `related_entity_ids` unions the filtered source members with
-  `direct_related_ids(relation, ...)`.
+- **Supplied derived tuples depend on the program's constructs.** Programs
+  using qualified reads, relation atoms or term comparisons refuse them at
+  request binding (`supplied_tuples_for_derived_relation`), and their members
+  resolver ignores them through `Engine::new` too. Other programs union the
+  filtered source members with `direct_related_ids(relation, ...)`, including
+  programs whose predicates read parameters, which raw `ProgramSpec` programs
+  could always express.
 - **Nothing constrains how many tuples an id appears in.** A relation schema
   holds a name, an arity, slot kinds and a derivation (`RelationSchema`,
   `src/model.rs`); binding checks tuple length and slot kinds
@@ -410,23 +414,42 @@ One entry per `program.relations` entry, with its name, arity and effective
 slot kinds. `slot_entities` is null only for a relation that declares none,
 which relation typing allows only when nothing executes it.
 
-`lookup_slots` is the set of slots that aggregates and membership tests in
-the program key on, with a derived relation's traversal of its source
-counted against the source. It is empty when no expression uses the
-relation. It records direction of traversal and nothing about cardinality.
+`lookup_slots` is the set of slots that aggregates, membership tests and atoms
+in the program key on, with a derived relation's traversal of its source
+counted against the source. It is empty when no expression uses the relation.
+It records direction of traversal and nothing about cardinality.
 
-`accepts_supplied_tuples` is true for every relation today: the evaluator
-reads tuples supplied under a relation's own name whether or not it is
-derived.
+An atom on a data relation records a lookup for each bound argument slot. An
+atom on a derived relation records its current slot, as a membership test
+does: it resolves that term's members and tests the related term against
+them. A term comparison adds no lookup, input read or relation read.
+
+`accepts_supplied_tuples` is false for every derived relation in a program
+using qualified reads, relation atoms or term comparisons; otherwise it is
+true. This is a program-wide restriction, including derived relations whose
+own predicates use none of those constructs. A parameter read in a predicate
+does not count: raw `ProgramSpec` predicates could always look up parameters.
 
 `provenance.kind` says what the declaration makes the relation: `supplied`
 for a data relation, `derived` for a `derived_relation`. `derived` carries
 `rule` (the id of the rule that derives it, today the relation's own id),
 `source_relation`, and `reads`: the input slots, rule ids and relations its
-predicate mentions directly. Nothing here is specific to unit derivation. The
-refusal of supplied tuples for a derived relation, ratified in
-`docs/unit-derivation.md`, is not part of this change; when it lands,
-`accepts_supplied_tuples` is where it shows.
+predicate mentions directly. An atom adds its named relation to
+`reads.relations`, as a bare membership test does; a term comparison adds
+nothing. Nothing here is specific to unit derivation.
+
+The judgment wire forms are
+`{kind: relation_atom, relation: R, terms: [anchor, candidate]}` (with terms in
+slot order) and `{kind: same_entity, left: anchor, right: candidate, negated:
+false}`; `negated: true` encodes `!=`. They add variants to format 3 without
+a version bump: older engines refuse the unknown expression kinds. Loading
+re-derives the complete interface and refuses a mismatch. The supplied-tuple
+restriction also covers programs using only qualified reads (#268), so
+their derived relations now report `accepts_supplied_tuples: false`. Earlier
+format-3 artifacts from programs using only qualified reads must be
+recompiled: the loader now expects that derived-relation interface field to be
+false. Programs using none of these constructs, including programs whose
+predicates only read parameters, derive the same interface as before.
 
 ## In Rust
 
@@ -614,5 +637,4 @@ relation provenance, and elections by actor.
 - A compile diagnostic for a rule referenced directly from a rule of another
   entity. The interface reports the consequence; whether those references are
   encoding defects is a corpus question.
-- Refusing supplied tuples for a derived relation.
 - The corpus-provisions index in the source closure.

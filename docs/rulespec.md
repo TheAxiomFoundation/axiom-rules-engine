@@ -418,9 +418,9 @@ forms, and `only_related`), which have no relation context
 not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
 are the scalar minimum and maximum of one qualified read. Reading a
 parameter, `period_start` or `period_end` through a term is refused with
-`relation_role_entity_mismatch`; reading a relation through a term is refused
-until relation atoms are supported (#214). Outside predicates the two names
-are ordinary identifiers: `anchor + 1` in a rule body reads an input named
+`relation_role_entity_mismatch`; reading a relation through a term is refused:
+use a relation atom. Outside predicates the two names are ordinary
+identifiers: `anchor + 1` in a rule body reads an input named
 `anchor`, and `anchor.age` there is a field access, which RuleSpec rejects.
 No declaration may take either name ([Declaration names](#declaration-names)).
 A compiled program that carries a read through a term anywhere but a derived
@@ -450,9 +450,46 @@ A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
-reads through a term, naming the qualified read and #218; a root that reaches
-no such relation compiles. Dense does compile parameter reads in a predicate. See [relation-roles.md](relation-roles.md) for the
-design.
+uses a qualified read, relation atom or term comparison, naming the construct
+and #218; a root that reaches no such relation compiles. Dense does compile
+parameter reads in a predicate.
+
+A relation atom, `R(t1, ..., tn)`, tests exactly those term ids in the declared
+relation's slot order. For example, `relative_of(candidate, anchor)` tests the
+reverse pair without the ambiguity of a bare same-kind membership test.
+A data atom holds when a supplied tuple matches every id and covers the
+evaluation period. A derived atom requires arity 2
+(`derived_relation_atom_arity_unsupported`) and tests whether its
+related-slot term belongs to the relation's members for its current-slot term.
+Each atom requires declared slot kinds (`relation_atom_needs_typed_relation`),
+the same number of terms as slots (`relation_atom_arity_mismatch`), a term in
+scope as every argument (`relation_atom_argument_not_term`), and a matching
+kind at each slot (`relation_atom_kind_mismatch`). An atom is a judgment, so
+`relative_of(candidate, anchor) > 0` is refused with
+`relation_atom_used_as_value`. A relation whose
+name is also a built-in function, such as `len`, cannot be used as an atom
+(`relation_name_shadows_builtin`): `len(relative_of)` still calls the built-in,
+and `len(anchor, candidate)` is refused. A bare relation name keeps its
+meaning.
+
+Two terms of the same kind can compare ids with `==` or `!=`:
+`candidate != anchor` excludes the anchor from its own candidates. Different
+kinds refuse with `relation_term_kind_mismatch`, a term compared with a
+value refuses with `relation_term_compared_with_value`, and any other
+operator, such as `anchor < candidate`, refuses with
+`relation_term_comparison_operator`. An atom or term
+comparison belongs only in a derived relation's predicate; rules and
+aggregation `where` clauses refuse it with `relation_role_outside_scope`.
+
+A program using qualified reads, atoms or term comparisons refuses supplied
+tuples under any derived relation's name
+(`supplied_tuples_for_derived_relation`). Its members resolver also ignores
+such tuples for direct Rust callers of `Engine::new`. Programs using none of
+these constructs retain the union of supplied and derived members, including
+programs whose predicates only read parameters. Request
+binding also refuses `relation_binding: lenient` when the program uses an
+atom (`lenient_binding_with_relation_roles`). See
+[relation-roles.md](relation-roles.md) for the design and derived-atom cost.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach

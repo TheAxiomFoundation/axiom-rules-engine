@@ -680,6 +680,18 @@ fn relation_role_unsupported(term: Term, name: &str) -> DenseCompileError {
     ))
 }
 
+fn relation_atom_unsupported(relation: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the relation atom `{relation}` in a derived relation's predicate; relation atoms run in explain and fast modes, and dense support is #218"
+    ))
+}
+
+fn term_comparison_unsupported() -> DenseCompileError {
+    DenseCompileError::Unsupported(
+        "a term comparison in a derived relation's predicate; term comparisons run in explain and fast modes, and dense support is #218".to_string(),
+    )
+}
+
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
     Literal(bool),
@@ -2248,6 +2260,10 @@ impl<'a> DenseCompiler<'a> {
             JudgmentExpr::RoleDerived { term, name } => {
                 Err(relation_role_unsupported(*term, name).into())
             }
+            JudgmentExpr::RelationAtom { relation, .. } => {
+                Err(relation_atom_unsupported(relation).into())
+            }
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported().into()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_scalar_expr(derived_name, left)?,
                 op: *op,
@@ -2306,6 +2322,8 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
         match expr {
             JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
+            JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => {
                 Ok(CompiledRelatedJudgmentExpr::Comparison {
                     left: self.compile_related_scalar(relation_index, left)?,
@@ -2858,6 +2876,8 @@ impl<'a> DenseCompiler<'a> {
     ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
         match expr {
             JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
+            JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_current_scalar_expr(derived_name, entity, left)?,
                 op: *op,

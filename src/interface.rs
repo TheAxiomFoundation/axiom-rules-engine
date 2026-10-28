@@ -443,6 +443,9 @@ pub(crate) fn derive_from_model(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Inspect the program once: doing this for every relation makes a long
+    // chain quadratic even when it uses no relation-role construct.
+    let uses_relation_roles = program.uses_relation_roles();
     let relations = relation_names
         .iter()
         .map(|name| {
@@ -456,7 +459,7 @@ pub(crate) fn derive_from_model(
                     .get(name.as_str())
                     .map(|slots| slots.iter().copied().collect())
                     .unwrap_or_default(),
-                accepts_supplied_tuples: true,
+                accepts_supplied_tuples: schema.derivation.is_none() || !uses_relation_roles,
                 provenance: match &schema.derivation {
                     None => RelationProvenance::Supplied,
                     Some(derivation) => RelationProvenance::Derived {
@@ -874,6 +877,27 @@ impl Collector<'_> {
                 current_slot,
                 ..
             } => self.lookup(relation, *current_slot),
+            JudgmentExpr::RelationAtom { relation, terms } => {
+                match self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    // A derived atom resolves the members of its current-slot
+                    // term, as a membership test does, and only tests the
+                    // related-slot id against them.
+                    Some(derivation) => self.lookup(relation, derivation.current_slot),
+                    // Every argument is bound: a tuple atom keys on all slots,
+                    // in the relation's declared tuple order.
+                    None => {
+                        for slot in 0..terms.len() {
+                            self.lookup(relation, slot);
+                        }
+                    }
+                }
+            }
+            JudgmentExpr::SameEntity { .. } => {}
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, flow, routing);
@@ -1107,8 +1131,11 @@ fn collect_judgment_relations(expr: &JudgmentExpr, relations: &mut BTreeSet<Stri
             collect_scalar_relations(left, relations);
             collect_scalar_relations(right, relations);
         }
-        JudgmentExpr::Derived(_) | JudgmentExpr::RoleDerived { .. } => {}
-        JudgmentExpr::RelationMember { relation, .. } => {
+        JudgmentExpr::Derived(_)
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
+        JudgmentExpr::RelationMember { relation, .. }
+        | JudgmentExpr::RelationAtom { relation, .. } => {
             relations.insert(relation.clone());
         }
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {

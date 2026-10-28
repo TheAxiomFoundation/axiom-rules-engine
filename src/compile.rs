@@ -1829,11 +1829,11 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
         return Err(CompileError::CyclicDependency { cycle });
     }
 
-    // The order above is stored in artifact metadata and compared exactly
-    // when an artifact is loaded, so it stays as computed; this further check
-    // only refuses programs, never reorders them.
-    reject_relation_routed_cycles(program, &rule_readers)?;
-    Ok(order)
+    // Published programs retain the exact order above. Atom programs were
+    // unreadable by earlier engines; their order additionally follows atom
+    // targets and their source/predicate dependencies in the combined graph.
+    let atom_order = reject_relation_routed_cycles(program, &rule_readers)?;
+    Ok(atom_order.unwrap_or(order))
 }
 
 /// Refuse a rule that depends on itself through derived relations: `e`
@@ -1844,7 +1844,9 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
 /// and the evaluators recursed until the stack overflowed. This walks one
 /// graph of rules and derived relations; every version of a rule counts, as it
 /// does above. Base relations depend on nothing, so a program without derived
-/// relations has no such cycle.
+/// relations has no such cycle. For programs using atoms, this same walk
+/// returns the smallest-ready-rule order through all these relation edges.
+/// Other programs keep their published metadata order exactly.
 ///
 /// `rule_readers[x]` lists, by position, the rules that read rule `x`
 /// directly: the rule-to-rule edges of the order above. That order also makes
@@ -1854,13 +1856,13 @@ fn evaluation_order(program: &ProgramSpec) -> Result<Vec<String>, CompileError> 
 fn reject_relation_routed_cycles(
     program: &ProgramSpec,
     rule_readers: &[Vec<usize>],
-) -> Result<(), CompileError> {
+) -> Result<Option<Vec<String>>, CompileError> {
     if program
         .relations
         .iter()
         .all(|relation| relation.derivation.is_none())
     {
-        return Ok(());
+        return Ok(None);
     }
     // Nodes are rules, then derived relations, by position. Rules and
     // relations have separate namespaces.
@@ -1887,6 +1889,8 @@ fn reject_relation_routed_cycles(
     // dependents[x] lists the nodes that depend on node x.
     let mut dependents = vec![Vec::new(); node_count];
     let mut incoming = vec![0_usize; node_count];
+    let mut has_atoms = false;
+    let mut atom_extra_edges = Vec::new();
     let mut add_edge = |dependency: Option<usize>, dependent: usize| {
         if let Some(dependency) = dependency {
             dependents[dependency].push(dependent);
@@ -1903,13 +1907,22 @@ fn reject_relation_routed_cycles(
         for semantics in std::iter::once(&derived.semantics)
             .chain(derived.versions.iter().map(|version| &version.semantics))
         {
-            match semantics {
+            has_atoms |= match semantics {
                 DerivedSemanticsSpec::Scalar { expr } => {
-                    collect_relation_members_from_scalar(expr, &mut relations);
+                    collect_relation_members_from_scalar(expr, &mut relations)
                 }
                 DerivedSemanticsSpec::Judgment { expr } => {
-                    collect_relation_members_from_judgment(expr, &mut relations);
+                    collect_relation_members_from_judgment(expr, &mut relations)
                 }
+            };
+        }
+        // The frozen relation-member collector treats `only_related` as a
+        // leaf. New atom programs use every relation read in their graph;
+        // retain those extra edges without changing legacy cycle verdicts.
+        let (_, aggregated_relations) = derived_dependencies(derived);
+        for relation in aggregated_relations.difference(&relations) {
+            if let Some(dependency) = relation_index(relation) {
+                atom_extra_edges.push((dependency, index));
             }
         }
         for relation in relations {
@@ -1920,29 +1933,80 @@ fn reject_relation_routed_cycles(
         let index = program.derived.len() + offset;
         let derivation = relation.derivation.as_ref().expect("derived relation");
         let mut rules = HashSet::new();
-        collect_judgment_dependencies(&derivation.predicate, &mut rules, &mut HashSet::new());
+        let mut aggregated_relations = HashSet::new();
+        collect_judgment_dependencies(&derivation.predicate, &mut rules, &mut aggregated_relations);
         for rule in rules {
             add_edge(rule_index(&rule), index);
         }
         let mut relations = HashSet::new();
-        collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
+        has_atoms |= collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
         relations.insert(derivation.source_relation.clone());
+        for relation in aggregated_relations.difference(&relations) {
+            if let Some(dependency) = relation_index(relation) {
+                atom_extra_edges.push((dependency, index));
+            }
+        }
         for source in relations {
             add_edge(relation_index(&source), index);
         }
     }
-
-    let mut ready = (0..node_count)
-        .filter(|&node| incoming[node] == 0)
-        .collect::<Vec<_>>();
-    while let Some(node) = ready.pop() {
-        for &dependent in &dependents[node] {
-            incoming[dependent] -= 1;
-            if incoming[dependent] == 0 {
-                ready.push(dependent);
-            }
+    if has_atoms {
+        for (dependency, dependent) in atom_extra_edges {
+            add_edge(Some(dependency), dependent);
         }
     }
+
+    let atom_order = if has_atoms {
+        let rule_count = program.derived.len();
+        let mut ready_relations = (rule_count..node_count)
+            .filter(|&node| incoming[node] == 0)
+            .collect::<Vec<_>>();
+        let mut ready_rules = program
+            .derived
+            .iter()
+            .enumerate()
+            .filter_map(|(index, derived)| (incoming[index] == 0).then_some(derived.name.as_str()))
+            .collect::<BTreeSet<_>>();
+        let mut order = Vec::with_capacity(rule_count);
+        loop {
+            // Relation nodes are transparent to the published rule order.
+            // Satisfy all of them before choosing the smallest ready rule.
+            let node = if let Some(relation) = ready_relations.pop() {
+                relation
+            } else if let Some(name) = ready_rules.pop_first() {
+                order.push(name.to_string());
+                rule_nodes[name]
+            } else {
+                break;
+            };
+            for &dependent in &dependents[node] {
+                incoming[dependent] -= 1;
+                if incoming[dependent] == 0 {
+                    if dependent < rule_count {
+                        ready_rules.insert(program.derived[dependent].name.as_str());
+                    } else {
+                        ready_relations.push(dependent);
+                    }
+                }
+            }
+        }
+        Some(order)
+    } else {
+        // Preserve the linear legacy cycle check as well as the old order;
+        // qualified reads and term comparisons alone do not select new order.
+        let mut ready = (0..node_count)
+            .filter(|&node| incoming[node] == 0)
+            .collect::<Vec<_>>();
+        while let Some(node) = ready.pop() {
+            for &dependent in &dependents[node] {
+                incoming[dependent] -= 1;
+                if incoming[dependent] == 0 {
+                    ready.push(dependent);
+                }
+            }
+        }
+        None
+    };
     let cycle = program
         .derived
         .iter()
@@ -1951,7 +2015,23 @@ fn reject_relation_routed_cycles(
         .map(|(_, derived)| derived.name.as_str())
         .collect::<BTreeSet<_>>();
     if cycle.is_empty() {
-        return Ok(());
+        // An unused relation cycle has no blocked rule to name. The legacy
+        // relation walk already rejects its cycles; atom programs add the
+        // complete relation-read graph, including `only_related`, here.
+        if has_atoms {
+            let relations = derived_relations
+                .iter()
+                .enumerate()
+                .filter(|(offset, _)| incoming[program.derived.len() + *offset] > 0)
+                .map(|(_, relation)| relation.name.as_str())
+                .collect::<BTreeSet<_>>();
+            if !relations.is_empty() {
+                return Err(CompileError::CyclicRelationDependency {
+                    cycle: relations.into_iter().collect::<Vec<_>>().join(", "),
+                });
+            }
+        }
+        return Ok(atom_order);
     }
     Err(CompileError::CyclicDependency {
         cycle: cycle.into_iter().collect::<Vec<_>>().join(", "),
@@ -2217,7 +2297,9 @@ fn collect_fast_blockers_from_judgment_expr(
         }
         JudgmentExprSpec::Derived { .. }
         | JudgmentExprSpec::RoleDerived { .. }
-        | JudgmentExprSpec::RelationMember { .. } => {}
+        | JudgmentExprSpec::RelationMember { .. }
+        | JudgmentExprSpec::RelationAtom { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2513,7 +2595,10 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationAtom { relation, .. } => {
+            aggregated_relations.insert(relation.clone());
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2527,7 +2612,13 @@ fn collect_judgment_dependencies(
     }
 }
 
-fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut HashSet<String>) {
+/// Collect relation reads with the frozen legacy membership walk, and report
+/// whether an atom occurs. Use `|=` below so every child is still visited.
+fn collect_relation_members_from_scalar(
+    expr: &ScalarExprSpec,
+    relations: &mut HashSet<String>,
+) -> bool {
+    let mut has_atom = false;
     match expr {
         ScalarExprSpec::Literal { .. }
         | ScalarExprSpec::InputForYear { .. }
@@ -2541,36 +2632,36 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
         | ScalarExprSpec::Floor { value: index } => {
-            collect_relation_members_from_scalar(index, relations);
+            has_atom |= collect_relation_members_from_scalar(index, relations);
         }
         ScalarExprSpec::Add { items }
         | ScalarExprSpec::Max { items }
         | ScalarExprSpec::Min { items } => {
             for item in items {
-                collect_relation_members_from_scalar(item, relations);
+                has_atom |= collect_relation_members_from_scalar(item, relations);
             }
         }
         ScalarExprSpec::Sub { left, right }
         | ScalarExprSpec::Mul { left, right }
         | ScalarExprSpec::Div { left, right } => {
-            collect_relation_members_from_scalar(left, relations);
-            collect_relation_members_from_scalar(right, relations);
+            has_atom |= collect_relation_members_from_scalar(left, relations);
+            has_atom |= collect_relation_members_from_scalar(right, relations);
         }
         ScalarExprSpec::DateAddDays { date, days } => {
-            collect_relation_members_from_scalar(date, relations);
-            collect_relation_members_from_scalar(days, relations);
+            has_atom |= collect_relation_members_from_scalar(date, relations);
+            has_atom |= collect_relation_members_from_scalar(days, relations);
         }
         ScalarExprSpec::DateAddMonths { date, months } => {
-            collect_relation_members_from_scalar(date, relations);
-            collect_relation_members_from_scalar(months, relations);
+            has_atom |= collect_relation_members_from_scalar(date, relations);
+            has_atom |= collect_relation_members_from_scalar(months, relations);
         }
         ScalarExprSpec::DateAddYears { date, years } => {
-            collect_relation_members_from_scalar(date, relations);
-            collect_relation_members_from_scalar(years, relations);
+            has_atom |= collect_relation_members_from_scalar(date, relations);
+            has_atom |= collect_relation_members_from_scalar(years, relations);
         }
         ScalarExprSpec::DaysBetween { from, to } => {
-            collect_relation_members_from_scalar(from, relations);
-            collect_relation_members_from_scalar(to, relations);
+            has_atom |= collect_relation_members_from_scalar(from, relations);
+            has_atom |= collect_relation_members_from_scalar(to, relations);
         }
         ScalarExprSpec::OnlyRelated { .. } => {}
         ScalarExprSpec::CountRelated {
@@ -2580,7 +2671,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
         } => {
             relations.insert(relation.clone());
             if let Some(where_clause) = where_clause {
-                collect_relation_members_from_judgment(where_clause, relations);
+                has_atom |= collect_relation_members_from_judgment(where_clause, relations);
             }
         }
         ScalarExprSpec::SumRelated {
@@ -2600,7 +2691,7 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
         } => {
             relations.insert(relation.clone());
             if let Some(where_clause) = where_clause {
-                collect_relation_members_from_judgment(where_clause, relations);
+                has_atom |= collect_relation_members_from_judgment(where_clause, relations);
             }
         }
         ScalarExprSpec::If {
@@ -2608,49 +2699,58 @@ fn collect_relation_members_from_scalar(expr: &ScalarExprSpec, relations: &mut H
             then_expr,
             else_expr,
         } => {
-            collect_relation_members_from_judgment(condition, relations);
-            collect_relation_members_from_scalar(then_expr, relations);
-            collect_relation_members_from_scalar(else_expr, relations);
+            has_atom |= collect_relation_members_from_judgment(condition, relations);
+            has_atom |= collect_relation_members_from_scalar(then_expr, relations);
+            has_atom |= collect_relation_members_from_scalar(else_expr, relations);
         }
         ScalarExprSpec::NoMatch { subject, patterns } => {
-            collect_relation_members_from_scalar(subject, relations);
+            has_atom |= collect_relation_members_from_scalar(subject, relations);
             for pattern in patterns {
-                collect_relation_members_from_scalar(pattern, relations);
+                has_atom |= collect_relation_members_from_scalar(pattern, relations);
             }
         }
         ScalarExprSpec::OverPeriods { value, n, .. } => {
-            collect_relation_members_from_scalar(value, relations);
+            has_atom |= collect_relation_members_from_scalar(value, relations);
             if let Some(n) = n {
-                collect_relation_members_from_scalar(n, relations);
+                has_atom |= collect_relation_members_from_scalar(n, relations);
             }
         }
     }
+    has_atom
 }
 
 fn collect_relation_members_from_judgment(
     expr: &JudgmentExprSpec,
     relations: &mut HashSet<String>,
-) {
+) -> bool {
+    let mut has_atom = false;
     match expr {
         JudgmentExprSpec::Comparison { left, right, .. } => {
-            collect_relation_members_from_scalar(left, relations);
-            collect_relation_members_from_scalar(right, relations);
+            has_atom |= collect_relation_members_from_scalar(left, relations);
+            has_atom |= collect_relation_members_from_scalar(right, relations);
         }
-        JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             relations.insert(relation.clone());
+        }
+        JudgmentExprSpec::RelationAtom { relation, .. } => {
+            relations.insert(relation.clone());
+            has_atom = true;
         }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
             for item in items {
-                collect_relation_members_from_judgment(item, relations);
+                has_atom |= collect_relation_members_from_judgment(item, relations);
             }
         }
         JudgmentExprSpec::Not { item } => {
-            collect_relation_members_from_judgment(item, relations);
+            has_atom |= collect_relation_members_from_judgment(item, relations);
         }
     }
+    has_atom
 }
 
 #[cfg(feature = "fs")]
