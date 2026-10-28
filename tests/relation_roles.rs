@@ -820,6 +820,19 @@ fn a_bare_term_is_refused_as_a_value() {
             "{formula}: {error}"
         );
     }
+    // An expression that is itself invalid in judgment position is refused
+    // before its bare-term operands are examined.
+    for (formula, message) in [
+        ("anchor + candidate", "binary op Add in judgment position"),
+        ("-anchor", "unary op in judgment position"),
+    ] {
+        let error = refusal(formula);
+        assert!(error.contains(message), "{formula}: {error}");
+        assert!(
+            !error.contains("[relation_term_used_as_value]"),
+            "{formula}: {error}"
+        );
+    }
 }
 
 #[test]
