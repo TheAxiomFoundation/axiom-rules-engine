@@ -38,9 +38,9 @@ pub struct Site {
 #[derive(Clone, Debug)]
 pub struct Generated {
     pub program: ProgramSpec,
-    /// Predicates constructed with a term read, atom, term comparison or
-    /// parameter lookup. Recorded at construction, without inspecting the
-    /// resulting expression tree or the production interface.
+    /// Predicates constructed with a term read, atom or term comparison.
+    /// Recorded at construction, without inspecting the resulting expression
+    /// tree or the production interface.
     pub relation_role_predicates: BTreeSet<String>,
     pub sites: Vec<Site>,
     pub references: Vec<(String, Context)>,

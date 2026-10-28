@@ -246,8 +246,8 @@ have `R`'s slot kind for slot `i`, and `R` must have declared slot kinds
 **Supplied tuples.** Decision d1265 keeps entry 5 of the ratified contract:
 a supplied tuple for a relation the program derives is refused
 (`unit-derivation.md` section 15). Today the engine instead adds such tuples
-to the members. In any program that uses a construct from this note, both of
-these change:
+to the members. In any program that uses a qualified read (3.2), an atom or
+a term comparison (3.5), both of these change:
 - Request binding refuses tuples supplied under the name of any derived
   relation (`supplied_tuples_for_derived_relation`).
 - The members resolver never adds a derived relation's own tuples. This also
@@ -255,7 +255,9 @@ these change:
 
 Section 2's survey found no program that uses these constructs, so no existing
 program changes behaviour or bytes. Programs that use none of them keep
-today's union.
+today's union. Parameters in predicates (3.3) do not opt in: a raw
+`ProgramSpec` predicate could always look up a parameter, and such a program
+must keep today's union.
 
 **Lenient binding.** Lenient binding keeps tuples whose kinds do not match
 their slots, which a lookup then misses. Request binding refuses lenient
@@ -272,7 +274,9 @@ the atom over `(anchor, candidate)` in those slots agree (section 7).
 
 A call whose name is a relation is an atom. A relation whose name is also a
 built-in function name (`len`, `sum`, `max` and the others) cannot be used as
-an atom (`relation_name_shadows_builtin`).
+an atom (`relation_name_shadows_builtin`). A call to that name still calls the
+built-in, as it did before atoms; passing it a term, which only an atom
+takes, is refused.
 
 ### 3.5 Term comparison
 
@@ -575,6 +579,8 @@ so each new variant is a compile error there until it is handled:
   - `Routing` carries current-versus-related flow. A read through `anchor`
     routes as current, and a read through `candidate` as related.
   - Atoms' bound slots go through `Collector::lookup`, as membership tests do.
+    A derived atom keys on its current slot only, which is the slot the
+    engine resolves members for.
 - `derive_interface` looks up `source_relation` at the current slot. A path
   source needs a lookup per step, and a `source_path` arm in
   `RelationProvenance`, whose hand-written `Deserialize` checks exact keys per

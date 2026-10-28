@@ -67,6 +67,38 @@ fn relation_atoms_read_relations_and_all_bound_slots() {
     }
 }
 
+/// A derived atom resolves members for its current-slot term and tests the
+/// related term against them, as a membership test does, so the interface
+/// records the same traversal for both.
+#[test]
+fn derived_atoms_record_the_current_slot_like_membership_tests() {
+    for current in [0, 1] {
+        let lookups = |predicate: Value| {
+            let mut spec = serde_json::to_value(program(predicate)).unwrap();
+            assert_eq!(spec["relations"][3]["name"], "otherwise_unused");
+            let derivation = &mut spec["relations"][3]["derivation"];
+            derivation["current_slot"] = json!(current);
+            derivation["related_slot"] = json!(1 - current);
+            let interface =
+                derive_interface(&serde_json::from_value::<ProgramSpec>(spec).unwrap()).unwrap();
+            relation(&interface.relations, "otherwise_unused")
+                .lookup_slots
+                .clone()
+        };
+        let atom = lookups(json!({
+            "kind": "relation_atom", "relation": "otherwise_unused", "terms": ["anchor", "candidate"]
+        }));
+        assert_eq!(atom, [current]);
+        assert_eq!(
+            atom,
+            lookups(json!({
+                "kind": "relation_member", "relation": "otherwise_unused",
+                "current_slot": current, "related_slot": 1 - current
+            }))
+        );
+    }
+}
+
 #[test]
 fn term_comparisons_read_no_inputs_rules_or_relations() {
     let interface = derive_interface(&program(json!({

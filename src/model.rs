@@ -707,17 +707,17 @@ impl Program {
     fn has_relation_construct(&self, atoms_only: bool) -> bool {
         self.relations.values().any(|relation| {
             relation.derivation.as_ref().is_some_and(|derivation| {
-                judgment_has_relation_construct(&derivation.predicate, atoms_only, true)
+                judgment_has_relation_construct(&derivation.predicate, atoms_only)
             })
         }) || self.derived.values().any(|derived| {
             std::iter::once(&derived.semantics)
                 .chain(derived.versions.iter().map(|version| &version.semantics))
                 .any(|semantics| match semantics {
                     DerivedSemantics::Scalar(expr) => {
-                        scalar_has_relation_construct(expr, atoms_only, false)
+                        scalar_has_relation_construct(expr, atoms_only)
                     }
                     DerivedSemantics::Judgment(expr) => {
-                        judgment_has_relation_construct(expr, atoms_only, false)
+                        judgment_has_relation_construct(expr, atoms_only)
                     }
                 })
         })
@@ -1052,28 +1052,27 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
 
 // Keep this walk exhaustive: new relation constructs must opt into binding's
 // contract even when nested in a scalar conditional or an inactive version.
-fn judgment_has_relation_construct(
-    expr: &JudgmentExpr,
-    atoms_only: bool,
-    in_predicate: bool,
-) -> bool {
+// Only variants a ProgramSpec could not express before relation roles count.
+// A predicate's `parameter_lookup` is not one: raw ProgramSpec programs have
+// always been able to build it, and they keep the union of supplied tuples.
+fn judgment_has_relation_construct(expr: &JudgmentExpr, atoms_only: bool) -> bool {
     match expr {
         JudgmentExpr::RelationAtom { .. } => true,
         JudgmentExpr::SameEntity { .. } | JudgmentExpr::RoleDerived { .. } => !atoms_only,
         JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => false,
         JudgmentExpr::Comparison { left, right, .. } => {
-            scalar_has_relation_construct(left, atoms_only, in_predicate)
-                || scalar_has_relation_construct(right, atoms_only, in_predicate)
+            scalar_has_relation_construct(left, atoms_only)
+                || scalar_has_relation_construct(right, atoms_only)
         }
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => items
             .iter()
-            .any(|item| judgment_has_relation_construct(item, atoms_only, in_predicate)),
-        JudgmentExpr::Not(item) => judgment_has_relation_construct(item, atoms_only, in_predicate),
+            .any(|item| judgment_has_relation_construct(item, atoms_only)),
+        JudgmentExpr::Not(item) => judgment_has_relation_construct(item, atoms_only),
     }
 }
 
-fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool, in_predicate: bool) -> bool {
-    let scalar = |expr| scalar_has_relation_construct(expr, atoms_only, in_predicate);
+fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool) -> bool {
+    let scalar = |expr| scalar_has_relation_construct(expr, atoms_only);
     match expr {
         ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => !atoms_only,
         ScalarExpr::Literal(_)
@@ -1084,7 +1083,7 @@ fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool, in_predica
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd
         | ScalarExpr::OnlyRelated { .. } => false,
-        ScalarExpr::ParameterLookup { index, .. } => (!atoms_only && in_predicate) || scalar(index),
+        ScalarExpr::ParameterLookup { index, .. } => scalar(index),
         ScalarExpr::Add(items) | ScalarExpr::Min(items) | ScalarExpr::Max(items) => {
             items.iter().any(scalar)
         }
@@ -1099,17 +1098,15 @@ fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool, in_predica
         ScalarExpr::CountRelated { where_clause, .. }
         | ScalarExpr::SumRelated { where_clause, .. }
         | ScalarExpr::ExtremeRelated { where_clause, .. }
-        | ScalarExpr::SingleRelated { where_clause, .. } => {
-            where_clause.as_ref().is_some_and(|predicate| {
-                judgment_has_relation_construct(predicate, atoms_only, in_predicate)
-            })
-        }
+        | ScalarExpr::SingleRelated { where_clause, .. } => where_clause
+            .as_ref()
+            .is_some_and(|predicate| judgment_has_relation_construct(predicate, atoms_only)),
         ScalarExpr::If {
             condition,
             then_expr,
             else_expr,
         } => {
-            judgment_has_relation_construct(condition, atoms_only, in_predicate)
+            judgment_has_relation_construct(condition, atoms_only)
                 || scalar(then_expr)
                 || scalar(else_expr)
         }

@@ -9,6 +9,7 @@ use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
 use axiom_rules_engine::depth::with_suspend_depth;
 use axiom_rules_engine::engine::Engine;
+use axiom_rules_engine::interface::derive_interface;
 use axiom_rules_engine::model::{Period, ScalarValue};
 use axiom_rules_engine::spec::{DatasetSpec, ProgramSpec};
 use proptest::prelude::*;
@@ -236,6 +237,13 @@ fn atom_and_term_comparison_refusals_name_the_construct() {
         ("candidate == 1", "relation_term_compared_with_value"),
         ("1 != anchor", "relation_term_compared_with_value"),
         ("anchor < candidate", "relation_term_comparison_operator"),
+        // A bare term is no judgment: `and`, `or` and `not` refuse it as one,
+        // and arithmetic refuses it as a value, not as a comparison.
+        ("anchor and age > 3", "relation_term_used_as_value"),
+        ("age > 3 or candidate", "relation_term_used_as_value"),
+        ("anchor and candidate", "relation_term_used_as_value"),
+        ("not anchor", "relation_term_used_as_value"),
+        ("anchor + candidate == 2", "relation_term_used_as_value"),
     ] {
         let error = compile_formula(formula, "")
             .expect_err("invalid formula")
@@ -276,6 +284,21 @@ fn atom_and_term_comparison_refusals_name_the_construct() {
         .expect_err("terms are in the wrong slots")
         .to_string();
     assert!(error.contains("relation_atom_kind_mismatch"), "{error}");
+    // A derived target's declared kinds are checked as a data relation's are.
+    compile_json(&mixed_kind_program(
+        atom("eligible", &["candidate", "anchor"]),
+        true,
+        0,
+    ))
+    .expect("derived atom in slot order");
+    let error = compile_json(&mixed_kind_program(
+        atom("eligible", &["anchor", "candidate"]),
+        true,
+        0,
+    ))
+    .expect_err("derived atom terms are in the wrong slots")
+    .to_string();
+    assert!(error.contains("relation_atom_kind_mismatch"), "{error}");
 }
 
 #[test]
@@ -301,6 +324,117 @@ fn rulespec_refuses_atoms_with_untyped_relations_and_builtin_names() {
             .expect_err("invalid atom")
             .to_string();
         assert!(error.contains(code), "{error}");
+    }
+}
+
+/// Every built-in function name, listed here independently of the engine.
+const BUILTIN_FUNCTIONS: [&str; 22] = [
+    "max",
+    "min",
+    "ceil",
+    "floor",
+    "days_between",
+    "date_add_days",
+    "date_add_months",
+    "date_add_years",
+    "sum_over_periods",
+    "max_over_periods",
+    "count_over_periods",
+    "sum_top_n_over_periods",
+    "len",
+    "sum",
+    "only",
+    "input_for_year",
+    "only_related",
+    "count_where",
+    "sum_where",
+    "min_where",
+    "max_where",
+    "exactly_one",
+];
+
+#[test]
+fn every_builtin_function_name_refuses_as_an_atom() {
+    for name in BUILTIN_FUNCTIONS {
+        let mut program = same_kind_program(atom(name, &["anchor", "candidate"]));
+        program["relations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": name, "arity": 2, "slot_entities": ["Person", "Person"]}));
+        let error = compile_json(&program)
+            .expect_err("built-in name as an atom")
+            .to_string();
+        assert!(
+            error.contains("relation_name_shadows_builtin"),
+            "{name}: {error}"
+        );
+        let extra = format!(
+            "  - name: {name}\n    kind: data_relation\n    data_relation: {{arity: 2, arguments: [Person, Person]}}\n"
+        );
+        for formula in [
+            format!("{name}(anchor, candidate)"),
+            format!("{name}(candidate, anchor) > 0"),
+        ] {
+            let error = compile_formula(&formula, &extra)
+                .expect_err("built-in name called with terms")
+                .to_string();
+            assert!(
+                error.contains("relation_name_shadows_builtin"),
+                "{formula}: {error}"
+            );
+        }
+    }
+}
+
+/// A relation named after a built-in leaves calls of the built-in alone: the
+/// same predicate gives the same results with and without that relation.
+#[test]
+fn builtin_calls_keep_their_meaning_beside_a_relation_of_the_same_name() {
+    let dataset = json!({"inputs": [input("a", "age", 40), input("b", "age", 30), input("c", "age", 10)],
+        "relations": [tuple("relative_of", &["a", "b"]), tuple("relative_of", &["a", "c"]),
+            tuple("relative_of", &["c", "a"])]});
+    // `kin` fixes the direction an aggregation over a same-kind relation
+    // needs; `adult` is a judgment for `count_where` to test.
+    let support = r#"
+  - name: kin
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: relative_of
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: 2026-01-01
+        formula: "true"
+  - name: adult
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: age > 17
+"#;
+    for (name, formula) in [
+        ("max", "max(age, 0) > 17"),
+        ("min", "min(age, 100) > 17"),
+        ("len", "len(kin) > 1"),
+        ("count_where", "count_where(kin, adult) > 0"),
+        ("exactly_one", "exactly_one(age > 17, age > 35)"),
+    ] {
+        let shadowing = format!(
+            "{support}  - name: {name}\n    kind: data_relation\n    data_relation: {{arity: 2, arguments: [Person, Person]}}\n"
+        );
+        let unrelated = shadowing.replace(&format!("name: {name}\n"), "name: unrelated\n");
+        let results = [shadowing, unrelated].map(|extra| {
+            let artifact = compile_formula(formula, &extra)
+                .unwrap_or_else(|error| panic!("{formula} beside `{name}`: {error}"));
+            let program = serde_json::to_value(&artifact.program).unwrap();
+            ["explain", "fast"]
+                .map(|mode| ["a", "b", "c"].map(|id| output(&run(mode, &program, &dataset, id), 0)))
+        });
+        assert_eq!(results[0], results[1], "{formula}");
     }
 }
 
@@ -415,6 +549,67 @@ fn atoms_and_identity_are_refused_outside_predicate_scope() {
     }
 }
 
+/// `Engine::new` skips compilation and relation typing, so the evaluator's
+/// own guard must fail an evaluation that reaches an atom or a comparison
+/// outside a predicate, rather than reading the construct as false.
+#[test]
+fn engine_new_fails_atoms_and_comparisons_reached_outside_a_predicate() {
+    let period = Period::month(2026, 1);
+    let data = serde_json::from_value::<DatasetSpec>(json!({"inputs": [], "relations": [
+        tuple("roster", &["a", "b"]),
+        tuple("relative_of", &["a", "b"]),
+        tuple("relative_of", &["b", "a"]),
+    ]}))
+    .unwrap()
+    .to_dataset()
+    .unwrap();
+    let model = |program: Value| {
+        serde_json::from_value::<ProgramSpec>(program)
+            .unwrap()
+            .to_program()
+            .unwrap()
+    };
+    for (expr, construct) in [
+        (
+            atom("relative_of", &["anchor", "candidate"]),
+            "relation atom",
+        ),
+        (same("anchor", "candidate", false), "term comparison"),
+        (same("anchor", "candidate", true), "term comparison"),
+    ] {
+        let mut in_rule = same_kind_program(yes());
+        in_rule["derived"].as_array_mut().unwrap().push(json!({
+            "name": "bad", "entity": "Person", "dtype": "judgment", "unit": null,
+            "semantics": "judgment", "expr": expr.clone(),
+        }));
+        let in_rule = model(in_rule);
+        let error = Engine::new(&in_rule, &data)
+            .evaluate_judgment("bad", "a", &period)
+            .expect_err("rule body")
+            .to_string();
+        assert!(
+            error.contains("relation_role_outside_scope") && error.contains(construct),
+            "{error}"
+        );
+        let mut in_where = same_kind_program(yes());
+        in_where["relations"][2]["derivation"]["predicate"] = json!({
+            "kind": "comparison", "op": "gt", "right": literal(0), "left": {
+                "kind": "count_related", "relation": "relative_of", "current_slot": 0,
+                "related_slot": 1, "where": expr,
+            }
+        });
+        let in_where = model(in_where);
+        let error = Engine::new(&in_where, &data)
+            .evaluate_scalar("total", "a", &period)
+            .expect_err("aggregation where clause")
+            .to_string();
+        assert!(
+            error.contains("relation_role_outside_scope") && error.contains(construct),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn atom_edges_refuse_direct_indirect_and_rule_routed_cycles() {
     for indirect in [false, true] {
@@ -502,8 +697,18 @@ fn supplied_derived_tuples_are_refused_program_wide_and_ignored_by_engine_new() 
     assert_eq!(output(&run("explain", &legacy, &dataset, "a"), 0), 1);
 }
 
+/// Raw ProgramSpec predicates could look up parameters before relation roles,
+/// so a parameter lookup alone keeps the union of supplied and derived
+/// members in every path, as it does on engines without relation roles.
 #[test]
-fn parameter_only_predicates_also_refuse_supplied_derived_tuples() {
+fn parameter_lookups_in_predicates_keep_the_union_of_supplied_tuples() {
+    let mut raw = same_kind_program(json!({"kind": "comparison", "op": "gt",
+        "left": {"kind": "parameter_lookup", "parameter": "threshold", "index": literal(0)},
+        "right": literal(0)}));
+    raw["parameters"] = json!([{"name": "threshold", "unit": null, "versions": [
+        {"effective_from": "2020-01-01", "values": {"0": {"kind": "integer", "value": 1}}}]}]);
+    let raw_dataset = json!({"inputs": [], "relations": [
+        tuple("roster", &["a", "b"]), tuple("selected", &["a", "c"])]});
     let parameter = r#"
   - name: enabled
     kind: parameter
@@ -513,25 +718,34 @@ fn parameter_only_predicates_also_refuse_supplied_derived_tuples() {
         formula: "true"
 "#;
     let artifact = compile_formula("enabled", parameter).expect("parameter predicate compiles");
-    let program = serde_json::to_value(&artifact.program).unwrap();
-    let dataset = json!({"inputs": [], "relations": [tuple("selected", &["a", "b"])]});
-    let error = execute("explain", &program, &dataset, &["a".into()])
-        .expect_err("program uses a parameter in a predicate");
-    assert!(
-        error.contains("supplied_tuples_for_derived_relation"),
-        "{error}"
-    );
-    let model = artifact.program.to_program().unwrap();
-    let data = serde_json::from_value::<DatasetSpec>(dataset)
-        .unwrap()
-        .to_dataset()
-        .unwrap();
-    assert_eq!(
-        Engine::new(&model, &data)
-            .evaluate_scalar("total", "a", &Period::month(2026, 1))
-            .unwrap(),
-        ScalarValue::Integer(0)
-    );
+    let rulespec_program = serde_json::to_value(&artifact.program).unwrap();
+    let rulespec_dataset = json!({"inputs": [], "relations": [
+        tuple("relative_of", &["a", "b"]), tuple("selected", &["a", "c"])]});
+    for (program, dataset) in [(raw, raw_dataset), (rulespec_program, rulespec_dataset)] {
+        compile_json(&program).expect("parameter predicate compiles");
+        for mode in ["explain", "fast"] {
+            assert_eq!(output(&run(mode, &program, &dataset, "a"), 0), 2, "{mode}");
+        }
+        let spec = serde_json::from_value::<ProgramSpec>(program).unwrap();
+        let interface = derive_interface(&spec).unwrap();
+        assert!(
+            interface
+                .relations
+                .iter()
+                .all(|relation| relation.accepts_supplied_tuples)
+        );
+        let model = spec.to_program().unwrap();
+        let data = serde_json::from_value::<DatasetSpec>(dataset)
+            .unwrap()
+            .to_dataset()
+            .unwrap();
+        assert_eq!(
+            Engine::new(&model, &data)
+                .evaluate_scalar("total", "a", &Period::month(2026, 1))
+                .unwrap(),
+            ScalarValue::Integer(2)
+        );
+    }
 }
 
 #[test]

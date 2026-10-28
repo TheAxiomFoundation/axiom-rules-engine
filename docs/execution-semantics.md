@@ -99,12 +99,14 @@ output's formula is evaluated for that entity and period as follows.
   refuses these constructs outside the predicate's scope, including
   aggregation `where` clauses (`relation_role_outside_scope`).
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, parameters in predicates, relation atoms or term
-  comparisons refuse tuples supplied under any derived relation's name
+  using qualified reads, relation atoms or term comparisons refuse tuples
+  supplied under any derived relation's name
   (`supplied_tuples_for_derived_relation`), and their members resolver ignores
   those tuples even through `Engine::new`. Programs using none retain the
-  union of supplied tuples and filtered source members. An atom also refuses
-  lenient request binding (`lenient_binding_with_relation_roles`).
+  union of supplied tuples and filtered source members; a parameter read in a
+  predicate, which raw `ProgramSpec` could always express, is not one of these
+  constructs. An atom also refuses lenient request binding
+  (`lenient_binding_with_relation_roles`).
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that

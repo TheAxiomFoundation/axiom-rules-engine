@@ -427,9 +427,8 @@ A compiled program that carries a read through a term anywhere but a derived
 relation's predicate fails relation typing with `relation_role_outside_scope`.
 
 Unqualified reads keep the routing above. A bare parameter name now reads the
-parameter in two places where it used to resolve to a rule of that name,
-else (in a predicate) a relation, else an input: anywhere in a predicate
-([relation-roles.md](relation-roles.md) §3.3), and where a
+parameter in two places where it used to read an input of that name: anywhere
+in a predicate ([relation-roles.md](relation-roles.md) §3.3), and where a
 formula tests it as a judgment (`enabled`, `not enabled`, `enabled and ...`),
 in a rule body as in a predicate. That held when nothing else had the name: a
 parameter that shared a rule's name used to read the rule there, and in a
@@ -465,7 +464,9 @@ Each atom requires declared slot kinds (`relation_atom_needs_typed_relation`),
 the same number of terms as slots (`relation_atom_arity_mismatch`), and a
 matching kind at each slot (`relation_atom_kind_mismatch`). A relation whose
 name is also a built-in function, such as `len`, cannot be used as an atom
-(`relation_name_shadows_builtin`). A bare relation name keeps its meaning.
+(`relation_name_shadows_builtin`): `len(relative_of)` still calls the built-in,
+and `len(anchor, candidate)` is refused. A bare relation name keeps its
+meaning.
 
 Two terms of the same kind can compare ids with `==` or `!=`:
 `candidate != anchor` excludes the anchor from its own candidates. Different
@@ -474,11 +475,12 @@ value refuses with `relation_term_compared_with_value`. An atom or term
 comparison belongs only in a derived relation's predicate; rules and
 aggregation `where` clauses refuse it with `relation_role_outside_scope`.
 
-A program using qualified reads, parameters in predicates, atoms or term
-comparisons refuses supplied tuples under any derived relation's name
+A program using qualified reads, atoms or term comparisons refuses supplied
+tuples under any derived relation's name
 (`supplied_tuples_for_derived_relation`). Its members resolver also ignores
 such tuples for direct Rust callers of `Engine::new`. Programs using none of
-these constructs retain the union of supplied and derived members. Request
+these constructs retain the union of supplied and derived members, including
+programs whose predicates only read parameters. Request
 binding also refuses `relation_binding: lenient` when the program uses an
 atom (`lenient_binding_with_relation_roles`). See
 [relation-roles.md](relation-roles.md) for the design and derived-atom cost.

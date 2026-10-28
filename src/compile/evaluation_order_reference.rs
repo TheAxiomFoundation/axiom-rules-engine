@@ -19,8 +19,8 @@
 //! collectors gain arms only for expression kinds added since, each read as
 //! the production collectors read it: a rule read through a term
 //! (`role_derived`) is a dependency, an input read through one is not.
-//! An atom reads its relation's predicate dependencies, as an aggregate does;
-//! a term comparison reads no rule.
+//! No generated program has an atom, so that arm is unreachable here; a term
+//! comparison reads no rule.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -422,10 +422,10 @@ fn collect_judgment_dependencies(
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
-        JudgmentExprSpec::RelationAtom { relation, .. } => {
-            if let Some(rules) = relation_dependencies.get(relation) {
-                dependencies.extend(rules.iter().cloned());
-            }
+        JudgmentExprSpec::RelationAtom { .. } => {
+            unreachable!(
+                "the evaluation-order generator builds no atoms; atom programs take the combined-graph order tested in tests/relation_atom_order.rs"
+            )
         }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }

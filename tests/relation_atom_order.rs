@@ -1,9 +1,15 @@
-//! Atom programs order rules through the complete relation dependency graph.
-//! Earlier artifacts keep their frozen order, including qualified-read and
-//! term-comparison programs which do not use an atom.
+//! Atom programs order rules through the complete relation dependency graph:
+//! each rule is the smallest name whose waits are listed, as the frozen order
+//! specifies for legacy programs (`compile/evaluation_order_tests.rs`), with
+//! waits followed through atoms, sources and predicates. Earlier artifacts
+//! keep their frozen order, including qualified-read and term-comparison
+//! programs which do not use an atom.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::spec::ProgramSpec;
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 fn integer(value: i64) -> Value {
@@ -172,4 +178,165 @@ fn unused_atom_cycles_through_only_related_are_refused() {
     );
     assert!(error.to_string().contains("inner"), "{error}");
     assert!(error.to_string().contains("selected"), "{error}");
+}
+
+const RULE_NAMES: [&str; 6] = ["q_rule", "c_rule", "x_rule", "a_rule", "m_rule", "k_rule"];
+
+/// What each generated node reads directly: rules, and derived relations.
+type Reads = BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>;
+
+/// An acyclic atom program: every rule and derived relation reads only nodes
+/// earlier in a generated sequence, and `rel0`'s predicate always holds an
+/// atom, so the program takes the combined-graph order. Records each node's
+/// direct reads at construction, independently of the compiler.
+fn generated_atom_program(bytes: &[u8]) -> (Value, Reads, Reads) {
+    let mut next = bytes.iter().copied().cycle();
+    let mut pick = |n: usize| usize::from(next.next().unwrap()) % n;
+    let rule_count = 1 + pick(RULE_NAMES.len());
+    let relation_count = 1 + pick(4);
+    let mut nodes = (0..rule_count)
+        .map(|index| (true, index))
+        .chain((0..relation_count).map(|index| (false, index)))
+        .collect::<Vec<_>>();
+    for i in (1..nodes.len()).rev() {
+        let j = pick(i + 1);
+        nodes.swap(i, j);
+    }
+    let (mut rules, mut relations) = (
+        Vec::new(),
+        vec![json!({
+            "name": "base", "arity": 2, "slot_entities": ["Person", "Person"]
+        })],
+    );
+    let (mut rule_reads, mut relation_reads) = (Reads::new(), Reads::new());
+    let (mut earlier_rules, mut earlier_relations) = (Vec::<String>::new(), Vec::<String>::new());
+    for (is_rule, index) in nodes {
+        let mut reads = (BTreeSet::new(), BTreeSet::new());
+        if is_rule {
+            let mut items = vec![integer(0)];
+            for _ in 0..pick(4) {
+                if pick(2) == 0 && !earlier_rules.is_empty() {
+                    let rule = earlier_rules[pick(earlier_rules.len())].clone();
+                    items.push(json!({"kind": "derived", "name": rule}));
+                    reads.0.insert(rule);
+                } else if !earlier_relations.is_empty() {
+                    let relation = earlier_relations[pick(earlier_relations.len())].clone();
+                    items.push(json!({"kind": "count_related", "relation": relation,
+                        "current_slot": 0, "related_slot": 1}));
+                    reads.1.insert(relation);
+                }
+            }
+            let name = RULE_NAMES[index].to_string();
+            rules.push(json!({"name": name, "entity": "Person", "dtype": "integer",
+                "semantics": "scalar", "expr": {"kind": "add", "items": items}}));
+            rule_reads.insert(name.clone(), reads);
+            earlier_rules.push(name);
+        } else {
+            let name = format!("rel{index}");
+            let source = if earlier_relations.is_empty() || pick(2) == 0 {
+                "base".to_string()
+            } else {
+                earlier_relations[pick(earlier_relations.len())].clone()
+            };
+            if source != "base" {
+                reads.1.insert(source.clone());
+            }
+            let mut items = vec![always()];
+            if index == 0 {
+                items.push(atom("base"));
+            }
+            for _ in 0..pick(4) {
+                if pick(2) == 0 && !earlier_rules.is_empty() {
+                    let rule = earlier_rules[pick(earlier_rules.len())].clone();
+                    items.push(
+                        json!({"kind": "comparison", "op": "gte", "right": integer(0),
+                        "left": {"kind": "role_derived", "term": "candidate", "name": rule}}),
+                    );
+                    reads.0.insert(rule);
+                } else if !earlier_relations.is_empty() && pick(2) == 0 {
+                    let target = earlier_relations[pick(earlier_relations.len())].clone();
+                    items.push(atom(&target));
+                    reads.1.insert(target);
+                } else {
+                    items.push(atom("base"));
+                }
+            }
+            relations.push(relation(
+                &name,
+                &source,
+                json!({"kind": "and", "items": items}),
+            ));
+            relation_reads.insert(name.clone(), reads);
+            earlier_relations.push(name);
+        }
+    }
+    (
+        json!({"relations": relations, "derived": rules}),
+        rule_reads,
+        relation_reads,
+    )
+}
+
+/// The rules a derived relation's members wait for: those its predicate reads
+/// and, transitively, those of every derived relation it reads.
+fn relation_waits(relation: &str, relation_reads: &Reads) -> BTreeSet<String> {
+    let (rules, relations) = &relation_reads[relation];
+    let mut waits = rules.clone();
+    for read in relations {
+        waits.extend(relation_waits(read, relation_reads));
+    }
+    waits
+}
+
+/// The specification: the i-th rule is the smallest name not yet listed
+/// whose waits are all listed, where a rule waits for each rule it reads and
+/// each rule a derived relation it reads waits for.
+fn smallest_ready_order(rule_reads: &Reads, relation_reads: &Reads) -> Vec<String> {
+    let waits = rule_reads
+        .iter()
+        .map(|(rule, (rules, relations))| {
+            let mut all = rules.clone();
+            for relation in relations {
+                all.extend(relation_waits(relation, relation_reads));
+            }
+            (rule.clone(), all)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut order = Vec::<String>::new();
+    while order.len() < waits.len() {
+        let next = waits
+            .iter()
+            .find(|(rule, waits)| {
+                !order.contains(rule) && waits.iter().all(|wait| order.contains(wait))
+            })
+            .map(|(rule, _)| rule.clone())
+            .expect("an acyclic program always has a ready rule");
+        order.push(next);
+    }
+    order
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn atom_program_order_is_the_smallest_ready_rule_order(
+        bytes in prop::collection::vec(any::<u8>(), 64),
+        rotation in 0_usize..8,
+    ) {
+        let (value, rule_reads, relation_reads) = generated_atom_program(&bytes);
+        let expected = smallest_ready_order(&rule_reads, &relation_reads);
+        let artifact = compile(value.clone()).unwrap();
+        prop_assert_eq!(&artifact.metadata.evaluation_order, &expected);
+        // Declaration order changes nothing.
+        let mut shuffled = value;
+        let rules = shuffled["derived"].as_array_mut().unwrap();
+        let len = rules.len();
+        rules.rotate_left(rotation % len);
+        rules.reverse();
+        let relations = shuffled["relations"].as_array_mut().unwrap();
+        let len = relations.len();
+        relations.rotate_left(rotation % len);
+        prop_assert_eq!(compile(shuffled).unwrap().metadata.evaluation_order, expected);
+    }
 }

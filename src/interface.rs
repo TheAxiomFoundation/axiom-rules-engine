@@ -878,10 +878,23 @@ impl Collector<'_> {
                 ..
             } => self.lookup(relation, *current_slot),
             JudgmentExpr::RelationAtom { relation, terms } => {
-                // Every argument is bound: a tuple atom keys on all slots,
-                // in the relation's declared tuple order.
-                for slot in 0..terms.len() {
-                    self.lookup(relation, slot);
+                match self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    // A derived atom resolves the members of its current-slot
+                    // term, as a membership test does, and only tests the
+                    // related-slot id against them.
+                    Some(derivation) => self.lookup(relation, derivation.current_slot),
+                    // Every argument is bound: a tuple atom keys on all slots,
+                    // in the relation's declared tuple order.
+                    None => {
+                        for slot in 0..terms.len() {
+                            self.lookup(relation, slot);
+                        }
+                    }
                 }
             }
             JudgmentExpr::SameEntity { .. } => {}

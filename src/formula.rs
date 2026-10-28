@@ -1432,34 +1432,46 @@ fn term_named(name: &str) -> Option<TermSpec> {
     }
 }
 
-/// Function names cannot also be used for relation atoms. Keep this list in
-/// sync with the scalar and judgment call lowering below.
+/// Function names cannot also be used for relation atoms. `builtin_tests`
+/// keeps this list equal to the scalar and judgment call lowering below.
+const BUILTIN_FUNCTIONS: [&str; 22] = [
+    "max",
+    "min",
+    "ceil",
+    "floor",
+    "days_between",
+    "date_add_days",
+    "date_add_months",
+    "date_add_years",
+    "sum_over_periods",
+    "max_over_periods",
+    "count_over_periods",
+    "sum_top_n_over_periods",
+    "len",
+    "sum",
+    "only",
+    "input_for_year",
+    "only_related",
+    "count_where",
+    "sum_where",
+    "min_where",
+    "max_where",
+    "exactly_one",
+];
+
 pub(crate) fn is_builtin_function(name: &str) -> bool {
-    matches!(
-        name,
-        "max"
-            | "min"
-            | "ceil"
-            | "floor"
-            | "days_between"
-            | "date_add_days"
-            | "date_add_months"
-            | "date_add_years"
-            | "sum_over_periods"
-            | "max_over_periods"
-            | "count_over_periods"
-            | "sum_top_n_over_periods"
-            | "len"
-            | "sum"
-            | "only"
-            | "input_for_year"
-            | "only_related"
-            | "count_where"
-            | "sum_where"
-            | "min_where"
-            | "max_where"
-            | "exactly_one"
-    )
+    BUILTIN_FUNCTIONS.contains(&name)
+}
+
+/// Whether `func(args)` is a relation atom. A call to a built-in function name
+/// stays the built-in, even when a relation has that name, unless it passes a
+/// bare term, which only an atom takes: that call shadows the built-in.
+fn is_relation_call(relations: &HashSet<String>, func: &str, args: &[Expr]) -> bool {
+    relations.contains(func)
+        && (!is_builtin_function(func)
+            || args
+                .iter()
+                .any(|arg| matches!(arg, Expr::Var(name) if term_named(name).is_some())))
 }
 
 impl LowerCtx {
@@ -1513,7 +1525,7 @@ impl LowerCtx {
         }
         match expr {
             Expr::Call { func, args } => {
-                self.relation_predicates.contains(func)
+                is_relation_call(&self.relation_predicates, func, args)
                     || args.iter().any(|arg| self.scoped_construct(arg))
             }
             Expr::BinOp { left, right, .. } => {
@@ -1615,8 +1627,8 @@ fn lit_bool_spec(b: bool) -> ScalarExprSpec {
 }
 
 fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaError> {
-    if let Expr::Call { func, .. } = e {
-        if ctx.relation_predicates.contains(func) {
+    if let Expr::Call { func, args } = e {
+        if is_relation_call(&ctx.relation_predicates, func, args) {
             let (code, detail) = if is_builtin_function(func) {
                 (
                     "relation_name_shadows_builtin",
@@ -2268,7 +2280,7 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
 fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, FormulaError> {
     // A relation call is a judgment, with arguments in declared tuple order.
     if let Expr::Call { func, args } = e {
-        if ctx.relation_predicates.contains(func) {
+        if is_relation_call(&ctx.relation_predicates, func, args) {
             if !ctx.terms {
                 return Err(FormulaError::lower(
                     "[relation_role_outside_scope] relation atoms require a derived relation predicate",
@@ -2311,7 +2323,20 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
             ));
         }
     }
-    if let Expr::BinOp { op, left, right } = e {
+    // Only a comparison compares terms. Under `and`, `or` or arithmetic a bare
+    // term is refused where it is lowered, as a judgment or as a value, rather
+    // than as a comparison it is not.
+    if let Expr::BinOp { op, left, right } = e
+        && matches!(
+            op,
+            BinOpKind::Lt
+                | BinOpKind::Gt
+                | BinOpKind::Le
+                | BinOpKind::Ge
+                | BinOpKind::Eq
+                | BinOpKind::Ne
+        )
+    {
         let term = |expr: &Expr| match expr {
             Expr::Var(name) => ctx.term(name),
             _ => None,
@@ -2713,5 +2738,56 @@ mod lexer_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use std::collections::BTreeSet;
+
+    use super::BUILTIN_FUNCTIONS;
+
+    /// The names each `match func.as_str()` call lowering dispatches on: its
+    /// arms at the match's own indentation, up to the catch-all arm.
+    fn lowered_call_names() -> BTreeSet<String> {
+        let source = include_str!("formula.rs");
+        let mut names = BTreeSet::new();
+        let mut matches = 0;
+        let mut lines = source.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "Expr::Call { func, args } => match func.as_str() {" {
+                continue;
+            }
+            matches += 1;
+            let arm_indent = line.len() - line.trim_start().len() + 4;
+            for arm in lines.by_ref() {
+                let indent = arm.len() - arm.trim_start().len();
+                let arm = arm.trim();
+                if indent != arm_indent || arm.is_empty() || arm.starts_with("//") {
+                    continue;
+                }
+                let Some((pattern, _)) = arm.split_once("=>") else {
+                    continue;
+                };
+                if !pattern.trim_start().starts_with('"') {
+                    break;
+                }
+                for name in pattern.split('|') {
+                    names.insert(name.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        assert_eq!(matches, 2, "scalar and judgment call lowering");
+        names
+    }
+
+    #[test]
+    fn builtin_function_names_are_the_lowered_call_names() {
+        let listed = BUILTIN_FUNCTIONS
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(listed.len(), BUILTIN_FUNCTIONS.len(), "no duplicates");
+        assert_eq!(listed, lowered_call_names());
     }
 }
