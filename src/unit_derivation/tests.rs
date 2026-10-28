@@ -3663,3 +3663,26 @@ fn synthetic_snap_pilot_shape_fixtures_match_7_cfr_projection_shapes() {
         );
     }
 }
+
+#[test]
+fn phase_two_programs_declare_only_base_relations() {
+    // Stage 3 binds request tuples straight into a dataset for the phase-two
+    // program, with no request binding. That is sound only while every
+    // phase-two relation is a base relation, so a tuple can never be supplied
+    // for a relation the program derives.
+    let artifact = compile_aggregation_plan(
+        include_str!("../../tests/fixtures/unit_derivation/renamed_child_gross_plan.yaml"),
+        &nz_source_artifact(),
+    )
+    .unwrap();
+    let spec = &artifact.phase_two_artifact.program;
+    assert!(!spec.relations.is_empty());
+    assert!(
+        spec.relations
+            .iter()
+            .all(|relation| relation.derivation.is_none())
+    );
+    let program = spec.to_program().unwrap();
+    assert!(!program.uses_relation_roles());
+    assert!(!program.uses_relation_atoms());
+}

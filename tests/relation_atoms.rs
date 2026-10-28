@@ -4,6 +4,8 @@
 //! deliberately excludes derived reads, rules that aggregate, comparisons
 //! of counts, and bare membership tests, as the design requires.
 
+use std::collections::BTreeSet;
+
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
@@ -237,6 +239,15 @@ fn atom_and_term_comparison_refusals_name_the_construct() {
         ("candidate == 1", "relation_term_compared_with_value"),
         ("1 != anchor", "relation_term_compared_with_value"),
         ("anchor < candidate", "relation_term_comparison_operator"),
+        // An atom is a judgment, not a value.
+        (
+            "relative_of(candidate, anchor) > 0",
+            "relation_atom_used_as_value",
+        ),
+        (
+            "relative_of(candidate, anchor) + 1 > 1",
+            "relation_atom_used_as_value",
+        ),
         // A bare term is no judgment: `and`, `or` and `not` refuse it as one,
         // and arithmetic refuses it as a value, not as a comparison.
         ("anchor and age > 3", "relation_term_used_as_value"),
@@ -438,6 +449,96 @@ fn builtin_calls_keep_their_meaning_beside_a_relation_of_the_same_name() {
     }
 }
 
+/// A filtered entity's relation (one that declares its own `entity`) is an
+/// ordinary derived relation to an atom: the atom tests membership for the
+/// term in its current slot, the members `len` counts.
+#[test]
+fn atoms_target_a_filtered_entitys_relation() {
+    let source = |formula: &str| {
+        format!(
+            r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: is_adult
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: age >= 18
+  - name: adult_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: AdultUnit
+      member_relation: adults
+      slot_entities: [Person, Household]
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: 2026-01-01
+        formula: candidate.is_adult
+  - name: selected
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      slot_entities: [Person, Household]
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: 2026-01-01
+        formula: "{formula}"
+  - name: total
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(selected)
+"#
+        )
+    };
+    let dataset = |c_age: i64| {
+        json!({"inputs": [input("a", "age", 40), input("b", "age", 8), input("c", "age", c_age)],
+            "relations": [tuple("member_of_household", &["a", "h"]),
+                tuple("member_of_household", &["b", "h"]), tuple("member_of_household", &["c", "h"])]})
+    };
+    let count = |formula: &str, c_age: i64| {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(&source(formula))
+            .unwrap_or_else(|error| panic!("{formula}: {error}"));
+        let program = serde_json::to_value(&artifact.program).unwrap();
+        ["explain", "fast"].map(|mode| output(&run(mode, &program, &dataset(c_age), "h"), 0))
+    };
+    for (c_age, adults) in [(30, 2), (17, 1)] {
+        assert_eq!(count("adult_unit(candidate, anchor)", c_age), [adults; 2]);
+        assert_eq!(count("candidate.is_adult", c_age), [adults; 2]);
+        assert_eq!(
+            count("not adult_unit(candidate, anchor)", c_age),
+            [3 - adults; 2]
+        );
+    }
+    let error =
+        CompiledProgramArtifact::from_rulespec_str(&source("adult_unit(anchor, candidate)"))
+            .expect_err("terms out of slot order")
+            .to_string();
+    assert!(error.contains("relation_atom_kind_mismatch"), "{error}");
+    // The member relation names the filtered entity's members for `len` and
+    // the other aggregations; it is not a relation an atom can test.
+    let error = CompiledProgramArtifact::from_rulespec_str(&source("adults(candidate, anchor)"))
+        .expect_err("a member relation is no atom target")
+        .to_string();
+    assert!(error.contains("unknown function `adults`"), "{error}");
+}
+
 #[test]
 fn rulespec_refuses_atoms_and_term_comparisons_in_aggregation_arguments() {
     for formula in [
@@ -630,10 +731,16 @@ fn atom_edges_refuse_direct_indirect_and_rule_routed_cycles() {
                 ));
         }
         let error = compile_json(&program).expect_err("atom cycle");
-        assert!(
-            matches!(error, CompileError::CyclicRelationDependency { .. }),
-            "{error}"
-        );
+        let CompileError::CyclicRelationDependency { cycle } = &error else {
+            panic!("expected a relation cycle, got {error}");
+        };
+        let named = cycle.split(", ").collect::<BTreeSet<_>>();
+        let expected = if indirect {
+            BTreeSet::from(["other", "selected"])
+        } else {
+            BTreeSet::from(["selected"])
+        };
+        assert_eq!(named, expected, "{error}");
     }
     let mut program = same_kind_program(atom("other", &["anchor", "candidate"]));
     program["relations"].as_array_mut().unwrap().push(derived_relation("other", "roster",
@@ -877,10 +984,13 @@ proptest! {
     }
 
     /// Each household has one fixed candidate, so the comparison checks
-    /// individual membership, not merely the size of the selected set.
+    /// individual membership, not merely the size of the selected set. A
+    /// decoy tuple can give the candidate a second tuple under the same
+    /// first-slot id, indexed before the real one, so an atom must search
+    /// every tuple for that id.
     #[test]
     fn positive_base_atoms_are_monotone_in_supplied_tuples(
-        rows in prop::collection::vec((any::<bool>(), any::<bool>(), any::<bool>()), 1..9),
+        rows in prop::collection::vec((any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()), 1..9),
         use_or in any::<bool>(), double_not in any::<bool>(),
     ) {
         let positive = |relation| {
@@ -896,12 +1006,19 @@ proptest! {
         let mut before = Vec::new();
         let mut after = Vec::new();
         let mut ids = Vec::new();
-        for (i, (edge, other, add)) in rows.into_iter().enumerate() {
+        let mut expected = Vec::new();
+        let holds = |edge: bool, other: bool| i64::from(if use_or { edge || other } else { edge && other });
+        for (i, (edge, other, add, decoy)) in rows.into_iter().enumerate() {
             let person = format!("p{i}"); let household = format!("h{i}");
             ids.push(household.clone());
+            expected.push((holds(edge, other), holds(edge || add, other || add)));
             before.push(tuple("roster", &[&person, &household]));
             after.push(tuple("roster", &[&person, &household]));
             for (name, present) in [("edge", edge), ("other", other)] {
+                if decoy {
+                    before.push(tuple(name, &[&person, "decoy"]));
+                    after.push(tuple(name, &[&person, "decoy"]));
+                }
                 if present { before.push(tuple(name, &[&person, &household])); }
                 if present || add { after.push(tuple(name, &[&person, &household])); }
             }
@@ -909,7 +1026,11 @@ proptest! {
         for mode in ["explain", "fast"] {
             let old = execute(mode, &program, &json!({"inputs": [], "relations": before}), &ids).unwrap();
             let new = execute(mode, &program, &json!({"inputs": [], "relations": after}), &ids).unwrap();
-            for i in 0..ids.len() { prop_assert!(output(&old, i) <= output(&new, i)); }
+            for (i, (old_count, new_count)) in expected.iter().enumerate() {
+                prop_assert_eq!(output(&old, i), *old_count);
+                prop_assert_eq!(output(&new, i), *new_count);
+                prop_assert!(output(&old, i) <= output(&new, i));
+            }
         }
     }
 
@@ -1042,9 +1163,13 @@ fn long_atom_dependency_chains_preserve_values_traces_and_suspend_depths() {
     let dataset = json!({"inputs": [input("b", "score", 23)],
         "relations": [tuple("roster", &["a", "b"])]});
     compile_json(&chained).expect("an acyclic atom dependency chain compiles");
+    // Unbounded suspend depth nests all 40 links natively. That needs about
+    // 1 MiB (991 KiB on arm64 debug, rustc 1.94.1, in every feature set).
+    // A 2 MiB thread, the default test-thread size, absorbs compiler
+    // variation but fails if each link's stack use doubles.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(2 * 1024 * 1024)
             .spawn_scoped(scope, || {
                 for mode in ["explain", "fast"] {
                     let expected =
@@ -1063,7 +1188,7 @@ fn long_atom_dependency_chains_preserve_values_traces_and_suspend_depths() {
                     }
                 }
             })
-            .expect("spawn large-stack regression thread")
+            .expect("spawn bounded-stack regression thread")
             .join()
             .expect("regression thread");
     });

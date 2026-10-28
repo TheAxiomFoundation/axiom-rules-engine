@@ -458,11 +458,15 @@ A relation atom, `R(t1, ..., tn)`, tests exactly those term ids in the declared
 relation's slot order. For example, `relative_of(candidate, anchor)` tests the
 reverse pair without the ambiguity of a bare same-kind membership test.
 A data atom holds when a supplied tuple matches every id and covers the
-evaluation period. A derived atom requires arity 2 and tests whether its
+evaluation period. A derived atom requires arity 2
+(`derived_relation_atom_arity_unsupported`) and tests whether its
 related-slot term belongs to the relation's members for its current-slot term.
 Each atom requires declared slot kinds (`relation_atom_needs_typed_relation`),
-the same number of terms as slots (`relation_atom_arity_mismatch`), and a
-matching kind at each slot (`relation_atom_kind_mismatch`). A relation whose
+the same number of terms as slots (`relation_atom_arity_mismatch`), a term in
+scope as every argument (`relation_atom_argument_not_term`), and a matching
+kind at each slot (`relation_atom_kind_mismatch`). An atom is a judgment, so
+`relative_of(candidate, anchor) > 0` is refused with
+`relation_atom_used_as_value`. A relation whose
 name is also a built-in function, such as `len`, cannot be used as an atom
 (`relation_name_shadows_builtin`): `len(relative_of)` still calls the built-in,
 and `len(anchor, candidate)` is refused. A bare relation name keeps its
@@ -470,8 +474,10 @@ meaning.
 
 Two terms of the same kind can compare ids with `==` or `!=`:
 `candidate != anchor` excludes the anchor from its own candidates. Different
-kinds refuse with `relation_term_kind_mismatch`, and a term compared with a
-value refuses with `relation_term_compared_with_value`. An atom or term
+kinds refuse with `relation_term_kind_mismatch`, a term compared with a
+value refuses with `relation_term_compared_with_value`, and any other
+operator, such as `anchor < candidate`, refuses with
+`relation_term_comparison_operator`. An atom or term
 comparison belongs only in a derived relation's predicate; rules and
 aggregation `where` clauses refuse it with `relation_role_outside_scope`.
 

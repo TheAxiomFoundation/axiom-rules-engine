@@ -444,7 +444,7 @@ slot order) and `{kind: same_entity, left: anchor, right: candidate, negated:
 false}`; `negated: true` encodes `!=`. They add variants to format 3 without
 a version bump: older engines refuse the unknown expression kinds. Loading
 re-derives the complete interface and refuses a mismatch. The supplied-tuple
-restriction also covers programs using only qualified reads from PR 1, so
+restriction also covers programs using only qualified reads (#268), so
 their derived relations now report `accepts_supplied_tuples: false`. Earlier
 format-3 artifacts from programs using only qualified reads must be
 recompiled: the loader now expects that derived-relation interface field to be
