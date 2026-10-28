@@ -334,6 +334,8 @@ pub struct DenseRelationBatchSpec {
     /// count, and one that does confirms the count), but no rule can read
     /// one. A binding layer that does not convert the columns no rule reads,
     /// as the PyO3 extension does not, passes their lengths here.
+    /// A length that equals the last offset confirms the count as a stated
+    /// `related_row_count` would, so it is trusted the same way.
     pub input_lengths: HashMap<String, usize>,
 }
 

@@ -46,7 +46,11 @@ already did for root columns.
   Python extension does not convert unread columns; it passes their lengths
   in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
   alone, checked like `inputs` but never readable), so the engine orders
-  every error and nothing is allocated from a claimed length.
+  the length and confirmation errors and the extension allocates nothing
+  from a claimed length. An unread column's length is trusted like a stated
+  count: any sized Python object confirms one, and binding reserves owners
+  from it up to the bound. The extension still raises its own errors first
+  for an unread entry with no `len()` and for a non-string key.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
   cleanly for a count no host can hold; a count that fits the owners buffer but
   not a later per-row buffer can still exhaust memory during execution.

@@ -583,9 +583,14 @@ fn build_batch(
 /// schema reads, which are never converted, so it applies the same rules to
 /// them as to a Rust caller's columns: each must have one value per related
 /// row, and one that does confirms the related row count. Only lengths cross,
-/// so nothing is allocated from a column's claimed length, and the engine
-/// orders every error. Malformed offsets are left for the engine to report
-/// first.
+/// so the extension allocates nothing from a column's claimed length, and the
+/// engine orders the length and confirmation errors. An unread column's
+/// `len()` is trusted like a stated `related_row_count`: any sized object
+/// confirms a count, and binding reserves owners from it up to the engine's
+/// row bound. Two errors are still the extension's own, raised before the
+/// engine's: an unread entry with no `len()` (`ValueError`) and a key that is
+/// not a string (`TypeError`). Malformed offsets are left for the engine to
+/// report first.
 fn forward_unread_lengths(
     batch: &mut DenseRelationBatchSpec,
     input_dict: &Bound<'_, PyDict>,
