@@ -217,7 +217,8 @@ fn dense_program(kind: &str, case: &Case) -> DenseCompiledProgram {
 /// them together. A row's related rows are its full tuples in order (dense
 /// has no intervals, so partial tuples are left out, and a repeated tuple is
 /// two rows). When a related row's household has no `refused` record the
-/// column is left out, which dense reports as a missing input.
+/// column is left out, which dense reports as a missing input; the batch
+/// states its related row count, since a left-out column cannot confirm it.
 fn dense(compiled: &DenseCompiledProgram, case: &Case, people: &[usize], f64_mode: bool) -> String {
     let mut offsets = vec![0];
     let mut households = Vec::new();
@@ -232,6 +233,8 @@ fn dense(compiled: &DenseCompiledProgram, case: &Case, people: &[usize], f64_mod
             .or_insert_with(|| DenseRelationBatchSpec {
                 offsets: offsets.clone(),
                 inputs: HashMap::new(),
+                related_row_count: Some(households.len()),
+                ..Default::default()
             });
         for name in &schema.related_inputs {
             let column: Option<Vec<bool>> = households
