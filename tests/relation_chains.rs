@@ -72,6 +72,10 @@ enum Link {
 /// A chain of `LINKS` derived relations over the data relation `base`, typed
 /// `[Household, Person]` throughout when `typed`.
 fn chain_relations(link: Link, typed: bool) -> Vec<Value> {
+    chain_relations_with_links(link, typed, LINKS)
+}
+
+fn chain_relations_with_links(link: Link, typed: bool, links: usize) -> Vec<Value> {
     let slots = if matches!(link, Link::Counted) {
         // Nested counts run on the candidate, so both sides have the same kind.
         json!(["Household", "Household"])
@@ -83,8 +87,8 @@ fn chain_relations(link: Link, typed: bool) -> Vec<Value> {
         base["slot_entities"] = slots.clone();
     }
     let mut relations = vec![base];
-    for index in 0..LINKS {
-        let next = (index + 1 < LINKS).then(|| relation_name(index + 1));
+    for index in 0..links {
+        let next = (index + 1 < links).then(|| relation_name(index + 1));
         let (source, predicate) = match (link, next) {
             (Link::Source, Some(next)) => (next, always()),
             (Link::SourceTestingBase, Some(next)) => (
@@ -158,10 +162,7 @@ fn timed<T>(label: &str, run: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     let result = run();
     let elapsed = started.elapsed();
-    assert!(
-        elapsed < BOUND,
-        "{label} took {elapsed:?} for {LINKS} links"
-    );
+    assert!(elapsed < BOUND, "{label} took {elapsed:?}");
     result
 }
 
@@ -269,10 +270,32 @@ fn a_chain_through_relation_member_predicates_is_linear_not_exponential() {
 
 #[test]
 fn a_chain_through_count_related_predicates_is_linear_not_exponential() {
+    check_count_related_chain(LINKS);
+}
+
+#[test]
+fn count_related_chain_stays_within_a_bounded_stack() {
+    // On aarch64-apple-darwin, rustc 1.94.1, this counted chain needed
+    // 576 KiB with debug nesting 8, versus 2048 KiB with nesting 32
+    // (16 KiB measurement resolution). A 1 MiB thread leaves about twice
+    // the measured need, yet fails if the debug limit returns to 32 or
+    // each link's native stack use doubles. Keep this budget independent
+    // of the runtime limit.
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        // More than both limits, so the native segment is just as deep as
+        // in the 20,000-link linearity test without repeating all its work.
+        .spawn(|| check_count_related_chain(128))
+        .expect("spawn bounded-stack count chain")
+        .join()
+        .expect("count chain stays within its stack budget");
+}
+
+fn check_count_related_chain(links: usize) {
     // Each link counts the next at its candidate, a different entity, so the
     // resolutions nest across entities as well as links.
     let program = program(
-        chain_relations(Link::Counted, true),
+        chain_relations_with_links(Link::Counted, true, links),
         vec![rule("head", count_related(&relation_name(0)))],
     );
     let tuples = [("n1", "n1"), ("n1", "n2"), ("n2", "n1"), ("n2", "n2")];

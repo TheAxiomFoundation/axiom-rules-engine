@@ -295,8 +295,8 @@ nesting, whatever the chain's length: a 20,000-rule chain answers on a 1 MiB
 thread in every mode (`src/depth.rs`). Fast's relation aggregations, which
 run on the explain engine fast embeds, and dense's lifetime reductions, which
 drive each period's executor, nest one bounded drive inside another and can
-use twice that. Expressions dense inlines are bounded separately (see above),
-and evaluating chains of derived relations is not covered here (#211).
+use twice that. Expressions dense inlines and derived-relation resolution
+have separate bounds (see above and below).
 
 Typing and binding a chain of derived relations is linear in its length and
 never recurses once per link. A derived relation that declares no slot kinds
@@ -319,6 +319,35 @@ evaluation did before the deferral. The threshold is 128 levels in release
 builds, so an evaluation that never nests that deep never retries, and 8 in
 debug builds, whose frames are about thirty times larger; deferring early also
 exercises deferral throughout the debug test suite.
+
+Derived-relation resolution has its own native nesting limit
+(`src/engine.rs`, `RELATION_NESTING_LIMIT`; #211). A predicate can ask for the
+members of another derived relation. Once resolution reaches the limit, an
+unresolved request stops the current resolution and names the members it
+needs. The driver resolves those members, caches the result and its trace
+records, then retries the stopped resolution. That retry reads completed work
+from the caches and resumes its predicate at the candidate that stopped it.
+Source chains are walked by a loop, so their length does not consume this
+native nesting budget. The limit is 32 in release builds and 8 in debug
+builds, whose larger frames need an earlier stop: a counted-predicate chain
+needed 2048 KiB at depth 32, but 576 KiB at depth 8 on aarch64-apple-darwin
+(rustc 1.94.1, measured to 16 KiB). The debug limit also
+exercises suspended resolution throughout the debug test suite. This limit
+is independent of the rule-deferral threshold, and compiled artifact bytes
+do not depend on it.
+
+For every acyclic program, a relation nesting limit of at least one preserves
+the values, errors and explain traces of unlimited native resolution. The
+`engine::relation_resolution_tests` property tests
+`suspended_resolution_matches_native_resolution` and
+`iterative_resolution_matches_recursive_semantics_on_small_dags` compare
+limited resolution with native resolution and an independent recursive
+oracle. `tests/relation_chains.rs` checks a long counted-predicate chain in
+`a_chain_through_count_related_predicates_is_linear_not_exponential`, and
+`count_related_chain_stays_within_a_bounded_stack` pins its native stack budget.
+`tests/relation_atoms.rs` checks values, traces and rule-deferral depths across
+a long atom chain in
+`long_atom_dependency_chains_preserve_values_traces_and_suspend_depths`.
 
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
@@ -343,7 +372,7 @@ a derived relation whose predicate defers for each of 256 members, cost 1.6
 times what recursion costs (each bounded there at three times, whatever the
 member count).
 
-Deferral happens only at rule references, so one rule's own expression
+Rule deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. Inlined dense expressions have no rule
 references, which is why dense bounds them (see above). Dense computes a rule
 it has never computed even when no row reaches it (to fix the rule's dtype),

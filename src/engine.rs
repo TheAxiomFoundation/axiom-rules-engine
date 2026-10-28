@@ -616,8 +616,8 @@ struct PendingMembers {
 /// next relation, the driver below it resolves that relation, and the
 /// stopped resolution then runs again; see [`Engine::resolve_members`].
 /// Debug frames are much larger: a count-related predicate chain needed
-/// 2048 KiB at depth 32 on aarch64-apple-darwin (rustc 1.94.1), but the same
-/// 20,000-link chain fits a 1 MiB thread at depth 8. Debug builds therefore
+/// 2048 KiB at depth 32, but 576 KiB at depth 8 (aarch64-apple-darwin,
+/// rustc 1.94.1, 16 KiB resolution). Debug builds therefore
 /// stop earlier; this also exercises suspended resolution throughout tests.
 #[cfg(debug_assertions)]
 const RELATION_NESTING_LIMIT: usize = 8;
