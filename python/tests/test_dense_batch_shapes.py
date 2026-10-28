@@ -443,8 +443,8 @@ def test_an_empty_array_with_a_second_axis_is_refused(tmp_path) -> None:
 
 def test_an_unread_column_is_checked_by_length_without_allocating(tmp_path) -> None:
     # A zero-stride view claims 2^50 values on eight bytes of storage. Only
-    # its length reaches the engine, which refuses it; nothing is allocated
-    # from that length.
+    # its length reaches the engine, which refuses it before any allocation
+    # sized by that length.
     program = _compile(tmp_path, HOUSEHOLD_SIZE_MODULE, "Household")
     key = _only_relation_key(program)
     age = np.broadcast_to(np.array(1, dtype=np.int64), (2**50,))

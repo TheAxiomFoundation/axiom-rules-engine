@@ -583,14 +583,16 @@ fn build_batch(
 /// schema reads, which are never converted, so it applies the same rules to
 /// them as to a Rust caller's columns: each must have one value per related
 /// row, and one that does confirms the related row count. Only lengths cross,
-/// so the extension allocates nothing from a column's claimed length, and the
-/// engine orders the length and confirmation errors. An unread column's
-/// `len()` is trusted like a stated `related_row_count`: any sized object
-/// confirms a count, and binding reserves owners from it up to the engine's
-/// row bound. Two errors are still the extension's own, raised before the
-/// engine's: an unread entry with no `len()` (`ValueError`) and a key that is
-/// not a string (`TypeError`). Malformed offsets are left for the engine to
-/// report first.
+/// so the extension makes no allocation sized by a column's claimed length,
+/// and the engine orders the length and confirmation errors among themselves.
+/// An unread entry gets none of the checks `dense_column_from_python` makes:
+/// its `len()` is taken as is, so any sized object counts and a `(3, 2)`
+/// array has length 3. A matching length is trusted like a stated
+/// `related_row_count`, so it can authorize the engine's owners reservation
+/// up to its row bound. This function's own errors are raised before the
+/// engine checks anything, a root column's length included: an unread entry
+/// with no `len()` (`ValueError`) and a key that is not a string
+/// (`TypeError`). Malformed offsets are left for the engine to report first.
 fn forward_unread_lengths(
     batch: &mut DenseRelationBatchSpec,
     input_dict: &Bound<'_, PyDict>,
@@ -621,7 +623,9 @@ fn forward_unread_lengths(
 }
 
 /// A relation dict's optional `related_row_count`. Absent or `None` leaves the
-/// related row count to be confirmed by the relation's columns.
+/// related row count to be confirmed by the relation's columns. It is read as
+/// an `i64`: a value outside that range raises `OverflowError`, and a negative
+/// one `ValueError`.
 fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Option<usize>> {
     let Some(value) = relation_dict.get_item("related_row_count")? else {
         return Ok(None);
@@ -646,7 +650,8 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
     if let Ok(array) = value.cast::<PyArray1<f64>>() {
         return decimal_column_from_f64(&array_values(array)?);
     }
-    // A column is one-dimensional. The list fallbacks below would read a
+    // A converted column is one-dimensional (unread columns cross by length
+    // alone and are not checked here). The list fallbacks below would read a
     // `(0, 2)` array, which iterates as no rows, as an empty column.
     if let Ok(array) = value.cast::<PyUntypedArray>() {
         if array.ndim() != 1 {
@@ -657,7 +662,9 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
         }
     }
     // An empty array of any dtype converts as an empty list of anything, so
-    // the list fallbacks below would call it bool. Keep its numpy dtype.
+    // the list fallbacks below would call it bool. Keep an integer, float or
+    // string dtype; any other empty array (complex, object, datetime, ...)
+    // still reads as bool.
     if let Ok(array) = value.cast::<PyUntypedArray>()
         && array.len() == 0
     {

@@ -6,17 +6,20 @@ entry per decision, most recent first.
 
 ## 2026-10-14 — Dense batches justify every row count they claim
 
-**Decision.** Dense binding refuses a batch whose row counts nothing
-confirms, before it allocates anything from them. `row_count` is the caller's
-stated root row count: every supplied root column must have that length, and
-it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest per-row
-buffer element). A relation's related row count is its last offset. A nonzero
-one must be confirmed by a supplied related column of that length or by an
-explicit `DenseRelationBatchSpec::related_row_count`; a stated count must equal
-the last offset, and so must every supplied related column, whether or not the
-program reads it. Counts above `MAX_DENSE_ROWS` are refused, and the owners
-buffer is reserved fallibly, so a stated count larger than memory is an error.
-Violations are `EvalError::TypeMismatch`.
+**Decision.** Dense binding refuses a batch whose row counts nothing confirms,
+before it makes any allocation sized by them. (Diagnostics and schema metadata
+still allocate; no buffer sized by an unconfirmed count does.) `row_count` is
+the caller's stated root row count: every supplied root column must have that
+length, and it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest
+per-row buffer element). A relation's related row count is its last offset. A
+nonzero one must be confirmed by a supplied related column of that length or
+by an explicit `DenseRelationBatchSpec::related_row_count`; a stated count
+must equal the last offset, and so must every supplied related column, whether
+or not the program reads it. Counts above `MAX_DENSE_ROWS` are refused, and
+the owners buffer is reserved with `try_reserve_exact`, so a reservation the
+allocator reports as failed is an error rather than an abort. A reservation
+that succeeds guarantees nothing about later allocations. Violations are
+`EvalError::TypeMismatch`.
 
 **Why.** Binding allocates one owner per related row, and the offsets were the
 only statement of how many there are. A relation with no related column (a
@@ -46,14 +49,28 @@ already did for root columns.
   Python extension does not convert unread columns; it passes their lengths
   in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
   alone, checked like `inputs` but never readable), so the engine orders
-  the length and confirmation errors and the extension allocates nothing
-  from a claimed length. An unread column's length is trusted like a stated
-  count: any sized Python object confirms one, and binding reserves owners
-  from it up to the bound. The extension still raises its own errors first
-  for an unread entry with no `len()` and for a non-string key.
+  the length and confirmation errors, and the extension makes no allocation
+  sized by a claimed length. Unread entries get none of the checks converted
+  columns get: their `len()` is taken as is, with no rank or dtype check.
+  The `DenseRelationBatch` wrapper passes each entry through `np.asarray`,
+  so there a `(3, 2)` array has length 3; the native extension called
+  directly takes any sized object. An unread length that matches is
+  trusted like a stated count, so it can authorize an owners reservation up
+  to the bound. The extension
+  raises its own errors before the engine checks anything, including a
+  root column's length: an unread entry with no `len()` (`ValueError`), a
+  non-string key (`TypeError`), and every error converting a read column.
+- The extension's conversion of read columns checks rank and keeps the dtype
+  of an empty array only for the cases it names: a numpy array that is not
+  one-dimensional is refused, and an empty integer, float or string array
+  keeps that dtype. Other empty arrays (complex, object, datetime, among
+  others) still fall through to the list fallbacks and read as bool. A
+  `related_row_count` outside `i64` raises `OverflowError`, and a negative
+  one raises `ValueError`.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
-  cleanly for a count no host can hold; a count that fits the owners buffer but
-  not a later per-row buffer can still exhaust memory during execution.
+  cleanly only when the allocator reports the failure. A count the reservation
+  succeeds for, but that a later per-row buffer cannot hold, can still exhaust
+  memory during execution.
 - `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
   `input_lengths`), which breaks struct literals outside this crate; it now
   derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a

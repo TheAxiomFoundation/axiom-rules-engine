@@ -1254,8 +1254,9 @@ impl DenseCompiledProgram {
     }
 
     /// Check a batch against this program, then bind its columns. Every count
-    /// binding or execution sizes a buffer by is justified before anything is
-    /// allocated from it:
+    /// binding or execution sizes a buffer by is justified before any buffer
+    /// of that size is allocated (error messages and schema metadata still
+    /// allocate):
     ///
     /// - `row_count` is at most [`MAX_DENSE_ROWS`], and every supplied root
     ///   column has that length.
@@ -1491,9 +1492,10 @@ impl DenseCompiledProgram {
         Ok(())
     }
 
-    /// Build a checked key's owners, reserved fallibly: a stated count is
-    /// trusted up to [`MAX_DENSE_ROWS`], so one larger than memory is an error
-    /// rather than an abort.
+    /// Build a checked key's owners, reserved with `try_reserve_exact`: a
+    /// stated count is trusted up to [`MAX_DENSE_ROWS`], and a reservation the
+    /// allocator reports as failed is an error rather than an abort. A
+    /// reservation that succeeds says nothing about later allocations.
     fn bind_relation_key(
         key: &DenseRelationKey,
         relation_batch: DenseRelationBatchSpec,
