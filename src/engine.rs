@@ -615,6 +615,13 @@ struct PendingMembers {
 /// of such a chain. Past this depth a resolution stops where it needs the
 /// next relation, the driver below it resolves that relation, and the
 /// stopped resolution then runs again; see [`Engine::resolve_members`].
+/// Debug frames are much larger: a count-related predicate chain needed
+/// 2048 KiB at depth 32 on aarch64-apple-darwin (rustc 1.94.1), but the same
+/// 20,000-link chain fits a 1 MiB thread at depth 8. Debug builds therefore
+/// stop earlier; this also exercises suspended resolution throughout tests.
+#[cfg(debug_assertions)]
+const RELATION_NESTING_LIMIT: usize = 8;
+#[cfg(not(debug_assertions))]
 const RELATION_NESTING_LIMIT: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -3745,13 +3752,17 @@ mod relation_resolution_tests {
         let nested = std::cell::Cell::new(0_usize);
         runner
             .run(&case(), |(program, dataset)| {
-                let native = evaluate(&program, &dataset, super::RELATION_NESTING_LIMIT);
-                let suspended = evaluate(&program, &dataset, 1);
-                if native != suspended {
-                    return Err(TestCaseError::fail(format!(
-                        "native {native:#?}\nsuspended {suspended:#?}\nprogram {}",
-                        serde_json::to_string(&program).expect("serializes")
-                    )));
+                // Keep this reference unsuspended regardless of the runtime
+                // default: these acyclic cases have only RELATIONS links.
+                let native = evaluate(&program, &dataset, usize::MAX);
+                for limit in [1, 2, super::RELATION_NESTING_LIMIT, 32, usize::MAX] {
+                    let suspended = evaluate(&program, &dataset, limit);
+                    if native != suspended {
+                        return Err(TestCaseError::fail(format!(
+                            "relation nesting {limit}\nnative {native:#?}\nsuspended {suspended:#?}\nprogram {}",
+                            serde_json::to_string(&program).expect("serializes")
+                        )));
+                    }
                 }
                 if native.iter().any(|line| line.contains("Ok(")) {
                     nested.set(nested.get() + 1);
