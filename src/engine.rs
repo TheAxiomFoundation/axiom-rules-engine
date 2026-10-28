@@ -1367,6 +1367,35 @@ impl<'a> Engine<'a> {
         self.judgment_rule(name, target_entity_id, period)
     }
 
+    /// The judgments only a relation role can evaluate, behind one call site
+    /// in `judgment_node`. Debug builds reserve every call's arguments and
+    /// result in the caller's frame, so a call site per construct grows every
+    /// judgment frame, including the frames of deeply nested legacy relation
+    /// predicates: a separate site for atoms and term comparisons pushed a
+    /// 20,000-link counted chain (`tests/relation_chains.rs`) past a 2 MiB
+    /// thread.
+    fn relation_role_judgment(
+        &mut self,
+        expr: &'a JudgmentExpr,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        match expr {
+            JudgmentExpr::RoleDerived { term, name } => {
+                self.role_judgment_rule(*term, name, period, relation_context)
+            }
+            JudgmentExpr::RelationAtom { relation, terms } => {
+                self.atom_judgment(relation, terms, period, relation_context)
+            }
+            JudgmentExpr::SameEntity {
+                left,
+                right,
+                negated,
+            } => self.same_entity_judgment(*left, *right, *negated, relation_context),
+            _ => unreachable!("only relation-role judgments"),
+        }
+    }
+
     // Keep these arms' binding and allocation locals outside `judgment_node`:
     // debug builds otherwise reserve them in every judgment frame, including
     // the frames of deeply nested legacy relation predicates.
@@ -2189,17 +2218,11 @@ impl<'a> Engine<'a> {
                 });
                 self.judgment_rule(name, target_entity_id, period)
             }
-            JudgmentExpr::RoleDerived { term, name } => {
-                self.role_judgment_rule(*term, name, period, relation_context)
+            JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::SameEntity { .. } => {
+                self.relation_role_judgment(expr, period, relation_context)
             }
-            JudgmentExpr::RelationAtom { relation, terms } => {
-                self.atom_judgment(relation, terms, period, relation_context)
-            }
-            JudgmentExpr::SameEntity {
-                left,
-                right,
-                negated,
-            } => self.same_entity_judgment(*left, *right, *negated, relation_context),
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
