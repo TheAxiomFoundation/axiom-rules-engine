@@ -277,8 +277,8 @@ fn a_chain_through_count_related_predicates_is_linear_not_exponential() {
 fn count_related_chain_stays_within_a_bounded_stack() {
     // On aarch64-apple-darwin, rustc 1.94.1, this counted chain needed
     // 576 KiB with debug nesting 8, versus 2048 KiB with nesting 32
-    // (16 KiB measurement resolution). A 1 MiB thread leaves about twice
-    // the measured need, yet fails if the debug limit returns to 32 or
+    // (16 KiB measurement resolution). A 1 MiB thread is 1.8 times the
+    // measured need, yet fails if the debug limit returns to 32 or
     // each link's native stack use doubles. Keep this budget independent
     // of the runtime limit.
     std::thread::Builder::new()

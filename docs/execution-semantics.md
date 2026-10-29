@@ -327,8 +327,8 @@ unresolved request stops the current resolution and names the members it
 needs. The driver resolves those members, caches the result and its trace
 records, then retries the stopped resolution. That retry reads completed work
 from the caches and resumes its predicate at the candidate that stopped it.
-Source chains are walked by a loop, so their length does not consume this
-native nesting budget. The limit is 32 in release builds and 8 in debug
+A loop walks source chains, so their length does not consume this native
+nesting budget. The limit is 32 in release builds and 8 in debug
 builds, whose larger frames need an earlier stop: a counted-predicate chain
 needed 2048 KiB at depth 32, but 576 KiB at depth 8 on aarch64-apple-darwin
 (rustc 1.94.1, measured to 16 KiB). The debug limit also
