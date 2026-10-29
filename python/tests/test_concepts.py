@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 from pathlib import Path
 
 import pytest
@@ -149,8 +151,11 @@ def write_formula_module(
     *,
     dtype: str = "Money",
     inputs: list[dict[str, str]] | None = None,
+    imports: list[str] | None = None,
 ) -> Path:
     document: dict[str, object] = {"format": "rulespec/v1"}
+    if imports:
+        document["imports"] = imports
     if inputs:
         document["inputs"] = inputs
     rules: list[dict[str, object]] = [
@@ -263,8 +268,74 @@ TEXT_CASES = [
     ("wages # then floor(wages)", {"wages"}),
     ('"""Rounded down, as floor(x) would."""\nfloor(wages)', {"wages"}),
 ]
-# What some formulas need to compile: a result dtype other than Money, or an
-# input declaration.
+# The words `keyword()` in src/formula.rs lexes as keywords are never names,
+# and no other word is a keyword: `then`, `in` and the like are inputs.
+KEYWORD_CASES = [
+    ("if is_adult: 1 elif is_student: 2 else: 3", {"is_adult", "is_student"}),
+    ("if True: wages else: 0", {"wages"}),
+    ("if is_adult and False: 0 else: wages", {"is_adult", "wages"}),
+    ("ceil(then)", {"then"}),
+    ("max(as, case) + min(in, is) + let", {"as", "case", "in", "is", "let"}),
+]
+# The keywords that begin declarations are refused where a formula reads a
+# name (`parse_primary`).
+DECLARATION_KEYWORDS = [
+    (f"wages + {keyword}", {"wages"}) for keyword in ("amend", "entity", "from", "to")
+]
+# `_ =>` is the match wildcard (`parse_match`). `_` read anywhere else, and a
+# name pattern, are inputs.
+MATCH_CASES = [
+    ("match filing_status: 1 => wages _ => 0", {"filing_status", "wages"}),
+    ("match filing_status:\n  1 => wages\n  _=>0", {"filing_status", "wages"}),
+    ("match filing_status: 1 => _ _ => 0", {"_", "filing_status"}),
+    (
+        "match filing_status: single => wages _ => 0",
+        {"filing_status", "single", "wages"},
+    ),
+    ("_ >= 1", {"_"}),
+]
+# `lower_to_scalar` reads `period_start` and `period_end` as the period's
+# dates, and `lower_to_judgment` refuses them. An argument read by name and a
+# field read through a relation are still inputs of those names.
+PERIOD_CASES = [
+    ("days_between(period_start, period_end)", set()),
+    ("days_between(period_start, birth_date)", {"birth_date"}),
+    ("match birth_date: period_end => 1 _ => 0", {"birth_date"}),
+    ("not period_end", set()),
+    ("count_where(member_of_household, period_start)", {"period_start"}),
+    ("count_where(member_of_household, (period_end))", {"period_end"}),
+    (
+        "sum_where(member_of_household, period_end, period_start)",
+        {"period_end", "period_start"},
+    ),
+    ("sum(member_of_household.period_start)", {"period_start"}),
+]
+# `len(r.f)` counts `r` and reads no field. A name indexed with `[` is a
+# parameter table, here one another module declares, and a relation argument
+# is a relation even where no rule declares it.
+POSITION_CASES = [
+    ("len(member_of_household.age)", set()),
+    ("len((member_of_household).age)", set()),
+    ("len((member_of_household.age))", set()),
+    ("rate_table[household_size] * 2", {"household_size"}),
+    ("(rate_table)[household_size]", {"household_size"}),
+    ("count_where(household_members, is_adult)", {"is_adult"}),
+    ("sum(household_members.wages)", {"wages"}),
+]
+# The lexer reads a path such as `a/b` as one name, and the lowering reads it
+# as the input of that name. With whitespace around `/`, or a digit after it,
+# `/` divides.
+PATH_CASES = [
+    ("household/size", {"household/size"}),
+    ("household/size/adults + wages", {"household/size/adults", "wages"}),
+    ("household/_size", {"household/_size"}),
+    ("wages / months", {"months", "wages"}),
+    ("wages /months", {"months", "wages"}),
+    ("wages/ months", {"months", "wages"}),
+    ("wages/12", {"wages"}),
+]
+# What some formulas need to compile: a result dtype other than Money, an
+# input declaration, or an imported module.
 CALL_DTYPES = {
     "date_add_days(birth_date, 1)": "Date",
     "date_add_months(birth_date, 1)": "Date",
@@ -273,6 +344,22 @@ CALL_DTYPES = {
     "exactly_one(is_adult, is_student)": "Judgment",
     '"max"': "Text",
     '"Aged (65+)"': "Text",
+    "_ >= 1": "Judgment",
+    "days_between(period_start, period_end)": "Integer",
+    "days_between(period_start, birth_date)": "Integer",
+    "match birth_date: period_end => 1 _ => 0": "Integer",
+    "not period_end": "Judgment",
+    "count_where(member_of_household, period_start)": "Integer",
+    "count_where(member_of_household, (period_end))": "Integer",
+    "len(member_of_household.age)": "Integer",
+    "len((member_of_household).age)": "Integer",
+    "len((member_of_household.age))": "Integer",
+    "count_where(household_members, is_adult)": "Integer",
+}
+RATE_TABLE_MODULE = "us:statutes/7/2013"
+CALL_IMPORTS = {
+    "rate_table[household_size] * 2": [RATE_TABLE_MODULE],
+    "(rate_table)[household_size]": [RATE_TABLE_MODULE],
 }
 CALL_INPUTS = {
     "input_for_year(wages, 2024)": [
@@ -291,11 +378,37 @@ CALL_INPUTS = {
 
 
 def write_call_module(root: Path, formula: str) -> Path:
+    imports = CALL_IMPORTS.get(formula)
+    if imports:
+        write_rate_table_module(root)
     return write_formula_module(
         root,
         {"called": formula},
         dtype=CALL_DTYPES.get(formula, "Money"),
         inputs=CALL_INPUTS.get(formula),
+        imports=imports,
+    )
+
+
+def write_rate_table_module(root: Path) -> Path:
+    document = {
+        "format": "rulespec/v1",
+        "rules": [
+            {
+                "name": "rate_table",
+                "kind": "parameter",
+                "dtype": "Money",
+                "indexed_by": "household_size",
+                "versions": [
+                    {"effective_from": "2026-01-01", "values": {1: 10, 2: 20}}
+                ],
+            }
+        ],
+    }
+    return write_rulespec(
+        root,
+        "us/statutes/7/2013.yaml",
+        yaml.safe_dump(document, sort_keys=False),
     )
 
 
@@ -337,6 +450,34 @@ def test_words_in_strings_and_comments_name_no_input(
     write_call_module(root, formula)
 
     assert inferred_input_names(root) == inputs
+
+
+@pytest.mark.parametrize(
+    ("formula", "inputs"),
+    KEYWORD_CASES
+    + DECLARATION_KEYWORDS
+    + MATCH_CASES
+    + PERIOD_CASES
+    + POSITION_CASES
+    + PATH_CASES,
+)
+def test_a_name_is_an_input_only_where_the_lowering_reads_one(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    write_call_module(root, formula)
+
+    assert inferred_input_names(root) == inputs
+
+
+PATH_RULES = {"household/size": "wages", "called": "household/size + 1"}
+
+
+def test_a_path_that_names_a_rule_reads_the_rule(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(root, PATH_RULES)
+
+    assert inferred_input_names(root) == {"wages"}
 
 
 # A name starts where the lexer's previous token ends: a date is ten bytes, and
@@ -392,6 +533,17 @@ COMPILE_REFUSALS = {
         "dense compilation does not yet support selected-year input"
     ),
     'min """ (': "block is never closed",
+    **{
+        formula: re.escape(
+            f"unexpected token in expression: {keyword.capitalize()} ({keyword})"
+        )
+        for (formula, _), keyword in zip(
+            DECLARATION_KEYWORDS, ("amend", "entity", "from", "to"), strict=True
+        )
+    },
+    "not period_end": "`period_end` is a date, so it cannot be tested as a judgment",
+    "count_where(household_members, is_adult)": "typing is mandatory",
+    "sum(household_members.wages)": "typing is mandatory",
 }
 COMPILED_CASES = [
     (formula, inputs, COMPILE_REFUSALS.get(formula))
@@ -401,6 +553,12 @@ COMPILED_CASES = [
         *((f"ceil{separator}(wages)", {"wages"}) for separator in SEPARATORS),
         *BARE_FUNCTION_NAMES,
         *TEXT_CASES,
+        *KEYWORD_CASES,
+        *DECLARATION_KEYWORDS,
+        *MATCH_CASES,
+        *PERIOD_CASES,
+        *POSITION_CASES,
+        *PATH_CASES,
     ]
 ]
 
@@ -430,6 +588,108 @@ def test_inferred_inputs_are_the_compiled_program_inputs(
         name for relation in program.relations for name in relation.related_inputs
     }
     assert compiled == inputs
+    # The engine accepts each input under the concept ID discovery gives it.
+    assert set(program.input_request_names) == inputs
+    assert all(
+        f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
+        for name in inputs
+    )
+
+
+RANDOM_NAMES = [
+    "wages", "age", "then", "in", "_", "period_start", "period_end",
+    "household/size", "single", "max", "floor", "sum", "len",
+]  # fmt: skip
+RANDOM_FIELDS = ["age", "wages", "period_start", "_", "then"]
+
+
+def random_formula(rng: random.Random, depth: int) -> str:
+    """A formula over the shapes the cases above pin, nested at random."""
+
+    def name() -> str:
+        text = rng.choice(RANDOM_NAMES)
+        return f"({text})" if rng.random() < 0.15 else text
+
+    def operand() -> str:
+        roll = rng.random()
+        if depth == 0 or roll < 0.4:
+            return name()
+        if roll < 0.5:
+            return rng.choice(["1", "2.5", '"a"', "True"])
+        return random_formula(rng, depth - 1)
+
+    relation = rng.choice(["member_of_household", "(member_of_household)"])
+    shapes = [
+        lambda: f"{operand()}{rng.choice(['+', '-', '*', '/', ' / '])}{operand()}",
+        lambda: f"{rng.choice(['ceil', 'floor'])}({operand()})",
+        lambda: f"{rng.choice(['max', 'min'])}({operand()}, {operand()})",
+        lambda: f"days_between({operand()}, {operand()})",
+        lambda: f"len({relation}{rng.choice(['', '.' + rng.choice(RANDOM_FIELDS)])})",
+        lambda: f"count_where({relation}, {name()})",
+        lambda: f"sum_where({relation}, {name()}, {name()})",
+        lambda: f"{rng.choice(['sum', 'max', 'only'])}({relation}.{rng.choice(RANDOM_FIELDS)})",
+        lambda: (
+            f"(match {name()}: {rng.choice(['1', 'single', 'period_end'])} => "
+            f"{operand()}{rng.choice(['', f' _ => {operand()}'])})"
+        ),
+        lambda: f"(if {operand()}: {operand()} elif {operand()}: {operand()} else: {operand()})",
+        lambda: f"{operand()} {rng.choice(['>=', '==', 'and', 'or not'])} {operand()}",
+    ]
+    return rng.choice(shapes)()
+
+
+@pytest.mark.skipif(
+    NativeCompiledDenseProgram is None,
+    reason="axiom_rules_engine_dense extension is not built",
+)
+@pytest.mark.parametrize("seed", range(4))
+def test_random_formulas_infer_the_compiled_program_inputs(
+    tmp_path: Path, seed: int
+) -> None:
+    # For every formula the compiler accepts, under the first result dtype it
+    # accepts, inference names exactly the program's inputs.
+    rng = random.Random(seed)
+    root = canonical_root(tmp_path)
+    compiled_formulas = 0
+    for _ in range(50):
+        formula = random_formula(rng, rng.randint(1, 2))
+        for dtype in ("Money", "Judgment", "Integer", "Date"):
+            path = write_formula_module(root, {"called": formula}, dtype=dtype)
+            try:
+                program = CompiledDenseProgram.from_file(
+                    path, rulespec_roots=[root], entity="Household"
+                )
+            except ValueError:
+                continue
+            compiled_formulas += 1
+            compiled = set(program.root_inputs) | {
+                name
+                for relation in program.relations
+                for name in relation.related_inputs
+            }
+            assert inferred_input_names(root) == compiled, formula
+            assert all(
+                f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
+                for name in compiled
+            ), formula
+            break
+    assert compiled_formulas >= 25
+
+
+@pytest.mark.skipif(
+    NativeCompiledDenseProgram is None,
+    reason="axiom_rules_engine_dense extension is not built",
+)
+def test_a_path_that_names_a_rule_is_compiled_as_the_rule(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    path = write_formula_module(root, PATH_RULES)
+
+    program = CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Household"
+    )
+
+    assert "household/size" in program.output_names
+    assert set(program.root_inputs) == {"wages"}
 
 
 def test_search_show_and_validate_concept(tmp_path: Path) -> None:
