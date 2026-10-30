@@ -615,6 +615,12 @@ struct PendingMembers {
 /// of such a chain. Past this depth a resolution stops where it needs the
 /// next relation, the driver below it resolves that relation, and the
 /// stopped resolution then runs again; see [`Engine::resolve_members`].
+/// Debug frames are much larger: a count-related predicate chain needed
+/// 2048 KiB at depth 32, but 576 KiB at depth 8 (aarch64-apple-darwin,
+/// rustc 1.94.1, 16 KiB resolution), so debug builds stop earlier.
+#[cfg(debug_assertions)]
+const RELATION_NESTING_LIMIT: usize = 8;
+#[cfg(not(debug_assertions))]
 const RELATION_NESTING_LIMIT: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -698,6 +704,8 @@ pub struct Engine<'a> {
     member_chains: HashMap<DerivedMembersKey, Vec<&'a crate::model::RelationSchema>>,
     #[cfg(test)]
     source_walks: usize,
+    #[cfg(test)]
+    relation_suspensions: usize,
     /// Effects of the relation predicates under evaluation, innermost last,
     /// each with the number of active evaluations when it began: only records
     /// made at that depth belong to the relation rather than to a rule its
@@ -983,6 +991,8 @@ impl<'a> Engine<'a> {
             member_chains: HashMap::new(),
             #[cfg(test)]
             source_walks: 0,
+            #[cfg(test)]
+            relation_suspensions: 0,
             member_captures: Vec::new(),
             relation_depth: 0,
             relation_nesting_limit: RELATION_NESTING_LIMIT,
@@ -2946,6 +2956,10 @@ impl<'a> Engine<'a> {
             self.relation_depth = self.relation_depth.saturating_sub(1);
             if let Some(needed) = self.suspended_on.take() {
                 if on_stack.insert(needed.clone()) {
+                    #[cfg(test)]
+                    {
+                        self.relation_suspensions += 1;
+                    }
                     stack.push(needed);
                     continue;
                 }
@@ -3499,6 +3513,38 @@ mod relation_resolution_tests {
     const PEOPLE: [&str; 3] = ["p1", "p2", "p3"];
     const RELATIONS: usize = 6;
 
+    /// How a case spends its relations. Source chains grow long when sources
+    /// and reads range over every later relation, and resolutions nest deep
+    /// when they favour the next one, so no one shape covers both.
+    #[derive(Clone, Copy)]
+    struct Shape {
+        /// Weight of a relation read against each other predicate leaf.
+        read: u32,
+        /// Weight of reading the next relation against any later one.
+        next: u32,
+        /// Weight of `base` against any relation, as a source and for a tuple.
+        base: u32,
+        /// Weight of a household rule reading `r0` against any relation.
+        root: u32,
+        /// One past the most tuples a dataset holds.
+        tuples: usize,
+    }
+
+    const BROAD: Shape = Shape {
+        read: 1,
+        next: 0,
+        base: 0,
+        root: 0,
+        tuples: 12,
+    };
+    const DEEP: Shape = Shape {
+        read: 4,
+        next: 3,
+        base: 3,
+        root: 2,
+        tuples: 32,
+    };
+
     fn literal(value: i64) -> Value {
         json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
     }
@@ -3509,48 +3555,58 @@ mod relation_resolution_tests {
 
     /// A predicate for derived relation `index`: it may read only relations
     /// after it and person rules, so programs stay acyclic.
-    fn predicate(index: usize) -> BoxedStrategy<Value> {
+    fn predicate(index: usize, shape: Shape) -> BoxedStrategy<Value> {
         let later = (index + 1..RELATIONS)
             .map(|later| format!("r{later}"))
             .collect::<Vec<_>>();
         let mut leaves = vec![
-            Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
-                .boxed(),
-            (0_usize..2)
-                .prop_map(|rule| {
-                    json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
-                })
-                .boxed(),
+            (
+                1,
+                Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
+                    .boxed(),
+            ),
+            (
+                1,
+                (0_usize..2)
+                    .prop_map(|rule| {
+                        json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
+                    })
+                    .boxed(),
+            ),
             // A parameter read and a division that can fail.
-            (0_i64..3)
-                .prop_map(|key| {
-                    json!({"kind": "comparison",
-                        "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
-                        "op": "gt", "right": literal(0)})
-                })
-                .boxed(),
+            (
+                1,
+                (0_i64..3)
+                    .prop_map(|key| {
+                        json!({"kind": "comparison",
+                            "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
+                            "op": "gt", "right": literal(0)})
+                    })
+                    .boxed(),
+            ),
         ];
-        if !later.is_empty() {
-            let members = later.clone();
-            leaves.push(
-                (prop::sample::select(members), 0_usize..2)
+        if let Some(next) = later.first().cloned() {
+            let read = prop_oneof![shape.next => Just(next), 1 => prop::sample::select(later)];
+            leaves.push((
+                shape.read,
+                (read.clone(), 0_usize..2)
                     .prop_map(|(relation, orientation)| {
                         json!({"kind": "relation_member", "relation": relation,
                             "current_slot": orientation, "related_slot": 1 - orientation})
                     })
                     .boxed(),
-            );
-            leaves.push(
-                prop::sample::select(later)
-                    .prop_map(|relation| {
+            ));
+            leaves.push((
+                shape.read,
+                read.prop_map(|relation| {
                         json!({"kind": "comparison",
                             "left": {"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1},
                             "op": "gte", "right": literal(1)})
                     })
                     .boxed(),
-            );
+            ));
         }
-        prop::strategy::Union::new(leaves)
+        prop::strategy::Union::new_weighted(leaves)
             .prop_recursive(2, 6, 3, |inner| {
                 prop_oneof![
                     vec(inner.clone(), 1..3)
@@ -3563,15 +3619,15 @@ mod relation_resolution_tests {
             .boxed()
     }
 
-    fn relation(index: usize) -> BoxedStrategy<Value> {
+    fn relation(index: usize, shape: Shape) -> BoxedStrategy<Value> {
         let sources = std::iter::once("base".to_string())
             .chain((index + 1..RELATIONS).map(|later| format!("r{later}")))
             .collect::<Vec<_>>();
         (
-            prop::sample::select(sources),
+            prop_oneof![shape.base => Just("base".to_string()), 1 => prop::sample::select(sources)],
             prop::sample::select(vec![(0_usize, 1_usize), (1, 0)]),
             prop::bool::ANY,
-            predicate(index),
+            predicate(index, shape),
         )
             .prop_map(
                 move |(source, (current_slot, related_slot), typed, predicate)| {
@@ -3588,8 +3644,11 @@ mod relation_resolution_tests {
             .boxed()
     }
 
-    fn household_rule(index: usize) -> BoxedStrategy<Value> {
-        let relation = (0..RELATIONS).prop_map(|relation| format!("r{relation}"));
+    fn household_rule(index: usize, shape: Shape) -> BoxedStrategy<Value> {
+        let relation = prop_oneof![
+            shape.root => Just("r0".to_string()),
+            1 => (0..RELATIONS).prop_map(|relation| format!("r{relation}")),
+        ];
         let where_clause = prop::option::of((0_usize..2).prop_map(|rule| {
             json!({"kind": "comparison", "left": person_rule(rule), "op": "lt", "right": literal(30)})
         }));
@@ -3623,20 +3682,27 @@ mod relation_resolution_tests {
     /// derived relations reading later ones through sources and predicates,
     /// and household aggregations over them; with tuples and incomes, some
     /// missing so predicates fail.
-    fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
-        let relations = (0..RELATIONS).map(relation).collect::<Vec<_>>();
-        let rules = (0..3).map(household_rule).collect::<Vec<_>>();
+    fn case_of(shape: Shape) -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
+        let relations = (0..RELATIONS)
+            .map(|index| relation(index, shape))
+            .collect::<Vec<_>>();
+        let rules = (0..3)
+            .map(|index| household_rule(index, shape))
+            .collect::<Vec<_>>();
         let tuples = vec(
             (
-                prop::sample::select(
-                    std::iter::once("base".to_string())
-                        .chain((0..RELATIONS).map(|index| format!("r{index}")))
-                        .collect::<Vec<_>>(),
-                ),
+                prop_oneof![
+                    shape.base => Just("base".to_string()),
+                    1 => prop::sample::select(
+                        std::iter::once("base".to_string())
+                            .chain((0..RELATIONS).map(|index| format!("r{index}")))
+                            .collect::<Vec<_>>(),
+                    ),
+                ],
                 prop::sample::select([HOUSEHOLDS.as_slice(), PEOPLE.as_slice()].concat()),
                 prop::sample::select(PEOPLE.to_vec()),
             ),
-            0..12,
+            0..shape.tuples,
         );
         let incomes = vec(prop::option::of(0_i64..40), PEOPLE.len());
         (relations, rules, tuples, incomes).prop_map(|(relations, rules, tuples, incomes)| {
@@ -3682,10 +3748,20 @@ mod relation_resolution_tests {
         })
     }
 
+    /// Broad and deep cases in equal parts.
+    fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
+        prop_oneof![case_of(BROAD), case_of(DEEP)]
+    }
+
     /// Every household output's value or error, and each household's trace,
-    /// as an engine resolving at most `limit` relations natively gives them.
-    fn evaluate(program: &ProgramSpec, dataset: &DatasetSpec, limit: usize) -> Vec<String> {
-        evaluate_with_oracle(
+    /// as an engine resolving at most `limit` relations natively gives them,
+    /// with the number of times that limit stopped a resolution.
+    fn evaluate(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+    ) -> (Vec<String>, usize) {
+        evaluate_counting(
             program,
             dataset,
             limit,
@@ -3701,6 +3777,16 @@ mod relation_resolution_tests {
         recursive: bool,
         suspend_depth: usize,
     ) -> Vec<String> {
+        evaluate_counting(program, dataset, limit, recursive, suspend_depth).0
+    }
+
+    fn evaluate_counting(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+        recursive: bool,
+        suspend_depth: usize,
+    ) -> (Vec<String>, usize) {
         let program = program.to_program().expect("the program lowers");
         // These are direct evaluator comparisons. Keep every generated
         // caller-slot orientation and direct tuple, including combinations
@@ -3729,29 +3815,36 @@ mod relation_resolution_tests {
             trace.sort();
             outcomes.extend(trace);
         }
-        outcomes
+        (outcomes, engine.relation_suspensions)
     }
 
     #[test]
     fn suspended_resolution_matches_native_resolution() {
         let mut runner = TestRunner::new_with_rng(
             Config {
-                cases: 1500,
+                cases: 3000,
                 failure_persistence: None,
                 ..Config::default()
             },
             TestRng::from_seed(RngAlgorithm::ChaCha, &[23; 32]),
         );
         let nested = std::cell::Cell::new(0_usize);
+        let stopped = std::cell::RefCell::new([0_usize; RELATIONS + 1]);
         runner
             .run(&case(), |(program, dataset)| {
-                let native = evaluate(&program, &dataset, super::RELATION_NESTING_LIMIT);
-                let suspended = evaluate(&program, &dataset, 1);
-                if native != suspended {
-                    return Err(TestCaseError::fail(format!(
-                        "native {native:#?}\nsuspended {suspended:#?}\nprogram {}",
-                        serde_json::to_string(&program).expect("serializes")
-                    )));
+                // Relations read only later ones, so the deepest request sits
+                // at depth RELATIONS - 1. That bounds the limits that can stop
+                // a resolution, and no limit can stop this reference.
+                let (native, _) = evaluate(&program, &dataset, usize::MAX);
+                for limit in 1..=RELATIONS {
+                    let (suspended, stops) = evaluate(&program, &dataset, limit);
+                    if native != suspended {
+                        return Err(TestCaseError::fail(format!(
+                            "relation nesting {limit}\nnative {native:#?}\nsuspended {suspended:#?}\nprogram {}",
+                            serde_json::to_string(&program).expect("serializes")
+                        )));
+                    }
+                    stopped.borrow_mut()[limit] += usize::from(stops > 0);
                 }
                 if native.iter().any(|line| line.contains("Ok(")) {
                     nested.set(nested.get() + 1);
@@ -3760,6 +3853,16 @@ mod relation_resolution_tests {
             })
             .unwrap();
         assert!(nested.get() > 500, "only {} cases evaluated", nested.get());
+        let stopped = stopped.into_inner();
+        for limit in 1..RELATIONS {
+            let cases = stopped[limit];
+            assert!(cases >= 10, "limit {limit} stopped only {cases} cases");
+        }
+        assert_eq!(stopped[RELATIONS], 0, "a limit past the deepest request");
+        eprintln!(
+            "COVERAGE stopped per limit: {stopped:?} nested {}",
+            nested.get()
+        );
     }
 
     /// The old recursive resolver is an independent oracle: source traversal,
@@ -3769,7 +3872,7 @@ mod relation_resolution_tests {
     fn iterative_resolution_matches_recursive_semantics_on_small_dags() {
         let mut runner = TestRunner::new_with_rng(
             Config {
-                cases: 1500,
+                cases: 3000,
                 failure_persistence: None,
                 ..Config::default()
             },

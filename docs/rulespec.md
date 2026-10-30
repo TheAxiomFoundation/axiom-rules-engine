@@ -410,13 +410,19 @@ derivation must declare them or a read through a term is refused
 
 Inside a predicate, `anchor` and `candidate` are reserved. A term written bare
 (as a value, a judgment, a parameter index, an aggregated relation, or after
-another term's `.`) is refused with `relation_term_used_as_value`. A read
-through a term may not appear in an aggregation's `where` clause or
-aggregated value (`count`, `sum`, `min`, `max`, `only` and their `_where`
-forms, and `only_related`), which have no relation context
-(`relation_role_outside_scope`). Because `anchor` and `candidate` name terms,
-not relations, `min(candidate.age)` and `max(candidate.age)` in a predicate
-are the scalar minimum and maximum of one qualified read. Reading a
+another term's `.`) is refused with `relation_term_used_as_value`. A whole
+predicate that is arithmetic refuses before lowering looks at its operands:
+`anchor + candidate` reports `binary op Add in judgment position`, and
+`-anchor` reports `unary op in judgment position`. In a value position,
+lowering takes a binary operator's or a negation's operands first, so
+`(anchor and candidate) == 1` and `(-anchor) == 1` report
+`relation_term_used_as_value`, but `not` refuses before lowering looks at its
+operand: `(not anchor) == 1` reports `` `not` in scalar position ``. A read
+through a term may not appear in an aggregation's `where` clause or aggregated value (`count`, `sum`, `min`,
+`max`, `only` and their `_where` forms, and `only_related`), which have no
+relation context (`relation_role_outside_scope`). Because `anchor` and
+`candidate` name terms, not relations, `min(candidate.age)` and
+`max(candidate.age)` in a predicate are the scalar minimum and maximum of one qualified read. Reading a
 parameter, `period_start` or `period_end` through a term is refused with
 `relation_role_entity_mismatch`; reading a relation through a term is refused:
 use a relation atom. Outside predicates the two names are ordinary

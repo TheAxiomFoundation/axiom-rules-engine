@@ -1163,13 +1163,18 @@ fn long_atom_dependency_chains_preserve_values_traces_and_suspend_depths() {
     let dataset = json!({"inputs": [input("b", "score", 23)],
         "relations": [tuple("roster", &["a", "b"])]});
     compile_json(&chained).expect("an acyclic atom dependency chain compiles");
-    // Unbounded suspend depth nests all 40 links natively. That needs about
-    // 1 MiB (991 KiB on arm64 debug, rustc 1.94.1, in every feature set).
-    // A 2 MiB thread, the default test-thread size, absorbs compiler
-    // variation but fails if each link's stack use doubles.
+    // Unbounded suspend depth disables rule deferral only. Relation
+    // resolution still nests at most RELATION_NESTING_LIMIT links natively,
+    // 8 in debug or 32 in release, then suspends and retries through its
+    // driver. This 40-link chain needed 368 KiB at debug depth 8, versus
+    // 992 KiB at depth 32 (rustc 1.94.1, aarch64-apple-darwin, 16 KiB
+    // measurement resolution). A 512 KiB thread is 1.4 times that need and
+    // fails if each link's stack use doubles; the fixed overhead of the rule
+    // evaluation does not double with the links. CI's compiler floats, so
+    // if a new rustc trips this guard, re-measure before raising it.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(2 * 1024 * 1024)
+            .stack_size(512 * 1024)
             .spawn_scoped(scope, || {
                 for mode in ["explain", "fast"] {
                     let expected =

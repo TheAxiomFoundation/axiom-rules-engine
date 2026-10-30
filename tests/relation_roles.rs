@@ -804,6 +804,11 @@ fn a_bare_term_is_refused_as_a_value() {
         "only(relative_of.candidate) > 0",
         "min_where(relative_of, anchor, is_adult) > 0",
         "max_where(relative_of, age, candidate) > 0",
+        // In a value position lowering takes a binary operator's or a
+        // negation's operands first, so the term's refusal comes before the
+        // operator's (see the `and` case below).
+        "(anchor and candidate) == 1",
+        "(-anchor) == 1",
     ] {
         let error = refusal(formula);
         assert!(
@@ -817,6 +822,25 @@ fn a_bare_term_is_refused_as_a_value() {
         let error = refusal(formula);
         assert!(
             error.contains("[relation_term_compared_with_value]"),
+            "{formula}: {error}"
+        );
+    }
+    // Arithmetic as a whole predicate refuses before lowering looks at its
+    // operands, and so does `not` in a value position. With valid operands,
+    // a value position refuses the operator.
+    for (formula, message) in [
+        ("anchor + candidate", "binary op Add in judgment position"),
+        ("-anchor", "unary op in judgment position"),
+        ("(not anchor) == 1", "`not` in scalar position"),
+        (
+            "(age and is_adult) + 1 > 0",
+            "binary op And in scalar position",
+        ),
+    ] {
+        let error = refusal(formula);
+        assert!(error.contains(message), "{formula}: {error}");
+        assert!(
+            !error.contains("[relation_term_used_as_value]"),
             "{formula}: {error}"
         );
     }
