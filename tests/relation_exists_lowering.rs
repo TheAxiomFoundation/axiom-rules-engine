@@ -88,9 +88,12 @@ fn nested_variables_lower_to_innermost_indices_in_reads_atoms_and_comparisons() 
 #[test]
 fn variables_are_reserved_before_after_and_beside_the_body() {
     for formula in [
+        // First exercise admission itself: disabling the scope guard makes
+        // this compile as an ordinary input, rather than merely changing a
+        // qualified field's refusal diagnostic.
+        "p and exists(relative_of(anchor, p), true)",
         "p.age > 0 and exists(relative_of(anchor, p), true)",
         "exists(relative_of(anchor, p), true) and p.age > 0",
-        "p and exists(relative_of(anchor, p), true)",
         "exists(relative_of(anchor, p), true) or p",
         "p == anchor and exists(relative_of(anchor, p), true)",
         "exists(relative_of(anchor, p), true) or relative_of(p, candidate)",

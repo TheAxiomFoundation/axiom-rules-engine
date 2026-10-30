@@ -202,6 +202,27 @@ fn unary_data_generator_has_a_finite_unbound_domain() {
 }
 
 #[test]
+fn variable_input_reads_use_the_bound_id_in_nested_frames() {
+    let at = |index| json!({"kind":"role_input","term":variable(index),"name":"points"});
+    let age = json!({"kind":"comparison","left":at(0),"op":"gte","right":integer(65)});
+    let nested = exists(
+        "edge",
+        vec![variable(0), variable(0)],
+        1,
+        json!({"kind":"comparison","left":at(1),"op":"gt","right":at(0)}),
+    );
+    let data = json!({"inputs":[input("a",10),input("b",90),input("c",0),input("p",65),input("q",17)],
+        "relations":[tuple("roster", &["a","b"]),tuple("roster", &["a","c"]),
+            tuple("edge", &["a","p"]),tuple("edge", &["p","q"])]});
+    for body in [age, nested] {
+        let p = program(exists("edge", vec![json!("anchor"), variable(0)], 1, body));
+        for mode in ["explain", "fast"] {
+            assert_eq!(count(&run(mode, &p, &data, &query_ids()).unwrap(), 0), 2);
+        }
+    }
+}
+
+#[test]
 fn exists_opts_into_strict_binding_and_dense_names_its_refusal() {
     let mut p = program(exists(
         "edge",
