@@ -331,10 +331,8 @@ A loop walks source chains, so their length does not consume this native
 nesting budget. The limit is 32 in release builds and 8 in debug
 builds, whose larger frames need an earlier stop: a counted-predicate chain
 needed 2048 KiB at depth 32, but 576 KiB at depth 8 on aarch64-apple-darwin
-(rustc 1.94.1, measured to 16 KiB). The debug limit also
-exercises suspended resolution throughout the debug test suite. This limit
-is independent of the rule-deferral threshold, and compiled artifact bytes
-do not depend on it.
+(rustc 1.94.1, measured to 16 KiB). This limit is independent of the
+rule-deferral threshold, and compiled artifact bytes do not depend on it.
 
 For every acyclic program, a relation nesting limit of at least one preserves
 the values, errors and explain traces of unlimited native resolution. The

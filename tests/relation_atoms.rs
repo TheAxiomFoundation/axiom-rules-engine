@@ -1168,9 +1168,10 @@ fn long_atom_dependency_chains_preserve_values_traces_and_suspend_depths() {
     // 8 in debug or 32 in release, then suspends and retries through its
     // driver. This 40-link chain needed 368 KiB at debug depth 8, versus
     // 992 KiB at depth 32 (rustc 1.94.1, aarch64-apple-darwin, 16 KiB
-    // measurement resolution). A 512 KiB thread leaves compiler headroom
-    // but fails if each link's stack use doubles; the fixed overhead of
-    // the rule evaluation does not double with the links.
+    // measurement resolution). A 512 KiB thread is 1.4 times that need and
+    // fails if each link's stack use doubles; the fixed overhead of the rule
+    // evaluation does not double with the links. CI's compiler floats, so
+    // if a new rustc trips this guard, re-measure before raising it.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(512 * 1024)

@@ -280,7 +280,8 @@ fn count_related_chain_stays_within_a_bounded_stack() {
     // (16 KiB measurement resolution). A 1 MiB thread is 1.8 times the
     // measured need, yet fails if the debug limit returns to 32 or
     // each link's native stack use doubles. Keep this budget independent
-    // of the runtime limit.
+    // of the runtime limit. CI's compiler floats, so if a new rustc trips
+    // this guard, re-measure before raising it.
     std::thread::Builder::new()
         .stack_size(1024 * 1024)
         // More than both limits, so the native segment is just as deep as

@@ -617,8 +617,7 @@ struct PendingMembers {
 /// stopped resolution then runs again; see [`Engine::resolve_members`].
 /// Debug frames are much larger: a count-related predicate chain needed
 /// 2048 KiB at depth 32, but 576 KiB at depth 8 (aarch64-apple-darwin,
-/// rustc 1.94.1, 16 KiB resolution). Debug builds therefore
-/// stop earlier; this also exercises suspended resolution throughout tests.
+/// rustc 1.94.1, 16 KiB resolution), so debug builds stop earlier.
 #[cfg(debug_assertions)]
 const RELATION_NESTING_LIMIT: usize = 8;
 #[cfg(not(debug_assertions))]
@@ -705,6 +704,8 @@ pub struct Engine<'a> {
     member_chains: HashMap<DerivedMembersKey, Vec<&'a crate::model::RelationSchema>>,
     #[cfg(test)]
     source_walks: usize,
+    #[cfg(test)]
+    relation_suspensions: usize,
     /// Effects of the relation predicates under evaluation, innermost last,
     /// each with the number of active evaluations when it began: only records
     /// made at that depth belong to the relation rather than to a rule its
@@ -990,6 +991,8 @@ impl<'a> Engine<'a> {
             member_chains: HashMap::new(),
             #[cfg(test)]
             source_walks: 0,
+            #[cfg(test)]
+            relation_suspensions: 0,
             member_captures: Vec::new(),
             relation_depth: 0,
             relation_nesting_limit: RELATION_NESTING_LIMIT,
@@ -2918,6 +2921,10 @@ impl<'a> Engine<'a> {
         let key = members_key(relation, entity_id, period);
         if !self.derived_members.contains_key(&key) {
             if self.relation_depth >= self.relation_nesting_limit {
+                #[cfg(test)]
+                {
+                    self.relation_suspensions += 1;
+                }
                 self.suspended_on = Some(key);
                 return Err(EvalError::TypeMismatch(
                     "derived relation resolution suspended".to_string(),
@@ -3521,43 +3528,56 @@ mod relation_resolution_tests {
             .map(|later| format!("r{later}"))
             .collect::<Vec<_>>();
         let mut leaves = vec![
-            Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
-                .boxed(),
-            (0_usize..2)
-                .prop_map(|rule| {
-                    json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
-                })
-                .boxed(),
+            (
+                1,
+                Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
+                    .boxed(),
+            ),
+            (
+                1,
+                (0_usize..2)
+                    .prop_map(|rule| {
+                        json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
+                    })
+                    .boxed(),
+            ),
             // A parameter read and a division that can fail.
-            (0_i64..3)
-                .prop_map(|key| {
-                    json!({"kind": "comparison",
-                        "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
-                        "op": "gt", "right": literal(0)})
-                })
-                .boxed(),
+            (
+                1,
+                (0_i64..3)
+                    .prop_map(|key| {
+                        json!({"kind": "comparison",
+                            "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
+                            "op": "gt", "right": literal(0)})
+                    })
+                    .boxed(),
+            ),
         ];
-        if !later.is_empty() {
-            let members = later.clone();
-            leaves.push(
-                (prop::sample::select(members), 0_usize..2)
+        if let Some(next) = later.first().cloned() {
+            // Relation reads outweigh the other leaves and mostly take the
+            // next relation, so resolutions nest far enough for every limit
+            // under test to stop one.
+            let read = prop_oneof![3 => Just(next), 1 => prop::sample::select(later)];
+            leaves.push((
+                4,
+                (read.clone(), 0_usize..2)
                     .prop_map(|(relation, orientation)| {
                         json!({"kind": "relation_member", "relation": relation,
                             "current_slot": orientation, "related_slot": 1 - orientation})
                     })
                     .boxed(),
-            );
-            leaves.push(
-                prop::sample::select(later)
-                    .prop_map(|relation| {
+            ));
+            leaves.push((
+                4,
+                read.prop_map(|relation| {
                         json!({"kind": "comparison",
                             "left": {"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1},
                             "op": "gte", "right": literal(1)})
                     })
                     .boxed(),
-            );
+            ));
         }
-        prop::strategy::Union::new(leaves)
+        prop::strategy::Union::new_weighted(leaves)
             .prop_recursive(2, 6, 3, |inner| {
                 prop_oneof![
                     vec(inner.clone(), 1..3)
@@ -3575,7 +3595,7 @@ mod relation_resolution_tests {
             .chain((index + 1..RELATIONS).map(|later| format!("r{later}")))
             .collect::<Vec<_>>();
         (
-            prop::sample::select(sources),
+            prop_oneof![3 => Just("base".to_string()), 1 => prop::sample::select(sources)],
             prop::sample::select(vec![(0_usize, 1_usize), (1, 0)]),
             prop::bool::ANY,
             predicate(index),
@@ -3596,7 +3616,10 @@ mod relation_resolution_tests {
     }
 
     fn household_rule(index: usize) -> BoxedStrategy<Value> {
-        let relation = (0..RELATIONS).prop_map(|relation| format!("r{relation}"));
+        let relation = prop_oneof![
+            2 => Just("r0".to_string()),
+            1 => (0..RELATIONS).prop_map(|relation| format!("r{relation}")),
+        ];
         let where_clause = prop::option::of((0_usize..2).prop_map(|rule| {
             json!({"kind": "comparison", "left": person_rule(rule), "op": "lt", "right": literal(30)})
         }));
@@ -3633,17 +3656,17 @@ mod relation_resolution_tests {
     fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
         let relations = (0..RELATIONS).map(relation).collect::<Vec<_>>();
         let rules = (0..3).map(household_rule).collect::<Vec<_>>();
+        // Most tuples feed `base`, which most chains start from.
         let tuples = vec(
             (
-                prop::sample::select(
-                    std::iter::once("base".to_string())
-                        .chain((0..RELATIONS).map(|index| format!("r{index}")))
-                        .collect::<Vec<_>>(),
-                ),
+                prop_oneof![
+                    3 => Just("base".to_string()),
+                    1 => (0..RELATIONS).prop_map(|index| format!("r{index}")),
+                ],
                 prop::sample::select([HOUSEHOLDS.as_slice(), PEOPLE.as_slice()].concat()),
                 prop::sample::select(PEOPLE.to_vec()),
             ),
-            0..12,
+            0..32,
         );
         let incomes = vec(prop::option::of(0_i64..40), PEOPLE.len());
         (relations, rules, tuples, incomes).prop_map(|(relations, rules, tuples, incomes)| {
@@ -3690,9 +3713,14 @@ mod relation_resolution_tests {
     }
 
     /// Every household output's value or error, and each household's trace,
-    /// as an engine resolving at most `limit` relations natively gives them.
-    fn evaluate(program: &ProgramSpec, dataset: &DatasetSpec, limit: usize) -> Vec<String> {
-        evaluate_with_oracle(
+    /// as an engine resolving at most `limit` relations natively gives them,
+    /// with the number of times that limit stopped a resolution.
+    fn evaluate(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+    ) -> (Vec<String>, usize) {
+        evaluate_counting(
             program,
             dataset,
             limit,
@@ -3708,6 +3736,16 @@ mod relation_resolution_tests {
         recursive: bool,
         suspend_depth: usize,
     ) -> Vec<String> {
+        evaluate_counting(program, dataset, limit, recursive, suspend_depth).0
+    }
+
+    fn evaluate_counting(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+        recursive: bool,
+        suspend_depth: usize,
+    ) -> (Vec<String>, usize) {
         let program = program.to_program().expect("the program lowers");
         // These are direct evaluator comparisons. Keep every generated
         // caller-slot orientation and direct tuple, including combinations
@@ -3736,7 +3774,7 @@ mod relation_resolution_tests {
             trace.sort();
             outcomes.extend(trace);
         }
-        outcomes
+        (outcomes, engine.relation_suspensions)
     }
 
     #[test]
@@ -3750,19 +3788,22 @@ mod relation_resolution_tests {
             TestRng::from_seed(RngAlgorithm::ChaCha, &[23; 32]),
         );
         let nested = std::cell::Cell::new(0_usize);
+        let stopped = std::cell::RefCell::new([0_usize; RELATIONS]);
         runner
             .run(&case(), |(program, dataset)| {
-                // Keep this reference unsuspended regardless of the runtime
-                // default: these acyclic cases have only RELATIONS links.
-                let native = evaluate(&program, &dataset, usize::MAX);
-                for limit in [1, 2, super::RELATION_NESTING_LIMIT, 32, usize::MAX] {
-                    let suspended = evaluate(&program, &dataset, limit);
+                // Relations read only later ones, so the deepest request sits
+                // at depth RELATIONS - 1. That bounds the limits that can stop
+                // a resolution, and no limit can stop this reference.
+                let (native, _) = evaluate(&program, &dataset, usize::MAX);
+                for limit in 1..RELATIONS {
+                    let (suspended, stops) = evaluate(&program, &dataset, limit);
                     if native != suspended {
                         return Err(TestCaseError::fail(format!(
                             "relation nesting {limit}\nnative {native:#?}\nsuspended {suspended:#?}\nprogram {}",
                             serde_json::to_string(&program).expect("serializes")
                         )));
                     }
+                    stopped.borrow_mut()[limit] += usize::from(stops > 0);
                 }
                 if native.iter().any(|line| line.contains("Ok(")) {
                     nested.set(nested.get() + 1);
@@ -3771,6 +3812,9 @@ mod relation_resolution_tests {
             })
             .unwrap();
         assert!(nested.get() > 500, "only {} cases evaluated", nested.get());
+        for (limit, cases) in stopped.into_inner().iter().enumerate().skip(1) {
+            assert!(*cases >= 10, "limit {limit} stopped only {cases} cases");
+        }
     }
 
     /// The old recursive resolver is an independent oracle: source traversal,
