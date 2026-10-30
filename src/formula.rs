@@ -1498,6 +1498,15 @@ impl LowerCtx {
         })
     }
 
+    /// How this predicate spells `term`: a variable's bound name, not its index.
+    fn spelling(&self, term: TermSpec) -> String {
+        match term {
+            TermSpec::Var(index) => self.variables.borrow().iter().rev().nth(index).cloned(),
+            TermSpec::Anchor | TermSpec::Candidate => None,
+        }
+        .unwrap_or_else(|| term.as_str().to_string())
+    }
+
     fn is_relation_call(&self, func: &str, args: &[Expr]) -> bool {
         is_relation_call(&self.relation_predicates, func, args)
             || (self.relation_predicates.contains(func)
@@ -1521,7 +1530,7 @@ impl LowerCtx {
     fn reject_term_name(&self, name: &str, what: &str) -> Result<(), FormulaError> {
         self.reject_out_of_scope_name(name)?;
         match self.term(name) {
-            Some(term) => Err(term_used_as_value(term, what)),
+            Some(_) => Err(term_used_as_value(name, what)),
             None => Ok(()),
         }
     }
@@ -1555,13 +1564,13 @@ impl LowerCtx {
         self.reject_out_of_scope_read(arg)?;
         if self.scoped_construct(arg) {
             return Err(FormulaError::lower(format!(
-                "[relation_role_outside_scope] {what} has no term bindings; qualified reads, atoms and term comparisons require the derived relation's predicate scope"
+                "[relation_role_outside_scope] {what} has no term bindings; qualified reads, atoms, term comparisons and `exists` require the derived relation's predicate scope"
             )));
         }
         if let Some((term, name)) = self.role_read(arg) {
             return Err(FormulaError::lower(format!(
                 "[relation_role_outside_scope] `{}.{name}` is read as {what}, which is evaluated on the aggregated relation's ids, where no term is bound; a read through a term may appear in a derived relation's predicate only outside any aggregation's `where` clause or aggregated value",
-                term.as_str()
+                self.spelling(term)
             )));
         }
         if let Expr::Var(name) = arg {
@@ -1720,7 +1729,7 @@ impl LowerCtx {
     /// Lower `term.name`, a read of a derived rule or an input at the term's
     /// id (relation roles, section 3.2).
     fn lower_role_read(&self, term: TermSpec, name: &str) -> Result<ScalarExprSpec, FormulaError> {
-        let t = term.as_str();
+        let t = self.spelling(term);
         self.reject_term_name(name, &format!("the name read through `{t}`"))?;
         if self.relation_predicates.contains(name) {
             return Err(FormulaError::lower(format!(
@@ -1747,11 +1756,9 @@ impl LowerCtx {
 }
 
 /// The refusal of a reserved term written as a value (`what`).
-fn term_used_as_value(term: TermSpec, what: &str) -> FormulaError {
+fn term_used_as_value(name: &str, what: &str) -> FormulaError {
     FormulaError::lower(format!(
-        "[relation_term_used_as_value] `{}` names a term of this derived relation's predicate, so it cannot be {what}; read a value at it with `{}.name`",
-        term.as_str(),
-        term.as_str()
+        "[relation_term_used_as_value] `{name}` names a term of this derived relation's predicate, so it cannot be {what}; read a value at it with `{name}.name`"
     ))
 }
 

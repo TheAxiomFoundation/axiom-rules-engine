@@ -1,7 +1,0 @@
---- a/src/formula.rs
-+++ b/src/formula.rs
-@@ -1529,3 +1529,3 @@
-     fn reject_out_of_scope_name(&self, name: &str) -> Result<(), FormulaError> {
--        if self.terms && self.reserved_variables.contains(name) && self.term(name).is_none() {
-+        if false && self.terms && self.reserved_variables.contains(name) && self.term(name).is_none() {
-             return Err(FormulaError::lower(format!(

@@ -1345,8 +1345,15 @@ impl<'a> Checker<'a> {
         match derivation.slot_entities.get(slot) {
             Some(kind) => Some(kind.clone()),
             None => {
-                self.push(RelationTypingCode::RelationRolesNeedSlotKinds, citing, citing,
-                    format!("the predicate of derived relation `{citing}` uses `{}`, but its derivation declares no kind for slot {slot}; declare `derived_relation.slot_entities`", term.as_str()));
+                self.push(
+                    RelationTypingCode::RelationRolesNeedSlotKinds,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` uses `{}`, but its derivation declares no kind for slot {slot}; declare `derived_relation.slot_entities`",
+                        term.as_str()
+                    ),
+                );
                 None
             }
         }
@@ -1395,8 +1402,14 @@ impl<'a> Checker<'a> {
                     .and_then(|schema| schema.derivation.as_ref())
                     .is_some_and(|generator| variable_slot != generator.related_slot)
                 {
-                    self.push(RelationTypingCode::InverseDerivedTraversalUnsupported, relation, citing,
-                        format!("exists cannot traverse derived relation `{relation}` backwards; bind its related slot"));
+                    self.push(
+                        RelationTypingCode::InverseDerivedTraversalUnsupported,
+                        relation,
+                        citing,
+                        format!(
+                            "exists cannot traverse derived relation `{relation}` backwards; bind its related slot"
+                        ),
+                    );
                 }
                 self.role_atom(
                     citing,
@@ -1413,11 +1426,34 @@ impl<'a> Checker<'a> {
                 if let (Some(left_kind), Some(right_kind)) = (left_kind, right_kind)
                     && left_kind != right_kind
                 {
-                    self.push(RelationTypingCode::RelationTermKindMismatch, citing, citing,
-                        format!("term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind", left.as_str(), right.as_str()));
+                    self.push(
+                        RelationTypingCode::RelationTermKindMismatch,
+                        citing,
+                        citing,
+                        format!(
+                            "term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind",
+                            left.as_str(),
+                            right.as_str()
+                        ),
+                    );
                 }
             }
             RoleConstruct::Read { term, name, rule } => {
+                let t = term.as_str();
+                let slot = term_slot(derivation, term);
+                if let Some(slot) = slot
+                    && derivation.slot_entities.get(slot).is_none()
+                {
+                    self.push(
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        citing,
+                        citing,
+                        format!(
+                            "the predicate of derived relation `{citing}` reads `{t}.{name}`, but the derivation declares no kind for slot {slot}, so `{t}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
+                        ),
+                    );
+                    return;
+                }
                 let Some(kind) = self.term_kind(citing, derivation, term, bindings) else {
                     return;
                 };
@@ -1438,8 +1474,15 @@ impl<'a> Checker<'a> {
                 } else {
                     "a rule read through a term must have that term's kind".to_string()
                 };
-                self.push(RelationTypingCode::RelationRoleEntityMismatch, citing, citing,
-                    format!("the predicate of derived relation `{citing}` reads `{}.{name}`: `{name}` has entity `{entity}`, but `{}` is a `{kind}` id; {detail}", term.as_str(), term.as_str()));
+                let at_slot = slot.map_or(String::new(), |slot| format!(" (slot {slot})"));
+                self.push(
+                    RelationTypingCode::RelationRoleEntityMismatch,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` reads `{t}.{name}`: `{name}` has entity `{entity}`, but `{t}` is a `{kind}` id{at_slot}; {detail}"
+                    ),
+                );
             }
         }
     }
@@ -1467,8 +1510,14 @@ impl<'a> Checker<'a> {
             .rsplit_once("#relation.")
             .map_or(relation, |(_, short)| short);
         if crate::formula::is_builtin_function(short_name) {
-            self.push(RelationTypingCode::RelationNameShadowsBuiltin, relation, citing,
-                format!("relation `{relation}` has a built-in function name and cannot be used as an atom"));
+            self.push(
+                RelationTypingCode::RelationNameShadowsBuiltin,
+                relation,
+                citing,
+                format!(
+                    "relation `{relation}` has a built-in function name and cannot be used as an atom"
+                ),
+            );
         }
         if schema.derivation.is_some() && schema.arity != 2 {
             self.push(
@@ -1493,6 +1542,8 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        // Atoms require an explicit kind declaration on the named relation;
+        // inheriting its source's kinds is insufficient.
         let kinds = schema
             .derivation
             .as_ref()
@@ -1507,6 +1558,8 @@ impl<'a> Checker<'a> {
                 format!("atom `{relation}` requires declared slot entity kinds"),
             );
         } else {
+            // Preserve the general checks for malformed/aliased slot kinds as
+            // well as the atom's term-to-slot kind checks.
             self.typed_slots(relation, citing);
         }
         for (slot, term) in terms.iter().enumerate() {
@@ -1518,10 +1571,28 @@ impl<'a> Checker<'a> {
                 kinds.get(slot),
             ) && actual != *expected
             {
-                self.push(RelationTypingCode::RelationAtomKindMismatch, relation, citing,
-                    format!("atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`", term.as_str()));
+                self.push(
+                    RelationTypingCode::RelationAtomKindMismatch,
+                    relation,
+                    citing,
+                    format!(
+                        "atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`",
+                        term.as_str()
+                    ),
+                );
             }
         }
+    }
+}
+
+/// The derivation slot `term` names; a variable names none.
+fn term_slot(derivation: &RelationDerivation, term: Term) -> Option<usize> {
+    match term {
+        Term::Anchor => Some(derivation.current_slot),
+        Term::Candidate => Some(derivation.related_slot),
+        Term::Var(_) => None,
+        #[cfg(test)]
+        Term::Id(_) => None,
     }
 }
 

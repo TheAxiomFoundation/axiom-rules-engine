@@ -4089,9 +4089,6 @@ mod relation_resolution_tests {
         prop_oneof![2 => case_of(BROAD), 2 => case_of(DEEP), 1 => case_of(EXISTS)]
     }
 
-    /// Every household output's value or error, and each household's trace,
-    /// as an engine resolving at most `limit` relations natively gives them,
-    /// with the number of times that limit stopped a resolution.
     fn evaluate_with_oracle(
         program: &ProgramSpec,
         dataset: &DatasetSpec,
@@ -4102,6 +4099,9 @@ mod relation_resolution_tests {
         evaluate_counting(program, dataset, limit, recursive, suspend_depth).0
     }
 
+    /// Every household output's value or error, and each household's trace,
+    /// as an engine resolving at most `limit` relations natively gives them,
+    /// with the number of times that limit stopped a resolution.
     fn evaluate_counting(
         program: &ProgramSpec,
         dataset: &DatasetSpec,

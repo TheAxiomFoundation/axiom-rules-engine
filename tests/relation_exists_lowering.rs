@@ -218,6 +218,33 @@ fn generators_require_one_new_lowercase_variable_and_an_atom() {
 }
 
 #[test]
+fn refusals_spell_a_variable_as_the_predicate_does() {
+    for (formula, spelled) in [
+        (
+            "exists(relative_of(anchor, kin), kin)",
+            "`kin` names a term",
+        ),
+        (
+            "exists(relative_of(anchor, kin), anchor.kin > 0)",
+            "`kin` names a term",
+        ),
+        (
+            "exists(relative_of(anchor, kin), sum(kin.age) > 0)",
+            "the summed value has no term bindings",
+        ),
+        (
+            "exists(relative_of(anchor, kin), kin.relative_of > 0)",
+            "`kin.relative_of` reads relation",
+        ),
+    ] {
+        let error = compile(formula, "")
+            .expect_err("invalid exists must refuse")
+            .to_string();
+        assert!(error.contains(spelled), "{formula}: {error}");
+    }
+}
+
+#[test]
 fn a_new_variable_cannot_hide_a_visible_rule_parameter_or_relation() {
     for name in ["total", "selected", "relative_of"] {
         refuses(
