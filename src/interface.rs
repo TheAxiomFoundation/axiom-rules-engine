@@ -911,7 +911,12 @@ impl Collector<'_> {
                 variable_slot,
                 body,
             } => {
-                match self.program.relations.get(relation).and_then(|schema| schema.derivation.as_ref()) {
+                match self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
                     Some(derivation) => self.lookup(relation, derivation.current_slot),
                     None => {
                         for slot in 0..terms.len() {
@@ -923,7 +928,9 @@ impl Collector<'_> {
                 }
                 let mut bound = routing.cloned();
                 if let Some(bound) = &mut bound {
-                    let kind = self.slot_kinds.get(relation)
+                    let kind = self
+                        .slot_kinds
+                        .get(relation)
                         .and_then(|kinds| kinds.get(*variable_slot).cloned());
                     bound.variables.push(kind);
                 }

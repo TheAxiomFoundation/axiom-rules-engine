@@ -2,7 +2,9 @@
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
+use axiom_rules_engine::depth::with_suspend_depth;
 use axiom_rules_engine::spec::ProgramSpec;
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 fn integer(n: i64) -> Value {
@@ -242,4 +244,65 @@ fn exists_opts_into_strict_binding_and_dense_names_its_refusal() {
         error.contains("supplied_tuples_for_derived_relation"),
         "{error}"
     );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {cases:48, rng_seed:proptest::test_runner::RngSeed::Fixed(21403), ..ProptestConfig::default()})]
+    #[test]
+    fn exists_values_order_determinism_and_modes_have_an_independent_oracle(
+        rows in prop::collection::vec((-2i64..3, any::<bool>()),0..8),
+        derived_domain in any::<bool>(), nested in any::<bool>(), shift in 0usize..32,
+    ) {
+        let body=if nested {
+            exists("edge",vec![variable(0),variable(0)],1,json!({"kind":"and","items":[positive(variable(1)),positive(variable(0))]}))
+        } else { positive(variable(0)) };
+        let p=program(exists(if derived_domain {"eligible"} else {"edge"},vec![json!("anchor"),variable(0)],1,body));
+        let mut records=vec![tuple("roster",&["a","b"]),tuple("roster",&["a","c"])];
+        let mut inputs=vec![];
+        for (index,(score,present)) in rows.iter().enumerate() {
+            let id=format!("p{index}"); inputs.push(input(&id,*score));
+            if *present { records.push(tuple("edge",&["a",&id])); records.push(tuple("edge",&["a",&id])); }
+            // Inner frame can only reach its own id, independently of outer candidate.
+            records.push(tuple("edge",&[&id,&id]));
+        }
+        let expected=2*i64::from(rows.iter().any(|(score,present)|*present&&*score>0));
+        let data=json!({"inputs":inputs,"relations":records});
+        let mut permuted=data.clone();
+        for key in ["inputs","relations"] { let items=permuted[key].as_array_mut().unwrap(); items.reverse(); if !items.is_empty() { let n=items.len(); items.rotate_left(shift%n); } }
+        let mut values=vec![];
+        for mode in ["explain","fast"] {
+            let first=run(mode,&p,&data,&query_ids()).unwrap();
+            prop_assert_eq!(count(&first,0),expected);
+            prop_assert_eq!(&first,&run(mode,&p,&data,&query_ids()).unwrap());
+            prop_assert_eq!(&first,&run(mode,&p,&permuted,&query_ids()).unwrap());
+            for depth in 0..=4 { prop_assert_eq!(&first,&with_suspend_depth(depth,||run(mode,&p,&data,&query_ids()).unwrap())); }
+            values.push(first["results"][0]["outputs"].clone());
+        }
+        prop_assert_eq!(&values[0],&values[1]);
+    }
+
+    /// §7.6 excludes derived reads, aggregating rules, count comparisons and bare tests.
+    /// These domains and atoms are base relations, under zero or two `not`s.
+    #[test]
+    fn positive_base_exists_are_monotone_with_exact_memberships(
+        rows in prop::collection::vec((any::<bool>(),any::<bool>(),any::<bool>()),1..10), double_not in any::<bool>(),
+    ) {
+        let body=json!({"kind":"same_entity","left":variable(0),"right":"candidate","negated":false});
+        let predicate=exists("edge",vec![json!("anchor"),variable(0)],1,body);
+        let p=program(if double_not {not(not(predicate))}else{predicate});
+        let (mut old,mut new,mut ids,mut expected)=(vec![],vec![],vec![],vec![]);
+        for (index,(present,add,decoy)) in rows.iter().enumerate() {
+            let a=format!("a{index}");let c=format!("c{index}");ids.push(a.clone());
+            old.push(tuple("roster",&[&a,&c]));new.push(tuple("roster",&[&a,&c]));
+            if *decoy {old.push(tuple("edge",&[&a,"decoy"]));new.push(tuple("edge",&[&a,"decoy"]));}
+            if *present {old.push(tuple("edge",&[&a,&c]));}
+            if *present||*add {new.push(tuple("edge",&[&a,&c]));}
+            expected.push((i64::from(*present),i64::from(*present||*add)));
+        }
+        for mode in ["explain","fast"] {
+            let a=run(mode,&p,&json!({"inputs":[],"relations":old}),&ids).unwrap();
+            let b=run(mode,&p,&json!({"inputs":[],"relations":new}),&ids).unwrap();
+            for (row,(before,after)) in expected.iter().enumerate(){prop_assert_eq!(count(&a,row),*before);prop_assert_eq!(count(&b,row),*after);prop_assert!(before<=after);}
+        }
+    }
 }

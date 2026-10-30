@@ -342,3 +342,171 @@ fn derived_generator_of_arity_other_than_two_refuses_by_name() {
         "{error}"
     );
 }
+
+#[test]
+fn compiled_domains_accept_exactly_matching_bound_slot_kinds() {
+    let accepted = Cell::new(0_usize);
+    let refused = Cell::new(0_usize);
+    let nested_accepted = Cell::new(0_usize);
+    let derived_accepted = Cell::new(0_usize);
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[0x82; 32]),
+    );
+    runner.run(&(
+        any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>(),
+        any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>(),
+    ), |(anchor_household, candidate_household, outer_household, nested,
+        derived, reverse, wrong_first, wrong_second)| {
+        let kind = |household| if household { "Household" } else { "Person" };
+        let anchor_kind = kind(anchor_household);
+        let candidate_kind = kind(candidate_household);
+        let outer_kind = kind(outer_household);
+        // In a flat domain either end of the owner's pair can bind the
+        // generator. In a nested domain the enclosing variable binds it.
+        let first_actual = if nested { outer_household }
+            else if reverse { candidate_household } else { anchor_household };
+        let first_term = if nested { json!({"var": 0}) }
+            else if reverse { json!("candidate") } else { json!("anchor") };
+        let second_actual = if reverse { anchor_household } else { candidate_household };
+        let second_term = if reverse { json!("anchor") } else { json!("candidate") };
+        let first_expected = kind(first_actual ^ wrong_first);
+        let second_expected = kind(second_actual ^ wrong_second);
+        let variable_kind = kind(!outer_household);
+        let mut relations = vec![
+            json!({"name": "roster", "arity": 2, "slot_entities": [anchor_kind, candidate_kind]}),
+            json!({"name": "outer_domain", "arity": 2, "slot_entities": [anchor_kind, outer_kind]}),
+        ];
+        let inner = if derived {
+            let current = usize::from(reverse);
+            let variable = 1 - current;
+            let kinds = if reverse { vec![variable_kind, first_expected] }
+                else { vec![first_expected, variable_kind] };
+            relations.push(json!({"name": "domain_source", "arity": 2, "slot_entities": kinds}));
+            relations.push(json!({"name": "domain", "arity": 2, "slot_entities": kinds,
+                "derivation": {"source_relation": "domain_source", "current_slot": current,
+                    "related_slot": variable, "slot_entities": kinds, "predicate": always()}}));
+            let terms = if reverse { vec![json!({"var": 0}), first_term] }
+                else { vec![first_term, json!({"var": 0})] };
+            json!({"kind": "exists", "relation": "domain", "terms": terms,
+                "variable_slot": variable, "body": always()})
+        } else {
+            relations.push(json!({"name": "domain", "arity": 3,
+                "slot_entities": [first_expected, variable_kind, second_expected]}));
+            json!({"kind": "exists", "relation": "domain",
+                "terms": [first_term, {"var": 0}, second_term], "variable_slot": 1, "body": always()})
+        };
+        let predicate = if nested { exists("outer_domain", inner) } else { inner };
+        relations.push(json!({"name": "selected", "arity": 2,
+            "slot_entities": [anchor_kind, candidate_kind], "derivation": {
+                "source_relation": "roster", "current_slot": 0, "related_slot": 1,
+                "slot_entities": [anchor_kind, candidate_kind], "predicate": predicate}}));
+        let value = json!({"relations": relations, "derived": [
+            {"name": "total", "entity": anchor_kind, "dtype": "integer", "semantics": "scalar",
+                "expr": {"kind": "count_related", "relation": "selected", "current_slot": 0, "related_slot": 1}},
+            {"name": "person_kind", "entity": "Person", "dtype": "integer", "semantics": "scalar", "expr": integer(0)},
+            {"name": "household_kind", "entity": "Household", "dtype": "integer", "semantics": "scalar", "expr": integer(0)},
+        ]});
+        let matches = !wrong_first && (derived || !wrong_second);
+        match compile(value) {
+            Ok(_) => {
+                prop_assert!(matches, "a compiled domain must match every bound slot");
+                accepted.set(accepted.get() + 1);
+                nested_accepted.set(nested_accepted.get() + usize::from(nested));
+                derived_accepted.set(derived_accepted.get() + usize::from(derived));
+            }
+            Err(error) => {
+                prop_assert!(!matches, "matching domains must compile: {}", error);
+                prop_assert!(error.contains("relation_atom_kind_mismatch"), "{}", error);
+                refused.set(refused.get() + 1);
+            }
+        }
+        Ok(())
+    }).unwrap();
+    assert!(
+        accepted.get() >= 40,
+        "only {} matching domains compiled",
+        accepted.get()
+    );
+    assert!(
+        refused.get() >= 80,
+        "only {} mismatching domains refused",
+        refused.get()
+    );
+    assert!(
+        nested_accepted.get() >= 20,
+        "only {} enclosing-variable domains compiled",
+        nested_accepted.get()
+    );
+    assert!(
+        derived_accepted.get() >= 24,
+        "only {} forward derived domains compiled",
+        derived_accepted.get()
+    );
+}
+
+#[test]
+fn generated_exists_generator_and_body_cycles_remain_refused() {
+    let refused = Cell::new(0_usize);
+    let generator_cycles = Cell::new(0_usize);
+    let body_cycles = Cell::new(0_usize);
+    let strategy = (1usize..9).prop_flat_map(|length| {
+        (
+            Just(length),
+            prop::collection::vec(any::<bool>(), length),
+            0usize..16,
+        )
+    });
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 128,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[0x94; 32]),
+    );
+    runner.run(&strategy, |(length, generators, rotation)| {
+        let mut relations = vec![json!({"name": "roster", "arity": 2,
+            "slot_entities": ["Person", "Person"]})];
+        for (index, generator) in generators.iter().enumerate() {
+            let next = format!("r{}", (index + 1) % length);
+            let predicate = if *generator { exists(&next, always()) }
+                else { exists("roster", json!({"kind": "relation_atom", "relation": next,
+                    "terms": [{"var": 0}, "candidate"]})) };
+            relations.push(relation(&format!("r{index}"), predicate));
+        }
+        let count = relations.len();
+        relations.rotate_left(rotation % count);
+        let value = json!({"relations": relations, "derived": [
+            {"name": "total", "entity": "Person", "dtype": "integer", "semantics": "scalar",
+                "expr": {"kind": "count_related", "relation": "r0", "current_slot": 0, "related_slot": 1}}
+        ]});
+        let result = compile(value);
+        prop_assert!(result.is_err(), "an exists relation edge must not allow recursion");
+        let error = result.unwrap_err();
+        prop_assert!(error.to_lowercase().contains("cycl"), "{}", error);
+        refused.set(refused.get() + 1);
+        generator_cycles.set(generator_cycles.get() + usize::from(generators.iter().any(|generator| *generator)));
+        body_cycles.set(body_cycles.get() + usize::from(generators.iter().any(|generator| !generator)));
+        Ok(())
+    }).unwrap();
+    assert!(
+        refused.get() >= 100,
+        "only {} generated cycles refused",
+        refused.get()
+    );
+    assert!(
+        generator_cycles.get() >= 60,
+        "only {} generator cycles refused",
+        generator_cycles.get()
+    );
+    assert!(
+        body_cycles.get() >= 60,
+        "only {} body-atom cycles refused",
+        body_cycles.get()
+    );
+}

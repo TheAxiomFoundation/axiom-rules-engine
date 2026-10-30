@@ -114,35 +114,104 @@ fn variables_are_reserved_before_after_and_beside_the_body() {
 fn generators_require_one_new_lowercase_variable_and_an_atom() {
     for (formula, code) in [
         ("exists()", "relation_exists_arity_mismatch"),
-        ("exists(relative_of(anchor, p))", "relation_exists_arity_mismatch"),
-        ("exists(relative_of(anchor, p), true, false)", "relation_exists_arity_mismatch"),
-        ("exists(relative_of, true)", "relation_exists_generator_not_atom"),
-        ("exists(missing(anchor, p), true)", "relation_exists_generator_not_atom"),
-        ("exists(relative_of(anchor, candidate), true)", "relation_exists_variable_count"),
-        ("exists(relative_of(anchor, anchor), true)", "relation_variable_name_conflict"),
-        ("exists(relative_of(candidate, candidate), true)", "relation_variable_name_conflict"),
-        ("exists(relative_of(p, q), true)", "relation_exists_variable_count"),
-        ("exists(relative_of(p, p), true)", "relation_exists_variable_count"),
-        ("exists(relative_of(anchor, P), true)", "relation_variable_invalid_name"),
-        ("exists(relative_of(anchor, _p), true)", "relation_variable_invalid_name"),
-        ("exists(relative_of(anchor, pQ), true)", "relation_variable_invalid_name"),
-        ("exists(relative_of(anchor, 3), true)", "relation_atom_argument_not_term"),
-        ("exists(relative_of(p), true)", "relation_atom_arity_mismatch"),
-        ("exists(relative_of(anchor, candidate, p), true)", "relation_atom_arity_mismatch"),
-        ("exists(relative_of(anchor, p), p)", "relation_term_used_as_value"),
-        ("exists(relative_of(anchor, p), p.p)", "relation_term_used_as_value"),
-        ("exists(relative_of(anchor, p), candidate.p)", "relation_term_used_as_value"),
-        ("exists(relative_of(anchor, p), p < candidate)", "relation_term_comparison_operator"),
-        ("exists(relative_of(anchor, p), p == 4)", "relation_term_compared_with_value"),
-        ("exists(relative_of(anchor, p), true) == 1", "relation_exists_used_as_value"),
+        (
+            "exists(relative_of(anchor, p))",
+            "relation_exists_arity_mismatch",
+        ),
+        (
+            "exists(relative_of(anchor, p), true, false)",
+            "relation_exists_arity_mismatch",
+        ),
+        (
+            "exists(relative_of, true)",
+            "relation_exists_generator_not_atom",
+        ),
+        (
+            "exists(missing(anchor, p), true)",
+            "relation_exists_generator_not_atom",
+        ),
+        (
+            "exists(relative_of(anchor, candidate), true)",
+            "relation_exists_variable_count",
+        ),
+        (
+            "exists(relative_of(anchor, anchor), true)",
+            "relation_variable_name_conflict",
+        ),
+        (
+            "exists(relative_of(candidate, candidate), true)",
+            "relation_variable_name_conflict",
+        ),
+        (
+            "exists(relative_of(p, q), true)",
+            "relation_exists_variable_count",
+        ),
+        (
+            "exists(relative_of(p, p), true)",
+            "relation_exists_variable_count",
+        ),
+        (
+            "exists(relative_of(anchor, P), true)",
+            "relation_variable_invalid_name",
+        ),
+        (
+            "exists(relative_of(anchor, _p), true)",
+            "relation_variable_invalid_name",
+        ),
+        (
+            "exists(relative_of(anchor, pQ), true)",
+            "relation_variable_invalid_name",
+        ),
+        (
+            "exists(relative_of(anchor, 3), true)",
+            "relation_atom_argument_not_term",
+        ),
+        (
+            "exists(relative_of(p), true)",
+            "relation_atom_arity_mismatch",
+        ),
+        (
+            "exists(relative_of(anchor, candidate, p), true)",
+            "relation_atom_arity_mismatch",
+        ),
+        (
+            "exists(relative_of(anchor, p), p)",
+            "relation_term_used_as_value",
+        ),
+        (
+            "exists(relative_of(anchor, p), p.p)",
+            "relation_term_used_as_value",
+        ),
+        (
+            "exists(relative_of(anchor, p), candidate.p)",
+            "relation_term_used_as_value",
+        ),
+        (
+            "exists(relative_of(anchor, p), p < candidate)",
+            "relation_term_comparison_operator",
+        ),
+        (
+            "exists(relative_of(anchor, p), p == 4)",
+            "relation_term_compared_with_value",
+        ),
+        (
+            "exists(relative_of(anchor, p), true) == 1",
+            "relation_exists_used_as_value",
+        ),
         // A zero-new-variable generator that uses an enclosing variable
         // attempts to rebind it rather than introducing a new variable.
-        ("exists(relative_of(anchor, p), exists(relative_of(anchor, p), true))", "relation_variable_name_conflict"),
+        (
+            "exists(relative_of(anchor, p), exists(relative_of(anchor, p), true))",
+            "relation_variable_name_conflict",
+        ),
     ] {
         refuses(formula, "", code);
     }
-    compile("exists(relative_of(anchor, person_2), person_2.age > 0)", "")
-        .expect("lowercase letters, digits and underscores are allowed");
+    compile(
+        "exists(relative_of(anchor, person_2), person_2.age > 0)",
+        "",
+    )
+    .expect("lowercase letters, digits and underscores are allowed");
 }
 
 #[test]
@@ -213,10 +282,16 @@ fn generator_kinds_are_inherited_by_variables_and_checked_in_the_body() {
       - effective_from: 2026-01-01
         formula: "true"
 "#;
-    compile("exists(residency(anchor, home), home.household_size > 1)", extra)
-        .expect("data generator variable has its slot's kind");
-    compile("exists(homes(anchor, home), home.household_size > 1)", extra)
-        .expect("derived generator variable has its slot's kind");
+    compile(
+        "exists(residency(anchor, home), home.household_size > 1)",
+        extra,
+    )
+    .expect("data generator variable has its slot's kind");
+    compile(
+        "exists(homes(anchor, home), home.household_size > 1)",
+        extra,
+    )
+    .expect("derived generator variable has its slot's kind");
     refuses(
         "exists(residency(anchor, home), home == candidate)",
         extra,
@@ -277,8 +352,14 @@ fn exists_has_no_scope_in_rule_bodies_or_aggregation_clauses_or_values() {
         ("Judgment", "exists(relative_of(anchor, p), true)"),
         ("Judgment", "not exists(relative_of(anchor, p), true)"),
         ("Integer", "exists(relative_of(anchor, p), true) + 1"),
-        ("Integer", "count_where(relative_of, exists(relative_of(anchor, p), true))"),
-        ("Integer", "sum_where(relative_of, exists(relative_of(anchor, p), true), enabled)"),
+        (
+            "Integer",
+            "count_where(relative_of, exists(relative_of(anchor, p), true))",
+        ),
+        (
+            "Integer",
+            "sum_where(relative_of, exists(relative_of(anchor, p), true), enabled)",
+        ),
     ] {
         let extra = format!(
             "  - name: invalid\n    kind: derived\n    entity: Person\n    dtype: {dtype}\n    versions:\n      - effective_from: 2026-01-01\n        formula: {}\n",
@@ -304,7 +385,10 @@ fn forall_is_not_exists_over_a_negated_body() {
     assert_eq!(pred["kind"], "not");
     assert_eq!(pred["item"]["kind"], "exists");
     assert_eq!(pred["item"]["body"]["kind"], "not");
-    assert_eq!(pred["item"]["body"]["item"]["left"]["term"], json!({"var": 0}));
+    assert_eq!(
+        pred["item"]["body"]["item"]["left"]["term"],
+        json!({"var": 0})
+    );
 }
 
 #[test]

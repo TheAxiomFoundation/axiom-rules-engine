@@ -1501,9 +1501,9 @@ impl LowerCtx {
     fn is_relation_call(&self, func: &str, args: &[Expr]) -> bool {
         is_relation_call(&self.relation_predicates, func, args)
             || (self.relation_predicates.contains(func)
-                && args.iter().any(|arg| {
-                    matches!(arg, Expr::Var(name) if self.term(name).is_some())
-                }))
+                && args
+                    .iter()
+                    .any(|arg| matches!(arg, Expr::Var(name) if self.term(name).is_some())))
     }
 
     /// The term `expr` reads through, when it is `t.name` in a predicate.
@@ -1635,7 +1635,11 @@ impl LowerCtx {
                 args.len()
             )));
         }
-        let Expr::Call { func, args: generator_args } = &args[0] else {
+        let Expr::Call {
+            func,
+            args: generator_args,
+        } = &args[0]
+        else {
             return Err(FormulaError::lower(
                 "[relation_exists_generator_not_atom] the first `exists` argument must be an atom over a declared relation",
             ));
@@ -2752,7 +2756,10 @@ fn reserved_variable_names(expr: &Expr) -> HashSet<String> {
         match expr {
             Expr::Call { func, args } => {
                 if func == "exists"
-                    && let Some(Expr::Call { args: generator_args, .. }) = args.first()
+                    && let Some(Expr::Call {
+                        args: generator_args,
+                        ..
+                    }) = args.first()
                 {
                     for arg in generator_args {
                         if let Expr::Var(name) = arg
@@ -2776,12 +2783,20 @@ fn reserved_variable_names(expr: &Expr) -> HashSet<String> {
                 collect(target, names);
                 collect(index, names);
             }
-            Expr::Cond { condition, then_expr, else_expr } => {
+            Expr::Cond {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 collect(condition, names);
                 collect(then_expr, names);
                 collect(else_expr, names);
             }
-            Expr::Match { subject, cases, default } => {
+            Expr::Match {
+                subject,
+                cases,
+                default,
+            } => {
                 collect(subject, names);
                 for (pattern, value) in cases {
                     collect(pattern, names);
