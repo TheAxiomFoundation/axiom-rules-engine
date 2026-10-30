@@ -677,6 +677,9 @@ impl<'a> RelationEvalContext<'a> {
         match term {
             Term::Anchor => self.current_id,
             Term::Candidate => self.related_id,
+            Term::Var(_) => unreachable!("exists variable evaluation is added in the next step"),
+            #[cfg(test)]
+            Term::Id(id) => id,
         }
     }
 }
@@ -1397,6 +1400,10 @@ impl<'a> Engine<'a> {
             JudgmentExpr::RelationAtom { relation, terms } => {
                 self.atom_judgment(relation, terms, period, relation_context)
             }
+            JudgmentExpr::Exists { .. } => Err(EvalError::TypeMismatch(
+                "exists evaluation is added in the next step".to_string(),
+            )
+            .into()),
             JudgmentExpr::SameEntity {
                 left,
                 right,
@@ -2230,7 +2237,8 @@ impl<'a> Engine<'a> {
             }
             JudgmentExpr::RoleDerived { .. }
             | JudgmentExpr::RelationAtom { .. }
-            | JudgmentExpr::SameEntity { .. } => {
+            | JudgmentExpr::SameEntity { .. }
+            | JudgmentExpr::Exists { .. } => {
                 self.relation_role_judgment(expr, period, relation_context)
             }
             JudgmentExpr::RelationMember {
@@ -3443,7 +3451,8 @@ fn collect_judgment_trace_references(
         // A comparison reads only the ids already in the binding context.
         JudgmentExpr::RelationMember { .. }
         | JudgmentExpr::RelationAtom { .. }
-        | JudgmentExpr::SameEntity { .. } => {}
+        | JudgmentExpr::SameEntity { .. }
+        | JudgmentExpr::Exists { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_trace_references(item, derived, parameters);

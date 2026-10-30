@@ -358,6 +358,7 @@ pub(crate) fn derive_from_model(
             derivation,
             current_kind,
             related_kind: related_kind.clone(),
+            variables: Vec::new(),
         };
         let flow = Flow::Kind(related_kind);
         let first_site = collector.sites.len();
@@ -556,10 +557,13 @@ enum Flow {
 
 /// Inside a derived relation's predicate, a referenced rule runs on the
 /// current id when its entity is the derivation's declared current kind.
+#[derive(Clone)]
 struct Routing<'a> {
     derivation: &'a RelationDerivation,
     current_kind: Option<String>,
     related_kind: Option<String>,
+    /// Lexical binding kinds, outermost first. `Var(0)` names the last.
+    variables: Vec<Option<String>>,
 }
 
 impl Routing<'_> {
@@ -569,6 +573,9 @@ impl Routing<'_> {
         Flow::Kind(match term {
             Term::Anchor => self.current_kind.clone(),
             Term::Candidate => self.related_kind.clone(),
+            Term::Var(index) => self.variables.iter().rev().nth(index).cloned().flatten(),
+            #[cfg(test)]
+            Term::Id(_) => None,
         })
     }
 }
@@ -898,6 +905,30 @@ impl Collector<'_> {
                 }
             }
             JudgmentExpr::SameEntity { .. } => {}
+            JudgmentExpr::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => {
+                match self.program.relations.get(relation).and_then(|schema| schema.derivation.as_ref()) {
+                    Some(derivation) => self.lookup(relation, derivation.current_slot),
+                    None => {
+                        for slot in 0..terms.len() {
+                            if slot != *variable_slot {
+                                self.lookup(relation, slot);
+                            }
+                        }
+                    }
+                }
+                let mut bound = routing.cloned();
+                if let Some(bound) = &mut bound {
+                    let kind = self.slot_kinds.get(relation)
+                        .and_then(|kinds| kinds.get(*variable_slot).cloned());
+                    bound.variables.push(kind);
+                }
+                self.judgment(body, flow, bound.as_ref());
+            }
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, flow, routing);
@@ -1137,6 +1168,10 @@ fn collect_judgment_relations(expr: &JudgmentExpr, relations: &mut BTreeSet<Stri
         JudgmentExpr::RelationMember { relation, .. }
         | JudgmentExpr::RelationAtom { relation, .. } => {
             relations.insert(relation.clone());
+        }
+        JudgmentExpr::Exists { relation, body, .. } => {
+            relations.insert(relation.clone());
+            collect_judgment_relations(body, relations);
         }
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {

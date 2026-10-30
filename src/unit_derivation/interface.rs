@@ -325,7 +325,12 @@ impl<'a> PhaseTwoEngine<'a> {
                 visiting,
                 reasons,
             ),
-            JudgmentExpr::RelationAtom { relation, .. } => {
+            JudgmentExpr::RelationAtom { relation, .. } | JudgmentExpr::Exists { relation, .. } => {
+                if let JudgmentExpr::Exists { body, .. } = expr {
+                    self.collect_judgment_reduction_reasons(
+                        body, entity_id, period, visiting, reasons,
+                    );
+                }
                 // This structural preflight has no predicate bindings, so
                 // inspect every unresolved tuple of the atom's relation.
                 // Its argument order must not hide a relation dependency.

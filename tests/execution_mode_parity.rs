@@ -2423,7 +2423,9 @@ fn walk_judgment(expr: &JudgmentExprSpec, visit: &mut dyn FnMut(Ref<'_>)) {
                 walk_judgment(item, visit);
             }
         }
-        JudgmentExprSpec::Not { item } => walk_judgment(item, visit),
+        JudgmentExprSpec::Not { item } | JudgmentExprSpec::Exists { body: item, .. } => {
+            walk_judgment(item, visit)
+        }
     }
 }
 
@@ -3688,6 +3690,9 @@ fn fmt_judgment(expr: &JudgmentExprSpec) -> String {
                 .join(", ");
             format!("{}({arguments})", fmt_relation(relation))
         }
+        JudgmentExprSpec::Exists { .. } => {
+            unreachable!("the legacy parity generator builds no exists expressions")
+        }
         JudgmentExprSpec::SameEntity {
             left,
             right,
@@ -4383,7 +4388,9 @@ fn retired_sums_in_judgment(expr: &JudgmentExprSpec) -> usize {
         | JudgmentExprSpec::ExactlyOne { items } => {
             items.iter().map(retired_sums_in_judgment).sum()
         }
-        JudgmentExprSpec::Not { item } => retired_sums_in_judgment(item),
+        JudgmentExprSpec::Not { item } | JudgmentExprSpec::Exists { body: item, .. } => {
+            retired_sums_in_judgment(item)
+        }
     }
 }
 
