@@ -1,0 +1,6 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -1724,3 +1724,2 @@
+         domain.sort();
+-        domain.dedup();
+         Ok(domain)

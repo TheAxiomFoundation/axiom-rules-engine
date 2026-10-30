@@ -366,9 +366,9 @@ person-to-person relation is evaluated for each related person. See
 [execution-semantics.md](execution-semantics.md).
 
 A predicate can also name the record it reads. Inside a derived relation's
-predicate, two **terms** name entity ids: `anchor`, the id the relation is read
-from (its current slot), and `candidate`, the id being tested (its related
-slot). `t.name` reads a value at a term's id:
+predicate, **terms** name entity ids: `anchor`, the id the relation is read
+from (its current slot), `candidate`, the id being tested (its related
+slot), and variables bound by `exists` below. `t.name` reads a value at a term's id:
 
 - `t.rule` evaluates a derived rule at `t`'s id. The rule's entity must be the
   kind of `t`'s slot, where a filtered entity such as `SnapUnit` counts as its
@@ -401,14 +401,15 @@ too, bare or through a term; it used to read an input of that name.
 
 Here `minimum_gap` is a scalar parameter. Both slots of `relative_of` hold
 `Person` ids, so a bare `age` reads the candidate's and a bare `Person` rule
-the anchor's; the terms reach either side. A term's kind is the
-derivation's `slot_entities` at the term's slot. A derivation that omits
-them takes them from a source whose two slots hold different kinds, but not
+the anchor's; the terms reach either side. The anchor's and candidate's kinds
+are the derivation's `slot_entities` at their respective slots. A derivation
+that omits them takes them from a source whose two slots hold different kinds, but not
 from a source whose slots share a kind such as `[Person, Person]`, so such a
 derivation must declare them or a read through a term is refused
 (`relation_roles_need_slot_kinds`).
 
-Inside a predicate, `anchor` and `candidate` are reserved. A term written bare
+Inside a predicate, `anchor`, `candidate` and every variable name bound anywhere
+in that predicate are reserved. A term in scope written bare
 (as a value, a judgment, a parameter index, an aggregated relation, or after
 another term's `.`) is refused with `relation_term_used_as_value`. A whole
 predicate that is arithmetic refuses before lowering looks at its operands:
@@ -456,7 +457,7 @@ A program with none of these, and with no term, compiles to the
 same artifact as before terms existed. Explain and bulk fast mode evaluate reads through terms, and a trace
 records a rule read through a term at the term's id. The dense compiler
 rejects a root entity whose rules reach a derived relation whose predicate
-uses a qualified read, relation atom or term comparison, naming the construct
+uses a qualified read, relation atom, term comparison or `exists`, naming the construct
 and #218; a root that reaches no such relation compiles. Dense does compile
 parameter reads in a predicate.
 
@@ -487,14 +488,82 @@ operator, such as `anchor < candidate`, refuses with
 comparison belongs only in a derived relation's predicate; rules and
 aggregation `where` clauses refuse it with `relation_role_outside_scope`.
 
-A program using qualified reads, atoms or term comparisons refuses supplied
+`exists(G, body)` quantifies over a finite relation domain. `G` is a generator
+atom with exactly one argument that introduces a new variable; all its other
+arguments are terms already in scope. For example:
+
+```text
+exists(relative_of(anchor, p), p.age >= 65)
+exists(snap_tie(anchor, p), snap_tie(p, candidate))
+exists(relative_of(anchor, p),
+       exists(relative_of(p, q), q.age > p.age and q != candidate))
+```
+
+The variable has the kind of its generator slot and is available only inside
+`body`, including nested generators, qualified reads, atoms and term
+comparisons. Its name must match `[a-z][a-z0-9_]*`. It cannot hide a visible
+rule, parameter or relation, or rebind an enclosing variable. `anchor` and
+`candidate` are also unavailable as variable names. A generator with no new
+variable that repeats `anchor` or `candidate`, or uses an enclosing variable,
+refuses with `relation_variable_name_conflict`; for example,
+`exists(relative_of(anchor, anchor), true)`. A generator using the two
+distinct terms `anchor` and `candidate` has no new variable and refuses with
+`relation_exists_variable_count`. Distinct sibling
+`exists` bodies may bind the same spelling. A read of a reserved variable
+outside its body refuses with `relation_variable_out_of_scope`, including a
+use before the `exists` that binds it; it never becomes an input read.
+
+A data generator ranges over the distinct ids in the variable's slot of
+tuples matching every bound argument and covering the whole evaluation period.
+It can bind any slot. A derived generator must be binary and bind its related
+slot: its domain is that relation's members for the term in its current slot.
+Domains are sorted by id. `exists` evaluates its body in that order, stops at
+the first body that holds, and does not hold over an empty domain. A failure
+propagates as it does from `or`. A universal test is `not exists(G, not body)`;
+for example, `not exists(relative_of(anchor, p), not p.eligible)` holds when
+every relative is eligible, including when there are no relatives.
+
+The formula refusals specific to `exists` are:
+
+| Code | Refused form |
+| --- | --- |
+| `relation_exists_arity_mismatch` | `exists` has other than two arguments. |
+| `relation_exists_generator_not_atom` | Its first argument is not a call to a declared relation. |
+| `relation_exists_variable_count` | The generator has no new variable without the rebinding cases above, has more than one new variable argument, or a raw model's variable marker or slot is invalid. |
+| `relation_variable_invalid_name` | A new variable is not a lowercase identifier. |
+| `relation_variable_name_conflict` | A new variable hides a visible declaration, or a zero-new-variable generator attempts to rebind an existing term as described above. |
+| `relation_variable_out_of_scope` | A reserved variable is read outside its body, or a raw model's variable index has no enclosing binding. |
+| `inverse_derived_traversal_unsupported` | A derived generator binds its current slot. |
+| `relation_exists_used_as_value` | `exists` is used as a scalar, such as `exists(G, body) > 0`. |
+
+Generators reuse the atom refusals: `relation_atom_argument_not_term` for a
+non-name argument, `relation_atom_arity_mismatch` for a wrong argument count,
+`relation_atom_needs_typed_relation` when the generator has no declared slot
+kinds, `relation_atom_kind_mismatch` for a bound term of the wrong kind, and
+`derived_relation_atom_arity_unsupported` for a derived generator whose arity
+is not 2. A predicate using `exists` also needs its own slot kinds
+(`relation_roles_need_slot_kinds`). Reads and comparisons in the body retain
+their refusals above, including `relation_role_entity_mismatch`,
+`relation_term_kind_mismatch`, `relation_term_used_as_value`,
+`relation_term_compared_with_value` and `relation_term_comparison_operator`.
+Rules, aggregation `where` clauses and aggregated values have no `exists`
+scope (`relation_role_outside_scope`). A generator is a dependency on its
+relation, so dependency cycles remain refused.
+
+`exists` is a built-in function name. A relation may be declared with that
+name, but it cannot be used as an atom or generator
+(`relation_name_shadows_builtin`). Thus `exists(relative_of(anchor, p), body)`
+keeps its quantifier meaning even if a relation is named `exists`, while
+`exists(anchor, candidate)` refuses when it names that relation.
+
+A program using qualified reads, atoms, term comparisons or `exists` refuses supplied
 tuples under any derived relation's name
 (`supplied_tuples_for_derived_relation`). Its members resolver also ignores
 such tuples for direct Rust callers of `Engine::new`. Programs using none of
 these constructs retain the union of supplied and derived members, including
 programs whose predicates only read parameters. Request
 binding also refuses `relation_binding: lenient` when the program uses an
-atom (`lenient_binding_with_relation_roles`). See
+atom or `exists` (`lenient_binding_with_relation_roles`). See
 [relation-roles.md](relation-roles.md) for the design and derived-atom cost.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:

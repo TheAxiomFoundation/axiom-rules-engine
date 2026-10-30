@@ -1,0 +1,12 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -4319,7 +4319,8 @@
+             -1_i64..3,
+         )
+             .prop_map(
+-                |(derived, nested, variable_slot, candidate, tuples, pairs, scores, threshold)| {
++                |(derived, _nested, variable_slot, candidate, tuples, pairs, scores, threshold)| {
++                    let nested = false;
+                     let period = Period::month(2026, 1);
+                     let interval = Interval::covering(&period);
+                     let inactive = Interval::covering(&Period::month(2026, 2));

@@ -297,7 +297,7 @@ pub enum Term {
 }
 
 impl Term {
-    /// The name a predicate spells this term with.
+    /// A stable term label for diagnostics and expression descriptions.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Anchor => "anchor",

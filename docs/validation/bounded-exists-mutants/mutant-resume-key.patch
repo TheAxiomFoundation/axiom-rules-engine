@@ -1,0 +1,11 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -1545,7 +1545,7 @@
+             node: std::ptr::from_ref(node) as usize,
+             anchor: context.current_id.to_string(),
+             candidate: context.related_id.to_string(),
+-            variables,
++            variables: variables.into_iter().take(1).collect(),
+             period: period.clone(),
+             parent: self.active_evaluations.last().cloned(),
+             owner: self.member_captures.last().and_then(|(owner, depth, _)| {

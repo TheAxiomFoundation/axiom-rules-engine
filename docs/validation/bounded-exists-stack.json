@@ -1,0 +1,100 @@
+{
+  "baseline": "bb6bcff95377",
+  "rustc": "1.94.1",
+  "resolution_bytes": 1024,
+  "main": {
+    "a_chain_closed_into_a_cycle_is_refused_without_recursing": {
+      "maximum_failing_bytes": 32768,
+      "minimum_passing_bytes": 33792,
+      "resolution": 1024
+    },
+    "a_chain_testing_its_base_relation_at_every_link_is_linear": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "a_chain_through_count_related_predicates_is_linear_not_exponential": {
+      "maximum_failing_bytes": 573440,
+      "minimum_passing_bytes": 574464,
+      "resolution": 1024
+    },
+    "a_chain_through_relation_member_predicates_is_linear_not_exponential": {
+      "maximum_failing_bytes": 262144,
+      "minimum_passing_bytes": 263168,
+      "resolution": 1024
+    },
+    "a_compiled_chain_loads_and_runs_in_linear_time": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "a_dense_chain_compiles_and_runs_in_linear_time": {
+      "maximum_failing_bytes": 98304,
+      "minimum_passing_bytes": 99328,
+      "resolution": 1024
+    },
+    "a_queried_typed_chain_evaluates_in_linear_time": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "an_unqueried_chain_binds_and_validates_in_linear_time": {
+      "maximum_failing_bytes": 49152,
+      "minimum_passing_bytes": 50176,
+      "resolution": 1024
+    },
+    "counting_every_link_of_a_chain_resolves_each_link_once": {
+      "maximum_failing_bytes": 147456,
+      "minimum_passing_bytes": 148480,
+      "resolution": 1024
+    }
+  },
+  "branch": {
+    "a_chain_closed_into_a_cycle_is_refused_without_recursing": {
+      "maximum_failing_bytes": 32768,
+      "minimum_passing_bytes": 33792,
+      "resolution": 1024
+    },
+    "a_chain_testing_its_base_relation_at_every_link_is_linear": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "a_chain_through_count_related_predicates_is_linear_not_exponential": {
+      "maximum_failing_bytes": 573440,
+      "minimum_passing_bytes": 574464,
+      "resolution": 1024
+    },
+    "a_chain_through_relation_member_predicates_is_linear_not_exponential": {
+      "maximum_failing_bytes": 262144,
+      "minimum_passing_bytes": 263168,
+      "resolution": 1024
+    },
+    "a_compiled_chain_loads_and_runs_in_linear_time": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "a_dense_chain_compiles_and_runs_in_linear_time": {
+      "maximum_failing_bytes": 98304,
+      "minimum_passing_bytes": 99328,
+      "resolution": 1024
+    },
+    "a_queried_typed_chain_evaluates_in_linear_time": {
+      "maximum_failing_bytes": 114688,
+      "minimum_passing_bytes": 115712,
+      "resolution": 1024
+    },
+    "an_unqueried_chain_binds_and_validates_in_linear_time": {
+      "maximum_failing_bytes": 49152,
+      "minimum_passing_bytes": 50176,
+      "resolution": 1024
+    },
+    "counting_every_link_of_a_chain_resolves_each_link_once": {
+      "maximum_failing_bytes": 147456,
+      "minimum_passing_bytes": 148480,
+      "resolution": 1024
+    }
+  },
+  "no_growth": true
+}
