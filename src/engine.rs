@@ -342,7 +342,7 @@ fn term_id<'c>(
     relation_context: Option<RelationEvalContext<'c>>,
 ) -> Result<&'c str, EvalError> {
     relation_context
-        .map(|context| context.id_of(term))
+        .and_then(|context| context.id_of(term))
         .ok_or_else(|| relation_role_outside_derived_relation(term, name))
 }
 
@@ -650,11 +650,18 @@ pub(crate) struct EvaluatedTraceInstance {
 /// extend this environment with a borrowed chain of frames; unqualified
 /// routing never reads them.
 #[derive(Clone, Copy)]
+struct VariableFrame<'a> {
+    id: &'a str,
+    parent: Option<&'a VariableFrame<'a>>,
+}
+
+#[derive(Clone, Copy)]
 struct RelationEvalContext<'a> {
     current_id: &'a str,
     related_id: &'a str,
-    current_entity: Option<&'a str>,
-    related_entity: Option<&'a str>,
+    current_entity: Option<&'a String>,
+    related_entity: Option<&'a String>,
+    variables: Option<&'a VariableFrame<'a>>,
 }
 
 impl<'a> RelationEvalContext<'a> {
@@ -663,23 +670,30 @@ impl<'a> RelationEvalContext<'a> {
     /// related slot has it, else none (the caller falls back to the id the
     /// predicate is evaluated on, the candidate).
     fn entity_id_for(self, entity: &str) -> Option<&'a str> {
-        if self.current_entity == Some(entity) {
+        if self.current_entity.is_some_and(|kind| kind == entity) {
             return Some(self.current_id);
         }
-        if self.related_entity == Some(entity) {
+        if self.related_entity.is_some_and(|kind| kind == entity) {
             return Some(self.related_id);
         }
         None
     }
 
     /// The id `term` names.
-    fn id_of(self, term: Term) -> &'a str {
+    fn id_of(self, term: Term) -> Option<&'a str> {
         match term {
-            Term::Anchor => self.current_id,
-            Term::Candidate => self.related_id,
-            Term::Var(_) => unreachable!("exists variable evaluation is added in the next step"),
+            Term::Anchor => Some(self.current_id),
+            Term::Candidate => Some(self.related_id),
+            Term::Var(mut index) => {
+                let mut frame = self.variables?;
+                while index > 0 {
+                    frame = frame.parent?;
+                    index -= 1;
+                }
+                Some(frame.id)
+            }
             #[cfg(test)]
-            Term::Id(id) => id,
+            Term::Id(id) => Some(id),
         }
     }
 }
@@ -688,6 +702,7 @@ pub struct Engine<'a> {
     program: &'a Program,
     input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>>,
     relation_index: HashMap<(String, usize, String), Vec<&'a crate::model::RelationRecord>>,
+    relation_records: HashMap<String, Vec<&'a crate::model::RelationRecord>>,
     scalar_cache: HashMap<CacheKey, ScalarValue>,
     /// Pre-rounding value of a currency rule whose declared rounding changed it,
     /// keyed like `scalar_cache`. Only populated when rounding actually moved
@@ -731,6 +746,9 @@ pub struct Engine<'a> {
     /// How far each aggregation over related entities has got in the
     /// current drive (see [`Step`]).
     folds: HashMap<Step, Progress<FoldResume, Fold>>,
+    exists: HashMap<ExistsKey, Progress<ExistsResume, JudgmentOutcome>>,
+    #[cfg(test)]
+    exists_coverage: ExistsCoverage,
     /// How far each resolution of a relation's members has got in the current
     /// drive (see [`Step`]).
     #[cfg(test)]
@@ -741,6 +759,8 @@ pub struct Engine<'a> {
     /// relation tuples read since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
+    #[cfg(test)]
+    maximum_depth: usize,
 }
 
 /// A loop over data that a deferral can interrupt: an aggregation (`count`,
@@ -787,6 +807,37 @@ enum Site {
         current_slot: usize,
         related_slot: usize,
     },
+}
+
+/// Each binding environment gets its own resumable disjunction. The owner
+/// separates relation-effect captures even when they share a parent rule.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExistsKey {
+    node: usize,
+    anchor: String,
+    candidate: String,
+    variables: Vec<String>,
+    period: Period,
+    parent: Option<CacheKey>,
+    owner: Option<DerivedMembersKey>,
+}
+
+#[derive(Debug)]
+struct ExistsResume {
+    domain: Vec<String>,
+    next: usize,
+    saw_undetermined: bool,
+}
+
+/// Incremented after the claimed work occurs, not on entry to an arm.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ExistsCoverage {
+    resumed: usize,
+    early_stop: usize,
+    empty: usize,
+    nonempty: usize,
+    nested: usize,
 }
 
 /// A loop's progress in the current drive.
@@ -957,6 +1008,8 @@ impl<'a> Engine<'a> {
             (String, usize, String),
             Vec<&'a crate::model::RelationRecord>,
         > = HashMap::new();
+        let mut relation_records: HashMap<String, Vec<&'a crate::model::RelationRecord>> =
+            HashMap::new();
         let uses_relation_roles = program.uses_relation_roles();
         for record in &data.relations {
             // Binding refuses these records. Low-level Rust callers skip
@@ -970,6 +1023,16 @@ impl<'a> Engine<'a> {
             {
                 continue;
             }
+            if program
+                .relations
+                .get(&record.name)
+                .is_some_and(|schema| schema.arity == 1)
+            {
+                relation_records
+                    .entry(record.name.clone())
+                    .or_default()
+                    .push(record);
+            }
             for (slot, value) in record.tuple.iter().enumerate() {
                 relation_index
                     .entry((record.name.clone(), slot, value.clone()))
@@ -982,6 +1045,7 @@ impl<'a> Engine<'a> {
             program,
             input_index,
             relation_index,
+            relation_records,
             scalar_cache: HashMap::new(),
             pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
@@ -1003,11 +1067,16 @@ impl<'a> Engine<'a> {
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             folds: HashMap::new(),
+            exists: HashMap::new(),
+            #[cfg(test)]
+            exists_coverage: ExistsCoverage::default(),
             #[cfg(test)]
             members: HashMap::new(),
             #[cfg(test)]
             recursive_relation_oracle: false,
             visits: 0,
+            #[cfg(test)]
+            maximum_depth: 0,
         }
     }
 
@@ -1055,8 +1124,16 @@ impl<'a> Engine<'a> {
                     .values()
                     .all(|progress| matches!(progress, Progress::Done(_)))
         );
+        debug_assert!(
+            result.is_err()
+                || self
+                    .exists
+                    .values()
+                    .all(|progress| matches!(progress, Progress::Done(_)))
+        );
         debug_assert!(self.member_captures.is_empty());
         self.folds.clear();
+        self.exists.clear();
         self.pending_members.clear();
         self.member_chains.clear();
         #[cfg(test)]
@@ -1113,6 +1190,10 @@ impl<'a> Engine<'a> {
     fn nested<T>(&mut self, evaluate: impl FnOnce(&mut Self) -> Eval<T>) -> Eval<T> {
         self.visits += 1;
         self.depth += 1;
+        #[cfg(test)]
+        {
+            self.maximum_depth = self.maximum_depth.max(self.depth);
+        }
         let result = evaluate(self);
         self.depth -= 1;
         result
@@ -1400,10 +1481,7 @@ impl<'a> Engine<'a> {
             JudgmentExpr::RelationAtom { relation, terms } => {
                 self.atom_judgment(relation, terms, period, relation_context)
             }
-            JudgmentExpr::Exists { .. } => Err(EvalError::TypeMismatch(
-                "exists evaluation is added in the next step".to_string(),
-            )
-            .into()),
+            JudgmentExpr::Exists { .. } => self.exists_judgment(expr, period, relation_context),
             JudgmentExpr::SameEntity {
                 left,
                 right,
@@ -1427,13 +1505,225 @@ impl<'a> Engine<'a> {
             .ok_or_else(|| relation_construct_outside_derived_relation("relation atom"))?;
         let ids = terms
             .iter()
-            .map(|term| context.id_of(*term))
-            .collect::<Vec<_>>();
+            .map(|term| term_id(*term, relation, Some(context)))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(if self.relation_atom_contains(relation, &ids, period)? {
             JudgmentOutcome::Holds
         } else {
             JudgmentOutcome::NotHolds
         })
+    }
+
+    /// Evaluate the finite, sorted disjunction represented by an `exists`.
+    /// Keep this frame outside `judgment_node`, whose stack size affects every
+    /// legacy relation predicate as well.
+    #[inline(never)]
+    fn exists_judgment(
+        &mut self,
+        node: &'a JudgmentExpr,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let JudgmentExpr::Exists {
+            relation,
+            terms,
+            variable_slot,
+            body,
+        } = node
+        else {
+            unreachable!("only exists nodes reach this helper");
+        };
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("exists"))?;
+        let mut variables = Vec::new();
+        let mut frame = context.variables;
+        while let Some(bound) = frame {
+            variables.push(bound.id.to_string());
+            frame = bound.parent;
+        }
+        let key = ExistsKey {
+            node: std::ptr::from_ref(node) as usize,
+            anchor: context.current_id.to_string(),
+            candidate: context.related_id.to_string(),
+            variables,
+            period: period.clone(),
+            parent: self.active_evaluations.last().cloned(),
+            owner: self.member_captures.last().and_then(|(owner, depth, _)| {
+                (*depth == self.active_evaluations.len()).then(|| owner.clone())
+            }),
+        };
+        #[cfg(test)]
+        let mut resumed = false;
+        let ExistsResume {
+            domain,
+            mut next,
+            mut saw_undetermined,
+        } = match self.exists.remove(&key) {
+            Some(Progress::Done(outcome)) => {
+                self.exists.insert(key, Progress::Done(outcome));
+                return Ok(outcome);
+            }
+            Some(Progress::Pending(resume)) => {
+                #[cfg(test)]
+                {
+                    resumed = true;
+                }
+                resume
+            }
+            None => {
+                let domain =
+                    self.exists_domain(relation, terms, *variable_slot, period, context)?;
+                #[cfg(test)]
+                if domain.is_empty() {
+                    self.exists_coverage.empty += 1;
+                } else {
+                    self.exists_coverage.nonempty += 1;
+                }
+                ExistsResume {
+                    domain,
+                    next: 0,
+                    saw_undetermined: false,
+                }
+            }
+        };
+        while let Some(id) = domain.get(next) {
+            self.visits += 1;
+            let bound = VariableFrame {
+                id,
+                parent: context.variables,
+            };
+            let bound_context = RelationEvalContext {
+                variables: Some(&bound),
+                ..context
+            };
+            let evaluated = self.eval_judgment_expr_inner(
+                body,
+                context.related_id,
+                period,
+                Some(bound_context),
+            );
+            #[cfg(test)]
+            {
+                // Count a resumed site only after its bound body actually ran.
+                self.exists_coverage.resumed += usize::from(resumed);
+                resumed = false;
+                self.exists_coverage.nested += usize::from(context.variables.is_some());
+            }
+            match evaluated {
+                Ok(JudgmentOutcome::Holds) => {
+                    for skipped in &domain[next + 1..] {
+                        let bound = VariableFrame {
+                            id: skipped,
+                            parent: context.variables,
+                        };
+                        self.record_skipped_judgment_dependencies(
+                            body,
+                            context.related_id,
+                            period,
+                            Some(RelationEvalContext {
+                                variables: Some(&bound),
+                                ..context
+                            }),
+                            TraceSkipReason::ShortCircuit,
+                        );
+                    }
+                    #[cfg(test)]
+                    {
+                        self.exists_coverage.early_stop += usize::from(next + 1 < domain.len());
+                    }
+                    self.exists
+                        .insert(key, Progress::Done(JudgmentOutcome::Holds));
+                    return Ok(JudgmentOutcome::Holds);
+                }
+                Ok(JudgmentOutcome::NotHolds) => {}
+                Ok(JudgmentOutcome::Undetermined) => saw_undetermined = true,
+                Err(interrupt)
+                    if self.suspended_on.is_some() || matches!(interrupt, Interrupt::Defer(_)) =>
+                {
+                    self.exists.insert(
+                        key,
+                        Progress::Pending(ExistsResume {
+                            domain,
+                            next,
+                            saw_undetermined,
+                        }),
+                    );
+                    return Err(interrupt);
+                }
+                Err(error) => return Err(error),
+            }
+            next += 1;
+        }
+        let outcome = if saw_undetermined {
+            JudgmentOutcome::Undetermined
+        } else {
+            JudgmentOutcome::NotHolds
+        };
+        self.exists.insert(key, Progress::Done(outcome));
+        Ok(outcome)
+    }
+
+    /// A data domain uses its lowest bound slot's existing tuple index; a
+    /// unary generator, which has no bound slots, reads its relation's tuples.
+    /// Derived domains read forward members, never supplied derived tuples.
+    fn exists_domain(
+        &mut self,
+        relation: &str,
+        terms: &[Term],
+        variable_slot: usize,
+        period: &Period,
+        context: RelationEvalContext<'_>,
+    ) -> Eval<Vec<String>> {
+        let schema = self
+            .program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        if terms.len() != schema.arity || variable_slot >= schema.arity {
+            return Err(EvalError::TypeMismatch(format!(
+                "exists generator `{relation}` has invalid arity or variable slot"
+            ))
+            .into());
+        }
+        if let Some(derivation) = &schema.derivation {
+            if schema.arity != 2 || variable_slot != derivation.related_slot {
+                return Err(EvalError::TypeMismatch(format!("inverse_derived_traversal_unsupported: exists generator `{relation}` must bind its binary derived relation's related slot")).into());
+            }
+            let anchor = term_id(terms[derivation.current_slot], relation, Some(context))?;
+            return self.related_entity_ids(
+                relation,
+                derivation.current_slot,
+                derivation.related_slot,
+                anchor,
+                period,
+            );
+        }
+        let bound = terms
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != variable_slot)
+            .map(|(slot, term)| Ok((slot, term_id(*term, relation, Some(context))?)))
+            .collect::<Result<Vec<_>, EvalError>>()?;
+        let records = if let Some((slot, id)) = bound.first() {
+            self.relation_index
+                .get(&(relation.to_string(), *slot, (*id).to_string()))
+        } else {
+            self.relation_records.get(relation)
+        }
+        .map_or(&[][..], Vec::as_slice);
+        self.visits += records.len();
+        let mut domain = records
+            .iter()
+            .filter(|record| {
+                record.tuple.len() == terms.len()
+                    && record.interval.contains_period(period)
+                    && bound.iter().all(|(slot, id)| record.tuple[*slot] == *id)
+            })
+            .map(|record| record.tuple[variable_slot].clone())
+            .collect::<Vec<_>>();
+        domain.sort();
+        domain.dedup();
+        Ok(domain)
     }
 
     fn same_entity_judgment(
@@ -1446,7 +1736,10 @@ impl<'a> Engine<'a> {
         let context = relation_context
             .ok_or_else(|| relation_construct_outside_derived_relation("term comparison"))?;
         Ok(
-            if (context.id_of(left) == context.id_of(right)) != negated {
+            if (term_id(left, "term comparison", Some(context))?
+                == term_id(right, "term comparison", Some(context))?)
+                != negated
+            {
                 JudgmentOutcome::Holds
             } else {
                 JudgmentOutcome::NotHolds
@@ -1676,7 +1969,10 @@ impl<'a> Engine<'a> {
                     let Some(context) = relation_context else {
                         continue;
                     };
-                    (name, context.id_of(term).to_string())
+                    let Some(id) = context.id_of(term) else {
+                        continue;
+                    };
+                    (name, id.to_string())
                 }
             };
             self.record_skipped_dependency(SkippedTraceDependency::Derived {
@@ -2707,14 +3003,9 @@ impl<'a> Engine<'a> {
                 let context = RelationEvalContext {
                     current_id: entity_id,
                     related_id,
-                    current_entity: derivation
-                        .slot_entities
-                        .get(derivation.current_slot)
-                        .map(String::as_str),
-                    related_entity: derivation
-                        .slot_entities
-                        .get(derivation.related_slot)
-                        .map(String::as_str),
+                    current_entity: derivation.slot_entities.get(derivation.current_slot),
+                    related_entity: derivation.slot_entities.get(derivation.related_slot),
+                    variables: None,
                 };
                 match self.eval_judgment_expr_inner(
                     &derivation.predicate,
@@ -3172,14 +3463,8 @@ impl<'a> Engine<'a> {
         } = pending;
         self.member_captures
             .push((level.clone(), self.active_evaluations.len(), effects));
-        let current_entity = derivation
-            .slot_entities
-            .get(derivation.current_slot)
-            .map(String::as_str);
-        let related_entity = derivation
-            .slot_entities
-            .get(derivation.related_slot)
-            .map(String::as_str);
+        let current_entity = derivation.slot_entities.get(derivation.current_slot);
+        let related_entity = derivation.slot_entities.get(derivation.related_slot);
         let mut failure = None;
         for (index, candidate) in candidates.iter().enumerate().skip(next) {
             let context = RelationEvalContext {
@@ -3187,6 +3472,7 @@ impl<'a> Engine<'a> {
                 related_id: candidate,
                 current_entity,
                 related_entity,
+                variables: None,
             };
             match self.eval_judgment_expr_inner(
                 &derivation.predicate,
@@ -3447,12 +3733,28 @@ fn collect_judgment_trace_references(
         JudgmentExpr::RoleDerived { term, name } => {
             derived.push(TraceReference::Term(*term, name.clone()));
         }
+        JudgmentExpr::Exists { body, .. } => {
+            // No domain is evaluated on a skipped path. This binder has no
+            // id; outer frames remain available after removing its index.
+            let mut body_references = Vec::new();
+            collect_judgment_trace_references(body, &mut body_references, parameters);
+            derived.extend(
+                body_references
+                    .into_iter()
+                    .filter_map(|reference| match reference {
+                        TraceReference::Term(Term::Var(0), _) => None,
+                        TraceReference::Term(Term::Var(index), name) => {
+                            Some(TraceReference::Term(Term::Var(index - 1), name))
+                        }
+                        reference => Some(reference),
+                    }),
+            );
+        }
         // Relation membership contributes no rule or parameter dependency.
         // A comparison reads only the ids already in the binding context.
         JudgmentExpr::RelationMember { .. }
         | JudgmentExpr::RelationAtom { .. }
-        | JudgmentExpr::SameEntity { .. }
-        | JudgmentExpr::Exists { .. } => {}
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_trace_references(item, derived, parameters);

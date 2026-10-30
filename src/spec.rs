@@ -68,7 +68,7 @@ pub enum SpecError {
     )]
     SuppliedTuplesForDerivedRelation { relation: String },
     #[error(
-        "lenient_binding_with_relation_roles: a program using relation atoms requires strict relation binding"
+        "lenient_binding_with_relation_roles: a program using relation atoms or exists requires strict relation binding"
     )]
     LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
