@@ -488,11 +488,12 @@ over determined ids, which #215 section 7 shows sound.
     gets the skip records that the body's reads at that id would produce. This
     matches the trace of the written-out disjunction.
 - **Cost.** An atom on a derived relation computes that relation's members for
-  another anchor. Members are not cached between drives
-  (`Engine::drive` clears them), so a household predicate with an `exists`
-  over co-residents and a derived atom inside costs about O(n³) for n
-  co-residents per anchor, inside the #240/#245 bounds. #211's member cache
-  reduces this. An `exists` whose result depends only on the anchor, such as
+  another anchor. The engine keeps each anchor's members for its lifetime
+  (`Engine::drive` leaves `derived_members` in place) and tests an atom by
+  binary search. A household predicate with an `exists` over co-residents and
+  a derived atom inside so costs about O(n² log n) for n co-residents per
+  anchor, plus one members resolution per co-resident, inside the #240/#245
+  bounds. An `exists` whose result depends only on the anchor, such as
   section 8's guard, is evaluated again for every candidate. That is because
   its resume key includes the candidate (3.6).
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails

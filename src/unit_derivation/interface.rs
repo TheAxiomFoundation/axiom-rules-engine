@@ -107,7 +107,7 @@ impl<'a> PhaseTwoEngine<'a> {
         let mut reasons = BTreeSet::new();
         self.collect_derived_reduction_reasons(
             derived_name,
-            entity_id,
+            Some(entity_id),
             period,
             &mut ReductionReasonTraversal::default(),
             &mut reasons,
@@ -120,10 +120,16 @@ impl<'a> PhaseTwoEngine<'a> {
             .map(CompleteReduction::Determined)
     }
 
+    /// `entity_id` names the entity an expression evaluates at. `None` marks
+    /// a read this structural walk cannot place: at a fold's related entities
+    /// or in a relation predicate, the only home of term reads, atoms and
+    /// `exists`. A relation read there counts every unresolved tuple, so an
+    /// unknown at any entity keeps the answer indeterminate, even when it
+    /// would not change it.
     fn collect_derived_reduction_reasons(
         &self,
         name: &str,
-        entity_id: &str,
+        entity_id: Option<&str>,
         period: &crate::model::Period,
         visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
@@ -147,7 +153,7 @@ impl<'a> PhaseTwoEngine<'a> {
     fn collect_scalar_reduction_reasons(
         &self,
         expr: &crate::model::ScalarExpr,
-        entity_id: &str,
+        entity_id: Option<&str>,
         period: &crate::model::Period,
         visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
@@ -200,8 +206,7 @@ impl<'a> PhaseTwoEngine<'a> {
             } => {
                 self.collect_relation_reasons(
                     relation,
-                    *current_slot,
-                    entity_id,
+                    entity_id.map(|id| (*current_slot, id)),
                     period,
                     visiting,
                     reasons,
@@ -233,16 +238,21 @@ impl<'a> PhaseTwoEngine<'a> {
             } => {
                 self.collect_relation_reasons(
                     relation,
-                    *current_slot,
-                    entity_id,
+                    entity_id.map(|id| (*current_slot, id)),
                     period,
                     visiting,
                     reasons,
                 );
                 if let Some(predicate) = where_clause {
                     self.collect_judgment_reduction_reasons(
-                        predicate, entity_id, period, visiting, reasons,
+                        predicate, None, period, visiting, reasons,
                     );
+                }
+                if let ScalarExpr::SumRelated { value, .. }
+                | ScalarExpr::ExtremeRelated { value, .. }
+                | ScalarExpr::SingleRelated { value, .. } = expr
+                {
+                    self.collect_related_value_reasons(value, period, visiting, reasons);
                 }
             }
             ScalarExpr::If {
@@ -286,10 +296,23 @@ impl<'a> PhaseTwoEngine<'a> {
         }
     }
 
+    /// A fold reads `value` at each related entity.
+    fn collect_related_value_reasons(
+        &self,
+        value: &crate::model::RelatedValueRef,
+        period: &crate::model::Period,
+        visiting: &mut ReductionReasonTraversal,
+        reasons: &mut BTreeSet<String>,
+    ) {
+        if let crate::model::RelatedValueRef::Derived(name) = value {
+            self.collect_derived_reduction_reasons(name, None, period, visiting, reasons);
+        }
+    }
+
     fn collect_judgment_reduction_reasons(
         &self,
         expr: &crate::model::JudgmentExpr,
-        entity_id: &str,
+        entity_id: Option<&str>,
         period: &crate::model::Period,
         visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
@@ -319,60 +342,31 @@ impl<'a> PhaseTwoEngine<'a> {
                 ..
             } => self.collect_relation_reasons(
                 relation,
-                *current_slot,
-                entity_id,
+                entity_id.map(|id| (*current_slot, id)),
                 period,
                 visiting,
                 reasons,
             ),
+            // This structural preflight has no predicate bindings, so it cannot
+            // place an atom's arguments or anything an `exists` binds.
             JudgmentExpr::RelationAtom { relation, .. } | JudgmentExpr::Exists { relation, .. } => {
                 if let JudgmentExpr::Exists { body, .. } = expr {
                     self.collect_judgment_reduction_reasons(
                         body, entity_id, period, visiting, reasons,
                     );
                 }
-                // This structural preflight has no predicate bindings, so
-                // inspect every unresolved tuple of the atom's relation.
-                // Its argument order must not hide a relation dependency.
-                for record in self.relation_knowledge.iter().filter(|record| {
-                    record.name == *relation && record.interval.contains_period(period)
-                }) {
-                    match &record.truth {
-                        LiftedTruth::Unknown {
-                            reasons: unresolved,
-                        }
-                        | LiftedTruth::Conflict {
-                            reasons: unresolved,
-                        } => {
-                            reasons.extend(unresolved.iter().cloned());
-                        }
-                        LiftedTruth::Holds | LiftedTruth::DoesNotHold => {}
-                    }
-                }
-                let current_slot = self
-                    .program
-                    .relations
-                    .get(relation)
-                    .and_then(|schema| schema.derivation.as_ref())
-                    .map_or(0, |derivation| derivation.current_slot);
-                self.collect_relation_reasons(
-                    relation,
-                    current_slot,
-                    entity_id,
-                    period,
-                    visiting,
-                    reasons,
-                );
+                self.collect_relation_reasons(relation, None, period, visiting, reasons);
             }
             JudgmentExpr::SameEntity { .. } => {}
         }
     }
 
+    /// `read_at` is the argument a read fixes and its entity, when the walk
+    /// can place the read.
     fn collect_relation_reasons(
         &self,
         relation: &str,
-        current_slot: usize,
-        entity_id: &str,
+        read_at: Option<(usize, &str)>,
         period: &crate::model::Period,
         visiting: &mut ReductionReasonTraversal,
         reasons: &mut BTreeSet<String>,
@@ -383,10 +377,9 @@ impl<'a> PhaseTwoEngine<'a> {
         for record in self.relation_knowledge.iter().filter(|record| {
             record.name == relation
                 && record.interval.contains_period(period)
-                && record
-                    .tuple
-                    .get(current_slot)
-                    .is_some_and(|id| id == entity_id)
+                && read_at.is_none_or(|(slot, entity_id)| {
+                    record.tuple.get(slot).is_some_and(|id| id == entity_id)
+                })
         }) {
             match &record.truth {
                 LiftedTruth::Unknown {
@@ -406,15 +399,14 @@ impl<'a> PhaseTwoEngine<'a> {
         {
             self.collect_relation_reasons(
                 &derivation.source_relation,
-                derivation.current_slot,
-                entity_id,
+                read_at.map(|(_, entity_id)| (derivation.current_slot, entity_id)),
                 period,
                 visiting,
                 reasons,
             );
             self.collect_judgment_reduction_reasons(
                 &derivation.predicate,
-                entity_id,
+                None,
                 period,
                 visiting,
                 reasons,
