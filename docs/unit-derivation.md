@@ -567,9 +567,8 @@ supplied-wins or derived-wins are both rejected.
   relation's sources, so a fact that would not change the answer can still
   hold it Indeterminate. The constitution path requires the lifted
   semantics. Direct records supplied under a derived relation's own name —
-  accepted and
-  unioned by the current engine — are likewise excluded from the
-  constitution path outside the shadow channel.
+  accepted and unioned by the current engine — are likewise excluded from
+  the constitution path outside the shadow channel.
 
 ## 9. Authoring surface (illustrative only)
 
