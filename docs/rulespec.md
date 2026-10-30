@@ -414,9 +414,11 @@ another term's `.`) is refused with `relation_term_used_as_value`. A whole
 predicate that is arithmetic refuses before lowering looks at its operands:
 `anchor + candidate` reports `binary op Add in judgment position`, and
 `-anchor` reports `unary op in judgment position`. In a value position,
-lowering takes an operator's operands first, so `(anchor and candidate) == 1`
-reports `relation_term_used_as_value`. A read through a term may not appear
-in an aggregation's `where` clause or aggregated value (`count`, `sum`, `min`,
+lowering takes a binary operator's or a negation's operands first, so
+`(anchor and candidate) == 1` and `(-anchor) == 1` report
+`relation_term_used_as_value`, but `not` refuses before lowering looks at its
+operand: `(not anchor) == 1` reports `` `not` in scalar position ``. A read
+through a term may not appear in an aggregation's `where` clause or aggregated value (`count`, `sum`, `min`,
 `max`, `only` and their `_where` forms, and `only_related`), which have no
 relation context (`relation_role_outside_scope`). Because `anchor` and
 `candidate` name terms, not relations, `min(candidate.age)` and
