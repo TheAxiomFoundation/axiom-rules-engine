@@ -686,6 +686,12 @@ fn relation_atom_unsupported(relation: &str) -> DenseCompileError {
     ))
 }
 
+fn exists_unsupported() -> DenseCompileError {
+    DenseCompileError::Unsupported(
+        "bounded exists is not supported in dense execution (#218)".to_string(),
+    )
+}
+
 fn term_comparison_unsupported() -> DenseCompileError {
     DenseCompileError::Unsupported(
         "a term comparison in a derived relation's predicate; term comparisons run in explain and fast modes, and dense support is #218".to_string(),
@@ -2263,6 +2269,7 @@ impl<'a> DenseCompiler<'a> {
             JudgmentExpr::RelationAtom { relation, .. } => {
                 Err(relation_atom_unsupported(relation).into())
             }
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported().into()),
             JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported().into()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_scalar_expr(derived_name, left)?,
@@ -2323,6 +2330,7 @@ impl<'a> DenseCompiler<'a> {
         match expr {
             JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
             JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported()),
             JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => {
                 Ok(CompiledRelatedJudgmentExpr::Comparison {
@@ -2877,6 +2885,7 @@ impl<'a> DenseCompiler<'a> {
         match expr {
             JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
             JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported()),
             JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_current_scalar_expr(derived_name, entity, left)?,

@@ -1507,7 +1507,7 @@ impl EvidenceCollector<'_> {
                     self.judgment(item, entity, slots);
                 }
             }
-            JudgmentExpr::Not(item) => self.judgment(item, entity, slots),
+            JudgmentExpr::Not(item) | JudgmentExpr::Exists { body: item, .. } => self.judgment(item, entity, slots),
             JudgmentExpr::Derived(_)
             | JudgmentExpr::RoleDerived { .. }
             | JudgmentExpr::RelationMember { .. }

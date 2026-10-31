@@ -1792,6 +1792,39 @@
           "type": "object"
         },
         {
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/JudgmentExprSpec"
+            },
+            "kind": {
+              "const": "exists",
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "terms": {
+              "items": {
+                "$ref": "#/$defs/TermSpec"
+              },
+              "type": "array"
+            },
+            "variable_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "terms",
+            "variable_slot",
+            "body"
+          ],
+          "type": "object"
+        },
+        {
           "description": "Compare term ids; both terms must have the same entity kind.",
           "properties": {
             "kind": {
@@ -3406,7 +3439,7 @@
       "type": "object"
     },
     "TermSpec": {
-      "description": "An end of the pair a derived relation's predicate tests, mirroring\n[`crate::model::Term`].",
+      "description": "An entity id in a derived relation's predicate, mirroring\n[`crate::model::Term`].",
       "oneOf": [
         {
           "const": "anchor",
@@ -3417,6 +3450,21 @@
           "const": "candidate",
           "description": "The id being tested: its related slot.",
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Index counted from the innermost enclosing `exists`.",
+          "properties": {
+            "var": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "var"
+          ],
+          "type": "object"
         }
       ]
     },

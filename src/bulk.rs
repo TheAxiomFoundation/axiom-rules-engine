@@ -528,6 +528,7 @@ fn outside_derived_relation(expr: &JudgmentExpr) -> EvalError {
         JudgmentExpr::RelationAtom { .. } => {
             relation_construct_outside_derived_relation("relation atom")
         }
+        JudgmentExpr::Exists { .. } => relation_construct_outside_derived_relation("exists"),
         JudgmentExpr::SameEntity { .. } => {
             relation_construct_outside_derived_relation("term comparison")
         }
@@ -1197,6 +1198,7 @@ impl<'a> BulkEvaluator<'a> {
             JudgmentExpr::RelationMember { .. }
             | JudgmentExpr::RoleDerived { .. }
             | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::Exists { .. }
             | JudgmentExpr::SameEntity { .. } => {
                 let (_, errors) = self.fail_all(mask, outside_derived_relation(expr));
                 Ok((vec![JudgmentOutcome::NotHolds; len], errors))

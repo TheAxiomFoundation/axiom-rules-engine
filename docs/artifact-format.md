@@ -414,8 +414,8 @@ One entry per `program.relations` entry, with its name, arity and effective
 slot kinds. `slot_entities` is null only for a relation that declares none,
 which relation typing allows only when nothing executes it.
 
-`lookup_slots` is the set of slots that aggregates, membership tests and atoms
-in the program key on, with a derived relation's traversal of its source
+`lookup_slots` is the set of slots that aggregates, membership tests, atoms
+and `exists` generators in the program key on, with a derived relation's traversal of its source
 counted against the source. It is empty when no expression uses the relation.
 It records direction of traversal and nothing about cardinality.
 
@@ -424,8 +424,15 @@ atom on a derived relation records its current slot, as a membership test
 does: it resolves that term's members and tests the related term against
 them. A term comparison adds no lookup, input read or relation read.
 
+An `exists` generator adds its relation to `reads.relations`. A data
+generator lists its bound slots in `lookup_slots` (every slot except
+`variable_slot`); a unary generator has no bound slot. A derived generator
+lists only its current slot. Body reads through a variable carry the kind
+of its generator's variable slot, including reads of enclosing variables
+inside another `exists` (`tests/relation_exists_interface.rs`).
+
 `accepts_supplied_tuples` is false for every derived relation in a program
-using qualified reads, relation atoms or term comparisons; otherwise it is
+using qualified reads, relation atoms, term comparisons or `exists`; otherwise it is
 true. This is a program-wide restriction, including derived relations whose
 own predicates use none of those constructs. A parameter read in a predicate
 does not count: raw `ProgramSpec` predicates could always look up parameters.
@@ -450,6 +457,23 @@ format-3 artifacts from programs using only qualified reads must be
 recompiled: the loader now expects that derived-relation interface field to be
 false. Programs using none of these constructs, including programs whose
 predicates only read parameters, derive the same interface as before.
+
+`exists` adds the judgment form
+`{kind: exists, relation: R, terms: [anchor, {var: 0}], variable_slot: 1,
+body: ...}` to format 3. Terms retain the strings `anchor` and `candidate`;
+`{var: n}` names the n-th enclosing variable, counted from the innermost
+binding at zero. Generator terms are interpreted in the enclosing scope,
+except `terms[variable_slot]`, which must be `{var: 0}` and marks the slot
+to enumerate. The body introduces the new zero-indexed variable. Thus
+`exists(R(anchor, p), exists(R(p, q), p == q))` writes both inner generator
+arguments as `{var: 0}`, but the inner comparison uses `{var: 1}` and
+`{var: 0}`. Compilation checks the marker, indices, kinds and forward
+direction for derived generators. Earlier engines refuse the unknown
+`exists` kind or variable term. Programs without `exists` keep their term
+encoding and interface. The expansion oracle's literal-id term exists only
+in Rust test builds: it has no spec or schema variant, and conversion to a
+serialized term refuses it (`variable_artifact_form_keeps_legacy_terms_and_round_trips`
+and `literal_ids_have_no_spec_or_artifact_representation`).
 
 ## In Rust
 

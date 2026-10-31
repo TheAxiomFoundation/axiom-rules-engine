@@ -581,6 +581,11 @@ impl Resolver<'_> {
                 self.atom_targets.insert(relation.clone());
                 self.uses_role_judgment = true;
             }
+            JudgmentExprSpec::Exists { relation, body, .. } => {
+                self.atom_targets.insert(relation.clone());
+                self.uses_role_judgment = true;
+                self.judgment(body, entity, membership)?;
+            }
             JudgmentExprSpec::SameEntity { .. } => self.uses_role_judgment = true,
             JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         }

@@ -68,7 +68,7 @@ pub enum SpecError {
     )]
     SuppliedTuplesForDerivedRelation { relation: String },
     #[error(
-        "lenient_binding_with_relation_roles: a program using relation atoms requires strict relation binding"
+        "lenient_binding_with_relation_roles: a program using relation atoms or exists requires strict relation binding"
     )]
     LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
@@ -1333,7 +1333,7 @@ pub enum ScalarExprSpec {
     },
 }
 
-/// An end of the pair a derived relation's predicate tests, mirroring
+/// An entity id in a derived relation's predicate, mirroring
 /// [`crate::model::Term`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1343,6 +1343,8 @@ pub enum TermSpec {
     Anchor,
     /// The id being tested: its related slot.
     Candidate,
+    /// Index counted from the innermost enclosing `exists`.
+    Var(usize),
 }
 
 impl TermSpec {
@@ -1350,6 +1352,7 @@ impl TermSpec {
         match self {
             Self::Anchor => Term::Anchor,
             Self::Candidate => Term::Candidate,
+            Self::Var(index) => Term::Var(index),
         }
     }
 
@@ -1357,6 +1360,9 @@ impl TermSpec {
         match term {
             Term::Anchor => Self::Anchor,
             Term::Candidate => Self::Candidate,
+            Term::Var(index) => Self::Var(index),
+            #[cfg(test)]
+            Term::Id(_) => panic!("test-only literal id terms cannot be serialized"),
         }
     }
 
@@ -1652,6 +1658,12 @@ pub enum JudgmentExprSpec {
         relation: String,
         terms: Vec<TermSpec>,
     },
+    Exists {
+        relation: String,
+        terms: Vec<TermSpec>,
+        variable_slot: usize,
+        body: Box<JudgmentExprSpec>,
+    },
     /// Compare term ids; both terms must have the same entity kind.
     SameEntity {
         left: TermSpec,
@@ -1700,6 +1712,17 @@ impl JudgmentExprSpec {
             Self::RelationAtom { relation, terms } => Ok(JudgmentExpr::RelationAtom {
                 relation: relation.clone(),
                 terms: terms.iter().map(|term| term.to_model()).collect(),
+            }),
+            Self::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => Ok(JudgmentExpr::Exists {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+                variable_slot: *variable_slot,
+                body: Box::new(body.to_model()?),
             }),
             Self::SameEntity {
                 left,
@@ -2044,5 +2067,14 @@ mod namespace_tests {
         let spec = program_with("derived", json!([derived.clone(), derived]));
 
         assert_collision(spec, "derived rule", "benefit");
+    }
+}
+
+#[cfg(test)]
+mod literal_id_term_tests {
+    #[test]
+    #[should_panic(expected = "test-only literal id terms cannot be serialized")]
+    fn literal_ids_have_no_spec_or_artifact_representation() {
+        super::TermSpec::from_model(crate::model::Term::Id("oracle-only"));
     }
 }

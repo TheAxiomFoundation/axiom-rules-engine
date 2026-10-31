@@ -422,9 +422,9 @@ fn collect_judgment_dependencies(
             dependencies.insert(name.clone());
         }
         JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
-        JudgmentExprSpec::RelationAtom { .. } => {
+        JudgmentExprSpec::RelationAtom { .. } | JudgmentExprSpec::Exists { .. } => {
             unreachable!(
-                "the evaluation-order generator builds no atoms; atom programs take the combined-graph order tested in tests/relation_atom_order.rs"
+                "the evaluation-order generator builds no atoms or exists; relation construct programs take the combined-graph order tested in tests/relation_atom_order.rs"
             )
         }
         JudgmentExprSpec::And { items }

@@ -99,14 +99,29 @@ output's formula is evaluated for that entity and period as follows.
   refuses these constructs outside the predicate's scope, including
   aggregation `where` clauses (`relation_role_outside_scope`).
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, relation atoms or term comparisons refuse tuples
+  using qualified reads, relation atoms, term comparisons or `exists` refuse tuples
   supplied under any derived relation's name
   (`supplied_tuples_for_derived_relation`), and their members resolver ignores
   those tuples even through `Engine::new`. Programs using none retain the
   union of supplied tuples and filtered source members; a parameter read in a
   predicate, which raw `ProgramSpec` could always express, is not one of these
-  constructs. An atom also refuses lenient request binding
+  constructs. An atom or `exists` also refuses lenient request binding
   (`lenient_binding_with_relation_roles`).
+- **`exists` evaluates a bounded disjunction.** In a derived relation's
+  predicate, `exists(R(anchor, p), body)` binds `p` to each distinct domain id
+  in sorted order. A data generator takes ids from tuples matching every
+  other argument and containing the whole period; it reads the tuple index
+  at the lowest-numbered bound slot, or all that relation's tuples for a
+  unary generator with no bound slot. A derived generator resolves members
+  for its current-slot term and can bind only its related slot. The body
+  holds for some id or the quantifier does not hold, including for an empty
+  domain. Evaluation stops at the first body that holds; a failure propagates
+  in domain order as from `or`. `not exists(G, not body)` expresses "for all"
+  and holds over an empty domain. Variables nest lexically and carry their
+  generator slot's kind. Unqualified reads retain anchor/candidate routing;
+  a variable is read through its term explicitly. Rules and aggregation
+  clauses or values have no variable bindings
+  (`relation_role_outside_scope`).
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -135,6 +150,21 @@ A rule pin (`CompiledExecutionRequest.pins`) rewrites the pinned rule to
 `if 0 == 0 then <literal> else <original formula>`. Under the reference
 semantics the original formula is never evaluated, so a pinned rule never needs
 the inputs its original formula reads. This holds in every mode.
+
+For reads through terms, explain records evaluated dependencies at the term's
+id. A skipped rule read through `anchor` or `candidate` is also recorded at
+that id. A skipped read through an enclosing `exists` variable is recorded
+at its bound id when that enclosing quantifier is being evaluated. A wholly
+skipped `exists` does not enumerate its domain: it records the body's
+anchor/candidate dependencies once and omits reads through its own variable,
+which has no bound id. Inside a running outer quantifier, a skipped nested
+`exists` still records reads through the outer variable. When an evaluated
+`exists` stops early, it records the body's skipped dependencies for each
+remaining domain id with that variable bound to that id. An evaluated
+`exists` with an empty domain evaluates no body and records no body
+dependencies. Thus expansion as a disjunction preserves values and failures,
+while the wholly skipped and empty
+domain cases have distinct trace rules.
 
 ## Fast mode contract
 
@@ -220,7 +250,7 @@ related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 
 A derived relation's predicate using a qualified read (`anchor.name`,
-`candidate.name`), relation atom or term comparison makes the dense compiler
+`candidate.name`), relation atom, term comparison or `exists` makes the dense compiler
 reject any root entity whose rules reach that relation with
 `DenseCompileError::Unsupported`, naming the construct and #218; a root that
 reaches no such relation compiles. Explain and fast evaluate it. Parameter
@@ -347,10 +377,19 @@ oracle. `tests/relation_chains.rs` checks a long counted-predicate chain in
 a long atom chain in
 `long_atom_dependency_chains_preserve_values_traces_and_suspend_depths`.
 
+An `exists` keeps its sorted domain, the next id to evaluate and the outcome
+accumulated so far across a suspension. Its progress key includes the node's
+address, the anchor id, the candidate id, every enclosing variable's id in
+order from innermost to outermost, the period, the parent rule evaluation and
+the enclosing member resolution that owns its trace effects. This separates, for example,
+`required_combination(p, candidate)` resolved for several values of `p` in
+one parent rule evaluation. A retry resumes the interrupted body at the same
+domain id; bodies before it retain their completed work.
+
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
-a `count` or `sum` over related entities, and the resolution of a relation's
-members, which tests a derived relation's predicate on each candidate. The
+a `count` or `sum` over related entities, an `exists` domain, and the resolution
+of a relation's members, which tests a derived relation's predicate on each candidate. The
 retry of the same rule evaluation resumes an interrupted loop at the member
 that deferred, and reuses a loop that had finished, so a household whose
 members each defer is not walked again for every member. A relation's own

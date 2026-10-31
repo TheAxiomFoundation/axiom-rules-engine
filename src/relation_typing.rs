@@ -59,6 +59,9 @@ pub enum RelationTypingCode {
     DerivedRelationAtomArityUnsupported,
     RelationNameShadowsBuiltin,
     RelationTermKindMismatch,
+    RelationVariableOutOfScope,
+    RelationExistsVariableCount,
+    InverseDerivedTraversalUnsupported,
 }
 
 impl RelationTypingCode {
@@ -86,6 +89,9 @@ impl RelationTypingCode {
             Self::DerivedRelationAtomArityUnsupported => "derived_relation_atom_arity_unsupported",
             Self::RelationNameShadowsBuiltin => "relation_name_shadows_builtin",
             Self::RelationTermKindMismatch => "relation_term_kind_mismatch",
+            Self::RelationVariableOutOfScope => "relation_variable_out_of_scope",
+            Self::RelationExistsVariableCount => "relation_exists_variable_count",
+            Self::InverseDerivedTraversalUnsupported => "inverse_derived_traversal_unsupported",
         }
     }
 }
@@ -1214,6 +1220,10 @@ impl<'a> Checker<'a> {
                 related_slot,
             } => self.membership(relation, *current_slot, *related_slot, context),
             JudgmentExpr::RelationAtom { relation, .. } => self.use_relation(relation),
+            JudgmentExpr::Exists { relation, body, .. } => {
+                self.use_relation(relation);
+                self.judgment(body, context);
+            }
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, context);
@@ -1289,76 +1299,51 @@ impl<'a> Checker<'a> {
                     );
                     continue;
                 }
-                let RoleConstruct::Read {
-                    term: read_term,
-                    name: read_name,
-                    rule: is_rule,
-                } = read.construct
-                else {
-                    self.role_judgment(name, derivation, read.construct);
-                    continue;
-                };
-                let term = read_term.as_str();
-                let slot = match read_term {
-                    Term::Anchor => derivation.current_slot,
-                    Term::Candidate => derivation.related_slot,
-                };
-                let Some(kind) = derivation.slot_entities.get(slot) else {
-                    self.push(
-                        RelationTypingCode::RelationRolesNeedSlotKinds,
-                        name,
-                        name,
-                        format!(
-                            "the predicate of derived relation `{name}` reads `{term}.{read_name}`, but the derivation declares no kind for slot {slot}, so `{term}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
-                        ),
-                    );
-                    continue;
-                };
-                if !is_rule {
-                    // Inputs have no declared kind, so an input read through a
-                    // term is not checked.
-                    continue;
-                }
-                let Some(rule) = program.derived.get(read_name) else {
-                    continue;
-                };
-                let entity = rule.entity.as_str();
-                if entity == kind || self.id_kind(entity) == kind {
-                    continue;
-                }
-                let detail = if entity == SCALAR_ENTITY {
-                    format!(
-                        "`{read_name}` has no entity (`{SCALAR_ENTITY}`), so it reads no id; read it unqualified"
-                    )
-                } else {
-                    "a rule read through a term must have that term's kind".to_string()
-                };
-                self.push(
-                    RelationTypingCode::RelationRoleEntityMismatch,
-                    name,
-                    name,
-                    format!(
-                        "the predicate of derived relation `{name}` reads `{term}.{read_name}`: `{read_name}` has entity `{entity}`, but `{term}` is a `{kind}` id (slot {slot}); {detail}"
-                    ),
-                );
+                self.role_construct(name, derivation, read.construct, &read.bindings);
             }
         }
     }
 
-    /// The slot kind of a term is always declared by the containing
-    /// derivation, never inferred from its source or from an atom.
-    fn term_kind<'d>(
+    /// A variable's kind comes from its generator slot; anchor and candidate
+    /// always use the containing derivation's explicit slot declarations.
+    fn term_kind(
         &mut self,
         citing: &str,
-        derivation: &'d RelationDerivation,
+        derivation: &RelationDerivation,
         term: Term,
-    ) -> Option<&'d str> {
+        bindings: &[(&str, usize)],
+    ) -> Option<String> {
         let slot = match term {
             Term::Anchor => derivation.current_slot,
             Term::Candidate => derivation.related_slot,
+            Term::Var(index) => {
+                let Some((relation, slot)) = bindings.iter().rev().nth(index) else {
+                    self.push(
+                        RelationTypingCode::RelationVariableOutOfScope,
+                        citing,
+                        citing,
+                        format!(
+                            "variable index {index} in `{citing}` has no enclosing exists binding"
+                        ),
+                    );
+                    return None;
+                };
+                return self.program.relations.get(*relation).and_then(|schema| {
+                    schema
+                        .derivation
+                        .as_ref()
+                        .filter(|derived| !derived.slot_entities.is_empty())
+                        .map(|derived| &derived.slot_entities)
+                        .unwrap_or(&schema.slot_entities)
+                        .get(*slot)
+                        .cloned()
+                });
+            }
+            #[cfg(test)]
+            Term::Id(_) => return None,
         };
         match derivation.slot_entities.get(slot) {
-            Some(kind) => Some(kind),
+            Some(kind) => Some(kind.clone()),
             None => {
                 self.push(
                     RelationTypingCode::RelationRolesNeedSlotKinds,
@@ -1374,92 +1359,70 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn role_judgment(
+    fn role_construct(
         &mut self,
         citing: &str,
         derivation: &RelationDerivation,
         construct: RoleConstruct<'_>,
+        bindings: &[(&str, usize)],
     ) {
         match construct {
             RoleConstruct::Atom { relation, terms } => {
-                let program = self.program;
-                let Some(schema) = program.relations.get(relation) else {
+                self.role_atom(citing, derivation, relation, terms, None, bindings);
+            }
+            RoleConstruct::Exists {
+                relation,
+                terms,
+                variable_slot,
+            } => {
+                if terms.get(variable_slot) != Some(&Term::Var(0)) {
                     self.push(
-                        RelationTypingCode::UnknownRelation,
-                        relation,
-                        citing,
-                        format!("`{citing}` uses an atom on undeclared relation `{relation}`"),
-                    );
-                    return;
-                };
-                let short_name = relation
-                    .rsplit_once("#relation.")
-                    .map_or(relation, |(_, short)| short);
-                if crate::formula::is_builtin_function(short_name) {
-                    self.push(
-                        RelationTypingCode::RelationNameShadowsBuiltin,
-                        relation,
-                        citing,
-                        format!("relation `{relation}` has a built-in function name and cannot be used as an atom"),
-                    );
-                }
-                if schema.derivation.is_some() && schema.arity != 2 {
-                    self.push(
-                        RelationTypingCode::DerivedRelationAtomArityUnsupported,
-                        relation,
-                        citing,
-                        format!("an atom on derived relation `{relation}` requires arity 2, but it declares {}", schema.arity),
-                    );
-                }
-                if terms.len() != schema.arity {
-                    self.push(
-                        RelationTypingCode::RelationAtomArityMismatch,
+                        RelationTypingCode::RelationExistsVariableCount,
                         relation,
                         citing,
                         format!(
-                            "atom `{relation}` has {} arguments but the relation has arity {}",
-                            terms.len(),
-                            schema.arity
+                            "exists generator `{relation}` must bind exactly one variable slot"
                         ),
                     );
                 }
-                // Atoms require an explicit kind declaration on the named
-                // relation; inheriting its source's kinds is insufficient.
-                let kinds = schema
-                    .derivation
-                    .as_ref()
-                    .filter(|derived| !derived.slot_entities.is_empty())
-                    .map(|derived| &derived.slot_entities)
-                    .unwrap_or(&schema.slot_entities);
-                if kinds.is_empty() {
+                if derivation.slot_entities.is_empty() {
                     self.push(
-                        RelationTypingCode::RelationAtomNeedsTypedRelation,
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        citing,
+                        citing,
+                        format!(
+                            "exists in `{citing}` requires declared derived_relation.slot_entities"
+                        ),
+                    );
+                }
+                if self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                    .is_some_and(|generator| variable_slot != generator.related_slot)
+                {
+                    self.push(
+                        RelationTypingCode::InverseDerivedTraversalUnsupported,
                         relation,
                         citing,
-                        format!("atom `{relation}` requires declared slot entity kinds"),
+                        format!(
+                            "exists cannot traverse derived relation `{relation}` backwards; bind its related slot"
+                        ),
                     );
-                } else {
-                    // Preserve the general checks for malformed/aliased slot
-                    // kinds as well as the atom's term-to-slot kind checks.
-                    self.typed_slots(relation, citing);
                 }
-                for (slot, term) in terms.iter().enumerate() {
-                    if let (Some(actual), Some(expected)) =
-                        (self.term_kind(citing, derivation, *term), kinds.get(slot))
-                        && actual != expected
-                    {
-                        self.push(
-                            RelationTypingCode::RelationAtomKindMismatch,
-                            relation,
-                            citing,
-                            format!("atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`", term.as_str()),
-                        );
-                    }
-                }
+                self.role_atom(
+                    citing,
+                    derivation,
+                    relation,
+                    terms,
+                    Some(variable_slot),
+                    bindings,
+                );
             }
             RoleConstruct::SameEntity { left, right } => {
-                let left_kind = self.term_kind(citing, derivation, left);
-                let right_kind = self.term_kind(citing, derivation, right);
+                let left_kind = self.term_kind(citing, derivation, left, bindings);
+                let right_kind = self.term_kind(citing, derivation, right, bindings);
                 if let (Some(left_kind), Some(right_kind)) = (left_kind, right_kind)
                     && left_kind != right_kind
                 {
@@ -1467,14 +1430,169 @@ impl<'a> Checker<'a> {
                         RelationTypingCode::RelationTermKindMismatch,
                         citing,
                         citing,
-                        format!("term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind", left.as_str(), right.as_str()),
+                        format!(
+                            "term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind",
+                            left.as_str(),
+                            right.as_str()
+                        ),
                     );
                 }
             }
-            RoleConstruct::Read { .. } => {
-                unreachable!("qualified reads are checked by relation_roles")
+            RoleConstruct::Read { term, name, rule } => {
+                let t = term.as_str();
+                let slot = term_slot(derivation, term);
+                if let Some(slot) = slot
+                    && derivation.slot_entities.get(slot).is_none()
+                {
+                    self.push(
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        citing,
+                        citing,
+                        format!(
+                            "the predicate of derived relation `{citing}` reads `{t}.{name}`, but the derivation declares no kind for slot {slot}, so `{t}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
+                        ),
+                    );
+                    return;
+                }
+                let Some(kind) = self.term_kind(citing, derivation, term, bindings) else {
+                    return;
+                };
+                if !rule {
+                    return;
+                }
+                let Some(derived) = self.program.derived.get(name) else {
+                    return;
+                };
+                let entity = derived.entity.as_str();
+                if entity == kind || self.id_kind(entity) == kind {
+                    return;
+                }
+                let detail = if entity == SCALAR_ENTITY {
+                    format!(
+                        "`{name}` has no entity (`{SCALAR_ENTITY}`), so it reads no id; read it unqualified"
+                    )
+                } else {
+                    "a rule read through a term must have that term's kind".to_string()
+                };
+                let at_slot = slot.map_or(String::new(), |slot| format!(" (slot {slot})"));
+                self.push(
+                    RelationTypingCode::RelationRoleEntityMismatch,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` reads `{t}.{name}`: `{name}` has entity `{entity}`, but `{t}` is a `{kind}` id{at_slot}; {detail}"
+                    ),
+                );
             }
         }
+    }
+
+    fn role_atom(
+        &mut self,
+        citing: &str,
+        derivation: &RelationDerivation,
+        relation: &str,
+        terms: &[Term],
+        variable_slot: Option<usize>,
+        bindings: &[(&str, usize)],
+    ) {
+        let program = self.program;
+        let Some(schema) = program.relations.get(relation) else {
+            self.push(
+                RelationTypingCode::UnknownRelation,
+                relation,
+                citing,
+                format!("`{citing}` uses an atom on undeclared relation `{relation}`"),
+            );
+            return;
+        };
+        let short_name = relation
+            .rsplit_once("#relation.")
+            .map_or(relation, |(_, short)| short);
+        if crate::formula::is_builtin_function(short_name) {
+            self.push(
+                RelationTypingCode::RelationNameShadowsBuiltin,
+                relation,
+                citing,
+                format!(
+                    "relation `{relation}` has a built-in function name and cannot be used as an atom"
+                ),
+            );
+        }
+        if schema.derivation.is_some() && schema.arity != 2 {
+            self.push(
+                RelationTypingCode::DerivedRelationAtomArityUnsupported,
+                relation,
+                citing,
+                format!(
+                    "an atom on derived relation `{relation}` requires arity 2, but it declares {}",
+                    schema.arity
+                ),
+            );
+        }
+        if terms.len() != schema.arity {
+            self.push(
+                RelationTypingCode::RelationAtomArityMismatch,
+                relation,
+                citing,
+                format!(
+                    "atom `{relation}` has {} arguments but the relation has arity {}",
+                    terms.len(),
+                    schema.arity
+                ),
+            );
+        }
+        // Atoms require an explicit kind declaration on the named relation;
+        // inheriting its source's kinds is insufficient.
+        let kinds = schema
+            .derivation
+            .as_ref()
+            .filter(|derived| !derived.slot_entities.is_empty())
+            .map(|derived| &derived.slot_entities)
+            .unwrap_or(&schema.slot_entities);
+        if kinds.is_empty() {
+            self.push(
+                RelationTypingCode::RelationAtomNeedsTypedRelation,
+                relation,
+                citing,
+                format!("atom `{relation}` requires declared slot entity kinds"),
+            );
+        } else {
+            // Preserve the general checks for malformed/aliased slot kinds as
+            // well as the atom's term-to-slot kind checks.
+            self.typed_slots(relation, citing);
+        }
+        for (slot, term) in terms.iter().enumerate() {
+            if variable_slot == Some(slot) {
+                continue;
+            }
+            if let (Some(actual), Some(expected)) = (
+                self.term_kind(citing, derivation, *term, bindings),
+                kinds.get(slot),
+            ) && actual != *expected
+            {
+                self.push(
+                    RelationTypingCode::RelationAtomKindMismatch,
+                    relation,
+                    citing,
+                    format!(
+                        "atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`",
+                        term.as_str()
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// The derivation slot `term` names; a variable names none.
+fn term_slot(derivation: &RelationDerivation, term: Term) -> Option<usize> {
+    match term {
+        Term::Anchor => Some(derivation.current_slot),
+        Term::Candidate => Some(derivation.related_slot),
+        Term::Var(_) => None,
+        #[cfg(test)]
+        Term::Id(_) => None,
     }
 }
 
@@ -1484,6 +1602,7 @@ struct RoleRead<'p> {
     /// The relation of the innermost aggregation whose `where` clause holds
     /// the read, or `None` when no aggregation encloses it.
     aggregated: Option<&'p str>,
+    bindings: Vec<(&'p str, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1501,6 +1620,11 @@ enum RoleConstruct<'p> {
         left: Term,
         right: Term,
     },
+    Exists {
+        relation: &'p str,
+        terms: &'p [Term],
+        variable_slot: usize,
+    },
 }
 
 impl RoleConstruct<'_> {
@@ -1508,6 +1632,7 @@ impl RoleConstruct<'_> {
         match self {
             Self::Read { term, name, .. } => format!("`{}.{name}`", term.as_str()),
             Self::Atom { relation, .. } => format!("relation atom `{relation}`"),
+            Self::Exists { relation, .. } => format!("exists over relation `{relation}`"),
             Self::SameEntity { .. } => "a term comparison".to_string(),
         }
     }
@@ -1521,10 +1646,27 @@ fn collect_judgment_role_reads<'p>(
     aggregated: Option<&'p str>,
     out: &mut Vec<RoleRead<'p>>,
 ) {
+    collect_judgment_role_reads_in(expr, aggregated, out, &[]);
+}
+
+fn collect_scalar_role_reads<'p>(
+    expr: &'p ScalarExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+) {
+    collect_scalar_role_reads_in(expr, aggregated, out, &[]);
+}
+
+fn collect_judgment_role_reads_in<'p>(
+    expr: &'p JudgmentExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+    bindings: &[(&'p str, usize)],
+) {
     match expr {
         JudgmentExpr::Comparison { left, right, .. } => {
-            collect_scalar_role_reads(left, aggregated, out);
-            collect_scalar_role_reads(right, aggregated, out);
+            collect_scalar_role_reads_in(left, aggregated, out, bindings);
+            collect_scalar_role_reads_in(right, aggregated, out, bindings);
         }
         JudgmentExpr::RoleDerived { term, name } => out.push(RoleRead {
             construct: RoleConstruct::Read {
@@ -1533,32 +1675,55 @@ fn collect_judgment_role_reads<'p>(
                 rule: true,
             },
             aggregated,
+            bindings: bindings.to_vec(),
         }),
         JudgmentExpr::RelationAtom { relation, terms } => out.push(RoleRead {
             construct: RoleConstruct::Atom { relation, terms },
             aggregated,
+            bindings: bindings.to_vec(),
         }),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            variable_slot,
+            body,
+        } => {
+            out.push(RoleRead {
+                construct: RoleConstruct::Exists {
+                    relation,
+                    terms,
+                    variable_slot: *variable_slot,
+                },
+                aggregated,
+                bindings: bindings.to_vec(),
+            });
+            let mut nested = bindings.to_vec();
+            nested.push((relation, *variable_slot));
+            collect_judgment_role_reads_in(body, aggregated, out, &nested);
+        }
         JudgmentExpr::SameEntity { left, right, .. } => out.push(RoleRead {
             construct: RoleConstruct::SameEntity {
                 left: *left,
                 right: *right,
             },
             aggregated,
+            bindings: bindings.to_vec(),
         }),
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
-                collect_judgment_role_reads(item, aggregated, out);
+                collect_judgment_role_reads_in(item, aggregated, out, bindings);
             }
         }
-        JudgmentExpr::Not(item) => collect_judgment_role_reads(item, aggregated, out),
+        JudgmentExpr::Not(item) => collect_judgment_role_reads_in(item, aggregated, out, bindings),
         JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
     }
 }
 
-fn collect_scalar_role_reads<'p>(
+fn collect_scalar_role_reads_in<'p>(
     expr: &'p ScalarExpr,
     aggregated: Option<&'p str>,
     out: &mut Vec<RoleRead<'p>>,
+    bindings: &[(&'p str, usize)],
 ) {
     match expr {
         ScalarExpr::RoleInput { term, name } => out.push(RoleRead {
@@ -1568,6 +1733,7 @@ fn collect_scalar_role_reads<'p>(
                 rule: false,
             },
             aggregated,
+            bindings: bindings.to_vec(),
         }),
         ScalarExpr::RoleDerived { term, name } => out.push(RoleRead {
             construct: RoleConstruct::Read {
@@ -1576,6 +1742,7 @@ fn collect_scalar_role_reads<'p>(
                 rule: true,
             },
             aggregated,
+            bindings: bindings.to_vec(),
         }),
         ScalarExpr::CountRelated {
             relation,
@@ -1598,15 +1765,17 @@ fn collect_scalar_role_reads<'p>(
             ..
         } => {
             if let Some(where_clause) = where_clause {
-                collect_judgment_role_reads(where_clause, Some(relation), out);
+                collect_judgment_role_reads_in(where_clause, Some(relation), out, bindings);
             }
         }
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => collect_scalar_role_reads(index, aggregated, out),
+        | ScalarExpr::Floor(index) => {
+            collect_scalar_role_reads_in(index, aggregated, out, bindings)
+        }
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
             for item in items {
-                collect_scalar_role_reads(item, aggregated, out);
+                collect_scalar_role_reads_in(item, aggregated, out, bindings);
             }
         }
         ScalarExpr::Sub(left, right)
@@ -1628,28 +1797,28 @@ fn collect_scalar_role_reads<'p>(
             from: left,
             to: right,
         } => {
-            collect_scalar_role_reads(left, aggregated, out);
-            collect_scalar_role_reads(right, aggregated, out);
+            collect_scalar_role_reads_in(left, aggregated, out, bindings);
+            collect_scalar_role_reads_in(right, aggregated, out, bindings);
         }
         ScalarExpr::If {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_judgment_role_reads(condition, aggregated, out);
-            collect_scalar_role_reads(then_expr, aggregated, out);
-            collect_scalar_role_reads(else_expr, aggregated, out);
+            collect_judgment_role_reads_in(condition, aggregated, out, bindings);
+            collect_scalar_role_reads_in(then_expr, aggregated, out, bindings);
+            collect_scalar_role_reads_in(else_expr, aggregated, out, bindings);
         }
         ScalarExpr::NoMatch { subject, patterns } => {
-            collect_scalar_role_reads(subject, aggregated, out);
+            collect_scalar_role_reads_in(subject, aggregated, out, bindings);
             for pattern in patterns {
-                collect_scalar_role_reads(pattern, aggregated, out);
+                collect_scalar_role_reads_in(pattern, aggregated, out, bindings);
             }
         }
         ScalarExpr::OverPeriods { value, n, .. } => {
-            collect_scalar_role_reads(value, aggregated, out);
+            collect_scalar_role_reads_in(value, aggregated, out, bindings);
             if let Some(n) = n {
-                collect_scalar_role_reads(n, aggregated, out);
+                collect_scalar_role_reads_in(n, aggregated, out, bindings);
             }
         }
         // `only_related` reads a named input at the related id, and an
@@ -1715,7 +1884,9 @@ fn collect_judgment_derived(expr: &JudgmentExpr, out: &mut BTreeSet<String>) {
                 collect_judgment_derived(item, out);
             }
         }
-        JudgmentExpr::Not(item) => collect_judgment_derived(item, out),
+        JudgmentExpr::Not(item) | JudgmentExpr::Exists { body: item, .. } => {
+            collect_judgment_derived(item, out)
+        }
     }
 }
 

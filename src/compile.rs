@@ -2307,7 +2307,7 @@ fn collect_fast_blockers_from_judgment_expr(
                 collect_fast_blockers_from_judgment_expr(derived_name, rules, item, blockers);
             }
         }
-        JudgmentExprSpec::Not { item } => {
+        JudgmentExprSpec::Exists { body: item, .. } | JudgmentExprSpec::Not { item } => {
             collect_fast_blockers_from_judgment_expr(derived_name, rules, item, blockers);
         }
     }
@@ -2599,6 +2599,10 @@ fn collect_judgment_dependencies(
         JudgmentExprSpec::RelationAtom { relation, .. } => {
             aggregated_relations.insert(relation.clone());
         }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            aggregated_relations.insert(relation.clone());
+            collect_judgment_dependencies(body, dependencies, aggregated_relations);
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -2737,6 +2741,11 @@ fn collect_relation_members_from_judgment(
         }
         JudgmentExprSpec::RelationAtom { relation, .. } => {
             relations.insert(relation.clone());
+            has_atom = true;
+        }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            relations.insert(relation.clone());
+            collect_relation_members_from_judgment(body, relations);
             has_atom = true;
         }
         JudgmentExprSpec::And { items }

@@ -339,7 +339,7 @@ fn rulespec_refuses_atoms_with_untyped_relations_and_builtin_names() {
 }
 
 /// Every built-in function name, listed here independently of the engine.
-const BUILTIN_FUNCTIONS: [&str; 22] = [
+const BUILTIN_FUNCTIONS: [&str; 23] = [
     "max",
     "min",
     "ceil",
@@ -362,6 +362,7 @@ const BUILTIN_FUNCTIONS: [&str; 22] = [
     "min_where",
     "max_where",
     "exactly_one",
+    "exists",
 ];
 
 #[test]

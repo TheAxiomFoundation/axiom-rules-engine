@@ -281,23 +281,30 @@ impl Extreme {
     }
 }
 
-/// An end of the pair a derived relation's predicate tests: the id the
-/// relation is read from (its current slot) or the id being tested (its
-/// related slot). A term has the kind the derivation's `slot_entities` give
-/// that slot. Terms are meaningful only inside a derived relation's
+/// An entity id in a derived relation's predicate. Anchor and candidate use
+/// the containing derivation's slot kinds; a variable uses its generator's
+/// slot kind. Terms are meaningful only inside a derived relation's
 /// predicate (docs/relation-roles.md, section 3.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Anchor,
     Candidate,
+    /// De Bruijn index, counted from the innermost enclosing `exists`.
+    Var(usize),
+    /// Literal ids exist only for independent expansion oracles in unit tests.
+    #[cfg(test)]
+    Id(&'static str),
 }
 
 impl Term {
-    /// The name a predicate spells this term with.
+    /// A stable term label for diagnostics and expression descriptions.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Anchor => "anchor",
             Self::Candidate => "candidate",
+            Self::Var(_) => "variable",
+            #[cfg(test)]
+            Self::Id(id) => id,
         }
     }
 }
@@ -483,6 +490,14 @@ pub enum JudgmentExpr {
     RelationAtom {
         relation: String,
         terms: Vec<Term>,
+    },
+    /// Finite disjunction over the generator's variable slot. Other generator
+    /// terms address the enclosing environment; the body binds `Var(0)`.
+    Exists {
+        relation: String,
+        terms: Vec<Term>,
+        variable_slot: usize,
+        body: Box<JudgmentExpr>,
     },
     /// Compare the ids of two terms of the same entity kind.
     SameEntity {
@@ -1057,7 +1072,7 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
 // always been able to build it, and they keep the union of supplied tuples.
 fn judgment_has_relation_construct(expr: &JudgmentExpr, atoms_only: bool) -> bool {
     match expr {
-        JudgmentExpr::RelationAtom { .. } => true,
+        JudgmentExpr::RelationAtom { .. } | JudgmentExpr::Exists { .. } => true,
         JudgmentExpr::SameEntity { .. } | JudgmentExpr::RoleDerived { .. } => !atoms_only,
         JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => false,
         JudgmentExpr::Comparison { left, right, .. } => {
@@ -1136,7 +1151,7 @@ fn collect_input_slots_from_judgment_expr<'a>(
                 collect_input_slots_from_judgment_expr(item, slots);
             }
         }
-        JudgmentExpr::Not(item) => {
+        JudgmentExpr::Not(item) | JudgmentExpr::Exists { body: item, .. } => {
             collect_input_slots_from_judgment_expr(item, slots);
         }
     }

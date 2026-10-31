@@ -4360,6 +4360,12 @@ fn rewrite_relation_alias_in_judgment(
                 *relation = relation_name.to_string();
             }
         }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+            rewrite_relation_alias_in_judgment(body, alias, relation_name);
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -4679,6 +4685,10 @@ fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<
         | JudgmentExprSpec::RelationAtom { relation, .. } => {
             names.insert(relation.clone());
         }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            names.insert(relation.clone());
+            collect_judgment_relation_names(body, names);
+        }
         JudgmentExprSpec::Comparison { left, right, .. } => {
             collect_scalar_relation_names(left, names);
             collect_scalar_relation_names(right, names);
@@ -4989,6 +4999,18 @@ fn rewrite_judgment_relation_references(
                 rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
             }
         }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            if !rewrite_relation_name(relation, origin_target, rewrites) {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
+            rewrite_judgment_relation_references(
+                body,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {
@@ -5079,7 +5101,7 @@ fn judgment_uses_imported_derived(
         | JudgmentExprSpec::ExactlyOne { items } => items.iter().any(|item| {
             judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
         }),
-        JudgmentExprSpec::Not { item } => {
+        JudgmentExprSpec::Not { item } | JudgmentExprSpec::Exists { body: item, .. } => {
             judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
         }
     }

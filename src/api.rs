@@ -1029,6 +1029,20 @@ fn format_judgment_expression(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            body,
+            ..
+        } => format!(
+            "exists({relation}({}), {})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_judgment_expression(program, body)
+        ),
         JudgmentExpr::SameEntity {
             left,
             right,
