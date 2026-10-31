@@ -840,6 +840,8 @@ closure is one household.
 - `meal_group`, a group-valued fact, and `age`. Purchases that form no single
   group (a buys with b and b with c, but a does not buy with c) have no true
   `meal_group`. That is a (c) case: set the exception input and supply ids.
+  The fixture still reads `meal_group` and fails if it is missing, so supply
+  any value there. With the flag set, the ids alone decide the household.
 - `snap_household_exception_may_apply`. The person may be described by
   (b)(2) (60 or older and unable to buy and prepare meals because of a
   disability), (b)(3) or (b)(4) (a board arrangement, including a person
