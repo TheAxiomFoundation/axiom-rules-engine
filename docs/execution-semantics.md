@@ -67,6 +67,14 @@ output's formula is evaluated for that entity and period as follows.
   entity, with no relation context. Its declared output rounding
   applies before any dependent reads the value, including when dense inlines
   the rule into an aggregation or predicate.
+- **Predicates resolve parameters as rule bodies do.** Table parameters,
+  scalar parameters and entity-free rules with literal values read the
+  module's parameter values. A bare Boolean parameter can act as a judgment;
+  a non-Boolean parameter used as a judgment fails when reached. A
+  `parameter` record with an entity or a computed formula lowers to a rule;
+  predicates read it with the routing and qualified-read kind checks of
+  other rules. Parameters have no entity id, so a qualified parameter read
+  is refused; read it unqualified instead (`relation_role_entity_mismatch`).
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
@@ -157,6 +165,48 @@ formula: |
 is total. So are `household_size > 0 and income / household_size < limit`, an
 input that is read only on one branch, and a derived rule that is referenced
 only from a branch no row selects.
+
+### Relation predicate compilation
+
+Terms carry their relation slot's kind; a bound variable carries its
+generator slot's kind. Compilation checks a qualified rule read against that
+kind and checks each atom argument against its declared relation slot.
+Input reads remain untyped. A term can appear in a qualified read, relation
+atom or equality/inequality comparison, but using a term as a value is
+refused (`relation_term_used_as_value`). A bound variable used outside its
+`exists` body is refused (`relation_variable_out_of_scope`). A new variable
+cannot hide a visible rule, parameter or relation, or rebind an enclosing
+variable (`relation_variable_name_conflict`).
+
+RuleSpec checks declaration names across the import-merged module closure
+before lowering any formula. It refuses a parameter, rule or relation named
+`anchor`, `candidate`, `period_start`, `period_end` or a formula keyword
+(`reserved_declaration_name`), and a name declared as two of a parameter,
+rule and relation (`declaration_name_clash`). A `parameter` record counts as
+the kind it lowers to. Outside predicates, undeclared `anchor` and
+`candidate` retain their ordinary input reads. A bare `period_start` or
+`period_end` reads the built-in date in scalar position and refuses in
+judgment position.
+
+These contracts cover parameter predicates in
+`tests/relation_roles.rs`, declaration and import clashes in
+`tests/declaration_names.rs`, atom kinds in `tests/relation_atoms.rs`, and
+variable scope and names in `tests/relation_exists_lowering.rs`.
+
+### Guarded household fixture
+
+The synthetic 7 CFR 273.1 fixture computes the people within two symmetric
+ties of the applicant. When no co-resident has an exception flag and no tie
+leaves that set, the set is the exact household. Otherwise it reads supplied
+`snap_household_unit` ids and includes co-residents with the applicant's id;
+a missing id fails naming that input. This never silently returns a wrong
+household under section 8's two preconditions: a complete residence roster
+and correct supplied ids wherever read. The guard depends on the applicant,
+so in a chain a–b–c–d, b's household needs no ids while a's does. The test
+`applicants_a_and_b_on_a_three_tie_chain` in `tests/snap_household.rs` checks
+both cases; `exception_for_older_roommate` checks the exception branch.
+The separate `snap_participating_member` relation filters (b)(7) ineligible
+members from composition without changing `snap_household_member`.
 
 ### Pins
 
