@@ -245,6 +245,15 @@ fn reduce(
     world: &World,
     person: &str,
 ) -> Result<CompleteReduction<ScalarValue>, String> {
+    evaluate(program, world, "total", person)
+}
+
+fn evaluate(
+    program: &Program,
+    world: &World,
+    rule: &str,
+    entity: &str,
+) -> Result<CompleteReduction<ScalarValue>, String> {
     let provenance = Provenance::Derived {
         constitution: "test".into(),
         trace_root: "test".into(),
@@ -357,7 +366,7 @@ fn reduce(
             .unwrap();
     phase
         .engine(program)
-        .evaluate_scalar("total", person, &period)
+        .evaluate_scalar(rule, entity, &period)
         .map_err(|error| format!("{error:?}"))
 }
 
@@ -418,8 +427,9 @@ fn every_read_of_an_unknown_membership_stays_indeterminate() {
 }
 
 /// A placed read sees only the requested person's memberships, so that
-/// person's status alone decides whether the answer stays indeterminate. An
-/// unknown elsewhere leaves the answer determined.
+/// person's status alone decides whether the answer stays Indeterminate. An
+/// unknown elsewhere does not make it so. A known `only_related` read with no
+/// related entity still fails on its own.
 #[test]
 fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
     for (name, relation, total) in placed_shapes() {
@@ -437,8 +447,39 @@ fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
     }
 }
 
+/// `p0` participates in `u0` and another person's status is unknown, so each
+/// placed shape reports the value `p0`'s own membership gives.
+#[test]
+fn a_placed_read_reports_its_value_past_another_persons_unknown() {
+    let world = [(0, Status::In), (1, Status::Unknown), (1, Status::Out)];
+    for (name, relation, total) in placed_shapes() {
+        assert_eq!(
+            reduce(&program(relation, total), &world, "p0"),
+            Ok(CompleteReduction::Determined(ScalarValue::Integer(1))),
+            "{name}"
+        );
+    }
+}
+
+/// `size` reads slot 0 at a unit, so only that unit's unknowns hold it.
+#[test]
+fn a_placed_read_at_a_unit_holds_on_that_units_unknowns_alone() {
+    let program = program(None, literal(0));
+    for world in worlds() {
+        for (index, unit) in UNITS.iter().enumerate() {
+            let reduction = evaluate(&program, &world, "size", unit);
+            assert_eq!(
+                matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })),
+                world.contains(&(index, Status::Unknown)),
+                "{world:?} at {unit}: {reduction:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_determined_answer_holds_in_every_completion() {
+    assert_eq!(worlds().len(), 216);
     let mut past_an_unknown = 0;
     for (name, relation, total) in unplaced_shapes().into_iter().chain(placed_shapes()) {
         let program = program(relation, total);
@@ -449,6 +490,11 @@ fn a_determined_answer_holds_in_every_completion() {
                     continue;
                 }
                 let resolved_worlds = completions(&world);
+                let unknowns = world
+                    .iter()
+                    .filter(|(_, status)| *status == Status::Unknown)
+                    .count();
+                assert_eq!(resolved_worlds.len(), 1 << unknowns);
                 for resolved in &resolved_worlds {
                     assert_eq!(
                         reduce(&program, resolved, person),
