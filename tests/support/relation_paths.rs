@@ -297,8 +297,22 @@ fn oracle(case: &Case, data: &Value, predicate: bool) -> Result<BTreeSet<usize>,
 /// defers none. A failure reaches a path by a different route at each depth,
 /// so every caller also checks invariant 7: outputs, traces and errors match.
 fn run(mode: &str, p: &Value, data: &Value) -> Result<Value, String> {
-    let request: ExecutionRequest=serde_json::from_value(json!({"mode":mode,"program":p,"dataset":data,
-        "queries":[{"entity_id":"p0","period":{"period_kind":"month","start":"2026-01-01","end":"2026-01-31"},"outputs":["count","mask"]}]})).unwrap();
+    run_periods(mode, p, data, &["2026-01"])
+}
+/// As [`run`], with one query of p0 per named month in one request, so the
+/// queries share an engine and its members cache.
+fn run_periods(mode: &str, p: &Value, data: &Value, months: &[&str]) -> Result<Value, String> {
+    let queries = months
+        .iter()
+        .map(|month| {
+            let last = if *month == "2026-02" { 28 } else { 31 };
+            json!({"entity_id":"p0","outputs":["count","mask"],"period":{"period_kind":"month",
+                "start":format!("{month}-01"),"end":format!("{month}-{last}")}})
+        })
+        .collect::<Vec<_>>();
+    let request: ExecutionRequest =
+        serde_json::from_value(json!({"mode":mode,"program":p,"dataset":data,"queries":queries}))
+            .unwrap();
     let at = |depth| {
         axiom_rules_engine::depth::with_suspend_depth(depth, || execute_request(request.clone()))
             .map(|response| serde_json::to_value(response).unwrap())
@@ -676,6 +690,41 @@ fn dense_refuses_paths_by_name_and_issue() {
         error.to_string().contains("path source") && error.to_string().contains("#218"),
         "{error}"
     );
+}
+
+#[test]
+fn one_request_keeps_each_periods_members_apart() {
+    let p = json!({"relations":[
+        {"name":"edge","arity":2,"slot_entities":["Person","Person"]},
+        {"name":"selected","arity":2,"slot_entities":["Person","Person"],"derivation":{
+            "source_path":[{"relation":"edge","from_slot":0,"to_slot":1}],
+            "current_slot":0,"related_slot":1,"slot_entities":["Person","Person"],"predicate":yes()}}
+    ],"derived":[
+        {"name":"count","entity":"Person","dtype":"integer","semantics":"scalar",
+            "expr":{"kind":"count_related","relation":"selected","current_slot":0,"related_slot":1}},
+        {"name":"mask","entity":"Person","dtype":"integer","semantics":"scalar",
+            "expr":{"kind":"sum_related","relation":"selected","current_slot":0,"related_slot":1,"value":{"kind":"derived","name":"token"}}},
+        {"name":"token","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"token"}}
+    ]});
+    // p1 is related all year, and p2 only from February.
+    let data = json!({"inputs":[input(1,"token",2),input(2,"token",4)],"relations":[
+        tuple("edge",0,1,false,true),
+        {"name":"edge","tuple":["p0","p2"],"interval":{"start":"2026-02-01","end":"2026-12-31"}}
+    ]});
+    let january = BTreeSet::from([1]);
+    let february = BTreeSet::from([1, 2]);
+    for mode in ["explain", "fast"] {
+        for (months, expected) in [
+            (["2026-01", "2026-02"], [&january, &february]),
+            (["2026-02", "2026-01"], [&february, &january]),
+        ] {
+            let response = run_periods(mode, &p, &data, &months).unwrap();
+            for (index, members) in expected.into_iter().enumerate() {
+                let result = json!({"results":[response["results"][index].clone()]});
+                assert_eq!(&self::members(&result), members, "{mode} {months:?}");
+            }
+        }
+    }
 }
 
 #[test]

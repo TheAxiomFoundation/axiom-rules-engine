@@ -82,6 +82,56 @@ fn path_records_every_relation_and_data_or_derived_lookup_slot() {
 }
 
 #[test]
+fn path_reads_hold_its_own_predicate_and_a_derived_step_keeps_its_own() {
+    let positive = |left: Value| {
+        json!({"kind":"comparison", "op":"gt", "left":left,
+            "right":{"kind":"literal","value":{"kind":"integer","value":0}}})
+    };
+    let rule = |name: &str, input: &str| {
+        json!({"name":name, "entity":"Person", "dtype":"integer", "semantics":"scalar",
+            "expr":{"kind":"input","name":input}})
+    };
+    let spec: ProgramSpec = serde_json::from_value(json!({"relations":[
+        {"name":"home", "arity":2, "slot_entities":["Person","Household"]},
+        {"name":"other", "arity":2, "slot_entities":["Person","Person"]},
+        {"name":"residents", "arity":2, "slot_entities":["Person","Household"], "derivation":{
+            "source_relation":"home", "current_slot":1, "related_slot":0,
+            "slot_entities":["Person","Household"],
+            "predicate":positive(json!({"kind":"role_derived","term":"candidate","name":"step_rule"}))}},
+        {"name":"selected", "arity":2, "slot_entities":["Person","Person"], "derivation":{
+            "source_path":[
+                {"relation":"home", "from_slot":0, "to_slot":1},
+                {"relation":"residents", "from_slot":1, "to_slot":0}],
+            "current_slot":0, "related_slot":1, "slot_entities":["Person","Person"],
+            "predicate":{"kind":"and","items":[
+                positive(json!({"kind":"role_derived","term":"candidate","name":"parent_rule"})),
+                positive(json!({"kind":"role_input","term":"candidate","name":"parent_input"})),
+                {"kind":"relation_atom","relation":"other","terms":["anchor","candidate"]}]}}}
+    ], "derived":[
+        count("selected"), rule("parent_rule", "parent_read"), rule("step_rule", "step_read")
+    ]}))
+    .unwrap();
+    let interface = derive_interface(&spec).unwrap();
+    let reads = |name: &str| match &interface
+        .relations
+        .iter()
+        .find(|relation| relation.name == name)
+        .unwrap()
+        .provenance
+    {
+        RelationProvenance::SourcePath { reads, .. }
+        | RelationProvenance::Derived { reads, .. } => reads,
+        RelationProvenance::Supplied => panic!("`{name}` is derived"),
+    };
+    assert_eq!(reads("selected").inputs, ["parent_input"]);
+    assert_eq!(reads("selected").rules, ["parent_rule"]);
+    assert_eq!(reads("selected").relations, ["home", "other", "residents"]);
+    // A step's own reads stay on the step. The parent's list isn't a closure.
+    assert_eq!(reads("residents").rules, ["step_rule"]);
+    assert_eq!(reads("residents").inputs, Vec::<String>::new());
+}
+
+#[test]
 fn path_provenance_and_steps_require_exactly_their_keys() {
     let interface = derive_interface(&fixture()).unwrap();
     let provenance = &interface

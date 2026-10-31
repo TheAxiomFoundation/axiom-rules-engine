@@ -14,7 +14,7 @@ use axiom_rules_engine::unit_derivation::{
     UnitDerivationResult, materialize_phase_two_dataset,
 };
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PERSONS: [&str; 3] = ["p0", "p1", "p2"];
 const UNITS: [&str; 2] = ["u0", "u1"];
@@ -598,7 +598,7 @@ fn a_placed_read_at_a_unit_holds_on_that_units_unknowns_alone() {
 fn a_determined_answer_holds_in_every_completion() {
     assert_eq!(worlds().into_iter().collect::<BTreeSet<_>>().len(), 216);
     let mut past_an_unknown = 0;
-    let mut path_completion_checks = 0;
+    let mut path_completion_checks = BTreeMap::new();
     let person_reads = unplaced_shapes()
         .into_iter()
         .chain(placed_shapes())
@@ -632,7 +632,7 @@ fn a_determined_answer_holds_in_every_completion() {
                 for resolved in &resolved_worlds {
                     let completed = evaluate(&program, resolved, rule, entity);
                     if name.starts_with("path source") {
-                        path_completion_checks += 1;
+                        *path_completion_checks.entry((rule, name)).or_insert(0) += 1;
                     }
                     assert_eq!(
                         completed, answer,
@@ -644,9 +644,13 @@ fn a_determined_answer_holds_in_every_completion() {
         }
     }
     assert!(past_an_unknown > 0, "no answer got past an unknown");
-    assert!(
-        path_completion_checks >= 900,
-        "path completions did not run: {path_completion_checks}"
+    // Each shape's count is exact, so losing one shape can't hide in a total.
+    assert_eq!(
+        path_completion_checks,
+        BTreeMap::from([
+            (("total", "path source first step"), 768),
+            (("total", "path source later step"), 192),
+            (("unit_total", "path source first step"), 432),
+        ])
     );
-    eprintln!("phase-two path completion checks={path_completion_checks} (floor 900)");
 }
