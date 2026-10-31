@@ -83,20 +83,26 @@ fn check(data: &Value, ids: &[&str], expected: &[(&str, &[&str])], output: &str)
     }
 }
 fn missing_ids(data: &Value, applicants: &[&str]) {
-    for mode in ["explain", "fast"] {
-        let error = run(mode, &program(), data, applicants, &["household_mask"]).unwrap_err();
-        assert!(error.contains("snap_household_unit"), "{mode}: {error}");
-        assert_eq!(
-            error,
-            run(
-                mode,
-                &program(),
-                &permuted(data),
-                applicants,
-                &["household_mask"]
-            )
-            .unwrap_err()
-        );
+    for applicant in applicants {
+        for mode in ["explain", "fast"] {
+            let error =
+                run(mode, &program(), data, &[*applicant], &["household_mask"]).unwrap_err();
+            assert!(
+                error.contains("snap_household_unit"),
+                "{mode} {applicant}: {error}"
+            );
+            assert_eq!(
+                error,
+                run(
+                    mode,
+                    &program(),
+                    &permuted(data),
+                    &[*applicant],
+                    &["household_mask"]
+                )
+                .unwrap_err()
+            );
+        }
     }
 }
 #[test]
