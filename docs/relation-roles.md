@@ -3,12 +3,12 @@
 Design for #214, step 3 of the unit-derivation plan. Decision d1265 (2026-10-10,
 recorded on #134 and in `unit-derivation.md` section 15): a legal unit is a
 derived relation from an anchor to persons, written by extending
-`derived_relation`. Not built yet.
+`derived_relation`. The series is complete; section 9 records what landed.
 
 ## 1. Purpose
 
 A unit's membership test needs five things that a derived-relation predicate
-cannot do on main:
+could not do before this series:
 
 - read a fact of either end of the pair by name, including when both ends are
   the same kind (a `[Person, Person]` relation);
@@ -576,7 +576,9 @@ read through a term (3.2).
 
 **Trace.** As in section 5.
 
-**Capabilities.** `relation_roles`, listed once the series is complete.
+**Capabilities.** `relation_roles` lists the completed series: terms and
+qualified reads, parameters in predicates, relation atoms, term comparisons,
+bounded `exists` and path sources.
 
 **Interface block (#155, PR #250).** A derived relation's provenance there is
 `{kind: derived, rule, source_relation, reads: {inputs, rules, relations}}`.
@@ -677,18 +679,32 @@ With #215:
 
 ## 8. Worked example: 7 CFR 273.1, common case
 
-This is a synthetic engine fixture, not a RuleSpec module. The pilot module in
-rulespec-us#1428 comes from the encoder. The fixture shows the constructs on
-the pilot's scope:
+`tests/fixtures/snap_household.rulespec.yaml` holds this synthetic engine
+fixture, which is not a RuleSpec module. The pilot module in rulespec-us#1428
+comes from the encoder. The fixture shows the constructs on the pilot's scope:
 - the meal group under (a)(3);
 - the required combinations of (b)(1)(i), (b)(1)(ii) and (b)(1)(iii);
 - the (b)(7) participation filter, kept apart from composition;
 - the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
 It must never return a wrong household silently, whether too small or too
-large. That holds under two preconditions, which the fixture's tests meet:
-- **A complete roster.** Every evaluated person has a `member_of_household`
-  record. A person with none has no candidates and gets an empty household.
+large. The engine trusts what the caller supplies, so a wrong age or a false
+exception flag gives a wrong household. With every supplied fact true, the
+promise holds under three preconditions, which the generated cases meet:
+- **One residence for each co-resident.** Everyone who lives in the residence,
+  evaluated or not, has exactly one `member_of_household` record, and that
+  record covers the whole evaluated period. A person with none, or with records
+  that each cover only part of the period, reaches no one and no one reaches
+  them. Their own household comes back empty, and a co-resident's comes back
+  short. So twelve monthly records do not serve a year query. A person recorded
+  in two residences bridges them. `lives_with` stops at each applicant's own
+  co-residents, so an applicant on one side misses people on the other, even
+  with correct ids. The fixture does not check any of this.
+- **Complete pair facts.** A spouse, parent or parental-control tuple that is
+  missing, or that covers only part of the period, reads as false, so the
+  people it would tie stay apart with no failure. An input fails when missing,
+  but a relation tuple does not. #215's declared
+  completeness would close this gap.
 - **Correct supplied ids,** where ids are read. The engine trusts them. Ids
   that split two tied people give a household that is too small. A check the
   pilot can add: a derived relation of ties between people with different
@@ -821,14 +837,24 @@ closure is one household.
 ```
 
 **Inputs.** All of these have no default.
-- `meal_group` and `age`.
+- `meal_group`, a group-valued fact, and `age`. Purchases that form no single
+  group (a buys with b and b with c, but a does not buy with c) have no true
+  `meal_group`. That is a (c) case: set the exception input and supply ids.
+  The fixture still reads `meal_group` and fails if it is missing, so supply
+  any value there. With the flag set, the ids alone decide the household.
 - `snap_household_exception_may_apply`. The person may be described by
   (b)(2) (60 or older and unable to buy and prepare meals because of a
-  disability), (b)(3) or (b)(4) (a boarder or foster placement), (b)(5) or
-  (b)(6) (a roomer or live-in attendant), or (b)(7)(vi) (a resident of an
-  institution, or one of its listed exceptions).
+  disability), (b)(3) or (b)(4) (a board arrangement, including a person
+  who pays less than reasonable compensation and whom the regulation does not
+  call a boarder, or a foster placement), (b)(5) or (b)(6) (a roomer or live-in attendant),
+  (b)(7)(vi) (a resident of an institution, or one of its listed exceptions),
+  or (c) (a situation (a) and (b) do not clearly address, which State policy
+  decides).
 - `snap_household_unit`. The caller's household id, read only in the cases
   above.
+- `under_parental_control_of` carries the (b)(1)(iii) determination itself:
+  the caller supplies a tuple only when the dependence test holds and State
+  law does not treat the child as an adult.
 - (b)(1)(iii) excludes a foster child. `snap_tie` does not test for one,
   because a foster placement is a (b)(4) case. It sets
   `snap_household_exception_may_apply`, so that household comes from the
@@ -845,11 +871,11 @@ closure is one household.
   once the supplied case applies.
 - `lives_with` comes from the roster, so every evaluated person needs a
   `member_of_household` record. A person living alone, (a)(1), is a residence
-  of one. A person with no record has no candidates, so the fixture's tests
-  supply every person's record.
+  of one. The generated cases supply one full-year record per person.
 - The guard's two `exists` depend only on the anchor, but are evaluated again
-  for each candidate (section 5, cost). #231 removes the guard and the
-  supplied ids.
+  for each candidate (section 5, cost). #231 removes the guard and the ids
+  that long chains read. The exception cases still read supplied ids until
+  an encoding decides those paragraphs.
 
 **Hand-worked cases.** The fixture's tests check memberships against these
 households, each worked out by hand from the regulation's text:
@@ -864,56 +890,54 @@ households, each worked out by hand from the regulation's text:
 | A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
 | Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
 | Two separate groups in one residence, each a chain of three ties, with the applicants at the ends of their chains | Each applicant gets exactly their own group from the supplied ids |
-| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (second precondition above). |
+| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (third precondition above). |
 | The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
-## 9. Plan
+## 9. Landed series
 
-Five pull requests, in order. Each has:
+The series delivers these constructs and contracts in five steps:
 
-- a test that fails before it;
-- the full suite green with and without the `unit-derivation` feature;
-- the byte-identity check of invariant 10;
-- its invariants in the PR body, with their tests.
-
-Each is sized for one build lane.
-
-1. **Terms, qualified reads and parameters.** The model, parsing, lowering,
-   reserved names, the kind check for rules, the binding environment, rule
-   edges in every walk, the input catalog, trace routing, the dense refusal,
-   and the `docs/rulespec.md` section.
-2. **Atoms and term comparison.** Relation edges, kind checks, the built-in
-   name refusal, the supplied-tuple refusal, and the differential test against
-   bare membership tests.
-3. **Bounded `exists`.** Variables and scope, the resumable site and its key,
-   the refusals, deferral transparency, and the expansion test.
-4. **Path sources.** The artifact form, candidate generation, every walk in
-   section 6, and the differential test against `exists`. #249 has landed:
-   the chain walks in typing, direction and migration now go through
-   `follow_chains` (`relation_typing.rs`), which follows one successor per
-   node. A path source makes a relation read several relations, one per
-   step, so this PR extends `follow_chains` or adds a graph walk beside it.
-   #211 has also landed: the chain walks in validation, binding and all
-   three evaluators are linear. This PR extends those walks to path edges.
-5. **Fixture and docs.** The 273.1 fixture and its hand-worked cases, the
-   `relation_roles` capability, `docs/execution-semantics.md`, and a
+1. **Terms, qualified reads and parameters (#268, #269, #273).** Added the
+   model, parsing, lowering, reserved and duplicate declaration checks, rule
+   kind checks, term bindings, dependency walks, input catalog and trace
+   routing, with named dense refusals and the `docs/rulespec.md` contract.
+2. **Atoms and term comparison (#276, #279).** Added relation edges, kind
+   checks, the built-in name and supplied-tuple refusals, and differential
+   tests against bare membership tests. #279 bounded native relation
+   nesting while preserving values and traces.
+3. **Bounded `exists` (#280, #281).** Added variables and scope, resumable
+   quantification, named refusals, deferral transparency and expansion tests.
+   #281 checked exact values and unit-local unknowns for phase-two reads.
+4. **Path sources (#282).** Added the artifact form, candidate generation,
+   dependency walks and differential tests against `exists`. Typing,
+   direction, migration, validation and binding follow every path step;
+   explain resumes path progress and dense refuses path sources by name.
+5. **Fixture and docs (#283).** Added section 8's synthetic 273.1 fixture, its eleven
+   hand-worked cases and independent household properties, the
+   `relation_roles` capability, `docs/execution-semantics.md` and the
    `DECISIONS.md` entry.
+
+The series extends artifact format 3 and its checked interface block (#250);
+it needs no additional format bump.
 
 **Next steps.**
 
 1. Under the three-valued option, follow the two steps in section 4. The
    later of #251 and each PR here adds the named refusals. The later of
    #215's third PR and this series lifts them.
-2. Recursion (#253, then #231) makes the household exact.
-3. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
-4. The pilot (TheAxiomFoundation/rulespec-us#1428) is encoded. It should
-   follow #231, so that its households are exact rather than guarded.
+2. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
+3. The encoder encodes the pilot (TheAxiomFoundation/rulespec-us#1428) in
+   section 8's guarded form, which supplied ids complete where the chain or
+   an exception leaves the computed case.
+4. Recursion (#253, then #231) later computes long chains exactly and
+   retires the guard. The exceptions keep their supplied ids until an encoding
+   decides those paragraphs, because a (b)(2) separation can split a meal tie.
 
 **Dependencies.**
 
 - This series depends on neither #155 nor #215 for its two-valued form.
-- It adds to artifact format 3 if #250 merges first.
+- It extends artifact format 3 and its interface block, which #250 landed.
 - #253 is stacked on this note, and builds on section 7's limits on
   monotonicity.
 

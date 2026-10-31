@@ -4,6 +4,42 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-31 — Relation roles express guarded household membership
+
+**Decision.** Add terms and qualified reads, parameters in predicates,
+relation atoms, term comparisons, bounded `exists` and path sources to
+derived relations. Advertise the completed series as `relation_roles`.
+Keep recursion (#231, #253) and the three-valued option (#215, #251) outside
+this series.
+
+**Why.** A household predicate needs facts about both ends of a pair,
+required combinations between people in scope, and co-residents reached
+through a residence roster. The synthetic 7 CFR 273.1 fixture demonstrates
+those operations without inventing a bounded substitute for a transitive
+household closure:
+
+- It computes the exact household when no residence exception applies and
+  the applicant's two-tie set is closed under ties.
+- Otherwise it reads supplied household ids. With every supplied fact true,
+  one full-period residence record for each co-resident, complete pair facts
+  and correct ids wherever read, it never silently returns a wrong household.
+
+**Consequences.** Explain and fast evaluate the constructs; dense refuses a
+reachable qualified read, atom, term comparison, `exists` or path source by
+name and names #218. Dense also compiles parameter reads in predicates.
+The series extends artifact format 3 and its checked interface block (#250).
+Programs using qualified reads, atoms, term comparisons, `exists` or path
+sources refuse tuples supplied under any derived relation's name; programs
+using none keep their existing union of supplied and derived tuples.
+An atom, `exists` or path source also refuses lenient request binding.
+
+The fixture declares every input with no default. Missing household ids
+fail evaluation naming `snap_household_unit` when a guard selects the
+supplied case. The tests cover eleven hand-worked households, compare an
+independent union-find oracle over generated residences, and check symmetry,
+partitioning, participation, order, modes and deferral. The pilot module in
+rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
+
 ## 2026-10-14 — Dense batches justify every row count they claim
 
 **Decision.** Dense binding refuses a batch whose row counts nothing confirms,

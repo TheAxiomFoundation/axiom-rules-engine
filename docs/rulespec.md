@@ -627,6 +627,11 @@ programs whose predicates only read parameters. Request
 binding also refuses `relation_binding: lenient` when the program uses an
 atom, `exists` or a path source (`lenient_binding_with_relation_roles`). See
 [relation-roles.md](relation-roles.md) for the design and derived-atom cost.
+The `relation_roles` capability advertises terms and qualified reads,
+parameters in predicates, relation atoms, term comparisons, bounded `exists`
+and path sources. These additions use artifact format 3; an older engine
+refuses an artifact that uses an expression variant or path source it does
+not support.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:
 a branch, operand or related member that a row's evaluation does not reach

@@ -180,7 +180,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // engines listing `related_min_max_only`. Engines
                         // with `artifact_interface` write and check
                         // `program.interface`.
-                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface"],
+                        // `relation_roles` supports predicate terms, qualified
+                        // reads, parameters, atoms, term comparisons,
+                        // bounded exists and paths.
+                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
                     }))?
                 );
                 return Ok(());
