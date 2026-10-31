@@ -168,7 +168,8 @@ fn derived_relation_gate_program() -> crate::model::Program {
             arity: 2,
             slot_entities: vec!["snap_household".to_string(), "person".to_string()],
             derivation: Some(RelationDerivation {
-                source_relation: constituent.to_string(),
+                source_relation: Some(constituent.to_string()),
+                source_path: None,
                 current_slot: 0,
                 related_slot: 1,
                 entity: Some("person".to_string()),

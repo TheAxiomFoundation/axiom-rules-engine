@@ -214,7 +214,12 @@ fn relations(program: &ProgramSpec) -> Relations {
                         ChainStep::End(Some(derivation.slot_entities.as_slice()))
                     }
                     Some(derivation) if relation.slot_entities.is_empty() => {
-                        ChainStep::Next(&derivation.source_relation)
+                        match derivation.source_relation.as_deref() {
+                            Some(source) if derivation.source_path.is_none() => {
+                                ChainStep::Next(source)
+                            }
+                            _ => ChainStep::End(None),
+                        }
                     }
                     _ => ChainStep::End(
                         (!relation.slot_entities.is_empty())
@@ -662,11 +667,45 @@ mod chain_tests {
                 if !relation.slot_entities.is_empty() {
                     return Some(relation.slot_entities.clone());
                 }
-                name = derivation.source_relation.clone();
+                name = derivation.source_relation.clone()?;
                 continue;
             }
             return (!relation.slot_entities.is_empty()).then(|| relation.slot_entities.clone());
         }
+    }
+
+    #[test]
+    fn a_path_declares_its_endpoints_and_a_filter_inherits_them() {
+        let spec: ProgramSpec = serde_json::from_value(json!({"relations": [
+            {"name": "out", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "back", "arity": 2, "slot_entities": ["Household", "Person"]},
+            {"name": "path", "arity": 2, "derivation": {
+                "source_path": [{"relation": "out", "from_slot": 0, "to_slot": 1},
+                                {"relation": "back", "from_slot": 0, "to_slot": 1}],
+                "slot_entities": ["Person", "Person"], "current_slot": 0, "related_slot": 1,
+                "predicate": always()}},
+            {"name": "filter", "arity": 2, "derivation": {
+                "source_relation": "path", "current_slot": 0, "related_slot": 1,
+                "predicate": always()}}
+        ]}))
+        .unwrap();
+        let resolved = relations(&spec);
+        for name in ["path", "filter"] {
+            assert_eq!(
+                resolved.derived[name].kinds.as_deref(),
+                Some(["Person".to_string(), "Person".to_string()].as_slice())
+            );
+        }
+        // An invalid path declaring nothing cannot inherit the household
+        // kind in its first step. Mandatory typing reports that declaration.
+        let mut invalid = spec;
+        invalid.relations[2]
+            .derivation
+            .as_mut()
+            .unwrap()
+            .slot_entities
+            .clear();
+        assert!(relations(&invalid).derived["path"].kinds.is_none());
     }
 
     #[test]

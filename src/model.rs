@@ -581,14 +581,34 @@ pub struct RelationSchema {
 }
 
 #[derive(Clone, Debug)]
+pub struct RelationPathStep {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct RelationDerivation {
-    pub source_relation: String,
+    pub source_relation: Option<String>,
+    pub source_path: Option<Vec<RelationPathStep>>,
     pub current_slot: usize,
     pub related_slot: usize,
     pub entity: Option<String>,
     pub member_relation: Option<String>,
     pub slot_entities: Vec<String>,
     pub predicate: JudgmentExpr,
+}
+
+impl RelationDerivation {
+    /// Relation edges read to generate candidates, in source order.
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -722,7 +742,8 @@ impl Program {
     fn has_relation_construct(&self, atoms_only: bool) -> bool {
         self.relations.values().any(|relation| {
             relation.derivation.as_ref().is_some_and(|derivation| {
-                judgment_has_relation_construct(&derivation.predicate, atoms_only)
+                derivation.source_path.is_some()
+                    || judgment_has_relation_construct(&derivation.predicate, atoms_only)
             })
         }) || self.derived.values().any(|derived| {
             std::iter::once(&derived.semantics)

@@ -1,3 +1,8 @@
+// Shared integration properties also run inside the library to observe
+// test-only evaluator work counters without exposing a runtime API.
+#[cfg(test)]
+extern crate self as axiom_rules_engine;
+
 /// Core engine version (`CARGO_PKG_VERSION`), for bindings to report provenance.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -367,6 +367,10 @@ relation:
   intermediate id. A differential test checks this equivalence (section 7).
 - **Membership.** A candidate's membership is the `and` of its reachability
   and the predicate, as for a single source.
+- **Failures.** A path resolves every id it reaches before it tests a
+  candidate, so a failure at any reached id fails the anchor's members. An
+  `exists` over the same steps stops at its first success and can miss that
+  id.
 - **Exclusive.** `source_relation` and `source_path` are exclusive, and one is
   required.
 - **Required declarations.** A path source requires `arity: 2`,
@@ -496,7 +500,10 @@ over determined ids, which #215 section 7 shows sound.
   members. That copies about n³ ids per anchor, plus one members resolution per
   co-resident, inside the #240/#245 bounds. The engine evaluates an `exists`
   whose result depends only on the anchor, such as section 8's guard, again for
-  every candidate, because its resume key includes the candidate (3.6).
+  every candidate, because its resume key includes the candidate (3.6). A path
+  source copies and sorts each current id's related ids, then sorts what the
+  step reached. A step that reaches r ids, repeats included, takes about
+  r log r time, and a derived step adds one members resolution per current id.
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails
   every membership that reads it. Encodings should put pair atoms before the
   value reads they guard, because `and` stops at the first `not_holds`.
@@ -561,6 +568,8 @@ handle atoms, domains and paths:
   artifacts.
 - Dense's derivation walk (`derivation_of` and its callers).
 - `unit_derivation/interface.rs`, while that module exists (#232 deletes it).
+- `python/axiom_rules_engine`: the rule-shape check in `concepts.py` and the
+  provenance union in `models.py`.
 
 **Input catalog.** `collect_input_slots_from_judgment_expr` collects inputs
 read through a term (3.2).
@@ -628,9 +637,10 @@ and differential tests for them.
    in those needs may differ (section 4).
 4. **Qualified reads agree with routing.** Where today's routing reads the
    same id, an unqualified read equals the qualified one.
-5. **Paths agree with `exists`.** A path source's members equal the members
-   computed with nested `exists` over its steps. The harness supplies a
-   candidate source that covers every id, which the language cannot express.
+5. **Paths agree with `exists`.** When neither side fails, a path source's
+   members equal the members computed with nested `exists` over its steps. The
+   harness supplies a candidate source that covers every id, which the
+   language cannot express. A path can fail where `exists` succeeds (3.7).
 6. **Monotone in tuples.** Take a predicate that reads relations only through
    atoms and `exists` domains on base relations, each under an even number of
    `not`s. Adding tuples to those relations never removes a member, though
@@ -644,7 +654,8 @@ and differential tests for them.
    #253 defines polarity through derived relations for recursion.
 7. **Deferral transparency.** Results and traces are identical at every
    suspend depth (`depth::with_suspend_depth`; compare
-   `tests/deferral_transparency.rs`). The resumable `exists` site is the
+   `tests/deferral_transparency.rs` and, for paths,
+   `tests/support/relation_paths.rs`). The resumable `exists` site is the
    riskiest code in the series.
 8. **Determinism.** Two runs produce identical output and trace bytes.
 9. **Modes agree.** Explain and fast agree on every test program, and dense
@@ -883,9 +894,8 @@ Each is sized for one build lane.
    `follow_chains` (`relation_typing.rs`), which follows one successor per
    node. A path source makes a relation read several relations, one per
    step, so this PR extends `follow_chains` or adds a graph walk beside it.
-   It also lands after #211, still open, which rewrites the chain walks in
-   validation, binding and all three evaluators, or with an explicit merge
-   plan for it.
+   #211 has also landed: the chain walks in validation, binding and all
+   three evaluators are linear. This PR extends those walks to path edges.
 5. **Fixture and docs.** The 273.1 fixture and its hand-worked cases, the
    `relation_roles` capability, `docs/execution-semantics.md`, and a
    `DECISIONS.md` entry.

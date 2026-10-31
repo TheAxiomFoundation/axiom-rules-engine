@@ -692,6 +692,27 @@ fn exists_unsupported() -> DenseCompileError {
     )
 }
 
+fn path_source_unsupported(relation: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the path source of derived relation `{relation}`; path sources run in explain and fast modes, and dense support is #218"
+    ))
+}
+
+/// The relation at or below `relation`, down its single sources, that takes
+/// a path source.
+fn path_source_below<'a>(program: &'a Program, relation: &'a str) -> Option<&'a str> {
+    let mut on_chain = HashSet::new();
+    let mut name = relation;
+    while on_chain.insert(name) {
+        let derivation = program.relations.get(name)?.derivation.as_ref()?;
+        if derivation.source_path.is_some() {
+            return Some(name);
+        }
+        name = derivation.source_relation.as_deref()?;
+    }
+    None
+}
+
 fn term_comparison_unsupported() -> DenseCompileError {
     DenseCompileError::Unsupported(
         "a term comparison in a derived relation's predicate; term comparisons run in explain and fast modes, and dense support is #218".to_string(),
@@ -1601,12 +1622,18 @@ impl<'a> CandidateAncestry<'a> {
         let mut derived = HashSet::new();
         for (name, schema) in &program.relations {
             children.entry(name).or_default();
-            if let Some(derivation) = &schema.derivation {
+            // Paths are refused when compilation reaches them. They do not
+            // belong to this single-source forest, including when unused.
+            if let Some(derivation) = &schema.derivation
+                && derivation.source_path.is_none()
+                && let Some(source) = &derivation.source_relation
+            {
                 derived.insert(name.as_str());
-                children
-                    .entry(&derivation.source_relation)
-                    .or_default()
-                    .push((name, derivation.current_slot, derivation.related_slot));
+                children.entry(source).or_default().push((
+                    name,
+                    derivation.current_slot,
+                    derivation.related_slot,
+                ));
             }
         }
         let mut intervals: HashMap<&str, (usize, usize)> = HashMap::new();
@@ -2411,9 +2438,12 @@ impl<'a> DenseCompiler<'a> {
                 {
                     Ok(CompiledRelatedJudgmentExpr::Literal(true))
                 }
-                Some(scope) => Err(DenseCompileError::Unsupported(format!(
-                    "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
-                ))),
+                Some(scope) => Err(match path_source_below(self.program, relation) {
+                    Some(path) => path_source_unsupported(path),
+                    None => DenseCompileError::Unsupported(format!(
+                        "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
+                    )),
+                }),
             },
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
@@ -2996,8 +3026,14 @@ impl<'a> DenseCompiler<'a> {
         let mut on_chain = HashSet::from([name]);
         let mut parent = None;
         loop {
-            let (_, derivation) = links.last().expect("the chain starts with one link");
-            let source = derivation.source_relation.as_str();
+            let (key, derivation) = links.last().expect("the chain starts with one link");
+            if derivation.source_path.is_some() {
+                return Err(path_source_unsupported(&key.name));
+            }
+            let source = derivation
+                .source_relation
+                .as_deref()
+                .expect("validated single source");
             let Some(source_derivation) = program
                 .relations
                 .get(source)
@@ -3025,7 +3061,10 @@ impl<'a> DenseCompiler<'a> {
         for (lookup_key, derivation) in links.into_iter().rev() {
             let key = parent.map_or_else(
                 || DenseRelationKey {
-                    name: derivation.source_relation.clone(),
+                    name: derivation
+                        .source_relation
+                        .clone()
+                        .expect("validated single source"),
                     current_slot: derivation.current_slot,
                     related_slot: derivation.related_slot,
                 },

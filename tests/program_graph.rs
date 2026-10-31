@@ -97,7 +97,8 @@ fn a_derived_relation_derived_from_itself_is_an_error_not_a_stack_overflow() {
                 arity: 2,
                 slot_entities: Vec::new(),
                 derivation: Some(RelationDerivationSpec {
-                    source_relation: "loop".to_string(),
+                    source_relation: Some("loop".to_string()),
+                    source_path: None,
                     current_slot: 0,
                     related_slot: 1,
                     entity: None,
@@ -207,7 +208,8 @@ fn derived_relation(name: &str, source: &str, predicate: JudgmentExprSpec) -> Re
         arity: 2,
         slot_entities: Vec::new(),
         derivation: Some(RelationDerivationSpec {
-            source_relation: source.to_string(),
+            source_relation: Some(source.to_string()),
+            source_path: None,
             current_slot: 0,
             related_slot: 1,
             entity: None,

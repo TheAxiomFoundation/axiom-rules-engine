@@ -62,6 +62,10 @@ pub enum RelationTypingCode {
     RelationVariableOutOfScope,
     RelationExistsVariableCount,
     InverseDerivedTraversalUnsupported,
+    RelationPathRequiresBinaryDeclaration,
+    RelationPathStepArity,
+    RelationPathStepSlots,
+    RelationPathKindMismatch,
 }
 
 impl RelationTypingCode {
@@ -92,6 +96,12 @@ impl RelationTypingCode {
             Self::RelationVariableOutOfScope => "relation_variable_out_of_scope",
             Self::RelationExistsVariableCount => "relation_exists_variable_count",
             Self::InverseDerivedTraversalUnsupported => "inverse_derived_traversal_unsupported",
+            Self::RelationPathRequiresBinaryDeclaration => {
+                "relation_path_requires_binary_declaration"
+            }
+            Self::RelationPathStepArity => "relation_path_step_arity",
+            Self::RelationPathStepSlots => "relation_path_step_slots",
+            Self::RelationPathKindMismatch => "relation_path_kind_mismatch",
         }
     }
 }
@@ -170,9 +180,10 @@ pub fn executed_relations(program: &Program) -> BTreeSet<String> {
 }
 
 /// The entity kind of each tuple slot of `relation`, or `None` when the
-/// relation (or, for a derived relation, every relation it filters) declares
-/// none. A derived relation's tuples are its source's tuples, so it inherits
-/// the source's kinds when it declares none of its own.
+/// relation (or, for a single-source derivation, every relation it filters)
+/// declares none. A single-source derivation inherits the source's kinds when
+/// it declares none of its own. A path declares its endpoint kinds directly;
+/// its intermediate relations never supply inherited kinds.
 ///
 /// This follows one chain of sources. To ask about many relations of one
 /// program, build [`EffectiveSlotEntities`] once: asking this per relation
@@ -206,7 +217,14 @@ fn own_slot_entities(schema: &RelationSchema) -> OwnSlotEntities<'_> {
             OwnSlotEntities::Settled(Some(&derivation.slot_entities))
         }
         Some(derivation) if schema.slot_entities.is_empty() => {
-            OwnSlotEntities::Inherited(&derivation.source_relation)
+            // A path joins new pairs rather than filtering one source's
+            // tuples. Its kinds must be declared, never inherited from a step.
+            match derivation.source_relation.as_deref() {
+                Some(source) if derivation.source_path.is_none() => {
+                    OwnSlotEntities::Inherited(source)
+                }
+                _ => OwnSlotEntities::Settled(None),
+            }
         }
         _ => OwnSlotEntities::Settled(
             (!schema.slot_entities.is_empty()).then_some(schema.slot_entities.as_slice()),
@@ -434,6 +452,87 @@ pub(crate) fn follow_chains<'k, R: Copy>(
             resolved.insert(node, result);
         }
         on_path.clear();
+    }
+    resolved
+}
+
+#[cfg(test)]
+thread_local! {
+    // Leaves, branching nodes, nodes with three or more edges, and back
+    // edges, counted only after the graph resolver performs the work.
+    static SOURCE_GRAPH_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+/// Whether every reachable relation meets a local condition and the source
+/// graph is acyclic. Unlike `follow_chains`, this visits every step of a path.
+/// A node and each of its source edges are examined once, with an explicit
+/// stack so shared tails and long chains do not repeat work or grow the stack.
+/// `None` means the local condition fails; an empty successor list is a leaf.
+pub(crate) fn all_source_edges<'k>(
+    starts: impl IntoIterator<Item = &'k str>,
+    mut successors: impl FnMut(&'k str) -> Option<Vec<&'k str>>,
+) -> BTreeMap<&'k str, bool> {
+    struct Frame<'k> {
+        name: &'k str,
+        next: usize,
+        edges: Vec<&'k str>,
+        valid: bool,
+    }
+    let mut resolved = BTreeMap::new();
+    let mut on_path = BTreeSet::new();
+    let mut stack = Vec::<Frame<'k>>::new();
+    for start in starts {
+        if resolved.contains_key(start) {
+            continue;
+        }
+        let edges = successors(start);
+        on_path.insert(start);
+        stack.push(Frame {
+            name: start,
+            next: 0,
+            valid: edges.is_some(),
+            edges: edges.unwrap_or_default(),
+        });
+        while let Some(frame) = stack.last_mut() {
+            if let Some(&next) = frame.edges.get(frame.next) {
+                frame.next += 1;
+                if let Some(&known) = resolved.get(next) {
+                    frame.valid &= known;
+                } else if on_path.contains(next) {
+                    #[cfg(test)]
+                    SOURCE_GRAPH_WORK.with(|work| {
+                        let mut counts = work.get();
+                        counts[3] += 1;
+                        work.set(counts);
+                    });
+                    frame.valid = false;
+                } else {
+                    let edges = successors(next);
+                    on_path.insert(next);
+                    stack.push(Frame {
+                        name: next,
+                        next: 0,
+                        valid: edges.is_some(),
+                        edges: edges.unwrap_or_default(),
+                    });
+                }
+            } else {
+                let frame = stack.pop().expect("a source frame");
+                #[cfg(test)]
+                SOURCE_GRAPH_WORK.with(|work| {
+                    let mut counts = work.get();
+                    counts[0] += usize::from(frame.next == 0);
+                    counts[1] += usize::from(frame.next > 1);
+                    counts[2] += usize::from(frame.next >= 3);
+                    work.set(counts);
+                });
+                on_path.remove(frame.name);
+                resolved.insert(frame.name, frame.valid);
+                if let Some(parent) = stack.last_mut() {
+                    parent.valid &= frame.valid;
+                }
+            }
+        }
     }
     resolved
 }
@@ -957,49 +1056,53 @@ impl<'a> Checker<'a> {
             return;
         };
         let schema_kinds = schema.slot_entities.clone();
-        self.use_relation(&derivation.source_relation);
-        let source_kinds = self.typed_slots(&derivation.source_relation, &name);
-        if let Some(source_kinds) = source_kinds.as_ref() {
-            for declared in [&derivation.slot_entities, &schema_kinds] {
-                if declared.is_empty() || declared == source_kinds {
-                    continue;
-                }
-                self.push(
+        if derivation.source_path.is_some() {
+            self.path_source(&name, schema.arity, &schema_kinds, &derivation);
+        } else if let Some(source_relation) = derivation.source_relation.as_deref() {
+            self.use_relation(source_relation);
+            let source_kinds = self.typed_slots(source_relation, &name);
+            if let Some(source_kinds) = source_kinds.as_ref() {
+                for declared in [&derivation.slot_entities, &schema_kinds] {
+                    if declared.is_empty() || declared == source_kinds {
+                        continue;
+                    }
+                    self.push(
                     RelationTypingCode::DerivedRelationSourceConflict,
                     &name,
                     &name,
                     format!(
                         "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
                         format_kinds(declared),
-                        derivation.source_relation,
+                        source_relation,
                         format_kinds(source_kinds)
                     ),
                 );
+                }
             }
-        }
-        // A derived source traverses its own source with its own
-        // slots, whatever slots reach it.
-        if let Some(source) = self
-            .program
-            .relations
-            .get(&derivation.source_relation)
-            .and_then(|schema| schema.derivation.as_ref())
-            && (source.current_slot, source.related_slot)
-                != (derivation.current_slot, derivation.related_slot)
-        {
-            self.push(
+            // A derived source traverses its own source with its own
+            // slots, whatever slots reach it.
+            if let Some(source) = self
+                .program
+                .relations
+                .get(source_relation)
+                .and_then(|schema| schema.derivation.as_ref())
+                && (source.current_slot, source.related_slot)
+                    != (derivation.current_slot, derivation.related_slot)
+            {
+                self.push(
                 RelationTypingCode::DerivedRelationSlotsDiverge,
                 &name,
                 &name,
                 format!(
                     "derived relation `{name}` reads its derived source `{}` with slots ({}, {}), but that source traverses its own source with slots ({}, {}); a chain of derived relations must keep one direction",
-                    derivation.source_relation,
+                    source_relation,
                     derivation.current_slot,
                     derivation.related_slot,
                     source.current_slot,
                     source.related_slot
                 ),
             );
+            }
         }
         self.predicate_rules(&name, &derivation);
         let kinds = self.slot_kinds.get(&name);
@@ -1014,6 +1117,84 @@ impl<'a> Checker<'a> {
                 citing: &name,
             },
         );
+    }
+
+    /// A path reads every step relation, but only its first and last kinds
+    /// describe the new pairs. No intermediate slot is inherited by the
+    /// derived relation's declaration.
+    fn path_source(
+        &mut self,
+        name: &str,
+        arity: usize,
+        schema_kinds: &[String],
+        derivation: &RelationDerivation,
+    ) {
+        let Some(path) = derivation.source_path.as_ref() else {
+            return;
+        };
+        let valid_declaration = arity == 2
+            && derivation.current_slot < 2
+            && derivation.related_slot < 2
+            && derivation.current_slot != derivation.related_slot
+            && derivation.slot_entities.len() == 2
+            && (schema_kinds.is_empty() || schema_kinds == derivation.slot_entities);
+        if !valid_declaration {
+            self.push(
+                RelationTypingCode::RelationPathRequiresBinaryDeclaration, name, name,
+                format!("path-sourced derived relation `{name}` requires arity 2, two declared slot kinds and distinct current_slot and related_slot in 0..2"),
+            );
+        }
+        let declared_kind = |slot: usize| derivation.slot_entities.get(slot).cloned();
+        let mut previous_kind = declared_kind(derivation.current_slot);
+        for (index, step) in path.iter().enumerate() {
+            self.use_relation(&step.relation);
+            let schema = self.program.relations.get(&step.relation);
+            let step_arity = schema.map(|schema| schema.arity);
+            let source_slots = schema
+                .and_then(|schema| schema.derivation.as_ref())
+                .map(|source| (source.current_slot, source.related_slot));
+            if step_arity.is_some_and(|arity| arity != 2) {
+                self.push(
+                    RelationTypingCode::RelationPathStepArity, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` reads non-binary relation `{}`", step.relation),
+                );
+            }
+            let kinds = self.typed_slots(&step.relation, name);
+            if step.from_slot >= 2 || step.to_slot >= 2 || step.from_slot == step.to_slot {
+                self.push(
+                    RelationTypingCode::RelationPathStepSlots, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` requires distinct binary slots 0 and 1; found ({}, {})", step.from_slot, step.to_slot),
+                );
+            }
+            if let Some((current_slot, related_slot)) = source_slots
+                && (step.from_slot, step.to_slot) != (current_slot, related_slot)
+            {
+                self.push(
+                    RelationTypingCode::InverseDerivedTraversalUnsupported, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` must traverse derived relation `{}` forward from slot {} to slot {}", step.relation, current_slot, related_slot),
+                );
+            }
+            let kind = |slot: usize| kinds.as_ref().and_then(|kinds| kinds.get(slot)).cloned();
+            let from_kind = kind(step.from_slot);
+            if let (Some(expected), Some(actual)) = (previous_kind.as_ref(), from_kind.as_ref())
+                && expected != actual
+            {
+                self.push(
+                    RelationTypingCode::RelationPathKindMismatch, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` starts at kind `{actual}`, but the preceding endpoint has kind `{expected}`"),
+                );
+            }
+            previous_kind = kind(step.to_slot);
+        }
+        if let (Some(actual), Some(expected)) =
+            (previous_kind, declared_kind(derivation.related_slot))
+            && actual != expected
+        {
+            self.push(
+                RelationTypingCode::RelationPathKindMismatch, name, name,
+                format!("path of derived relation `{name}` ends at kind `{actual}`, but its candidate kind is `{expected}`"),
+            );
+        }
     }
 
     /// A derived relation's predicate runs each rule it reads on the current
@@ -1284,6 +1465,9 @@ impl<'a> Checker<'a> {
             let Some(derivation) = &schema.derivation else {
                 continue;
             };
+            if derivation.source_path.is_some() {
+                self.path_source(name, schema.arity, &schema.slot_entities, derivation);
+            }
             let mut reads = Vec::new();
             collect_judgment_role_reads(&derivation.predicate, None, &mut reads);
             for read in reads {
@@ -2360,7 +2544,8 @@ pub(crate) mod chain_test_programs {
         let derivation = (source, 0_usize..3, 0_usize..3, entity, kinds()).prop_map(
             |(source_relation, current_slot, related_slot, entity, slot_entities)| {
                 RelationDerivation {
-                    source_relation,
+                    source_relation: Some(source_relation),
+                    source_path: None,
                     current_slot,
                     related_slot,
                     entity: entity.map(str::to_string),
@@ -2553,7 +2738,7 @@ pub(crate) mod chain_test_programs {
                 if !schema.slot_entities.is_empty() {
                     return Some(schema.slot_entities.clone());
                 }
-                return inner(program, &derivation.source_relation, visited);
+                return inner(program, derivation.source_relation.as_deref()?, visited);
             }
             (!schema.slot_entities.is_empty()).then(|| schema.slot_entities.clone())
         }
@@ -2955,6 +3140,129 @@ mod chain_resolution_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn source_graph_visits_long_chains_and_shared_tails_once() {
+        let names = (0..50_000)
+            .map(|index| format!("r{index:07}"))
+            .collect::<Vec<_>>();
+        for branching in [false, true] {
+            let mut calls = 0;
+            let resolved = all_source_edges(names.iter().map(String::as_str), |name| {
+                calls += 1;
+                let index = name[1..].parse::<usize>().unwrap();
+                let Some(next) = names.get(index + 1) else {
+                    return Some(Vec::new());
+                };
+                Some(if branching {
+                    vec![next.as_str(), names.last().unwrap().as_str(), next.as_str()]
+                } else {
+                    vec![next.as_str()]
+                })
+            });
+            assert_eq!(calls, names.len());
+            assert_eq!(resolved.len(), names.len());
+            assert!(resolved.values().all(|valid| *valid));
+        }
+    }
+
+    #[test]
+    fn source_graph_matches_independent_reachability_and_cycle_oracle() {
+        let names = || prop::sample::select(vec!["a", "b", "c", "d", "e", "f"]);
+        let graph = prop::collection::btree_map(
+            names(),
+            (any::<bool>(), prop::collection::vec(names(), 0..=4)),
+            0..=6,
+        );
+        let (branched, long_paths, cyclic, settled, leaves) = (
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+        );
+        runner(2000)
+            .run(&graph, |graph| {
+                let starts = ["a", "b", "c", "d", "e", "f", "g"];
+                let mut visits = BTreeMap::new();
+                SOURCE_GRAPH_WORK.with(|work| work.set([0; 4]));
+                let actual = all_source_edges(starts, |node| {
+                    *visits.entry(node).or_insert(0_usize) += 1;
+                    let Some((valid, edges)) = graph.get(node) else {
+                        return Some(Vec::new());
+                    };
+                    if *valid { Some(edges.clone()) } else { None }
+                });
+                SOURCE_GRAPH_WORK.with(|work| {
+                    let counts = work.get();
+                    leaves.set(leaves.get() + counts[0]);
+                    branched.set(branched.get() + counts[1]);
+                    long_paths.set(long_paths.get() + counts[2]);
+                    cyclic.set(cyclic.get() + counts[3]);
+                });
+                assert!(visits.values().all(|visits| *visits == 1));
+                for start in starts {
+                    // Independent oracle: collect the reachable subgraph, then
+                    // remove its leaves. A remaining node belongs to, or reaches,
+                    // a cycle. This does no recursive or memoized source walk.
+                    let mut reachable = BTreeSet::new();
+                    let mut pending = vec![start];
+                    let mut locally_valid = true;
+                    while let Some(node) = pending.pop() {
+                        if !reachable.insert(node) {
+                            continue;
+                        }
+                        if let Some((valid, edges)) = graph.get(node) {
+                            locally_valid &= *valid;
+                            if *valid {
+                                pending.extend(edges.iter().copied());
+                            }
+                        }
+                    }
+                    let mut remaining = reachable.clone();
+                    loop {
+                        let leaves = remaining
+                            .iter()
+                            .copied()
+                            .filter(|node| {
+                                graph.get(node).is_none_or(|(valid, edges)| {
+                                    !valid || edges.iter().all(|edge| !remaining.contains(edge))
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        if leaves.is_empty() {
+                            break;
+                        }
+                        for node in leaves {
+                            remaining.remove(node);
+                        }
+                    }
+                    let expected = locally_valid && remaining.is_empty();
+                    settled.set(settled.get() + usize::from(expected));
+                    prop_assert_eq!(actual[start], expected, "{} in {:?}", start, graph);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let counts = (
+            branched.get(),
+            long_paths.get(),
+            cyclic.get(),
+            settled.get(),
+            leaves.get(),
+        );
+        eprintln!(
+            "source graph work counts (branching, 3+ edges, cycles, settled, leaves): {counts:?}"
+        );
+        assert!(
+            counts.0 > 1000
+                && counts.1 > 700
+                && counts.2 > 500
+                && counts.3 > 2000
+                && counts.4 > 3000,
+            "graph coverage {counts:?}"
+        );
     }
 
     #[test]

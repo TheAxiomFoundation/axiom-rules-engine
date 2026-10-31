@@ -203,7 +203,10 @@ fn reject_relation_routed_cycles(
         }
         let mut relations = HashSet::new();
         collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
-        relations.insert(derivation.source_relation.clone());
+        if derivation.source_path.is_some() {
+            unreachable!("the frozen evaluation-order oracle covers legacy programs only");
+        }
+        relations.insert(derivation.source_relation.clone().expect("legacy source"));
         for source in relations {
             add_edge(relation_index(&source), index);
         }

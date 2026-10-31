@@ -99,13 +99,14 @@ output's formula is evaluated for that entity and period as follows.
   refuses these constructs outside the predicate's scope, including
   aggregation `where` clauses (`relation_role_outside_scope`).
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, relation atoms, term comparisons or `exists` refuse tuples
+  using qualified reads, relation atoms, term comparisons, `exists` or path
+  sources refuse tuples
   supplied under any derived relation's name
   (`supplied_tuples_for_derived_relation`), and their members resolver ignores
   those tuples even through `Engine::new`. Programs using none retain the
   union of supplied tuples and filtered source members; a parameter read in a
   predicate, which raw `ProgramSpec` could always express, is not one of these
-  constructs. An atom or `exists` also refuses lenient request binding
+  constructs. An atom, `exists` or path source also refuses lenient request binding
   (`lenient_binding_with_relation_roles`).
 - **`exists` evaluates a bounded disjunction.** In a derived relation's
   predicate, `exists(R(anchor, p), body)` binds `p` to each distinct domain id
@@ -122,6 +123,19 @@ output's formula is evaluated for that entity and period as follows.
   a variable is read through its term explicitly. Rules and aggregation
   clauses or values have no variable bindings
   (`relation_role_outside_scope`).
+- **Path sources join before testing membership.** Starting with the anchor
+  id, each binary step replaces the current ids with those reached from its
+  `from_slot` to its `to_slot`. A data step includes only tuples whose
+  interval contains the whole period. A derived step resolves forward
+  members for each current id. Each frontier is distinct and sorted; only
+  the final frontier becomes candidates, so intermediate ids are dropped.
+  The outer predicate then runs once per candidate in sorted order, as for
+  a single source. An empty frontier gives no members. A failure at any
+  reached id fails the anchor's members, even for candidates that id does
+  not reach. Kind checks require
+  the first step to start at the anchor's kind, every junction to match, and
+  the final step to end at the candidate's kind
+  (`tests/relation_paths_surface.rs`, `tests/relation_paths.rs`).
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -249,8 +263,9 @@ batch is its base relation's. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 
-A derived relation's predicate using a qualified read (`anchor.name`,
-`candidate.name`), relation atom, term comparison or `exists` makes the dense compiler
+A derived relation's path source or predicate using a qualified read
+(`anchor.name`, `candidate.name`), relation atom, term comparison or `exists`
+makes the dense compiler
 reject any root entity whose rules reach that relation with
 `DenseCompileError::Unsupported`, naming the construct and #218; a root that
 reaches no such relation compiles. Explain and fast evaluate it. Parameter
@@ -386,10 +401,20 @@ the enclosing member resolution that owns its trace effects. This separates, for
 one parent rule evaluation. A retry resumes the interrupted body at the same
 domain id; bodies before it retain their completed work.
 
+A path's members resolution saves the step index, sorted current frontier,
+the next id in that frontier, ids reached so far and captured trace effects.
+A derived step can stop while resolving an intermediate id's members. The
+retry reuses completed lookups, resumes that id, and advances to the next
+step only after the frontier is complete. Once candidates are generated,
+the ordinary members predicate loop saves its own progress. Both relation
+nesting limits and rule deferral preserve results and traces
+(`engine::relation_resolution_tests::suspended_resolution_matches_native_resolution`).
+
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
 a `count` or `sum` over related entities, an `exists` domain, and the resolution
-of a relation's members, which tests a derived relation's predicate on each candidate. The
+of a relation's members, which generates a path's candidates and tests a derived
+relation's predicate on each candidate. The
 retry of the same rule evaluation resumes an interrupted loop at the member
 that deferred, and reuses a loop that had finished, so a household whose
 members each defer is not walked again for every member. A relation's own

@@ -98,9 +98,11 @@ fn program(links: &[Link], outputs: &[usize], masked: bool) -> Program {
                 arity: 2,
                 slot_entities: slots.clone(),
                 derivation: Some(RelationDerivation {
-                    source_relation: link
-                        .parent
-                        .map_or_else(|| "base".to_string(), |parent| format!("link{parent}")),
+                    source_relation: Some(
+                        link.parent
+                            .map_or_else(|| "base".to_string(), |parent| format!("link{parent}")),
+                    ),
+                    source_path: None,
                     current_slot: 0,
                     related_slot: 1,
                     entity: None,
@@ -335,7 +337,7 @@ fn dense_compiler_refuses_a_long_source_cycle_with_the_existing_diagnostic() {
         .derivation
         .as_mut()
         .unwrap()
-        .source_relation = format!("link{}", LINKS - 1);
+        .source_relation = Some(format!("link{}", LINKS - 1));
     let error = compile(&program).expect_err("a long source cycle is refused");
     assert!(
         matches!(error, DenseCompileError::Unsupported(ref message)
@@ -416,10 +418,10 @@ proptest! {
                     let mut name = scope.as_str();
                     let expected = loop {
                         let Some(derivation) = oriented.relations.get(name).and_then(|relation| relation.derivation.as_ref()) else { break false; };
-                        if derivation.source_relation == target {
+                        if derivation.source_relation.as_deref() == Some(target.as_str()) {
                             break derivation.current_slot == current_slot && derivation.related_slot == related_slot;
                         }
-                        name = &derivation.source_relation;
+                        name = derivation.source_relation.as_deref().expect("single-source test graph");
                     };
                     prop_assert_eq!(compiler.holds_for_every_candidate(&scope, &target, current_slot, related_slot), expected);
                 }
@@ -454,7 +456,7 @@ proptest! {
     fn dense_source_cycles_of_random_lengths_are_refused(length in 1_usize..32) {
         let mut program = program(&chain(length), &[length - 1], false);
         program.relations.get_mut("link0").unwrap().derivation.as_mut().unwrap().source_relation =
-            format!("link{}", length - 1);
+            Some(format!("link{}", length - 1));
         let error = compile(&program).expect_err("a source cycle is refused");
         prop_assert!(matches!(error, DenseCompileError::Unsupported(ref message)
             if message == &format!("cyclic dense compilation dependency involving `link{}`", length - 1)), "unexpected cycle diagnostic: {}", error);

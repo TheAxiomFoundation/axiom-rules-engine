@@ -1193,15 +1193,50 @@
           },
           "type": "array"
         },
+        "source_path": {
+          "items": {
+            "$ref": "#/$defs/RelationPathStepSpec"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "source_relation": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "source_relation",
         "current_slot",
         "related_slot",
         "predicate"
+      ],
+      "type": "object"
+    },
+    "RelationPathStepSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "from_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relation": {
+          "type": "string"
+        },
+        "to_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relation",
+        "from_slot",
+        "to_slot"
       ],
       "type": "object"
     },

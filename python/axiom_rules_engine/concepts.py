@@ -691,11 +691,14 @@ def _validate_rule_shapes(rules: Any, path: Path) -> None:
             if (
                 not isinstance(relation, dict)
                 or not isinstance(relation.get("arity"), int)
-                or not isinstance(relation.get("source_relation"), str)
+                or not (
+                    isinstance(relation.get("source_relation"), str)
+                    or isinstance(relation.get("source_path"), list)
+                )
             ):
                 raise ValueError(
-                    "derived_relation rules require arity and source_relation: "
-                    f"{path}"
+                    "derived_relation rules require arity and source_relation "
+                    f"or source_path: {path}"
                 )
             if not _has_executable_formula(rule):
                 raise ValueError(f"derived_relation rule has no formula: {path}")

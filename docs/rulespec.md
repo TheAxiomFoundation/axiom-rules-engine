@@ -277,8 +277,8 @@ The migration command continues to write format 2; recompilation from
 RuleSpec produces format 3 with its checked interface and producer identities.
 
 Derived relations are rule-defined views over data relations or other derived
-relations. The source relation supplies candidate tuples; the formula decides
-which candidate tuples remain in the filtered relation.
+relations. A single source relation or a source path supplies candidates; the
+formula decides which candidates remain in the derived relation.
 Local source and predicate references resolve within the declaring module,
 including when that module is imported. Inputs used only by a relation predicate
 use the declaring module’s canonical `#input.<slot>` reference; an importing
@@ -556,14 +556,76 @@ name, but it cannot be used as an atom or generator
 keeps its quantifier meaning even if a relation is named `exists`, while
 `exists(anchor, candidate)` refuses when it names that relation.
 
-A program using qualified reads, atoms, term comparisons or `exists` refuses supplied
+A derived relation can reach candidates through several binary relations by
+replacing `source_relation` with `source_path`:
+
+```yaml
+  - name: lives_with
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+      source_path:
+        - {relation: member_of_household, from_slot: 0, to_slot: 1}
+        - {relation: member_of_household, from_slot: 1, to_slot: 0}
+    versions:
+      - effective_from: 2026-01-01
+        formula: true
+```
+
+Each step reads its `relation` from `from_slot` to `to_slot`. Relation names
+resolve within the declaring module on every step, including in imports.
+A data step follows tuples covering the whole evaluation period. A derived
+step reads the relation's forward members: `from_slot` must be its current
+slot and `to_slot` its related slot. The first step starts at the anchor;
+each later step starts at every distinct id reached by the previous step.
+Only final ids become candidates, distinct and sorted. Thus the example
+includes the anchor and every person sharing any of their households;
+an anchor without a household has no candidates. The predicate filters those
+candidates with the same anchor/candidate bindings as a single source.
+
+A path requires explicit `arity: 2`, two `slot_entities`, `current_slot` and
+`related_slot`, with the slots distinct and in range. Its first `from` kind
+must be the anchor's, every junction must join equal kinds, and its last `to`
+kind must be the candidate's. The legacy default `(current_slot: 1,
+related_slot: 0)` applies only to a single source. A path cannot declare
+`entity` or `member_relation`, whose filtered-entity aliases require a single
+source's current id.
+
+The path refusals are:
+
+| Code | Refused form |
+| --- | --- |
+| `relation_path_source_conflict` | Both `source_relation` and `source_path` are supplied; a raw ProgramSpec also uses this code when neither is supplied. |
+| `relation_path_requires_binary_declaration` | A path lacks explicit binary arity, two slot kinds or distinct binary current/related slots. |
+| `relation_path_forbidden_field` | A path declares `entity` or `member_relation`. |
+| `relation_path_empty` | `source_path` has no steps. |
+| `relation_path_step_arity` | A step names a relation whose arity is not 2. |
+| `relation_path_step_slots` | A step's slots are equal or outside 0 and 1. |
+| `relation_path_kind_mismatch` | A junction joins different kinds, or the first/last kind differs from the anchor/candidate kind. |
+| `inverse_derived_traversal_unsupported` | A derived step reads against its declared direction. |
+| `UnknownRelationDependency` | A step names an undeclared relation; the standalone typing check reports `unknown_relation`. |
+| `untyped_relation` | A step's relation lacks declared or inherited slot kinds. |
+| `supplied_tuples_for_derived_relation` | A path program supplies tuples under any derived relation's name. |
+| `lenient_binding_with_relation_roles` | A path program requests lenient tuple binding. |
+
+A RuleSpec declaration with neither source retains the existing
+`MissingDerivedRelationSource` refusal, whose message names
+`derived_relation.source_relation`. Each step also contributes a dependency
+edge, so a cycle through any step remains refused. Explain and fast execute
+paths; dense refuses `source_path` with `DenseCompileError::Unsupported`
+and names #218.
+
+A program using qualified reads, atoms, term comparisons, `exists` or a path source refuses supplied
 tuples under any derived relation's name
 (`supplied_tuples_for_derived_relation`). Its members resolver also ignores
 such tuples for direct Rust callers of `Engine::new`. Programs using none of
 these constructs retain the union of supplied and derived members, including
 programs whose predicates only read parameters. Request
 binding also refuses `relation_binding: lenient` when the program uses an
-atom or `exists` (`lenient_binding_with_relation_roles`). See
+atom, `exists` or a path source (`lenient_binding_with_relation_roles`). See
 [relation-roles.md](relation-roles.md) for the design and derived-atom cost.
 
 Every mode evaluates conditionals, `and`/`or` and aggregations lazily per row:

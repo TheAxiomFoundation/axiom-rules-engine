@@ -4882,7 +4882,7 @@ rules:
                 .unwrap();
             assert_eq!(
                 relation.derivation.as_ref().unwrap().source_relation,
-                format!("{prefix}{source}")
+                Some(format!("{prefix}{source}"))
             );
         }
     }
