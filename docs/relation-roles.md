@@ -679,9 +679,9 @@ With #215:
 
 ## 8. Worked example: 7 CFR 273.1, common case
 
-This is a synthetic engine fixture, not a RuleSpec module. The pilot module in
-rulespec-us#1428 comes from the encoder. The fixture shows the constructs on
-the pilot's scope:
+`tests/fixtures/snap_household.rulespec.yaml` holds this synthetic engine
+fixture, which is not a RuleSpec module. The pilot module in rulespec-us#1428
+comes from the encoder. The fixture shows the constructs on the pilot's scope:
 - the meal group under (a)(3);
 - the required combinations of (b)(1)(i), (b)(1)(ii) and (b)(1)(iii);
 - the (b)(7) participation filter, kept apart from composition;
@@ -889,7 +889,7 @@ The series delivers these constructs and contracts in five steps:
    dependency walks and differential tests against `exists`. Typing,
    direction, migration, validation and binding follow every path step;
    explain resumes path progress and dense refuses path sources by name.
-5. **Fixture and docs.** Added section 8's synthetic 273.1 fixture, its eleven
+5. **Fixture and docs (#283).** Added section 8's synthetic 273.1 fixture, its eleven
    hand-worked cases and independent household properties, the
    `relation_roles` capability, `docs/execution-semantics.md` and the
    `DECISIONS.md` entry.
@@ -902,10 +902,12 @@ it needs no additional format bump.
 1. Under the three-valued option, follow the two steps in section 4. The
    later of #251 and each PR here adds the named refusals. The later of
    #215's third PR and this series lifts them.
-2. Recursion (#253, then #231) makes the household exact.
-3. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
-4. The pilot (TheAxiomFoundation/rulespec-us#1428) is encoded. It should
-   follow #231, so that its households are exact rather than guarded.
+2. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
+3. The encoder encodes the pilot (TheAxiomFoundation/rulespec-us#1428) in
+   section 8's guarded form, which supplied ids complete where the chain or
+   an exception leaves the computed case.
+4. Recursion (#253, then #231) later makes the household exact and retires
+   the guard and the supplied ids.
 
 **Dependencies.**
 

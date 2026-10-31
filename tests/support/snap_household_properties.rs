@@ -350,6 +350,16 @@ impl RawRecords {
     }
 }
 
+/// A complete dataset with one person's household id removed.
+fn without_unit(data: &Value, person: &str) -> Value {
+    let mut data = data.clone();
+    data["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|record| record["name"] != "snap_household_unit" || record["entity_id"] != person);
+    data
+}
+
 /// Breadth-first distances classify the graph actually returned by snap_tie.
 /// The independent union-find above determines the expected households.
 fn distances(ids: &[String], ties: &[BTreeSet<String>], anchor: usize) -> Vec<Option<usize>> {
@@ -412,6 +422,7 @@ struct Coverage {
     escaping_tie: usize,
     exception: usize,
     id_failure: usize,
+    partial_id_failure: usize,
     exception_changes_partition: usize,
     chain_lengths: [usize; 4],
 }
@@ -423,6 +434,11 @@ impl Coverage {
             ("tie leaves two-tie set", self.escaping_tie, 12),
             ("exception in residence", self.exception, 64),
             ("evaluation fails naming unit id", self.id_failure, 12),
+            (
+                "one missing id fails naming it",
+                self.partial_id_failure,
+                12,
+            ),
             (
                 "exception changes supplied partition",
                 self.exception_changes_partition,
@@ -483,7 +499,9 @@ fn guarded_households_never_silently_disagree_with_independent_union_find() {
             let mut exact_no_ids = false;
             let mut escaping_tie = false;
             let mut id_failure = false;
+            let mut partial_id_failure = false;
             let mut chain_lengths = [false; 4];
+            let one_missing = without_unit(&supplied, ids[residence.shift % ids.len()]);
             for (index, person) in ids.iter().enumerate() {
                 prop_assert!(observed_households[index].contains(*person));
                 for other in 0..ids.len() {
@@ -527,16 +545,34 @@ fn guarded_households_never_silently_disagree_with_independent_union_find() {
                             members(explain, 0, "household_mask", &ids),
                             expected[index].clone()
                         );
+                        prop_assert!(!leaves_set, "a tie left the set, yet no id was read");
                         exact_no_ids = true;
                     }
                     (Err(explain), Err(fast)) => {
                         prop_assert_eq!(explain, fast);
                         prop_assert!(explain.contains("snap_household_unit"), "{}", explain);
+                        prop_assert!(leaves_set, "a closed set read an id: {}", explain);
                         id_failure = true;
-                        escaping_tie |= leaves_set;
+                        escaping_tie = true;
                     }
                     (explain, fast) => {
                         prop_assert!(false, "modes differ: {:?} / {:?}", explain, fast)
+                    }
+                }
+                // Every co-resident is a candidate, so one missing id fails
+                // exactly the applicants whose guard selects the supplied ids.
+                match run("explain", &p, &one_missing, &[*person], &["household_mask"]) {
+                    Ok(response) => {
+                        prop_assert!(!leaves_set, "a tie left the set past a missing id");
+                        prop_assert_eq!(
+                            members(&response, 0, "household_mask", &ids),
+                            expected[index].clone()
+                        );
+                    }
+                    Err(error) => {
+                        prop_assert!(error.contains("snap_household_unit"), "{}", error);
+                        prop_assert!(leaves_set, "a closed set read an id: {}", error);
+                        partial_id_failure = true;
                     }
                 }
             }
@@ -556,7 +592,13 @@ fn guarded_households_never_silently_disagree_with_independent_union_find() {
                 .map(|index| partition_members(&raw.ids, &arbitrary_units, index))
                 .collect::<Vec<_>>();
             let mut exception_runs = vec![];
+            let exception_no_ids = dataset(&residence, None, true);
             for mode in ["explain", "fast"] {
+                for person in &ids {
+                    let error = run(mode, &p, &exception_no_ids, &[*person], &["household_mask"])
+                        .unwrap_err();
+                    prop_assert!(error.contains("snap_household_unit"), "{}", error);
+                }
                 let response = run(
                     mode,
                     &p,
@@ -602,6 +644,7 @@ fn guarded_households_never_silently_disagree_with_independent_union_find() {
             counts.exact_no_ids += usize::from(exact_no_ids);
             counts.escaping_tie += usize::from(escaping_tie);
             counts.id_failure += usize::from(id_failure);
+            counts.partial_id_failure += usize::from(partial_id_failure);
             counts.exception += 1;
             counts.exception_changes_partition += usize::from(exception_expected != expected);
             for (count, reached) in counts.chain_lengths.iter_mut().zip(chain_lengths) {

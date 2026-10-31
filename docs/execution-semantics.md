@@ -73,8 +73,9 @@ output's formula is evaluated for that entity and period as follows.
   a non-Boolean parameter used as a judgment fails when reached. A
   `parameter` record with an entity or a computed formula lowers to a rule;
   predicates read it with the routing and qualified-read kind checks of
-  other rules. Parameters have no entity id, so a qualified parameter read
-  is refused; read it unqualified instead (`relation_role_entity_mismatch`).
+  other rules. Parameters have no entity id, so the compiler refuses a
+  qualified parameter read (`relation_role_entity_mismatch`); read it
+  unqualified instead.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
@@ -172,9 +173,9 @@ Terms carry their relation slot's kind; a bound variable carries its
 generator slot's kind. Compilation checks a qualified rule read against that
 kind and checks each atom argument against its declared relation slot.
 Input reads remain untyped. A term can appear in a qualified read, relation
-atom or equality/inequality comparison, but using a term as a value is
-refused (`relation_term_used_as_value`). A bound variable used outside its
-`exists` body is refused (`relation_variable_out_of_scope`). A new variable
+atom or equality/inequality comparison, but the compiler refuses a term used
+as a value (`relation_term_used_as_value`) and a bound variable used outside
+its `exists` body (`relation_variable_out_of_scope`). A new variable
 cannot hide a visible rule, parameter or relation, or rebind an enclosing
 variable (`relation_variable_name_conflict`).
 

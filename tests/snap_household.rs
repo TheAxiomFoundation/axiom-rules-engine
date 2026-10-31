@@ -129,6 +129,18 @@ fn fixture_compiles_strictly_and_dense_refuses_by_name() {
         "{reached}"
     );
 }
+/// Section 8's first precondition: a person with no roster record has no
+/// candidates, so the household comes back empty with no failure.
+#[test]
+fn a_person_off_the_roster_gets_an_empty_household() {
+    let ids = ["a", "b"];
+    let mut data = residence(&ids);
+    data["relations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|record| record["tuple"][0] != "b");
+    check(&data, &ids, &[("a", &["a"]), ("b", &[])], "household_mask");
+}
 #[test]
 fn a_person_living_alone() {
     let ids = ["a"];
