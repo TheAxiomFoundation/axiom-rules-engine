@@ -189,7 +189,7 @@ fn an_unused_path_does_not_enter_denses_single_source_ancestry() {
 }
 
 #[test]
-fn generated_paths_record_all_edges_and_slots() {
+pub(crate) fn generated_paths_record_all_edges_and_slots() {
     let mut runner = TestRunner::new(Config {
         cases: 128,
         failure_persistence: None,

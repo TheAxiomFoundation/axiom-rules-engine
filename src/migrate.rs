@@ -1098,7 +1098,8 @@ fn untrusted_filter_hints(model: &crate::model::Program) -> Vec<String> {
 
 /// The relation at the bottom of each relation's chain of sources (a data
 /// relation, or a name the program does not declare), or none for a chain
-/// that cycles. Each chain is followed once, however many relations share it.
+/// that cycles or reaches a path. A path has no unique physical source.
+/// Each chain is followed once, however many relations share it.
 fn chain_bottoms(model: &crate::model::Program) -> std::collections::BTreeMap<&str, Option<&str>> {
     use crate::relation_typing::ChainStep;
     crate::relation_typing::follow_chains(
@@ -1124,7 +1125,7 @@ type DerivedDataSources<'a> = std::collections::BTreeMap<&'a str, Option<(&'a st
 /// and the slots it reads it with: the relation's own derivation slots,
 /// carried down a chain whose every derived link traverses its source with
 /// those same slots. A link with other slots, a source the program does not
-/// declare, or a cycle leaves it unresolved. Each chain is followed once.
+/// declare, a path, or a cycle leaves it unresolved. Each chain is followed once.
 fn derived_data_sources(model: &crate::model::Program) -> DerivedDataSources<'_> {
     use crate::relation_typing::ChainStep;
     let derived = model
@@ -1199,11 +1200,11 @@ fn trusted_filter_kinds(
     crate::relation_typing::innermost_kinds(&direct)
 }
 
-/// Derived relations whose declared kinds agree with their source's, and
-/// whose slots match a derived source's, all the way down their source chain:
-/// a filter that declares nothing still inherits whatever an ancestor
-/// declares, so one contradicting ancestor poisons every derived relation
-/// above it. A cyclic chain is never consistent.
+/// Derived relations whose source edges agree on kinds and direction all the
+/// way through their source graph. Single-source filters inherit kinds and
+/// preserve their source's direction; paths check each junction and their
+/// declared endpoints. One inconsistent source or a cycle makes every
+/// derivation reaching it inconsistent.
 fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
     let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(model);
     let locally_consistent = |name: &str| {

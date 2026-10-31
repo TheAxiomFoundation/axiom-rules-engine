@@ -22,8 +22,8 @@ use crate::spec::{
     SpecError,
 };
 
-/// `program.interface`. Every list is sorted except a relation's
-/// `slot_entities`, which keeps tuple order.
+/// `program.interface`. Sets are sorted; `slot_entities` keeps tuple order
+/// and a provenance's `source_path` keeps traversal order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -331,6 +331,65 @@ pub fn derive_interface(program: &ProgramSpec) -> Result<ProgramInterface, SpecE
     derive_from_model(&program.to_program()?, &program.input_declarations)
 }
 
+/// Count completed collection work, without exposing counters in the library API.
+#[cfg(test)]
+mod actual_path_work {
+    use std::cell::Cell;
+
+    type Counts = (usize, usize, [usize; 3]);
+    thread_local! {
+        static COUNTS: Cell<Counts> = const { Cell::new((0, 0, [0; 3])) };
+    }
+
+    pub(super) fn lookup(position: usize, derived: bool) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.0 += 1;
+            if derived && position < 3 {
+                value.2[position] += 1;
+            }
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn completed(length: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.1 += usize::from(length >= 3);
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace((0, 0, [0; 3])))
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/relation_path_interface.rs"]
+mod relation_path_properties;
+
+#[cfg(test)]
+mod path_work_tests {
+    #[test]
+    fn generated_interface_collection_is_exercised() {
+        super::actual_path_work::take();
+        super::relation_path_properties::generated_paths_record_all_edges_and_slots();
+        let (steps, long, derived_positions) = super::actual_path_work::take();
+        assert!(steps >= 300, "interface lookups went dark: {steps}");
+        assert!(long >= 50, "long interface paths went dark: {long}");
+        for (position, count) in derived_positions.into_iter().enumerate() {
+            assert!(
+                count >= 20,
+                "derived interface position {position} went dark: {count}"
+            );
+        }
+        eprintln!(
+            "actual interface work: steps={steps} (floor 300), long={long} (floor 50), derived positions={derived_positions:?} (floor 20 each)"
+        );
+    }
+}
+
 /// Fails only on `declarations`: see [`slot_elections`], and an election
 /// some read site defaults with `input_or_else`, since the engine never
 /// defaults an election.
@@ -372,14 +431,19 @@ pub(crate) fn derive_from_model(
         // Data steps key on their from slot; derived steps resolve members
         // at the step relation's current slot.
         if let Some(path) = &derivation.source_path {
-            for step in path {
-                let slot = program
+            for (_position, step) in path.iter().enumerate() {
+                let step_derivation = program
                     .relations
                     .get(&step.relation)
-                    .and_then(|relation| relation.derivation.as_ref())
-                    .map_or(step.from_slot, |derivation| derivation.current_slot);
+                    .and_then(|relation| relation.derivation.as_ref());
+                let slot =
+                    step_derivation.map_or(step.from_slot, |derivation| derivation.current_slot);
                 collector.lookup(&step.relation, slot);
+                #[cfg(test)]
+                actual_path_work::lookup(_position, step_derivation.is_some());
             }
+            #[cfg(test)]
+            actual_path_work::completed(path.len());
         } else if let Some(source) = &derivation.source_relation {
             collector.lookup(source, derivation.current_slot);
         }

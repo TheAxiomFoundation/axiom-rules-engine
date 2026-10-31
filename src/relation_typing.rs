@@ -180,9 +180,10 @@ pub fn executed_relations(program: &Program) -> BTreeSet<String> {
 }
 
 /// The entity kind of each tuple slot of `relation`, or `None` when the
-/// relation (or, for a derived relation, every relation it filters) declares
-/// none. A derived relation's tuples are its source's tuples, so it inherits
-/// the source's kinds when it declares none of its own.
+/// relation (or, for a single-source derivation, every relation it filters)
+/// declares none. A single-source derivation inherits the source's kinds when
+/// it declares none of its own. A path declares its endpoint kinds directly;
+/// its intermediate relations never supply inherited kinds.
 ///
 /// This follows one chain of sources. To ask about many relations of one
 /// program, build [`EffectiveSlotEntities`] once: asking this per relation

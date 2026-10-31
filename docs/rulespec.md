@@ -612,7 +612,7 @@ The path refusals are:
 | `lenient_binding_with_relation_roles` | A path program requests lenient tuple binding. |
 
 A RuleSpec declaration with neither source retains the existing
-`MissingDerivedRelationSource` refusal: it must declare
+`MissingDerivedRelationSource` refusal, whose message names
 `derived_relation.source_relation`. Each step also contributes a dependency
 edge, so a cycle through any step remains refused. Explain and fast execute
 paths; dense refuses `source_path` with `DenseCompileError::Unsupported`

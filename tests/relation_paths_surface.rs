@@ -198,6 +198,30 @@ fn raw_path_sources_refuse_conflicts_empty_paths_and_filtered_entity_fields() {
 }
 
 #[test]
+fn raw_path_sources_require_binary_slots_and_declared_endpoint_kinds() {
+    for (field, value) in [
+        ("arity", json!(3)),
+        ("slot_entities", json!(["Person", "Household"])),
+        ("derivation.slot_entities", json!([])),
+        ("derivation.slot_entities", json!(["Person"])),
+        ("derivation.current_slot", json!(2)),
+        ("derivation.related_slot", json!(0)),
+    ] {
+        let mut program = path_program();
+        if let Some(field) = field.strip_prefix("derivation.") {
+            program["relations"][1]["derivation"][field] = value;
+        } else {
+            program["relations"][1][field] = value;
+        }
+        let error = compile(program).unwrap_err();
+        assert!(
+            error.contains("relation_path_requires_binary_declaration"),
+            "{field}: {error}"
+        );
+    }
+}
+
+#[test]
 fn path_step_and_kind_refusals_name_the_construct() {
     for (path, extra, code) in [
         (

@@ -97,6 +97,8 @@ struct ReductionReasonTraversal {
     relations: BTreeSet<String>,
     #[cfg(test)]
     path_steps: [usize; 2],
+    #[cfg(test)]
+    derived_path_positions: [usize; 3],
 }
 
 impl<'a> PhaseTwoEngine<'a> {
@@ -419,6 +421,10 @@ impl<'a> PhaseTwoEngine<'a> {
                     #[cfg(test)]
                     {
                         visiting.path_steps[usize::from(index > 0)] += 1;
+                        if index < 3 && self.program.relations[&step.relation].derivation.is_some()
+                        {
+                            visiting.derived_path_positions[index] += 1;
+                        }
                     }
                 }
             } else if let Some(source) = &derivation.source_relation {
@@ -1144,6 +1150,46 @@ mod path_reason_tests {
     use std::cell::Cell;
 
     #[test]
+    fn a_repeated_step_drops_the_first_steps_entity_placement() {
+        let spec: ProgramSpec = serde_json::from_value(json!({"relations":[
+            {"name":"edge","arity":2,"slot_entities":["Person","Person"]},
+            {"name":"selected","arity":2,"slot_entities":["Person","Person"],"derivation":{
+                "source_path":[
+                    {"relation":"edge","from_slot":0,"to_slot":1},
+                    {"relation":"edge","from_slot":1,"to_slot":0}],
+                "current_slot":0,"related_slot":1,"slot_entities":["Person","Person"],
+                "predicate":{"kind":"same_entity","left":"anchor","right":"anchor","negated":false}}}
+        ],"derived":[]})).unwrap();
+        let program = spec.to_program().unwrap();
+        let data = DataSet::default();
+        let period = Period::month(2026, 1);
+        let knowledge = [RelationKnowledgeRecord {
+            name: "edge".into(),
+            tuple: vec!["other".into(), "intermediate".into()],
+            interval: Interval::covering(&period),
+            truth: LiftedTruth::Unknown {
+                reasons: BTreeSet::from(["later-step-unknown".into()]),
+            },
+        }];
+        let engine = PhaseTwoEngine {
+            ordinary: Engine::new(&program, &data),
+            program: &program,
+            relation_knowledge: &knowledge,
+        };
+        let mut traversal = ReductionReasonTraversal::default();
+        let mut reasons = BTreeSet::new();
+        engine.collect_relation_reasons(
+            "selected",
+            Some((0, "requested")),
+            &period,
+            &mut traversal,
+            &mut reasons,
+        );
+        assert_eq!(reasons, BTreeSet::from(["later-step-unknown".into()]));
+        assert_eq!(traversal.path_steps, [1, 1]);
+    }
+
+    #[test]
     fn phase_two_path_reads_place_only_the_first_step() {
         let mut runner = TestRunner::new(Config {
             cases: 128,
@@ -1154,21 +1200,29 @@ mod path_reason_tests {
         let first_steps = Cell::new(0);
         let later_steps = Cell::new(0);
         let long_paths = Cell::new(0);
-        runner.run(&(prop::collection::vec(0_usize..2, 1..6), any::<bool>()), |(slots, first_matches)| {
+        let derived_positions = [Cell::new(0), Cell::new(0), Cell::new(0)];
+        runner.run(&(prop::collection::vec((0_usize..2, any::<bool>()), 1..6), any::<bool>()), |(steps, first_matches)| {
             let period = Period::month(2026, 1);
             let mut relations = Vec::new();
             let mut path = Vec::new();
             let mut knowledge = Vec::new();
             let mut expected = BTreeSet::new();
-            for (index, &from) in slots.iter().enumerate() {
+            for (index, &(from, derived)) in steps.iter().enumerate() {
                 let name = format!("step{index}");
-                relations.push(json!({"name":name,"arity":2,"slot_entities":["Person","Person"]}));
+                let data_name = if derived { format!("base{index}") } else { name.clone() };
+                relations.push(json!({"name":data_name,"arity":2,"slot_entities":["Person","Person"]}));
+                if derived {
+                    relations.push(json!({"name":name,"arity":2,"slot_entities":["Person","Person"],"derivation":{
+                        "source_relation":data_name,"current_slot":from,"related_slot":1-from,
+                        "slot_entities":["Person","Person"],"predicate":{
+                            "kind":"same_entity","left":"anchor","right":"anchor","negated":false}}}));
+                }
                 path.push(json!({"relation":name,"from_slot":from,"to_slot":1-from}));
                 let mut tuple = vec!["candidate".to_owned(); 2];
                 tuple[from] = if index == 0 && first_matches { "requested" } else { "other" }.to_owned();
                 let reason = format!("unknown:{index}");
                 knowledge.push(RelationKnowledgeRecord {
-                    name,
+                    name: data_name,
                     tuple,
                     interval: Interval::covering(&period),
                     truth: LiftedTruth::Unknown { reasons: BTreeSet::from([reason.clone()]) },
@@ -1192,6 +1246,9 @@ mod path_reason_tests {
             first_steps.set(first_steps.get() + traversal.path_steps[0]);
             later_steps.set(later_steps.get() + traversal.path_steps[1]);
             long_paths.set(long_paths.get() + usize::from(traversal.path_steps[1] >= 2));
+            for (position, count) in traversal.derived_path_positions.into_iter().enumerate() {
+                derived_positions[position].set(derived_positions[position].get() + count);
+            }
             Ok(())
         }).unwrap();
         assert!(
@@ -1209,11 +1266,19 @@ mod path_reason_tests {
             "long path reads went dark: {}",
             long_paths.get()
         );
+        for (position, cases) in derived_positions.iter().enumerate() {
+            assert!(
+                cases.get() >= 20,
+                "derived phase-two position {position} went dark: {}",
+                cases.get()
+            );
+        }
         eprintln!(
-            "phase-two path reads: first={} (floor 128), later={} (floor 200), long={} (floor 50)",
+            "phase-two path reads: first={} (floor 128), later={} (floor 200), long={} (floor 50), derived positions={:?} (floor 20 each)",
             first_steps.get(),
             later_steps.get(),
-            long_paths.get()
+            long_paths.get(),
+            derived_positions.map(|count| count.get())
         );
     }
 }

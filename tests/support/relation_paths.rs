@@ -425,6 +425,8 @@ fn paths_agree_with_nested_exists_and_raw_records_in_explain_and_fast_including_
                     (Err(a), Err(b)) => prop_assert_eq!(a, b),
                     _ => prop_assert!(false, "path and exists differ"),
                 }
+                // Fast intentionally omits trace records; compare returned values
+                // across modes, and compare traces within each mode below.
                 outputs.push(result.map(|response| response["results"][0]["outputs"].clone()));
             }
             prop_assert_eq!(&outputs[0], &outputs[1]);
@@ -508,10 +510,18 @@ fn record_roster_and_input_order_and_repeated_runs_preserve_outputs_and_traces()
                 coverage.reset();
                 let repeated = run(mode, &p, &data);
                 prop_assert_eq!(&first, &repeated);
+                prop_assert_eq!(
+                    serde_json::to_vec(&first).unwrap(),
+                    serde_json::to_vec(&repeated).unwrap()
+                );
                 coverage.observe(false);
                 coverage.reset();
                 let reordered = run(mode, &p, &permuted);
                 prop_assert_eq!(&first, &reordered);
+                prop_assert_eq!(
+                    serde_json::to_vec(&first).unwrap(),
+                    serde_json::to_vec(&reordered).unwrap()
+                );
                 coverage.observe(false);
             }
             Ok(())
@@ -563,6 +573,58 @@ fn adding_base_tuples_is_monotone_with_exact_finite_candidate_sets() {
     coverage.floors("monotone", [0, 15, 15, 25, 0, 0, 0, 0], 0);
     eprintln!("monotone exact strict growth={}, floor=15", growth.get());
     assert!(growth.get() >= 15);
+}
+
+#[test]
+fn every_generated_path_has_finite_exact_candidates_and_refuses_a_cycle_through_each_step() {
+    let coverage = ActualCoverage::default();
+    let refused_positions = Cell::new([0usize; 4]);
+    runner(45, 96)
+        .run(&cases(), |mut case| {
+            // The positive control is evaluated before closing the graph. A
+            // successful compiler result alone would not show that the path
+            // can run or that only final frontier ids become candidates.
+            case.reverse = 0;
+            case.missing = None;
+            let p = program(&case, false, false);
+            let data = dataset(&case);
+            let expected = oracle(&case, &data, false).unwrap();
+            prop_assert!(expected.len() <= IDS);
+            for mode in ["explain", "fast"] {
+                coverage.reset();
+                let result = run(mode, &p, &data);
+                assert_oracle(&result, &Ok(expected.clone()));
+                coverage.observe(false);
+            }
+            for cycle_step in 0..case.length {
+                let mut cyclic = p.clone();
+                let name = format!("edge_{cycle_step}");
+                let step_relation = cyclic["relations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|relation| relation["name"] == name)
+                    .unwrap();
+                *step_relation = derived(&name, "selected", 0, yes());
+                let spec = serde_json::from_value(cyclic).unwrap();
+                let error = CompiledProgramArtifact::compile(spec)
+                    .err()
+                    .expect("a dependency cycle through a path step must be refused")
+                    .to_string();
+                prop_assert!(error.to_lowercase().contains("cycle"), "{error}");
+                let mut positions = refused_positions.get();
+                positions[cycle_step] += 1;
+                refused_positions.set(positions);
+            }
+            Ok(())
+        })
+        .unwrap();
+    coverage.floors("termination/finite", [8, 15, 15, 25, 25, 8, 5, 2], 0);
+    for (position, count) in refused_positions.get().into_iter().enumerate() {
+        let floor = [80, 50, 30, 10][position];
+        eprintln!("termination refused cycle at step {position}={count}, floor={floor}");
+        assert!(count >= floor, "cycle at step {position}: {count}, floor {floor}");
+    }
 }
 
 #[test]

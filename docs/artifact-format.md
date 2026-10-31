@@ -416,8 +416,9 @@ slot kinds. `slot_entities` is null only for a relation that declares none,
 which relation typing allows only when nothing executes it.
 
 `lookup_slots` is the set of slots that aggregates, membership tests, atoms,
-`exists` generators and source-path steps in the program key on, with a derived relation's traversal of its source
-counted against the source. It is empty when no expression uses the relation.
+`exists` generators and source-path steps in the program key on, with a
+derived relation's traversal of its source counted against the source. It
+is empty when no expression or derivation traversal uses the relation.
 It records direction of traversal and nothing about cardinality.
 
 An atom on a data relation records a lookup for each bound argument slot. An
