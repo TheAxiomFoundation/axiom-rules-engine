@@ -489,14 +489,14 @@ over determined ids, which #215 section 7 shows sound.
     matches the trace of the written-out disjunction.
 - **Cost.** An atom on a derived relation computes that relation's members for
   another anchor. The engine keeps each anchor's members for its lifetime
-  (`Engine::drive` leaves `derived_members` in place), so each anchor resolves
-  once. Every atom still copies those members into a fresh sorted vector before
-  its binary search. A household predicate with an `exists` over n co-residents
-  and a derived atom inside runs n² atoms over n members. That copies about n³
-  ids per anchor, plus one members resolution per co-resident, inside the
-  #240/#245 bounds. An `exists` whose result depends only on the anchor, such as
-  section 8's guard, is evaluated again for every candidate. That is because
-  its resume key includes the candidate (3.6).
+  (`Engine::drive` leaves `derived_members` in place), so one engine resolves a
+  relation's anchor once per period. Every atom still copies those members into
+  a fresh sorted vector before its binary search. A household predicate with an
+  `exists` over n co-residents and a derived atom inside runs n² atoms over n
+  members. That copies about n³ ids per anchor, plus one members resolution per
+  co-resident, inside the #240/#245 bounds. The engine evaluates an `exists`
+  whose result depends only on the anchor, such as section 8's guard, again for
+  every candidate, because its resume key includes the candidate (3.6).
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails
   every membership that reads it. Encodings should put pair atoms before the
   value reads they guard, because `and` stops at the first `not_holds`.
