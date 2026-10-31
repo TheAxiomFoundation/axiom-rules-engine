@@ -1274,22 +1274,54 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         };
         agrees(&derivation.slot_entities) && agrees(&schema.slot_entities)
     };
-    let consistent = crate::relation_typing::all_source_edges(
-        model.relations.keys().map(String::as_str),
-        |name| {
-            if !locally_consistent(name) {
-                return None;
-            }
-            Some(
-                model
+    let has_paths = model.relations.values().any(|schema| {
+        schema
+            .derivation
+            .as_ref()
+            .is_some_and(|derivation| derivation.source_path.is_some())
+    });
+    let consistent = if has_paths {
+        crate::relation_typing::all_source_edges(
+            model.relations.keys().map(String::as_str),
+            |name| {
+                if !locally_consistent(name) {
+                    return None;
+                }
+                Some(
+                    model
+                        .relations
+                        .get(name)
+                        .and_then(|schema| schema.derivation.as_ref())
+                        .map(|derivation| derivation.source_relations().collect())
+                        .unwrap_or_default(),
+                )
+            },
+        )
+    } else {
+        // Keep the original single-successor walk for legacy programs. Its
+        // shared path buffer avoids one successor allocation per relation.
+        use crate::relation_typing::ChainStep;
+        crate::relation_typing::follow_chains(
+            model.relations.keys().map(String::as_str),
+            false,
+            |name| {
+                if !locally_consistent(name) {
+                    return ChainStep::End(false);
+                }
+                match model
                     .relations
                     .get(name)
                     .and_then(|schema| schema.derivation.as_ref())
-                    .map(|derivation| derivation.source_relations().collect())
-                    .unwrap_or_default(),
-            )
-        },
-    );
+                {
+                    Some(derivation) => match derivation.source_relation.as_deref() {
+                        Some(source) => ChainStep::Next(source),
+                        None => ChainStep::End(false),
+                    },
+                    None => ChainStep::End(true),
+                }
+            },
+        )
+    };
     model
         .relations
         .iter()
