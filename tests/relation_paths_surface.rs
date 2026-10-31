@@ -297,6 +297,29 @@ fn path_step_and_kind_refusals_name_the_construct() {
 }
 
 #[test]
+fn a_read_against_a_paths_direction_is_refused_like_a_single_sources() {
+    let mut reversed = path_program();
+    reversed["derived"][0]["expr"]["current_slot"] = json!(1);
+    reversed["derived"][0]["expr"]["related_slot"] = json!(0);
+    assert!(
+        compile(reversed)
+            .unwrap_err()
+            .contains("derived_relation_slots_diverge")
+    );
+    let mut member = path_program();
+    member["relations"].as_array_mut().unwrap().push(json!({"name":"tested","arity":2,
+        "slot_entities":["Person","Person"],"derivation":{"source_relation":"lives_with",
+        "current_slot":0,"related_slot":1,"slot_entities":["Person","Person"],
+        "predicate":{"kind":"relation_member","relation":"lives_with","current_slot":1,"related_slot":0}}}));
+    member["derived"][0]["expr"]["relation"] = json!("tested");
+    assert!(
+        compile(member)
+            .unwrap_err()
+            .contains("derived_relation_slots_diverge")
+    );
+}
+
+#[test]
 fn every_path_step_is_a_cycle_dependency() {
     let mut program = path_program();
     program["relations"][1]["derivation"]["source_path"] =

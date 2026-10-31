@@ -3721,7 +3721,11 @@ fn render_program(program: &ProgramSpec) -> String {
                 text,
                 "\n    relation {} = {} where {}",
                 relation.name,
-                fmt_relation(&derivation.source_relation),
+                derivation
+                    .source_relations()
+                    .map(fmt_relation)
+                    .collect::<Vec<_>>()
+                    .join(" / "),
                 fmt_judgment(&derivation.predicate)
             );
         }

@@ -780,3 +780,65 @@ fn a_three_step_path_changes_entity_kind_twice_and_drops_both_intermediate_front
         assert_eq!(members(&run(mode, &p, &data).unwrap()), BTreeSet::from([2]));
     }
 }
+
+#[test]
+fn a_failure_at_a_reached_id_fails_a_path_where_exists_stops_early() {
+    // Invariant 5 holds when neither side fails. Both p1 and p2 reach p3, and
+    // only p2 lacks `allow`. The path resolves its whole frontier first, so
+    // p2 fails it. `exists` succeeds at p1 and never reads p2.
+    let relation = |name: &str| json!({"name":name,"arity":2,"slot_entities":["Person","Person"]});
+    let path = json!({"name":"selected","arity":2,"slot_entities":["Person","Person"],"derivation":{
+        "source_path":[{"relation":"first","from_slot":0,"to_slot":1},
+            {"relation":"checked","from_slot":0,"to_slot":1}],
+        "current_slot":0,"related_slot":1,"slot_entities":["Person","Person"],"predicate":yes()}});
+    let exists = derived(
+        "selected",
+        "only",
+        0,
+        json!({"kind":"exists","relation":"first","terms":["anchor",variable(0)],"variable_slot":1,
+            "body":atom("checked",variable(0),json!("candidate"),false)}),
+    );
+    let program = |selected: Value| {
+        json!({"relations":[
+            relation("first"),relation("second"),relation("only"),
+            derived("checked","second",0,positive(json!("anchor"),"allowed")),
+            selected
+        ],"derived":[
+            {"name":"count","entity":"Person","dtype":"integer","semantics":"scalar",
+                "expr":{"kind":"count_related","relation":"selected","current_slot":0,"related_slot":1}},
+            {"name":"mask","entity":"Person","dtype":"integer","semantics":"scalar",
+                "expr":{"kind":"sum_related","relation":"selected","current_slot":0,"related_slot":1,"value":{"kind":"derived","name":"token"}}},
+            {"name":"token","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"token"}},
+            {"name":"allowed","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"allow"}}
+        ]})
+    };
+    let records = [
+        tuple("first", 0, 1, false, true),
+        tuple("first", 0, 2, false, true),
+        tuple("second", 1, 3, false, true),
+        tuple("second", 2, 3, false, true),
+        tuple("only", 0, 3, false, true),
+    ];
+    let failing = json!({"inputs":[input(3,"token",8),input(1,"allow",1)],"relations":records});
+    let complete = json!({"inputs":[input(3,"token",8),input(1,"allow",1),input(2,"allow",1)],
+        "relations":records});
+    for mode in ["explain", "fast"] {
+        let error = run(mode, &program(path.clone()), &failing).unwrap_err();
+        assert!(
+            error.contains("allow") && error.contains("p2"),
+            "{mode}: {error}"
+        );
+        assert_eq!(
+            members(&run(mode, &program(exists.clone()), &failing).unwrap()),
+            BTreeSet::from([3]),
+            "{mode}"
+        );
+        for selected in [&path, &exists] {
+            assert_eq!(
+                members(&run(mode, &program(selected.clone()), &complete).unwrap()),
+                BTreeSet::from([3]),
+                "{mode}"
+            );
+        }
+    }
+}

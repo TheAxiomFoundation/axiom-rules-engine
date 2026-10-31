@@ -130,7 +130,9 @@ output's formula is evaluated for that entity and period as follows.
   members for each current id. Each frontier is distinct and sorted; only
   the final frontier becomes candidates, so intermediate ids are dropped.
   The outer predicate then runs once per candidate in sorted order, as for
-  a single source. An empty frontier gives no members. Kind checks require
+  a single source. An empty frontier gives no members. A failure at any
+  reached id fails the anchor's members, even for candidates that id does
+  not reach. Kind checks require
   the first step to start at the anchor's kind, every junction to match, and
   the final step to end at the candidate's kind
   (`tests/relation_paths_surface.rs`, `tests/relation_paths.rs`).

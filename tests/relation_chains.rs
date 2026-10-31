@@ -46,6 +46,10 @@ fn count_related(relation: &str) -> Value {
     json!({"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1})
 }
 
+fn step(relation: &str) -> Value {
+    json!({"relation": relation, "from_slot": 0, "to_slot": 1})
+}
+
 fn rule(name: &str, expr: Value) -> Value {
     json!({
         "name": name, "entity": "Household", "dtype": "integer", "unit": null,
@@ -67,6 +71,11 @@ enum Link {
     /// `rel_i` draws on `base`, and its predicate counts `rel_{i+1}` at the
     /// candidate.
     Counted,
+    /// `rel_i.source_path` is the one step `rel_{i+1}`.
+    Path,
+    /// `rel_i.source_path` is `base`, then `rel_{i+1}`, so each link resolves
+    /// the next at every id `base` reaches.
+    PathThroughBase,
 }
 
 /// A chain of `LINKS` derived relations over the data relation `base`, typed
@@ -76,8 +85,8 @@ fn chain_relations(link: Link, typed: bool) -> Vec<Value> {
 }
 
 fn chain_relations_with_links(link: Link, typed: bool, links: usize) -> Vec<Value> {
-    let slots = if matches!(link, Link::Counted) {
-        // Nested counts run on the candidate, so both sides have the same kind.
+    let slots = if matches!(link, Link::Counted | Link::PathThroughBase) {
+        // Nested links run on the candidate, so both sides have the same kind.
         json!(["Household", "Household"])
     } else {
         json!(["Household", "Person"])
@@ -89,27 +98,34 @@ fn chain_relations_with_links(link: Link, typed: bool, links: usize) -> Vec<Valu
     let mut relations = vec![base];
     for index in 0..links {
         let next = (index + 1 < links).then(|| relation_name(index + 1));
-        let (source, predicate) = match (link, next) {
-            (Link::Source, Some(next)) => (next, always()),
+        let (field, source, predicate) = match (link, next) {
+            (Link::Source, Some(next)) => ("source_relation", json!(next), always()),
             (Link::SourceTestingBase, Some(next)) => (
-                next,
+                "source_relation",
+                json!(next),
                 json!({"kind": "relation_member", "relation": "base", "current_slot": 0, "related_slot": 1}),
             ),
             (Link::Member, Some(next)) => (
-                "base".to_string(),
+                "source_relation",
+                json!("base"),
                 json!({"kind": "relation_member", "relation": next, "current_slot": 0, "related_slot": 1}),
             ),
             (Link::Counted, Some(next)) => (
-                "base".to_string(),
+                "source_relation",
+                json!("base"),
                 json!({"kind": "comparison", "left": count_related(&next), "op": "gte", "right": literal(0)}),
             ),
-            (_, None) => ("base".to_string(), always()),
+            (Link::Path, Some(next)) => ("source_path", json!([step(&next)]), always()),
+            (Link::PathThroughBase, Some(next)) => {
+                ("source_path", json!([step("base"), step(&next)]), always())
+            }
+            (_, None) => ("source_relation", json!("base"), always()),
         };
         let mut relation = json!({
             "name": relation_name(index),
             "arity": 2,
             "derivation": {
-                "source_relation": source, "current_slot": 0, "related_slot": 1,
+                field: source, "current_slot": 0, "related_slot": 1,
                 "predicate": predicate,
             },
         });
@@ -306,11 +322,77 @@ fn check_count_related_chain(links: usize) {
 }
 
 #[test]
+fn a_chain_of_path_sources_evaluates_in_linear_time() {
+    let program = program(
+        chain_relations(Link::Path, true),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("h1", "p1"), ("h1", "p2")];
+    for response in explain_and_fast(&program, &tuples, "h1", &["head"], "path chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_chain_of_paths_through_two_ids_is_linear_not_exponential() {
+    check_path_through_base_chain(LINKS);
+}
+
+#[test]
+fn a_path_chain_stays_within_a_bounded_stack() {
+    // On aarch64-apple-darwin, rustc 1.94.1, this chain needed at most 236 KiB
+    // with debug nesting 8 (16 KiB measurement resolution). A 512 KiB thread
+    // is 2.2 times the measured need, yet fails if each level's native stack
+    // use more than doubles. CI's compiler floats, so if a new rustc trips
+    // this guard, re-measure before raising it.
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| check_path_through_base_chain(128))
+        .expect("spawn bounded-stack path chain")
+        .join()
+        .expect("path chain stays within its stack budget");
+}
+
+fn check_path_through_base_chain(links: usize) {
+    // Each link resolves the next at both ids, so re-resolving a link doubles
+    // the work per link, and the resolutions nest across entities.
+    let program = program(
+        chain_relations_with_links(Link::PathThroughBase, true, links),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("n1", "n1"), ("n1", "n2"), ("n2", "n1"), ("n2", "n2")];
+    for response in explain_and_fast(
+        &program,
+        &tuples,
+        "n1",
+        &["head"],
+        "path-through-base chain",
+    ) {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_path_chain_closed_into_a_cycle_is_refused_without_recursing() {
+    let mut relations = chain_relations(Link::Path, true);
+    let derivation = &mut relations.last_mut().expect("the chain has links")["derivation"];
+    derivation
+        .as_object_mut()
+        .expect("a derivation is an object")
+        .remove("source_relation");
+    derivation["source_path"] = json!([step(&relation_name(0))]);
+    assert_cycle_refused(program(relations, vec![rule("k", literal(3))]));
+}
+
+#[test]
 fn a_chain_closed_into_a_cycle_is_refused_without_recursing() {
     let mut relations = chain_relations(Link::Source, false);
     relations.last_mut().expect("the chain has links")["derivation"]["source_relation"] =
         json!(relation_name(0));
-    let program = program(relations, vec![rule("k", literal(3))]);
+    assert_cycle_refused(program(relations, vec![rule("k", literal(3))]));
+}
+
+fn assert_cycle_refused(program: ProgramSpec) {
     let error = timed("cyclic chain", || {
         execute_request(request(&program, "explain", &[], "h1", &["k"]))
             .expect_err("a cycle of source relations is refused")
@@ -327,25 +409,28 @@ fn a_chain_closed_into_a_cycle_is_refused_without_recursing() {
 #[test]
 fn a_compiled_chain_loads_and_runs_in_linear_time() {
     // Loading an artifact runs mandatory entity typing and the cycle search
-    // over the whole chain.
-    let program = program(
-        chain_relations(Link::Source, true),
-        vec![rule("head", count_related(&relation_name(0)))],
-    );
-    let artifact = timed("compile", || {
-        CompiledProgramArtifact::compile(program).expect("the chain compiles")
-    });
-    let request: CompiledExecutionRequest = serde_json::from_value(json!({
-        "mode": "explain",
-        "dataset": dataset(&[("h1", "p1"), ("h1", "p2")]),
-        "queries": [{"entity_id": "h1", "period": period(), "outputs": ["head"]}],
-    }))
-    .expect("a valid compiled request");
-    assert_eq!(request.mode, ExecutionMode::Explain);
-    let response = timed("compiled run", || {
-        execute_compiled_request(artifact, request).expect("the compiled chain runs")
-    });
-    assert_eq!(integer_output(&response, "head"), 2);
+    // over the whole chain. A path chain also runs the source-edge walk that
+    // single sources skip.
+    for link in [Link::Source, Link::Path] {
+        let program = program(
+            chain_relations(link, true),
+            vec![rule("head", count_related(&relation_name(0)))],
+        );
+        let artifact = timed("compile", || {
+            CompiledProgramArtifact::compile(program).expect("the chain compiles")
+        });
+        let request: CompiledExecutionRequest = serde_json::from_value(json!({
+            "mode": "explain",
+            "dataset": dataset(&[("h1", "p1"), ("h1", "p2")]),
+            "queries": [{"entity_id": "h1", "period": period(), "outputs": ["head"]}],
+        }))
+        .expect("a valid compiled request");
+        assert_eq!(request.mode, ExecutionMode::Explain);
+        let response = timed("compiled run", || {
+            execute_compiled_request(artifact, request).expect("the compiled chain runs")
+        });
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
 }
 
 #[test]

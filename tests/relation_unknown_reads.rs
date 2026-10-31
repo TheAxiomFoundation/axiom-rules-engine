@@ -161,8 +161,10 @@ fn unit_shapes() -> Vec<Shape> {
         (
             "only related in a dead branch",
             None,
-            in_dead_branch(json!({"kind": "comparison", "op": "eq", "left": only_eligible,
-                "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}})),
+            in_dead_branch(
+                json!({"kind": "comparison", "op": "eq", "left": only_eligible,
+                "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}),
+            ),
         ),
         (
             "membership test in a dead branch",
@@ -601,14 +603,16 @@ fn a_determined_answer_holds_in_every_completion() {
         .into_iter()
         .chain(placed_shapes())
         .map(|(name, relation, total)| (name, program(relation, total), "total", &PERSONS[..]));
-    let unit_reads = unit_shapes().into_iter().map(|(name, relation, unit_total)| {
-        (
-            name,
-            program_with(relation, literal(0), unit_total),
-            "unit_total",
-            &UNITS[..],
-        )
-    });
+    let unit_reads = unit_shapes()
+        .into_iter()
+        .map(|(name, relation, unit_total)| {
+            (
+                name,
+                program_with(relation, literal(0), unit_total),
+                "unit_total",
+                &UNITS[..],
+            )
+        });
     for (name, program, rule, entities) in person_reads.chain(unit_reads) {
         for world in worlds() {
             for entity in entities {

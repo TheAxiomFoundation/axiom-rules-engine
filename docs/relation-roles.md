@@ -367,6 +367,10 @@ relation:
   intermediate id. A differential test checks this equivalence (section 7).
 - **Membership.** A candidate's membership is the `and` of its reachability
   and the predicate, as for a single source.
+- **Failures.** A path resolves every id it reaches before it tests a
+  candidate, so a failure at any reached id fails the anchor's members. An
+  `exists` over the same steps stops at its first success and can miss that
+  id.
 - **Exclusive.** `source_relation` and `source_path` are exclusive, and one is
   required.
 - **Required declarations.** A path source requires `arity: 2`,
@@ -633,9 +637,10 @@ and differential tests for them.
    in those needs may differ (section 4).
 4. **Qualified reads agree with routing.** Where today's routing reads the
    same id, an unqualified read equals the qualified one.
-5. **Paths agree with `exists`.** A path source's members equal the members
-   computed with nested `exists` over its steps. The harness supplies a
-   candidate source that covers every id, which the language cannot express.
+5. **Paths agree with `exists`.** When neither side fails, a path source's
+   members equal the members computed with nested `exists` over its steps. The
+   harness supplies a candidate source that covers every id, which the
+   language cannot express. A path can fail where `exists` succeeds (3.7).
 6. **Monotone in tuples.** Take a predicate that reads relations only through
    atoms and `exists` domains on base relations, each under an even number of
    `not`s. Adding tuples to those relations never removes a member, though
