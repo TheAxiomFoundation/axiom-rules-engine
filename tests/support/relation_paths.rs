@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use axiom_rules_engine::api::{ExecutionRequest, execute_request};
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
@@ -187,9 +187,14 @@ fn program(case: &Case, use_exists: bool, predicate: bool) -> Value {
             "expr":{"kind":"count_related","relation":"selected","current_slot":0,"related_slot":1}},
         {"name":"mask","entity":"Person","dtype":"integer","semantics":"scalar",
             "expr":{"kind":"sum_related","relation":"selected","current_slot":0,"related_slot":1,"value":{"kind":"derived","name":"token"}}},
-        {"name":"token","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"token"}},
-        {"name":"keep_rule","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"keep"}}
+        {"name":"token","entity":"Person","dtype":"integer","semantics":"scalar","expr":{"kind":"input","name":"token"}}
     ]);
+    if predicate {
+        derived_rules.as_array_mut().unwrap().push(json!({
+            "name":"keep_rule","entity":"Person","dtype":"integer","semantics":"scalar",
+            "expr":{"kind":"input","name":"keep"}
+        }));
+    }
     for step in 0..case.length {
         if is_derived(case, step) {
             derived_rules.as_array_mut().unwrap().push(json!({
@@ -200,14 +205,14 @@ fn program(case: &Case, use_exists: bool, predicate: bool) -> Value {
     }
     json!({"relations":relations,"derived":derived_rules})
 }
-fn dataset(case: &Case) -> Value {
+fn dataset(case: &Case, predicate: bool) -> Value {
     let mut records = vec![];
     let mut inputs = vec![];
     for index in 0..IDS {
         records.push(tuple("all_ids", 0, index, false, true));
         records.push(tuple("gate", index, index, false, true));
         inputs.push(input(index, "token", 1 << index));
-        if case.missing != Some(index) {
+        if predicate && case.missing != Some(index) {
             inputs.push(input(
                 index,
                 "keep",
@@ -215,11 +220,13 @@ fn dataset(case: &Case) -> Value {
             ));
         }
         for step in 0..case.length {
-            inputs.push(input(
-                index,
-                &format!("allow_{step}"),
-                i64::from(case.allows[step] & (1 << index) != 0),
-            ));
+            if is_derived(case, step) {
+                inputs.push(input(
+                    index,
+                    &format!("allow_{step}"),
+                    i64::from(case.allows[step] & (1 << index) != 0),
+                ));
+            }
         }
     }
     for &(step, from, to, full) in &case.rows {
@@ -406,7 +413,7 @@ fn paths_agree_with_nested_exists_and_raw_records_in_explain_and_fast_including_
     let coverage = ActualCoverage::default();
     runner(41, 128)
         .run(&cases(), |case| {
-            let data = dataset(&case);
+            let data = dataset(&case, true);
             let expected = oracle(&case, &data, true);
             let p = program(&case, false, true);
             let expanded = program(&case, true, true);
@@ -444,7 +451,7 @@ fn a_forward_one_step_path_equals_its_single_source_with_values_order_and_failur
         .run(&cases(), |mut case| {
             case.length = 1;
             case.reverse = 0;
-            let data = dataset(&case);
+            let data = dataset(&case, true);
             let expected = oracle(&case, &data, true);
             let p = program(&case, false, true);
             let mut single = p.clone();
@@ -491,7 +498,7 @@ fn record_roster_and_input_order_and_repeated_runs_preserve_outputs_and_traces()
         .run(&cases(), |mut case| {
             case.missing = None;
             let p = program(&case, false, true);
-            let data = dataset(&case);
+            let data = dataset(&case, true);
             let expected = oracle(&case, &data, true);
             let mut permuted = data.clone();
             for key in ["relations", "inputs"] {
@@ -542,14 +549,14 @@ fn adding_base_tuples_is_monotone_with_exact_finite_candidate_sets() {
             case.derived = 0;
             case.missing = None;
             let p = program(&case, false, false);
-            let old = dataset(&case);
+            let old = dataset(&case, false);
             let mut enlarged = case.clone();
             for step in 0..case.length {
                 enlarged
                     .rows
                     .push((step, step % IDS, (step + 1) % IDS, true));
             }
-            let new = dataset(&enlarged);
+            let new = dataset(&enlarged, false);
             let before = oracle(&case, &old, false).unwrap();
             let after = oracle(&enlarged, &new, false).unwrap();
             prop_assert!(before.is_subset(&after));
@@ -587,7 +594,7 @@ fn every_generated_path_has_finite_exact_candidates_and_refuses_a_cycle_through_
             case.reverse = 0;
             case.missing = None;
             let p = program(&case, false, false);
-            let data = dataset(&case);
+            let data = dataset(&case, false);
             let expected = oracle(&case, &data, false).unwrap();
             prop_assert!(expected.len() <= IDS);
             for mode in ["explain", "fast"] {
@@ -609,9 +616,11 @@ fn every_generated_path_has_finite_exact_candidates_and_refuses_a_cycle_through_
                 let spec = serde_json::from_value(cyclic).unwrap();
                 let error = CompiledProgramArtifact::compile(spec)
                     .err()
-                    .expect("a dependency cycle through a path step must be refused")
-                    .to_string();
-                prop_assert!(error.to_lowercase().contains("cycle"), "{error}");
+                    .expect("a dependency cycle through a path step must be refused");
+                prop_assert!(
+                    matches!(error, CompileError::CyclicRelationDependency { .. }),
+                    "{error}"
+                );
                 let mut positions = refused_positions.get();
                 positions[cycle_step] += 1;
                 refused_positions.set(positions);
@@ -623,7 +632,10 @@ fn every_generated_path_has_finite_exact_candidates_and_refuses_a_cycle_through_
     for (position, count) in refused_positions.get().into_iter().enumerate() {
         let floor = [80, 50, 30, 10][position];
         eprintln!("termination refused cycle at step {position}={count}, floor={floor}");
-        assert!(count >= floor, "cycle at step {position}: {count}, floor {floor}");
+        assert!(
+            count >= floor,
+            "cycle at step {position}: {count}, floor {floor}"
+        );
     }
 }
 
@@ -649,7 +661,7 @@ fn dense_refuses_paths_by_name_and_issue() {
         "{error}"
     );
     assert!(
-        error.to_string().contains("source_path") && error.to_string().contains("#218"),
+        error.to_string().contains("path source") && error.to_string().contains("#218"),
         "{error}"
     );
 }
@@ -708,7 +720,7 @@ fn a_two_step_path_resolves_a_derived_second_step_whose_predicate_has_exists() {
         shift: 0,
     };
     let p = program(&case, false, true);
-    let data = dataset(&case);
+    let data = dataset(&case, true);
     let expected = BTreeSet::from([1, 2]);
     for mode in ["explain", "fast"] {
         assert_eq!(members(&run(mode, &p, &data).unwrap()), expected);

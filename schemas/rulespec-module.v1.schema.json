@@ -558,6 +558,34 @@
               "source": {
                 "type": "string"
               },
+              "source_path": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "from_slot": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "relation": {
+                      "type": "string"
+                    },
+                    "to_slot": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "relation",
+                    "from_slot",
+                    "to_slot"
+                  ],
+                  "type": "object"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "source_relation": {
                 "type": "string"
               }

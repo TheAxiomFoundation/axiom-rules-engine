@@ -208,6 +208,11 @@ fn raw_path_sources_require_binary_slots_and_declared_endpoint_kinds() {
         ("derivation.related_slot", json!(0)),
     ] {
         let mut program = path_program();
+        if field == "arity" {
+            // Reach path typing without first violating the legacy schema's
+            // independent slot-kind count check.
+            program["relations"][1]["slot_entities"] = json!([]);
+        }
         if let Some(field) = field.strip_prefix("derivation.") {
             program["relations"][1]["derivation"][field] = value;
         } else {
@@ -259,7 +264,11 @@ fn path_step_and_kind_refusals_name_the_construct() {
             None,
             "relation_path_kind_mismatch",
         ),
-        (json!([step("absent", 0, 1)]), None, "unknown_relation"),
+        (
+            json!([step("absent", 0, 1)]),
+            None,
+            "unknown relation dependency `absent`",
+        ),
         (
             json!([step("untyped", 0, 1)]),
             Some(json!({"name":"untyped","arity":2})),
@@ -297,7 +306,7 @@ fn every_path_step_is_a_cycle_dependency() {
             "current_slot":0,"related_slot":1,"slot_entities":["Household","Person"],"predicate":truth()}}));
     let error = compile(program).unwrap_err();
     assert!(
-        error.contains("cycle") || error.contains("Cycle"),
+        error.to_lowercase().contains("cyclic") || error.to_lowercase().contains("cycle"),
         "{error}"
     );
 }

@@ -2274,7 +2274,7 @@
     },
     "ProgramInterface": {
       "additionalProperties": false,
-      "description": "`program.interface`. Every list is sorted except a relation's\n`slot_entities`, which keeps tuple order.",
+      "description": "`program.interface`. Sets are sorted; `slot_entities` keeps tuple order\nand a provenance's `source_path` keeps traversal order.",
       "properties": {
         "entities": {
           "description": "One entry per entity kind the program can evaluate on, by kind.",
@@ -2374,12 +2374,23 @@
           },
           "type": "array"
         },
+        "source_path": {
+          "items": {
+            "$ref": "#/$defs/RelationPathStepSpec"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "source_relation": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "source_relation",
         "current_slot",
         "related_slot",
         "predicate"
@@ -2392,6 +2403,30 @@
         "symmetric"
       ],
       "type": "string"
+    },
+    "RelationPathStepSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "from_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relation": {
+          "type": "string"
+        },
+        "to_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relation",
+        "from_slot",
+        "to_slot"
+      ],
+      "type": "object"
     },
     "RelationProvenance": {
       "description": "What the declaration makes a relation.",
@@ -2436,12 +2471,41 @@
             "reads"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A `derived_relation` whose candidates come from a path.",
+          "properties": {
+            "kind": {
+              "const": "source_path",
+              "type": "string"
+            },
+            "reads": {
+              "$ref": "#/$defs/RelationReads"
+            },
+            "rule": {
+              "type": "string"
+            },
+            "source_path": {
+              "items": {
+                "$ref": "#/$defs/RelationPathStepSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "rule",
+            "source_path",
+            "reads"
+          ],
+          "type": "object"
         }
       ]
     },
     "RelationReads": {
       "additionalProperties": false,
-      "description": "What a derived relation's predicate mentions directly.",
+      "description": "What a derived relation's predicate mentions directly, plus the relations\na path source traverses.",
       "properties": {
         "inputs": {
           "description": "Input slots.",
