@@ -14,7 +14,8 @@ use crate::source::ModuleSource;
 use crate::spec::{
     DerivedSemanticsSpec, IndexedParameterSpec, InputDeclarationSpec, InputElection,
     JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, UnitSpec,
+    RelationDerivationSpec, RelationPathStepSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    UnitSpec,
 };
 
 /// The only content roots admitted directly below a jurisdiction directory.
@@ -293,6 +294,22 @@ pub enum RuleSpecError {
     MissingDerivedRelationArity { name: String },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation.source_relation")]
     MissingDerivedRelationSource { name: String },
+    #[error(
+        "relation_path_source_conflict: RuleSpec derived relation `{name}` cannot declare both source_relation and source_path"
+    )]
+    RelationPathSourceConflict { name: String },
+    #[error(
+        "relation_path_requires_binary_declaration: RuleSpec path-sourced relation `{name}` must explicitly declare arity: 2, slot_entities and distinct current_slot and related_slot"
+    )]
+    RelationPathRequiresBinaryDeclaration { name: String },
+    #[error(
+        "relation_path_forbidden_field: RuleSpec path-sourced relation `{name}` cannot declare {field}"
+    )]
+    RelationPathForbiddenField { name: String, field: &'static str },
+    #[error(
+        "relation_path_empty: RuleSpec derived relation `{name}` must declare at least one source_path step"
+    )]
+    RelationPathEmpty { name: String },
     #[error(
         "RuleSpec derived relation `{name}` must declare exactly one membership formula version"
     )]
@@ -1095,6 +1112,8 @@ pub struct DerivedRelationRef {
     pub arity: Option<usize>,
     #[serde(default, alias = "source")]
     pub source_relation: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub entity: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
@@ -3550,21 +3569,62 @@ impl RuleDefinition {
                 name: self.name.clone(),
             }
         })?;
+        // Keep the legacy missing-arity refusal and its ordering unchanged.
+        if derived_relation.source_path.is_none() && derived_relation.arity.is_none() {
+            return Err(RuleSpecError::MissingDerivedRelationArity {
+                name: self.name.clone(),
+            });
+        }
+        let source_relation = derived_relation
+            .source_relation
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .map(str::to_string);
+        if derived_relation.source_relation.is_some() && derived_relation.source_path.is_some() {
+            return Err(RuleSpecError::RelationPathSourceConflict {
+                name: self.name.clone(),
+            });
+        }
+        if let Some(path) = &derived_relation.source_path {
+            if derived_relation.arity != Some(2)
+                || derived_relation.slot_entities.len() != 2
+                || !matches!(
+                    (derived_relation.current_slot, derived_relation.related_slot),
+                    (Some(0), Some(1)) | (Some(1), Some(0))
+                )
+            {
+                return Err(RuleSpecError::RelationPathRequiresBinaryDeclaration {
+                    name: self.name.clone(),
+                });
+            }
+            for (field, value) in [
+                ("entity", &derived_relation.entity),
+                ("member_relation", &derived_relation.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(RuleSpecError::RelationPathForbiddenField {
+                        name: self.name.clone(),
+                        field,
+                    });
+                }
+            }
+            if path.is_empty() {
+                return Err(RuleSpecError::RelationPathEmpty {
+                    name: self.name.clone(),
+                });
+            }
+        } else if source_relation.is_none() {
+            return Err(RuleSpecError::MissingDerivedRelationSource {
+                name: self.name.clone(),
+            });
+        }
         let arity =
             derived_relation
                 .arity
                 .ok_or_else(|| RuleSpecError::MissingDerivedRelationArity {
                     name: self.name.clone(),
                 })?;
-        let source_relation = derived_relation
-            .source_relation
-            .as_deref()
-            .map(str::trim)
-            .filter(|source| !source.is_empty())
-            .ok_or_else(|| RuleSpecError::MissingDerivedRelationSource {
-                name: self.name.clone(),
-            })?
-            .to_string();
         let versions = self.effective_versions();
         if versions.len() != 1 {
             return Err(RuleSpecError::InvalidDerivedRelationFormulaVersions {
@@ -3585,14 +3645,17 @@ impl RuleDefinition {
             relation_predicate_names.clone(),
             parameter_names.clone(),
         )?;
-        let (inferred_current_slot, inferred_related_slot) =
-            crate::formula::infer_relation_slots_for_rulespec(source_relation.as_str());
+        let (inferred_current_slot, inferred_related_slot) = source_relation
+            .as_deref()
+            .map(crate::formula::infer_relation_slots_for_rulespec)
+            .unwrap_or((0, 1));
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
             slot_entities: derived_relation.slot_entities.clone(),
             derivation: Some(RelationDerivationSpec {
                 source_relation,
+                source_path: derived_relation.source_path.clone(),
                 current_slot: derived_relation
                     .current_slot
                     .unwrap_or(inferred_current_slot),
@@ -4477,7 +4540,12 @@ fn rewrite_relation_references(
             continue;
         };
         if let Some(derivation) = &mut relation.derivation {
-            rewrite_relation_name(&mut derivation.source_relation, origin_target, rewrites);
+            if let Some(source) = &mut derivation.source_relation {
+                rewrite_relation_name(source, origin_target, rewrites);
+            }
+            for step in derivation.source_path.iter_mut().flatten() {
+                rewrite_relation_name(&mut step.relation, origin_target, rewrites);
+            }
             rewrite_judgment_relation_references(
                 &mut derivation.predicate,
                 origin_target,
@@ -4567,7 +4635,7 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
     }
     for relation in &program.relations {
         if let Some(derivation) = &relation.derivation {
-            names.insert(derivation.source_relation.clone());
+            names.extend(derivation.source_relations().map(str::to_string));
             collect_judgment_relation_names(&derivation.predicate, &mut names);
         }
     }

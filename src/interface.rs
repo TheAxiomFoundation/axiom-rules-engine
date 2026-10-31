@@ -17,7 +17,10 @@ use crate::model::{
     SCALAR_ENTITY, ScalarExpr, ScalarValue, Term,
 };
 use crate::relation_typing;
-use crate::spec::{InputDeclarationSpec, InputElection, ProgramSpec, ScalarValueSpec, SpecError};
+use crate::spec::{
+    InputDeclarationSpec, InputElection, ProgramSpec, RelationPathStepSpec, ScalarValueSpec,
+    SpecError,
+};
 
 /// `program.interface`. Every list is sorted except a relation's
 /// `slot_entities`, which keeps tuple order.
@@ -163,9 +166,16 @@ pub enum RelationProvenance {
         source_relation: String,
         reads: RelationReads,
     },
+    /// A `derived_relation` whose candidates come from a path.
+    SourcePath {
+        rule: String,
+        source_path: Vec<RelationPathStepSpec>,
+        reads: RelationReads,
+    },
 }
 
-/// What a derived relation's predicate mentions directly.
+/// What a derived relation's predicate mentions directly, plus the relations
+/// a path source traverses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -293,13 +303,22 @@ impl<'de> Deserialize<'de> for RelationProvenance {
             &[
                 ("supplied", &[]),
                 ("derived", &["rule", "source_relation", "reads"]),
+                ("source_path", &["rule", "source_path", "reads"]),
             ],
         )?;
         Ok(match variant.as_str() {
             "supplied" => Self::Supplied,
-            _ => Self::Derived {
+            "derived" => Self::Derived {
                 rule: field::<String, D::Error>(&mut object, "rule")?,
                 source_relation: field::<String, D::Error>(&mut object, "source_relation")?,
+                reads: field::<RelationReads, D::Error>(&mut object, "reads")?,
+            },
+            _ => Self::SourcePath {
+                rule: field::<String, D::Error>(&mut object, "rule")?,
+                source_path: field::<Vec<RelationPathStepSpec>, D::Error>(
+                    &mut object,
+                    "source_path",
+                )?,
                 reads: field::<RelationReads, D::Error>(&mut object, "reads")?,
             },
         })
@@ -350,8 +369,20 @@ pub(crate) fn derive_from_model(
         let Some(derivation) = &program.relations[*name].derivation else {
             continue;
         };
-        // A derived relation traverses its source keyed on its current slot.
-        collector.lookup(&derivation.source_relation, derivation.current_slot);
+        // Data steps key on their from slot; derived steps resolve members
+        // at the step relation's current slot.
+        if let Some(path) = &derivation.source_path {
+            for step in path {
+                let slot = program
+                    .relations
+                    .get(&step.relation)
+                    .and_then(|relation| relation.derivation.as_ref())
+                    .map_or(step.from_slot, |derivation| derivation.current_slot);
+                collector.lookup(&step.relation, slot);
+            }
+        } else if let Some(source) = &derivation.source_relation {
+            collector.lookup(source, derivation.current_slot);
+        }
         let (current_kind, related_kind) =
             relation_typing::predicate_slot_kinds(&collector.slot_kinds, name, derivation);
         let routing = Routing {
@@ -366,6 +397,9 @@ pub(crate) fn derive_from_model(
         collector.judgment(&derivation.predicate, &flow, Some(&routing));
         let mut relations = BTreeSet::new();
         collect_judgment_relations(&derivation.predicate, &mut relations);
+        if let Some(path) = &derivation.source_path {
+            relations.extend(path.iter().map(|step| step.relation.clone()));
+        }
         predicate_reads.insert(
             (*name).clone(),
             RelationReads {
@@ -463,17 +497,38 @@ pub(crate) fn derive_from_model(
                 accepts_supplied_tuples: schema.derivation.is_none() || !uses_relation_roles,
                 provenance: match &schema.derivation {
                     None => RelationProvenance::Supplied,
-                    Some(derivation) => RelationProvenance::Derived {
-                        rule: (*name).clone(),
-                        source_relation: derivation.source_relation.clone(),
-                        reads: predicate_reads
-                            .remove(name.as_str())
-                            .unwrap_or(RelationReads {
-                                inputs: Vec::new(),
-                                rules: Vec::new(),
-                                relations: Vec::new(),
-                            }),
-                    },
+                    Some(derivation) => {
+                        let reads =
+                            predicate_reads
+                                .remove(name.as_str())
+                                .unwrap_or(RelationReads {
+                                    inputs: Vec::new(),
+                                    rules: Vec::new(),
+                                    relations: Vec::new(),
+                                });
+                        match &derivation.source_path {
+                            Some(path) => RelationProvenance::SourcePath {
+                                rule: (*name).clone(),
+                                source_path: path
+                                    .iter()
+                                    .map(|step| RelationPathStepSpec {
+                                        relation: step.relation.clone(),
+                                        from_slot: step.from_slot,
+                                        to_slot: step.to_slot,
+                                    })
+                                    .collect(),
+                                reads,
+                            },
+                            None => RelationProvenance::Derived {
+                                rule: (*name).clone(),
+                                source_relation: derivation
+                                    .source_relation
+                                    .clone()
+                                    .expect("validated single source"),
+                                reads,
+                            },
+                        }
+                    }
                 },
             }
         })

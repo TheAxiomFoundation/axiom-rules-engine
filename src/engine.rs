@@ -609,6 +609,69 @@ struct PendingMembers {
     effects: Vec<TraceEffect>,
 }
 
+/// Progress through a path's candidate generation. A completed lookup advances
+/// `next`; a suspended lookup retains that id and every completed step.
+#[derive(Debug)]
+struct PathResume {
+    step: usize,
+    frontier: Vec<String>,
+    next: usize,
+    reached: Vec<String>,
+    effects: Vec<TraceEffect>,
+}
+
+/// Counts increment only after a lookup or a complete candidate generation.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct PathCoverage {
+    resumed: usize,
+    empty: usize,
+    nonempty: usize,
+    long: usize,
+    derived_positions: [usize; 4],
+}
+
+#[cfg(test)]
+mod actual_path_work {
+    use std::cell::Cell;
+    type Counts = (usize, usize, usize, usize, [usize; 4]);
+    thread_local! { static COUNTS: Cell<Counts> = const { Cell::new((0, 0, 0, 0, [0; 4])) }; }
+
+    pub(super) fn lookup(resumed: bool, derived_position: Option<usize>) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.0 += usize::from(resumed);
+            if let Some(position) = derived_position {
+                value.4[position.min(3)] += 1;
+            }
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn completed(frontier: &[String], length: usize) {
+        assert!(
+            frontier.windows(2).all(|pair| pair[0] < pair[1]),
+            "path candidates must be distinct and sorted: {frontier:?}"
+        );
+        let empty = frontier.is_empty();
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.1 += usize::from(empty);
+            value.2 += usize::from(!empty);
+            value.3 += usize::from(length >= 3);
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn take() -> Option<Counts> {
+        Some(COUNTS.with(|counts| counts.replace((0, 0, 0, 0, [0; 4]))))
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/relation_paths.rs"]
+mod relation_path_properties;
+
 /// How many derived-relation resolutions may nest on the native stack. A
 /// relation's predicate can read another derived relation, whose predicate
 /// reads the next, so nesting natively would grow the stack with the length
@@ -717,6 +780,9 @@ pub struct Engine<'a> {
     tracing: bool,
     derived_members: HashMap<DerivedMembersKey, DerivedMembers>,
     pending_members: HashMap<DerivedMembersKey, PendingMembers>,
+    pending_paths: HashMap<DerivedMembersKey, PathResume>,
+    #[cfg(test)]
+    path_coverage: PathCoverage,
     /// Validated source prefixes that a predicate interruption has not yet
     /// finished. Retaining them prevents a retry from walking the prefix again.
     member_chains: HashMap<DerivedMembersKey, Vec<&'a crate::model::RelationSchema>>,
@@ -1055,6 +1121,9 @@ impl<'a> Engine<'a> {
             tracing,
             derived_members: HashMap::new(),
             pending_members: HashMap::new(),
+            pending_paths: HashMap::new(),
+            #[cfg(test)]
+            path_coverage: PathCoverage::default(),
             member_chains: HashMap::new(),
             #[cfg(test)]
             source_walks: 0,
@@ -1135,6 +1204,7 @@ impl<'a> Engine<'a> {
         self.folds.clear();
         self.exists.clear();
         self.pending_members.clear();
+        self.pending_paths.clear();
         self.member_chains.clear();
         #[cfg(test)]
         self.members.clear();
@@ -2981,13 +3051,39 @@ impl<'a> Engine<'a> {
                 // not read this relation's own tuples again, so they are read
                 // once the resolution finishes.
                 let candidates = match &schema.derivation {
-                    Some(derivation) => self.related_entity_ids(
-                        &derivation.source_relation,
-                        derivation.current_slot,
-                        derivation.related_slot,
-                        entity_id,
-                        period,
-                    )?,
+                    Some(derivation) => {
+                        if let Some(path) = &derivation.source_path {
+                            let mut frontier =
+                                std::collections::BTreeSet::from([entity_id.to_string()]);
+                            for step in path {
+                                let mut reached = std::collections::BTreeSet::new();
+                                for id in frontier {
+                                    for next in self.related_entity_ids(
+                                        &step.relation,
+                                        step.from_slot,
+                                        step.to_slot,
+                                        &id,
+                                        period,
+                                    )? {
+                                        reached.insert(next);
+                                    }
+                                }
+                                frontier = reached;
+                            }
+                            frontier.into_iter().collect()
+                        } else {
+                            self.related_entity_ids(
+                                derivation
+                                    .source_relation
+                                    .as_deref()
+                                    .expect("a single source"),
+                                derivation.current_slot,
+                                derivation.related_slot,
+                                entity_id,
+                                period,
+                            )?
+                        }
+                    }
                     None => Vec::new(),
                 };
                 MembersResume {
@@ -3266,6 +3362,7 @@ impl<'a> Engine<'a> {
                 // program validation refuses. The recursive resolution this
                 // replaces overflowed the stack on one.
                 self.pending_members.remove(&top);
+                self.pending_paths.remove(&top);
                 self.member_chains.remove(&top);
                 self.derived_members.insert(
                     top.clone(),
@@ -3317,8 +3414,16 @@ impl<'a> Engine<'a> {
                     }
                     chain.push(relation);
                     on_chain.insert(relation.name.as_str());
+                    // Paths branch and change the lookup id at every step.
+                    // Their resumable frontier is handled at this chain level.
+                    if derivation.source_path.is_some() {
+                        break None;
+                    }
                     let source = match self.relation_schema(
-                        &derivation.source_relation,
+                        derivation
+                            .source_relation
+                            .as_deref()
+                            .expect("a single source"),
                         derivation.current_slot,
                         derivation.related_slot,
                     ) {
@@ -3370,6 +3475,14 @@ impl<'a> Engine<'a> {
                 .derivation
                 .as_ref()
                 .expect("the chain holds derived relations");
+            if derivation.source_path.is_some() {
+                if let Err(interrupt) = self.fold_path_members(&level, derivation) {
+                    self.member_chains.insert(key.clone(), chain);
+                    return Err(interrupt);
+                }
+                chain.pop();
+                continue;
+            }
             let pending = match self.pending_members.remove(&level) {
                 Some(pending) => pending,
                 None => match self.member_candidates(derivation, entity_id, period) {
@@ -3407,7 +3520,10 @@ impl<'a> Engine<'a> {
         period: &Period,
     ) -> Result<PendingMembers, (EvalError, Vec<TraceEffect>)> {
         let program: &'a Program = self.program;
-        let source = &derivation.source_relation;
+        let source = derivation
+            .source_relation
+            .as_deref()
+            .expect("a single source");
         let mut candidates = self.direct_related_ids(
             source,
             derivation.current_slot,
@@ -3444,6 +3560,116 @@ impl<'a> Engine<'a> {
             kept: Vec::new(),
             effects,
         })
+    }
+
+    /// Generate a path's candidates before filtering them. Keep the path state
+    /// separate from a predicate's state so legacy source-chain frames stay
+    /// small. Captures carry a derived step's effects across either kind of stop.
+    fn fold_path_members(
+        &mut self,
+        level: &DerivedMembersKey,
+        derivation: &'a crate::model::RelationDerivation,
+    ) -> Eval<()> {
+        if let Some(pending) = self.pending_members.remove(level) {
+            return self.filter_members(level, derivation, pending);
+        }
+        let steps = derivation.source_path.as_ref().expect("a path source");
+        let saved = self.pending_paths.remove(level);
+        #[cfg(test)]
+        let mut resumed = saved.is_some();
+        let mut progress = saved.unwrap_or_else(|| PathResume {
+            step: 0,
+            frontier: vec![level.entity_id.clone()],
+            next: 0,
+            reached: Vec::new(),
+            effects: Vec::new(),
+        });
+        self.member_captures.push((
+            level.clone(),
+            self.active_evaluations.len(),
+            std::mem::take(&mut progress.effects),
+        ));
+        while let Some(step) = steps.get(progress.step) {
+            while let Some(id) = progress.frontier.get(progress.next) {
+                match self.related_entity_ids(
+                    &step.relation,
+                    step.from_slot,
+                    step.to_slot,
+                    id,
+                    &level.period,
+                ) {
+                    Ok(ids) => {
+                        progress.reached.extend(ids);
+                        progress.next += 1;
+                        #[cfg(test)]
+                        {
+                            actual_path_work::lookup(
+                                resumed,
+                                self.program.relations[&step.relation]
+                                    .derivation
+                                    .is_some()
+                                    .then_some(progress.step),
+                            );
+                            if resumed {
+                                self.path_coverage.resumed += 1;
+                                resumed = false;
+                            }
+                            if self.program.relations[&step.relation].derivation.is_some() {
+                                self.path_coverage.derived_positions[progress.step.min(3)] += 1;
+                            }
+                        }
+                    }
+                    Err(interrupt) => {
+                        let (_, _, effects) = self.member_captures.pop().expect("path capture");
+                        progress.effects = effects;
+                        if self.suspended_on.is_some() || matches!(interrupt, Interrupt::Defer(_)) {
+                            self.pending_paths.insert(level.clone(), progress);
+                            return Err(interrupt);
+                        }
+                        let Interrupt::Error(error) = interrupt else {
+                            unreachable!("deferral saved above")
+                        };
+                        self.derived_members.insert(
+                            level.clone(),
+                            DerivedMembers {
+                                result: Err(error),
+                                effects: progress.effects,
+                                recorded_on: Vec::new(),
+                            },
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            progress.reached.sort();
+            progress.reached.dedup();
+            progress.frontier = std::mem::take(&mut progress.reached);
+            progress.next = 0;
+            progress.step += 1;
+        }
+        let (_, _, effects) = self.member_captures.pop().expect("path capture");
+        #[cfg(test)]
+        {
+            actual_path_work::completed(&progress.frontier, steps.len());
+            if progress.frontier.is_empty() {
+                self.path_coverage.empty += 1;
+            } else {
+                self.path_coverage.nonempty += 1;
+            }
+            if steps.len() >= 3 {
+                self.path_coverage.long += 1;
+            }
+        }
+        self.filter_members(
+            level,
+            derivation,
+            PendingMembers {
+                candidates: progress.frontier.into(),
+                next: 0,
+                kept: Vec::new(),
+                effects,
+            },
+        )
     }
 
     /// Test the remaining candidates against the derivation's predicate and
@@ -3840,6 +4066,7 @@ mod relation_resolution_tests {
         /// One past the most tuples a dataset holds.
         tuples: usize,
         exists: bool,
+        paths: bool,
     }
 
     const BROAD: Shape = Shape {
@@ -3849,6 +4076,7 @@ mod relation_resolution_tests {
         root: 0,
         tuples: 12,
         exists: false,
+        paths: false,
     };
     const DEEP: Shape = Shape {
         read: 4,
@@ -3857,10 +4085,15 @@ mod relation_resolution_tests {
         root: 2,
         tuples: 32,
         exists: false,
+        paths: false,
     };
     const EXISTS: Shape = Shape {
         exists: true,
         ..DEEP
+    };
+    const PATHS: Shape = Shape {
+        paths: true,
+        ..EXISTS
     };
 
     fn literal(value: i64) -> Value {
@@ -3959,20 +4192,42 @@ mod relation_resolution_tests {
         let sources = std::iter::once("base".to_string())
             .chain((index + 1..RELATIONS).map(|later| format!("r{later}")))
             .collect::<Vec<_>>();
+        let source =
+            prop_oneof![shape.base => Just("base".to_string()), 1 => prop::sample::select(sources)];
         (
-            prop_oneof![shape.base => Just("base".to_string()), 1 => prop::sample::select(sources)],
+            source.clone(),
             prop::sample::select(vec![(0_usize, 1_usize), (1, 0)]),
             prop::bool::ANY,
             predicate(index, shape),
+            vec(source, 1..5),
         )
             .prop_map(
-                move |(source, (current_slot, related_slot), typed, predicate)| {
+                move |(source, (current_slot, related_slot), typed, predicate, path)| {
                     let mut derivation = json!({
                         "source_relation": source, "current_slot": current_slot,
                         "related_slot": related_slot, "predicate": predicate,
                     });
-                    if typed {
-                        derivation["slot_entities"] = json!(["Household", "Person"]);
+                    if shape.paths {
+                        derivation
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("source_relation");
+                        derivation["source_path"] = json!(
+                            path.into_iter()
+                                .map(|relation| json!({
+                                    "relation":relation, "from_slot":0, "to_slot":1
+                                }))
+                                .collect::<Vec<_>>()
+                        );
+                        derivation["current_slot"] = json!(0);
+                        derivation["related_slot"] = json!(1);
+                    }
+                    if typed || shape.paths {
+                        derivation["slot_entities"] = if shape.paths {
+                            json!(["Person", "Person"])
+                        } else {
+                            json!(["Household", "Person"])
+                        };
                     }
                     json!({"name": format!("r{index}"), "arity": 2, "derivation": derivation})
                 },
@@ -4041,15 +4296,20 @@ mod relation_resolution_tests {
             0..shape.tuples,
         );
         let incomes = vec(prop::option::of(0_i64..40), PEOPLE.len());
-        (relations, rules, tuples, incomes).prop_map(|(relations, rules, tuples, incomes)| {
+        (relations, rules, tuples, incomes).prop_map(move |(relations, rules, tuples, incomes)| {
             let mut derived = vec![
                 json!({"name": "p0", "entity": "Person", "dtype": "decimal", "unit": null,
                     "semantics": "scalar", "expr": {"kind": "input", "name": "income"}}),
                 json!({"name": "p1", "entity": "Person", "dtype": "decimal", "unit": null,
                     "semantics": "scalar", "expr": {"kind": "add", "items": [person_rule(0), literal(5)]}}),
             ];
-            derived.extend(rules);
-            let relations = std::iter::once(json!({"name": "base", "arity": 2}))
+            derived.extend(rules.into_iter().map(|mut rule| {
+                if shape.paths { rule["entity"] = json!("Person"); }
+                rule
+            }));
+            let mut base = json!({"name": "base", "arity": 2});
+            if shape.paths { base["slot_entities"] = json!(["Person", "Person"]); }
+            let relations = std::iter::once(base)
                 .chain(relations)
                 .collect::<Vec<_>>();
             let program = json!({
@@ -4086,7 +4346,7 @@ mod relation_resolution_tests {
 
     /// Broad and deep cases in equal parts.
     fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
-        prop_oneof![2 => case_of(BROAD), 2 => case_of(DEEP), 1 => case_of(EXISTS)]
+        prop_oneof![2 => case_of(BROAD), 2 => case_of(DEEP), 1 => case_of(EXISTS), 2 => case_of(PATHS)]
     }
 
     fn evaluate_with_oracle(
@@ -4109,7 +4369,7 @@ mod relation_resolution_tests {
         recursive: bool,
         suspend_depth: usize,
     ) -> (Vec<String>, usize) {
-        let (outcomes, stops, _, _) =
+        let (outcomes, stops, _, _, _) =
             evaluate_detailed(program, dataset, limit, recursive, suspend_depth);
         (outcomes, stops)
     }
@@ -4120,7 +4380,13 @@ mod relation_resolution_tests {
         limit: usize,
         recursive: bool,
         suspend_depth: usize,
-    ) -> (Vec<String>, usize, super::ExistsCoverage, usize) {
+    ) -> (
+        Vec<String>,
+        usize,
+        super::ExistsCoverage,
+        usize,
+        super::PathCoverage,
+    ) {
         let program = program.to_program().expect("the program lowers");
         // These are direct evaluator comparisons. Keep every generated
         // caller-slot orientation and direct tuple, including combinations
@@ -4135,7 +4401,13 @@ mod relation_resolution_tests {
         limit: usize,
         recursive: bool,
         suspend_depth: usize,
-    ) -> (Vec<String>, usize, super::ExistsCoverage, usize) {
+    ) -> (
+        Vec<String>,
+        usize,
+        super::ExistsCoverage,
+        usize,
+        super::PathCoverage,
+    ) {
         let period = Period::month(2026, 1);
         let mut engine = Engine::new(program, dataset).with_relation_nesting_limit(limit);
         engine.recursive_relation_oracle = recursive;
@@ -4164,6 +4436,7 @@ mod relation_resolution_tests {
             engine.relation_suspensions,
             engine.exists_coverage,
             engine.maximum_depth,
+            engine.path_coverage,
         )
     }
 
@@ -4179,6 +4452,7 @@ mod relation_resolution_tests {
         );
         let nested = std::cell::Cell::new(0_usize);
         let stopped = std::cell::RefCell::new([0_usize; RELATIONS + 1]);
+        let paths = std::cell::RefCell::new(super::PathCoverage::default());
         runner
             .run(&case(), |(program, dataset)| {
                 // Convert once per case; every limit/depth still gets a fresh
@@ -4188,11 +4462,11 @@ mod relation_resolution_tests {
                 // Relations read only later ones, so the deepest request sits
                 // at depth RELATIONS - 1. That bounds the limits that can stop
                 // a resolution, and no limit can stop this reference.
-                let (native, _, _, maximum_depth) = evaluate_detailed_model(&model, &data, usize::MAX, true, usize::MAX);
+                let (native, _, _, maximum_depth, _) = evaluate_detailed_model(&model, &data, usize::MAX, true, usize::MAX);
                 for limit in 1..=RELATIONS {
                     let mut stopped_here = false;
                     for suspend_depth in 1..=maximum_depth {
-                        let (suspended, stops, _, _) = evaluate_detailed_model(&model, &data, limit, false, suspend_depth);
+                        let (suspended, stops, _, _, coverage) = evaluate_detailed_model(&model, &data, limit, false, suspend_depth);
                         if native != suspended {
                             return Err(TestCaseError::fail(format!(
                                 "relation nesting {limit}, rule suspend depth {suspend_depth}\nnative {native:#?}\nsuspended {suspended:#?}\nprogram {}",
@@ -4200,6 +4474,16 @@ mod relation_resolution_tests {
                             )));
                         }
                         stopped_here |= stops > 0;
+                        // These counters come from successful resumed lookups
+                        // and completed candidate generations in the evaluator.
+                        let mut paths = paths.borrow_mut();
+                        paths.resumed += coverage.resumed;
+                        paths.empty += coverage.empty;
+                        paths.nonempty += coverage.nonempty;
+                        paths.long += coverage.long;
+                        for (total, count) in paths.derived_positions.iter_mut().zip(coverage.derived_positions) {
+                            *total += count;
+                        }
                     }
                     stopped.borrow_mut()[limit] += usize::from(stopped_here);
                 }
@@ -4210,6 +4494,23 @@ mod relation_resolution_tests {
             })
             .unwrap();
         assert!(nested.get() > 500, "only {} cases evaluated", nested.get());
+        let paths = paths.into_inner();
+        assert!(
+            paths.resumed >= 25,
+            "resumed candidate generation: {paths:?}"
+        );
+        assert!(
+            paths.empty >= 100 && paths.nonempty >= 25,
+            "empty/nonempty paths: {paths:?}"
+        );
+        assert!(paths.long >= 100, "three-or-more steps: {paths:?}");
+        assert!(
+            paths.derived_positions.iter().all(|count| *count >= 10),
+            "derived step positions: {paths:?}"
+        );
+        eprintln!(
+            "PATH COVERAGE {paths:?}; floors resumed25 empty100 nonempty25 long100 each-position10"
+        );
         let stopped = stopped.into_inner();
         for limit in 1..RELATIONS {
             let cases = stopped[limit];
@@ -4276,7 +4577,8 @@ mod relation_resolution_tests {
 
     fn derivation(source: &str, predicate: JudgmentExpr) -> RelationDerivation {
         RelationDerivation {
-            source_relation: source.to_string(),
+            source_relation: Some(source.to_string()),
+            source_path: None,
             current_slot: 0,
             related_slot: 1,
             entity: None,
@@ -5352,7 +5654,8 @@ mod relation_resolution_tests {
                     arity: 2,
                     slot_entities: vec!["Node".to_string(), "Node".to_string()],
                     derivation: Some(RelationDerivation {
-                        source_relation: source,
+                        source_relation: Some(source),
+                        source_path: None,
                         current_slot: 0,
                         related_slot: 1,
                         entity: None,
@@ -5710,7 +6013,8 @@ mod relation_resolution_tests {
                             arity: 2,
                             slot_entities: vec!["Node".to_string(), "Node".to_string()],
                             derivation: Some(RelationDerivation {
-                                source_relation: "base".to_string(),
+                                source_relation: Some("base".to_string()),
+                                source_path: None,
                                 current_slot: 0,
                                 related_slot: 1,
                                 entity: None,
@@ -5832,7 +6136,8 @@ mod relation_resolution_tests {
                     arity: 2,
                     slot_entities: vec!["Node".to_string(), "Node".to_string()],
                     derivation: Some(RelationDerivation {
-                        source_relation: "items".to_string(),
+                        source_relation: Some("items".to_string()),
+                        source_path: None,
                         current_slot: 0,
                         related_slot: 1,
                         entity: None,

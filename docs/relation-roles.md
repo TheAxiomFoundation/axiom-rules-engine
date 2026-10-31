@@ -883,9 +883,8 @@ Each is sized for one build lane.
    `follow_chains` (`relation_typing.rs`), which follows one successor per
    node. A path source makes a relation read several relations, one per
    step, so this PR extends `follow_chains` or adds a graph walk beside it.
-   It also lands after #211, still open, which rewrites the chain walks in
-   validation, binding and all three evaluators, or with an explicit merge
-   plan for it.
+   #211 has also landed: the chain walks in validation, binding and all
+   three evaluators are linear. This PR extends those walks to path edges.
 5. **Fixture and docs.** The 273.1 fixture and its hand-worked cases, the
    `relation_roles` capability, `docs/execution-semantics.md`, and a
    `DECISIONS.md` entry.

@@ -54,6 +54,15 @@ fn selected(predicate: Value) -> Value {
     selected_from("constituent", predicate)
 }
 
+fn selected_path(steps: &[(&str, usize, usize)]) -> Value {
+    let steps = steps.iter().map(|(relation, from_slot, to_slot)| {
+        json!({"relation": relation, "from_slot": from_slot, "to_slot": to_slot})
+    }).collect::<Vec<_>>();
+    json!({"name": "selected", "arity": 2, "slot_entities": ["Unit", "Person"], "derivation": {
+        "source_path": steps, "current_slot": 1, "related_slot": 0,
+        "slot_entities": ["Unit", "Person"], "predicate": tautology()}})
+}
+
 fn count_selected() -> Value {
     json!({"kind": "count_related", "relation": "selected", "current_slot": 1, "related_slot": 0})
 }
@@ -104,6 +113,11 @@ fn placed_shapes() -> Vec<Shape> {
             count_selected(),
         ),
         (
+            "path source first step",
+            Some(selected_path(&[("participating", 1, 0)])),
+            count_selected(),
+        ),
+        (
             "only related",
             None,
             one_if(
@@ -134,6 +148,15 @@ fn unplaced_shapes() -> Vec<Shape> {
     let atom = json!({"kind": "relation_atom", "relation": "members",
         "terms": ["candidate", "anchor"]});
     vec![
+        (
+            "path source later step",
+            Some(selected_path(&[
+                ("constituent", 1, 0),
+                ("participating", 0, 1),
+                ("constituent", 1, 0),
+            ])),
+            count_selected(),
+        ),
         (
             "exists over a derived generator",
             Some(selected(some_member.clone())),
@@ -422,11 +445,20 @@ fn every_read_of_an_unknown_membership_stays_indeterminate() {
 /// unknown elsewhere leaves the answer determined.
 #[test]
 fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
+    let mut path_evaluations = 0;
+    let mut path_unknowns = 0;
     for (name, relation, total) in placed_shapes() {
         let program = program(relation, total);
         for world in worlds() {
             for (index, person) in PERSONS.iter().enumerate() {
                 let reduction = reduce(&program, &world, person);
+                if name == "path source first step" {
+                    path_evaluations += 1;
+                    path_unknowns += usize::from(matches!(
+                        reduction,
+                        Ok(CompleteReduction::Indeterminate { .. })
+                    ));
+                }
                 assert_eq!(
                     matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })),
                     world[index].1 == Status::Unknown,
@@ -435,11 +467,23 @@ fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
             }
         }
     }
+    assert!(
+        path_evaluations >= 648,
+        "placed path did not run: {path_evaluations}"
+    );
+    assert!(
+        path_unknowns >= 216,
+        "placed path missed unknowns: {path_unknowns}"
+    );
+    eprintln!(
+        "phase-two placed path: evaluations={path_evaluations} (floor 648), unknowns={path_unknowns} (floor 216)"
+    );
 }
 
 #[test]
 fn a_determined_answer_holds_in_every_completion() {
     let mut past_an_unknown = 0;
+    let mut path_completion_checks = 0;
     for (name, relation, total) in unplaced_shapes().into_iter().chain(placed_shapes()) {
         let program = program(relation, total);
         for world in worlds() {
@@ -450,9 +494,12 @@ fn a_determined_answer_holds_in_every_completion() {
                 }
                 let resolved_worlds = completions(&world);
                 for resolved in &resolved_worlds {
+                    let completed = reduce(&program, resolved, person);
+                    if name.starts_with("path source") {
+                        path_completion_checks += 1;
+                    }
                     assert_eq!(
-                        reduce(&program, resolved, person),
-                        answer,
+                        completed, answer,
                         "{name} in {world:?} completed as {resolved:?}"
                     );
                 }
@@ -461,4 +508,9 @@ fn a_determined_answer_holds_in_every_completion() {
         }
     }
     assert!(past_an_unknown > 0, "no answer got past an unknown");
+    assert!(
+        path_completion_checks >= 900,
+        "path completions did not run: {path_completion_checks}"
+    );
+    eprintln!("phase-two path completion checks={path_completion_checks} (floor 900)");
 }

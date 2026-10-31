@@ -1109,7 +1109,10 @@ fn chain_bottoms(model: &crate::model::Program) -> std::collections::BTreeMap<&s
             .get(name)
             .and_then(|schema| schema.derivation.as_ref())
         {
-            Some(derivation) => ChainStep::Next(&derivation.source_relation),
+            Some(derivation) => match derivation.source_relation.as_deref() {
+                Some(source) if derivation.source_path.is_none() => ChainStep::Next(source),
+                _ => ChainStep::End(None),
+            },
             None => ChainStep::End(Some(name)),
         },
     )
@@ -1137,17 +1140,22 @@ fn derived_data_sources(model: &crate::model::Program) -> DerivedDataSources<'_>
         else {
             return ChainStep::End(None);
         };
+        // A path joins pairs, so no one physical data relation can supply
+        // migration evidence for an aggregate over its result.
+        let Some(source_relation) = derivation
+            .source_relation
+            .as_deref()
+            .filter(|_| derivation.source_path.is_none())
+        else {
+            return ChainStep::End(None);
+        };
         let slots = (derivation.current_slot, derivation.related_slot);
-        match model.relations.get(&derivation.source_relation) {
+        match model.relations.get(source_relation) {
             None => ChainStep::End(None),
             Some(source) => match &source.derivation {
-                None => ChainStep::End(Some((
-                    derivation.source_relation.as_str(),
-                    slots.0,
-                    slots.1,
-                ))),
+                None => ChainStep::End(Some((source_relation, slots.0, slots.1))),
                 Some(next) if (next.current_slot, next.related_slot) == slots => {
-                    ChainStep::Next(&derivation.source_relation)
+                    ChainStep::Next(source_relation)
                 }
                 Some(_) => ChainStep::End(None),
             },
@@ -1197,7 +1205,6 @@ fn trusted_filter_kinds(
 /// declares, so one contradicting ancestor poisons every derived relation
 /// above it. A cyclic chain is never consistent.
 fn consistent_derivations(model: &crate::model::Program) -> std::collections::BTreeSet<String> {
-    use crate::relation_typing::ChainStep;
     let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(model);
     let locally_consistent = |name: &str| {
         let Some(schema) = model.relations.get(name) else {
@@ -1206,38 +1213,80 @@ fn consistent_derivations(model: &crate::model::Program) -> std::collections::BT
         let Some(derivation) = schema.derivation.as_ref() else {
             return true;
         };
+        if let Some(path) = &derivation.source_path {
+            // Path declarations cannot define a filtered entity. Their own
+            // kinds and each junction still have to agree before any source
+            // chain that reaches them can be trusted.
+            if schema.arity != 2
+                || derivation.slot_entities.len() != 2
+                || derivation.current_slot >= 2
+                || derivation.related_slot >= 2
+                || derivation.current_slot == derivation.related_slot
+                || path.is_empty()
+                || derivation.entity.is_some()
+                || derivation.member_relation.is_some()
+                || (!schema.slot_entities.is_empty()
+                    && schema.slot_entities != derivation.slot_entities)
+            {
+                return false;
+            }
+            let mut previous = derivation.slot_entities.get(derivation.current_slot);
+            for step in path {
+                let Some(source) = model.relations.get(&step.relation) else {
+                    return false;
+                };
+                if source.arity != 2
+                    || step.from_slot >= 2
+                    || step.to_slot >= 2
+                    || step.from_slot == step.to_slot
+                    || source.derivation.as_ref().is_some_and(|source| {
+                        (step.from_slot, step.to_slot) != (source.current_slot, source.related_slot)
+                    })
+                {
+                    return false;
+                }
+                let Some(kinds) = slot_kinds.get(&step.relation) else {
+                    return false;
+                };
+                if previous != kinds.get(step.from_slot) {
+                    return false;
+                }
+                previous = kinds.get(step.to_slot);
+            }
+            return previous == derivation.slot_entities.get(derivation.related_slot);
+        }
+        let Some(source_relation) = derivation.source_relation.as_deref() else {
+            return false;
+        };
         if let Some(source) = model
             .relations
-            .get(&derivation.source_relation)
+            .get(source_relation)
             .and_then(|source| source.derivation.as_ref())
             && (source.current_slot, source.related_slot)
                 != (derivation.current_slot, derivation.related_slot)
         {
             return false;
         }
-        let source = slot_kinds.get(&derivation.source_relation);
+        let source = slot_kinds.get(source_relation);
         let agrees = |declared: &Vec<String>| {
             declared.is_empty() || source.is_some_and(|source| source == declared.as_slice())
         };
         agrees(&derivation.slot_entities) && agrees(&schema.slot_entities)
     };
-    // A relation is consistent when it and every relation down its chain
-    // are, and the chain ends at a data relation rather than cycling.
-    let consistent = crate::relation_typing::follow_chains(
+    let consistent = crate::relation_typing::all_source_edges(
         model.relations.keys().map(String::as_str),
-        false,
         |name| {
             if !locally_consistent(name) {
-                return ChainStep::End(false);
+                return None;
             }
-            match model
-                .relations
-                .get(name)
-                .and_then(|schema| schema.derivation.as_ref())
-            {
-                Some(derivation) => ChainStep::Next(&derivation.source_relation),
-                None => ChainStep::End(true),
-            }
+            Some(
+                model
+                    .relations
+                    .get(name)
+                    .and_then(|schema| schema.derivation.as_ref())
+                    .map(|derivation| derivation.source_relations().collect())
+                    .unwrap_or_default(),
+            )
         },
     );
     model
@@ -1541,14 +1590,25 @@ mod chain_tests {
             };
             if let Some(source) = model
                 .relations
-                .get(&derivation.source_relation)
+                .get(
+                    derivation
+                        .source_relation
+                        .as_deref()
+                        .expect("legacy source"),
+                )
                 .and_then(|source| source.derivation.as_ref())
                 && (source.current_slot, source.related_slot)
                     != (derivation.current_slot, derivation.related_slot)
             {
                 return false;
             }
-            let source = reference_effective_slot_entities(model, &derivation.source_relation);
+            let source = reference_effective_slot_entities(
+                model,
+                derivation
+                    .source_relation
+                    .as_deref()
+                    .expect("legacy source"),
+            );
             let agrees = |declared: &Vec<String>| {
                 declared.is_empty() || source.as_ref().is_some_and(|source| source == declared)
             };
@@ -1570,7 +1630,9 @@ mod chain_tests {
                         .get(&current)
                         .and_then(|schema| schema.derivation.as_ref())
                     {
-                        Some(derivation) => current = derivation.source_relation.clone(),
+                        Some(derivation) => {
+                            current = derivation.source_relation.clone().expect("legacy source")
+                        }
                         None => return true,
                     }
                 }
@@ -1638,7 +1700,7 @@ mod chain_tests {
             if !visited.insert(name.clone()) {
                 return None;
             }
-            name = derivation.source_relation.clone();
+            name = derivation.source_relation.clone()?;
         }
         Some(name)
     }
@@ -1666,7 +1728,7 @@ mod chain_tests {
                 return None;
             }
             slots = derivation_slots;
-            name = derivation.source_relation.clone();
+            name = derivation.source_relation.clone()?;
         }
     }
 
@@ -1751,6 +1813,91 @@ mod chain_tests {
     }
 
     #[test]
+    fn path_sources_preserve_kinds_without_inventing_a_physical_source() {
+        use crate::model::{JudgmentExpr, RelationDerivation, RelationPathStep, RelationSchema};
+        let kinds = vec!["Person".to_string(), "Person".to_string()];
+        let mut model = Program::default();
+        model.relations.insert(
+            "base".to_string(),
+            RelationSchema {
+                name: "base".to_string(),
+                arity: 2,
+                slot_entities: kinds.clone(),
+                derivation: None,
+            },
+        );
+        model.relations.insert(
+            "path".to_string(),
+            RelationSchema {
+                name: "path".to_string(),
+                arity: 2,
+                slot_entities: kinds.clone(),
+                derivation: Some(RelationDerivation {
+                    source_relation: None,
+                    source_path: Some(
+                        ["base", "base", "base"]
+                            .map(|relation| RelationPathStep {
+                                relation: relation.to_string(),
+                                from_slot: 0,
+                                to_slot: 1,
+                            })
+                            .to_vec(),
+                    ),
+                    current_slot: 0,
+                    related_slot: 1,
+                    entity: None,
+                    member_relation: None,
+                    slot_entities: kinds.clone(),
+                    predicate: JudgmentExpr::And(Vec::new()),
+                }),
+            },
+        );
+        model.relations.insert(
+            "filter".to_string(),
+            RelationSchema {
+                name: "filter".to_string(),
+                arity: 2,
+                slot_entities: Vec::new(),
+                derivation: Some(RelationDerivation {
+                    source_relation: Some("path".to_string()),
+                    source_path: None,
+                    current_slot: 0,
+                    related_slot: 1,
+                    entity: Some("Unit".to_string()),
+                    member_relation: None,
+                    slot_entities: Vec::new(),
+                    predicate: JudgmentExpr::And(Vec::new()),
+                }),
+            },
+        );
+        assert_eq!(
+            consistent_derivations(&model),
+            BTreeSet::from(["filter".to_string(), "path".to_string()])
+        );
+        assert_eq!(
+            trusted_filter_kinds(&model).get("Unit").map(String::as_str),
+            Some("Person")
+        );
+        assert_eq!(chain_bottoms(&model)["filter"], None);
+        assert_eq!(derived_data_sources(&model)["filter"], None);
+        // The second step is an edge even though no slot-kind inheritance
+        // follows it. A cycle there poisons every filter above the path.
+        model
+            .relations
+            .get_mut("path")
+            .unwrap()
+            .derivation
+            .as_mut()
+            .unwrap()
+            .source_path
+            .as_mut()
+            .unwrap()[1]
+            .relation = "path".to_string();
+        assert!(consistent_derivations(&model).is_empty());
+        assert!(trusted_filter_kinds(&model).is_empty());
+    }
+
+    #[test]
     fn migration_chain_walks_are_linear_in_a_long_chain() {
         // Every relation walked its chain to the bottom, and checked each
         // link's source kinds by walking again: cubic in the chain length.
@@ -1777,7 +1924,8 @@ mod chain_tests {
                     arity: 2,
                     slot_entities: Vec::new(),
                     derivation: Some(crate::model::RelationDerivation {
-                        source_relation,
+                        source_relation: Some(source_relation),
+                        source_path: None,
                         current_slot: 0,
                         related_slot: 1,
                         entity: Some(format!("U{link}")),

@@ -95,6 +95,8 @@ pub struct PhaseTwoEngine<'a> {
 struct ReductionReasonTraversal {
     derived: BTreeSet<String>,
     relations: BTreeSet<String>,
+    #[cfg(test)]
+    path_steps: [usize; 2],
 }
 
 impl<'a> PhaseTwoEngine<'a> {
@@ -397,13 +399,37 @@ impl<'a> PhaseTwoEngine<'a> {
             .get(relation)
             .and_then(|schema| schema.derivation.as_ref())
         {
-            self.collect_relation_reasons(
-                &derivation.source_relation,
-                read_at.map(|(_, entity_id)| (derivation.current_slot, entity_id)),
-                period,
-                visiting,
-                reasons,
-            );
+            if let Some(path) = &derivation.source_path {
+                for (index, step) in path.iter().enumerate() {
+                    // Only the first step reads at the requested id. Every
+                    // later step uses an intermediate id this static walk
+                    // cannot place, so it must include all unknowns there.
+                    let step_read_at = if index == 0 {
+                        read_at.map(|(_, entity_id)| (step.from_slot, entity_id))
+                    } else {
+                        None
+                    };
+                    self.collect_relation_reasons(
+                        &step.relation,
+                        step_read_at,
+                        period,
+                        visiting,
+                        reasons,
+                    );
+                    #[cfg(test)]
+                    {
+                        visiting.path_steps[usize::from(index > 0)] += 1;
+                    }
+                }
+            } else if let Some(source) = &derivation.source_relation {
+                self.collect_relation_reasons(
+                    source,
+                    read_at.map(|(_, entity_id)| (derivation.current_slot, entity_id)),
+                    period,
+                    visiting,
+                    reasons,
+                );
+            }
             self.collect_judgment_reduction_reasons(
                 &derivation.predicate,
                 None,
@@ -1103,5 +1129,91 @@ fn provenance_json(provenance: &Provenance) -> serde_json::Value {
             "constitution": constitution,
             "trace_root": trace_root,
         }),
+    }
+}
+
+#[cfg(test)]
+mod path_reason_tests {
+    use super::*;
+    use crate::engine::Engine;
+    use crate::model::{DataSet, Interval, Period};
+    use crate::spec::ProgramSpec;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngSeed, TestRunner};
+    use serde_json::json;
+    use std::cell::Cell;
+
+    #[test]
+    fn phase_two_path_reads_place_only_the_first_step() {
+        let mut runner = TestRunner::new(Config {
+            cases: 128,
+            failure_persistence: None,
+            rng_seed: RngSeed::Fixed(0x214_4_2),
+            ..Config::default()
+        });
+        let first_steps = Cell::new(0);
+        let later_steps = Cell::new(0);
+        let long_paths = Cell::new(0);
+        runner.run(&(prop::collection::vec(0_usize..2, 1..6), any::<bool>()), |(slots, first_matches)| {
+            let period = Period::month(2026, 1);
+            let mut relations = Vec::new();
+            let mut path = Vec::new();
+            let mut knowledge = Vec::new();
+            let mut expected = BTreeSet::new();
+            for (index, &from) in slots.iter().enumerate() {
+                let name = format!("step{index}");
+                relations.push(json!({"name":name,"arity":2,"slot_entities":["Person","Person"]}));
+                path.push(json!({"relation":name,"from_slot":from,"to_slot":1-from}));
+                let mut tuple = vec!["candidate".to_owned(); 2];
+                tuple[from] = if index == 0 && first_matches { "requested" } else { "other" }.to_owned();
+                let reason = format!("unknown:{index}");
+                knowledge.push(RelationKnowledgeRecord {
+                    name,
+                    tuple,
+                    interval: Interval::covering(&period),
+                    truth: LiftedTruth::Unknown { reasons: BTreeSet::from([reason.clone()]) },
+                });
+                if index > 0 || first_matches { expected.insert(reason); }
+            }
+            relations.push(json!({"name":"selected","arity":2,"slot_entities":["Person","Person"],"derivation":{
+                "source_path":path,"current_slot":0,"related_slot":1,"slot_entities":["Person","Person"],
+                "predicate":{"kind":"comparison","op":"eq",
+                    "left":{"kind":"literal","value":{"kind":"integer","value":1}},
+                    "right":{"kind":"literal","value":{"kind":"integer","value":1}}}}}));
+            let spec: ProgramSpec = serde_json::from_value(json!({"relations":relations,"derived":[]})).unwrap();
+            let program = spec.to_program().unwrap();
+            let data = DataSet::default();
+            let engine = PhaseTwoEngine { ordinary: Engine::new(&program, &data), program: &program, relation_knowledge: &knowledge };
+            let mut traversal = ReductionReasonTraversal::default();
+            let mut reasons = BTreeSet::new();
+            engine.collect_relation_reasons("selected", Some((0,"requested")), &period, &mut traversal, &mut reasons);
+            prop_assert_eq!(reasons, expected);
+            // Count completed recursive reads, after the actual walk returns.
+            first_steps.set(first_steps.get() + traversal.path_steps[0]);
+            later_steps.set(later_steps.get() + traversal.path_steps[1]);
+            long_paths.set(long_paths.get() + usize::from(traversal.path_steps[1] >= 2));
+            Ok(())
+        }).unwrap();
+        assert!(
+            first_steps.get() >= 128,
+            "first path reads went dark: {}",
+            first_steps.get()
+        );
+        assert!(
+            later_steps.get() >= 200,
+            "later path reads went dark: {}",
+            later_steps.get()
+        );
+        assert!(
+            long_paths.get() >= 50,
+            "long path reads went dark: {}",
+            long_paths.get()
+        );
+        eprintln!(
+            "phase-two path reads: first={} (floor 128), later={} (floor 200), long={} (floor 50)",
+            first_steps.get(),
+            later_steps.get(),
+            long_paths.get()
+        );
     }
 }

@@ -2259,7 +2259,8 @@ fn lower_program_reading(
             arity: 2,
             slot_entities: vec![PERSON.to_string(), HOUSEHOLD.to_string()],
             derivation: Some(RelationDerivationSpec {
-                source_relation: MEMBERS.to_string(),
+                source_relation: Some(MEMBERS.to_string()),
+                source_path: None,
                 current_slot: 1,
                 related_slot: 0,
                 entity: None,

@@ -63,7 +63,8 @@ content, described below.
   produce it; raw `ProgramSpec` expressions can. No such read appears in the
   corpus measurement above.
 - **Supplied derived tuples depend on the program's constructs.** Programs
-  using qualified reads, relation atoms or term comparisons refuse them at
+  using qualified reads, relation atoms, term comparisons, `exists` or path
+  sources refuse them at
   request binding (`supplied_tuples_for_derived_relation`), and their members
   resolver ignores them through `Engine::new` too. Other programs union the
   filtered source members with `direct_related_ids(relation, ...)`, including
@@ -414,8 +415,8 @@ One entry per `program.relations` entry, with its name, arity and effective
 slot kinds. `slot_entities` is null only for a relation that declares none,
 which relation typing allows only when nothing executes it.
 
-`lookup_slots` is the set of slots that aggregates, membership tests, atoms
-and `exists` generators in the program key on, with a derived relation's traversal of its source
+`lookup_slots` is the set of slots that aggregates, membership tests, atoms,
+`exists` generators and source-path steps in the program key on, with a derived relation's traversal of its source
 counted against the source. It is empty when no expression uses the relation.
 It records direction of traversal and nothing about cardinality.
 
@@ -431,19 +432,48 @@ lists only its current slot. Body reads through a variable carry the kind
 of its generator's variable slot, including reads of enclosing variables
 inside another `exists` (`tests/relation_exists_interface.rs`).
 
+A source-path data step lists its `from_slot`; a derived step lists that
+relation's current slot, which evaluation resolves members for. Each step's
+relation enters the path relation's `reads.relations`, once and sorted,
+including steps used only to reach an intermediate id. The ordered
+`source_path` keeps its declared order (`tests/relation_path_interface.rs`).
+
 `accepts_supplied_tuples` is false for every derived relation in a program
-using qualified reads, relation atoms, term comparisons or `exists`; otherwise it is
+using qualified reads, relation atoms, term comparisons, `exists` or a path
+source; otherwise it is
 true. This is a program-wide restriction, including derived relations whose
 own predicates use none of those constructs. A parameter read in a predicate
 does not count: raw `ProgramSpec` predicates could always look up parameters.
 
 `provenance.kind` says what the declaration makes the relation: `supplied`
-for a data relation, `derived` for a `derived_relation`. `derived` carries
+for a data relation, `derived` for a single-source `derived_relation`, and
+`source_path` for a path-sourced `derived_relation`. `derived` carries
 `rule` (the id of the rule that derives it, today the relation's own id),
 `source_relation`, and `reads`: the input slots, rule ids and relations its
 predicate mentions directly. An atom adds its named relation to
 `reads.relations`, as a bare membership test does; a term comparison adds
 nothing. Nothing here is specific to unit derivation.
+
+`source_path` provenance carries exactly `kind`, `rule`, `source_path` and
+`reads`. Each path step has exactly `relation`, `from_slot` and `to_slot`.
+Its `reads` contains the predicate's direct mentions plus each step's
+relation. It never carries `source_relation`:
+
+```json
+{"kind":"source_path","rule":"lives_with","source_path":[
+  {"relation":"member_of_household","from_slot":0,"to_slot":1},
+  {"relation":"member_of_household","from_slot":1,"to_slot":0}
+],"reads":{"inputs":[],"rules":[],"relations":["member_of_household"]}}
+```
+
+The executable derivation likewise writes exactly one of `source_relation`
+and `source_path`. A path omits the `source_relation` key entirely. Older
+engines require it, so they refuse a path instead of silently evaluating a
+single source while ignoring the unknown path field. An artifact with no
+path retains its existing source field and interface bytes. This extends
+format 3 without a version bump; loading still re-derives and compares the
+whole interface (`tests/relation_paths_surface.rs` and
+`tests/relation_path_interface.rs`).
 
 The judgment wire forms are
 `{kind: relation_atom, relation: R, terms: [anchor, candidate]}` (with terms in
@@ -577,8 +607,8 @@ a new format version, whose engine reads format 3 through a compatibility
 loader that keeps this derivation. A later construct that older engines
 refuse to deserialize may extend the derivation and `RelationProvenance`
 for programs using that construct without a format bump: no published
-artifact changes. Examples include a new expression variant or a derived
-relation without `source_relation`, as #214 plans. The derivation therefore
+artifact changes. Examples include a new expression variant or a path-sourced
+derived relation that omits `source_relation` (#214). The derivation therefore
 claims structural facts and usage rules that transcribe what evaluators
 enforce. Golden fixtures pin it.
 

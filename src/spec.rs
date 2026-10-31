@@ -10,8 +10,8 @@ use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
     IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
     ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
-    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, Term, UnitDef,
-    UnitKind,
+    RelationPathStep, RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr,
+    ScalarValue, Term, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -20,6 +20,16 @@ pub enum SpecError {
     SelectedYearInput(String),
     #[error("input declaration `{input}`: {message}")]
     InputDeclaration { input: String, message: String },
+    #[error(
+        "relation_path_source_conflict: a derived relation must declare exactly one of source_relation or source_path"
+    )]
+    RelationPathSourceConflict,
+    #[error("relation_path_empty: a source_path must contain at least one step")]
+    RelationPathEmpty,
+    #[error(
+        "relation_path_forbidden_field: a path-sourced derived relation cannot declare {field}"
+    )]
+    RelationPathForbiddenField { field: &'static str },
     #[error("only_related requires a Boolean input reference")]
     InvalidOnlyRelatedValue,
     #[error("only_related requires distinct binary relation slots 0 and 1")]
@@ -754,7 +764,10 @@ impl RelationSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationDerivationSpec {
-    pub source_relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     pub current_slot: usize,
     pub related_slot: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -766,10 +779,54 @@ pub struct RelationDerivationSpec {
     pub predicate: JudgmentExprSpec,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RelationPathStepSpec {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
 impl RelationDerivationSpec {
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
+
     fn to_model(&self) -> Result<RelationDerivation, SpecError> {
+        if self.source_relation.is_some() == self.source_path.is_some() {
+            return Err(SpecError::RelationPathSourceConflict);
+        }
+        if let Some(path) = &self.source_path {
+            if path.is_empty() {
+                return Err(SpecError::RelationPathEmpty);
+            }
+            for (field, value) in [
+                ("entity", &self.entity),
+                ("member_relation", &self.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(SpecError::RelationPathForbiddenField { field });
+                }
+            }
+        }
         Ok(RelationDerivation {
             source_relation: self.source_relation.clone(),
+            source_path: self.source_path.as_ref().map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| RelationPathStep {
+                        relation: step.relation.clone(),
+                        from_slot: step.from_slot,
+                        to_slot: step.to_slot,
+                    })
+                    .collect()
+            }),
             current_slot: self.current_slot,
             related_slot: self.related_slot,
             entity: self.entity.clone(),
