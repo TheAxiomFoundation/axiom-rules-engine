@@ -1,6 +1,7 @@
 //! A determined phase-two answer must survive every unknown membership: it
-//! has to equal the answer each completion of the unknowns gives. Every read
-//! here reaches `participating` at an entity other than the requested one.
+//! has to equal the answer each completion of the unknowns gives. The walk
+//! places some reads of `participating` at the requested person and counts
+//! every unknown for the rest. The world is small enough to check all of it.
 #![cfg(feature = "unit-derivation")]
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
@@ -12,7 +13,6 @@ use axiom_rules_engine::unit_derivation::{
     Projection, ProjectionRole, PrototypeRun, Provenance, RosterInput, SuppliedEntity,
     UnitDerivationResult, materialize_phase_two_dataset,
 };
-use proptest::prelude::*;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -29,6 +29,8 @@ enum Status {
 /// Each person's unit and participation.
 type World = [(usize, Status); 3];
 
+type Shape = (&'static str, Option<Value>, Value);
+
 fn literal(value: i64) -> Value {
     json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
 }
@@ -41,11 +43,15 @@ fn tautology() -> Value {
     json!({"kind": "comparison", "op": "eq", "left": literal(1), "right": literal(1)})
 }
 
-/// A person's `selected` units: those of `constituent`, kept by `predicate`.
-fn selected(predicate: Value) -> Value {
+/// A person's `selected` units: those of `source`, kept by `predicate`.
+fn selected_from(source: &str, predicate: Value) -> Value {
     json!({"name": "selected", "arity": 2, "slot_entities": ["Unit", "Person"], "derivation": {
-        "source_relation": "constituent", "current_slot": 1, "related_slot": 0,
+        "source_relation": source, "current_slot": 1, "related_slot": 0,
         "slot_entities": ["Unit", "Person"], "predicate": predicate}})
+}
+
+fn selected(predicate: Value) -> Value {
+    selected_from("constituent", predicate)
 }
 
 fn count_selected() -> Value {
@@ -74,9 +80,49 @@ fn exists(relation: &str, terms: Value, slot: usize, body: Value) -> Value {
         "variable_slot": slot, "body": body})
 }
 
+/// Each shape reads `participating` through a fold or membership test at the
+/// requested person, so the walk places the read there.
+fn placed_shapes() -> Vec<Shape> {
+    let one_if = |condition: Value, otherwise: Value| {
+        json!({"kind": "if", "condition": condition, "then_expr": literal(1),
+            "else_expr": otherwise})
+    };
+    let only_eligible = json!({"kind": "only_related", "relation": "participating",
+        "current_slot": 1, "related_slot": 0, "value": {"kind": "input", "name": "eligible"}});
+    let member = json!({"kind": "relation_member", "relation": "participating",
+        "current_slot": 1, "related_slot": 0});
+    vec![
+        (
+            "direct count",
+            None,
+            json!({"kind": "count_related", "relation": "participating", "current_slot": 1,
+                "related_slot": 0}),
+        ),
+        (
+            "count of a derived relation",
+            Some(selected_from("participating", tautology())),
+            count_selected(),
+        ),
+        (
+            "only related",
+            None,
+            one_if(
+                json!({"kind": "comparison", "op": "eq", "left": only_eligible,
+                    "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}),
+                literal(0),
+            ),
+        ),
+        (
+            "membership test in a dead branch",
+            None,
+            one_if(tautology(), one_if(member, literal(0))),
+        ),
+    ]
+}
+
 /// Each shape reads `participating` away from the requested person's own
 /// fold, so the walk cannot place the read at that person.
-fn shapes() -> Vec<(&'static str, Option<Value>, Value)> {
+fn unplaced_shapes() -> Vec<Shape> {
     let derived_size = json!({"kind": "derived", "name": "size"});
     let bare_size = positive(json!({"kind": "derived", "name": "size"}));
     let some_member = exists(
@@ -194,7 +240,11 @@ fn period() -> Period {
     Period::month(2026, 1)
 }
 
-fn reduce(program: &Program, world: &World, person: &str) -> CompleteReduction<ScalarValue> {
+fn reduce(
+    program: &Program,
+    world: &World,
+    person: &str,
+) -> Result<CompleteReduction<ScalarValue>, String> {
     let provenance = Provenance::Derived {
         constitution: "test".into(),
         trace_root: "test".into(),
@@ -292,20 +342,23 @@ fn reduce(program: &Program, world: &World, person: &str) -> CompleteReduction<S
             .collect(),
     };
     let period = period();
-    let phase = materialize_phase_two_dataset(
-        &DataSet::default(),
-        program,
-        &input,
-        &run,
-        Interval::covering(&period),
-    )
-    .unwrap();
+    let mut base = DataSet::default();
+    for unit in UNITS {
+        base.add_input(
+            "eligible",
+            "Unit",
+            unit,
+            Interval::covering(&period),
+            ScalarValue::Bool(true),
+        );
+    }
+    let phase =
+        materialize_phase_two_dataset(&base, program, &input, &run, Interval::covering(&period))
+            .unwrap();
     phase
         .engine(program)
         .evaluate_scalar("total", person, &period)
-        .unwrap_or_else(|error| CompleteReduction::Indeterminate {
-            reasons: BTreeSet::from([format!("evaluation failed: {error:?}")]),
-        })
+        .map_err(|error| format!("{error:?}"))
 }
 
 /// Every way the world's unknown memberships could resolve.
@@ -328,12 +381,19 @@ fn completions(world: &World) -> Vec<World> {
     worlds
 }
 
-fn world() -> impl Strategy<Value = World> {
-    let person = (
-        0..UNITS.len(),
-        prop_oneof![Just(Status::In), Just(Status::Out), Just(Status::Unknown)],
-    );
-    [person.clone(), person.clone(), person]
+fn worlds() -> Vec<World> {
+    let people = (0..UNITS.len())
+        .flat_map(|unit| [Status::In, Status::Out, Status::Unknown].map(|status| (unit, status)))
+        .collect::<Vec<_>>();
+    let mut worlds = Vec::new();
+    for &first in &people {
+        for &second in &people {
+            for &third in &people {
+                worlds.push([first, second, third]);
+            }
+        }
+    }
+    worlds
 }
 
 /// One unknown membership in `u0`, and `p0` in `u0`. Each shape answers
@@ -342,7 +402,7 @@ fn world() -> impl Strategy<Value = World> {
 fn every_read_of_an_unknown_membership_stays_indeterminate() {
     let world = [(0, Status::Unknown), (0, Status::Out), (1, Status::Out)];
     let mut escaped = Vec::new();
-    for (name, relation, total) in shapes() {
+    for (name, relation, total) in unplaced_shapes() {
         let program = program(relation, total);
         let answers = completions(&world)
             .iter()
@@ -350,46 +410,55 @@ fn every_read_of_an_unknown_membership_stays_indeterminate() {
             .collect::<BTreeSet<_>>();
         assert_eq!(answers.len(), 2, "{name}: the unknown changes nothing");
         let reduction = reduce(&program, &world, "p0");
-        if !matches!(reduction, CompleteReduction::Indeterminate { .. }) {
+        if !matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })) {
             escaped.push(format!("{name}: {reduction:?}"));
         }
     }
     assert!(escaped.is_empty(), "past an unknown: {escaped:#?}");
 }
 
-/// The walk keeps a fold's own read at the requested entity, so an unknown
-/// membership of another unit leaves a direct count determined.
+/// A placed read sees only the requested person's memberships, so that
+/// person's status alone decides whether the answer stays indeterminate. An
+/// unknown elsewhere leaves the answer determined.
 #[test]
-fn a_direct_count_ignores_an_unknown_in_another_unit() {
-    let program = program(
-        None,
-        json!({"kind": "count_related", "relation": "participating", "current_slot": 1,
-            "related_slot": 0}),
-    );
-    let world = [(0, Status::In), (1, Status::Unknown), (1, Status::Out)];
-    assert_eq!(
-        reduce(&program, &world, "p0"),
-        CompleteReduction::Determined(ScalarValue::Integer(1))
-    );
-}
-
-proptest! {
-    #[test]
-    fn a_determined_answer_holds_in_every_completion(
-        shape in 0..shapes().len(),
-        world in world(),
-        person in 0..PERSONS.len(),
-    ) {
-        let (name, relation, total) = shapes().swap_remove(shape);
+fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
+    for (name, relation, total) in placed_shapes() {
         let program = program(relation, total);
-        if let answer @ CompleteReduction::Determined(_) = reduce(&program, &world, PERSONS[person]) {
-            for resolved in completions(&world) {
-                prop_assert_eq!(
-                    &reduce(&program, &resolved, PERSONS[person]),
-                    &answer,
-                    "{} in {:?} completed as {:?}", name, world, resolved
+        for world in worlds() {
+            for (index, person) in PERSONS.iter().enumerate() {
+                let reduction = reduce(&program, &world, person);
+                assert_eq!(
+                    matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })),
+                    world[index].1 == Status::Unknown,
+                    "{name} in {world:?} at {person}: {reduction:?}"
                 );
             }
         }
     }
+}
+
+#[test]
+fn a_determined_answer_holds_in_every_completion() {
+    let mut past_an_unknown = 0;
+    for (name, relation, total) in unplaced_shapes().into_iter().chain(placed_shapes()) {
+        let program = program(relation, total);
+        for world in worlds() {
+            for person in PERSONS {
+                let answer = reduce(&program, &world, person);
+                if !matches!(answer, Ok(CompleteReduction::Determined(_))) {
+                    continue;
+                }
+                let resolved_worlds = completions(&world);
+                for resolved in &resolved_worlds {
+                    assert_eq!(
+                        reduce(&program, resolved, person),
+                        answer,
+                        "{name} in {world:?} completed as {resolved:?}"
+                    );
+                }
+                past_an_unknown += usize::from(resolved_worlds.len() > 1);
+            }
+        }
+    }
+    assert!(past_an_unknown > 0, "no answer got past an unknown");
 }
