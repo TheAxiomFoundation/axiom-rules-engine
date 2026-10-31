@@ -118,6 +118,10 @@ pub(crate) fn checked_div(left: Decimal, right: Decimal) -> Result<Decimal, Arit
 pub enum EvalError {
     #[error("unknown derived output: {0}")]
     UnknownDerived(String),
+    /// The rule exists in the module, but the dense plan cannot express it, so
+    /// it was left out at compile time. The reason is the compile error.
+    #[error("derived output `{output}` has no dense plan: {reason}")]
+    UnavailableDenseOutput { output: String, reason: String },
     #[error("unknown parameter: {0}")]
     UnknownParameter(String),
     #[error("unknown relation: {0}")]
