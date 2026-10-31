@@ -1,0 +1,96 @@
+# Synthetic engine test input modeling 7 CFR 273.1; not a corpus module.
+# The pilot module in rulespec-us#1428 comes from the encoder.
+format: rulespec/v1
+inputs:
+  meal_group: {dtype: Integer}
+  age: {dtype: Integer}
+  snap_household_exception_may_apply: {dtype: Judgment}
+  snap_household_unit: {dtype: Integer}
+  snap_ineligible_member_under_b7: {dtype: Judgment}
+rules:
+  # Data relations. Each is a supplied pair fact with declared kinds.
+  - {name: member_of_household, kind: data_relation,
+     data_relation: {arity: 2, arguments: [Person, Household]}}
+  - {name: residence_size, kind: derived, entity: Household, dtype: Integer, period: Month,   # gives the
+     versions: [{effective_from: 2026-01-01, formula: len(member_of_household)}]} # Household kind a rule
+  - {name: spouse_of, kind: data_relation,
+     data_relation: {arity: 2, arguments: [Person, Person]}}
+  - {name: parent_of, kind: data_relation,                 # natural, adoptive or step
+     data_relation: {arity: 2, arguments: [Person, Person]}}
+  - {name: under_parental_control_of, kind: data_relation, # (child, controller), (b)(1)(iii)
+     data_relation: {arity: 2, arguments: [Person, Person]}}
+
+  - name: lives_with                    # section 3.7; includes the person themself
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+      source_path:
+        - {relation: member_of_household, from_slot: 0, to_slot: 1}
+        - {relation: member_of_household, from_slot: 1, to_slot: 0}
+    versions:
+      - effective_from: 2026-01-01
+        formula: true
+
+  - name: snap_tie                      # (a)(3), or a (b)(1)(i)-(iii) combination
+    kind: derived_relation
+    derived_relation: {arity: 2, slot_entities: [Person, Person],
+                       current_slot: 0, related_slot: 1, source_relation: lives_with}
+    versions:
+      - effective_from: 2026-01-01
+        formula: >
+          candidate.meal_group == anchor.meal_group
+          or spouse_of(anchor, candidate) or spouse_of(candidate, anchor)
+          or (parent_of(anchor, candidate) and candidate.age < 22)
+          or (parent_of(candidate, anchor) and anchor.age < 22)
+          or (under_parental_control_of(candidate, anchor)
+              and not parent_of(anchor, candidate) and candidate.age < 18)
+          or (under_parental_control_of(anchor, candidate)
+              and not parent_of(candidate, anchor) and anchor.age < 18)
+
+  - name: snap_within_two_ties
+    kind: derived_relation
+    derived_relation: {arity: 2, slot_entities: [Person, Person],
+                       current_slot: 0, related_slot: 1, source_relation: lives_with}
+    versions:
+      - effective_from: 2026-01-01
+        formula: >
+          candidate == anchor
+          or snap_tie(anchor, candidate)
+          or exists(snap_tie(anchor, p), snap_tie(p, candidate))
+
+  - name: snap_exception_in_residence   # an exception may apply to some co-resident
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: count_where(lives_with, snap_household_exception_may_apply) > 0
+
+  - name: snap_household_member         # composition, anchored on the applicant
+    kind: derived_relation
+    derived_relation: {arity: 2, slot_entities: [Person, Person],
+                       current_slot: 0, related_slot: 1, source_relation: lives_with}
+    versions:
+      - effective_from: 2026-01-01
+        formula: >
+          (snap_within_two_ties(anchor, candidate)
+           and not anchor.snap_exception_in_residence
+           and not exists(snap_within_two_ties(anchor, p),
+                          exists(snap_tie(p, r), not snap_within_two_ties(anchor, r))))
+          or ((anchor.snap_exception_in_residence
+               or exists(snap_within_two_ties(anchor, p),
+                         exists(snap_tie(p, r), not snap_within_two_ties(anchor, r))))
+              and candidate.snap_household_unit == anchor.snap_household_unit)
+
+  - name: snap_participating_member     # (b)(7); composition stays as it is
+    kind: derived_relation
+    derived_relation: {arity: 2, slot_entities: [Person, Person],
+                       current_slot: 0, related_slot: 1,
+                       source_relation: snap_household_member}
+    versions:
+      - effective_from: 2026-01-01
+        formula: not candidate.snap_ineligible_member_under_b7
