@@ -20,8 +20,9 @@ household closure:
 
 - It computes the exact household when no residence exception applies and
   the applicant's two-tie set is closed under ties.
-- Otherwise it reads supplied household ids; with a complete roster and
-  correct ids wherever read, it never silently returns a wrong household.
+- Otherwise it reads supplied household ids. With one full-period residence
+  record per person, complete pair facts and correct ids wherever read, it
+  never silently returns a wrong household.
 
 **Consequences.** Explain and fast evaluate the constructs; dense refuses a
 reachable qualified read, atom, term comparison, `exists` or path source by

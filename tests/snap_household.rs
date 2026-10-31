@@ -129,6 +129,9 @@ fn fixture_compiles_strictly_and_dense_refuses_by_name() {
         "{reached}"
     );
 }
+fn in_early_january(name: &str, a: &str, b: &str) -> Value {
+    json!({"name":name,"tuple":[a,b],"interval":{"start":"2026-01-01","end":"2026-01-15"}})
+}
 /// Section 8's first precondition: a person with no roster record has no
 /// candidates, so the household comes back empty with no failure.
 #[test]
@@ -140,6 +143,73 @@ fn a_person_off_the_roster_gets_an_empty_household() {
         .unwrap()
         .retain(|record| record["tuple"][0] != "b");
     check(&data, &ids, &[("a", &["a"]), ("b", &[])], "household_mask");
+}
+/// The first precondition again: a record that covers part of the month
+/// reaches no one, so the household comes back empty with no failure.
+#[test]
+fn a_roster_record_covering_part_of_the_month_gives_an_empty_household() {
+    let ids = ["a", "b"];
+    let mut data = residence(&ids);
+    let relations = data["relations"].as_array_mut().unwrap();
+    relations.retain(|record| record["tuple"][0] != "b");
+    relations.push(in_early_january("member_of_household", "b", "home"));
+    check(&data, &ids, &[("a", &["a"]), ("b", &[])], "household_mask");
+}
+/// The first precondition again: b lives in both residences, and `lives_with`
+/// stops at each applicant's own co-residents. Correct ids cannot add a person
+/// the source never reaches, so a and c come back short of the three-person
+/// household. This pins the gap the note names; it does not endorse it.
+#[test]
+fn a_person_in_two_residences_leaves_each_side_short() {
+    let ids = ["a", "b", "c"];
+    let mut data = residence(&ids);
+    let relations = data["relations"].as_array_mut().unwrap();
+    relations.retain(|record| record["tuple"][0] != "c");
+    relations.push(tuple("member_of_household", "b", "elsewhere"));
+    relations.push(tuple("member_of_household", "c", "elsewhere"));
+    edge(&mut data, "spouse_of", "a", "b");
+    edge(&mut data, "spouse_of", "b", "c");
+    units(&mut data, &ids, 1);
+    check(
+        &data,
+        &ids,
+        &[
+            ("a", &["a", "b"]),
+            ("b", &["a", "b", "c"]),
+            ("c", &["b", "c"]),
+        ],
+        "household_mask",
+    );
+}
+/// Section 8's second precondition: a missing pair fact reads as false, so
+/// matching ids cannot rescue a spouse the dataset leaves out.
+#[test]
+fn a_missing_spouse_record_leaves_the_couple_apart() {
+    let ids = ["a", "b"];
+    let mut data = residence(&ids);
+    units(&mut data, &ids, 1);
+    check(
+        &data,
+        &ids,
+        &[("a", &["a"]), ("b", &["b"])],
+        "household_mask",
+    );
+}
+/// The second precondition again: a pair fact must cover the whole month.
+#[test]
+fn a_spouse_record_covering_part_of_the_month_ties_no_one() {
+    let ids = ["a", "b"];
+    let mut data = residence(&ids);
+    data["relations"]
+        .as_array_mut()
+        .unwrap()
+        .push(in_early_january("spouse_of", "a", "b"));
+    check(
+        &data,
+        &ids,
+        &[("a", &["a"]), ("b", &["b"])],
+        "household_mask",
+    );
 }
 #[test]
 fn a_person_living_alone() {

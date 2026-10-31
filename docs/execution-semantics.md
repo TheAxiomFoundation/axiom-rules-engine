@@ -201,8 +201,8 @@ ties of the applicant. When no co-resident has an exception flag and no tie
 leaves that set, the set is the exact household. Otherwise it reads supplied
 `snap_household_unit` ids and includes co-residents with the applicant's id;
 a missing id fails naming that input. This never silently returns a wrong
-household under section 8's two preconditions: a complete residence roster
-and correct supplied ids wherever read. The guard depends on the applicant,
+household under section 8's three preconditions: one full-period residence
+record per person, complete pair facts and correct supplied ids wherever read. The guard depends on the applicant,
 so in a chain a–b–c–d, b's household needs no ids while a's does. The test
 `applicants_a_and_b_on_a_three_tie_chain` in `tests/snap_household.rs` checks
 both cases; `exception_for_older_roommate` checks the exception branch.

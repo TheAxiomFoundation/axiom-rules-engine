@@ -688,9 +688,19 @@ comes from the encoder. The fixture shows the constructs on the pilot's scope:
 - the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
 It must never return a wrong household silently, whether too small or too
-large. That holds under two preconditions, which the fixture's tests meet:
-- **A complete roster.** Every evaluated person has a `member_of_household`
-  record. A person with none has no candidates and gets an empty household.
+large. That holds under three preconditions, which the generated cases meet:
+- **One residence per person.** Every evaluated person has exactly one
+  `member_of_household` record that covers the evaluated period. A person with
+  none, or with a record that covers only part of the period, has no candidates
+  and gets an empty household. A person recorded in two residences bridges
+  them. `lives_with` stops at each applicant's own co-residents, so an
+  applicant on one side misses people on the other, even with correct ids. The
+  fixture does not check this.
+- **Complete pair facts.** A spouse, parent or parental-control tuple that is
+  missing, or that covers only part of the period, reads as false, so the
+  people it would tie stay apart with no failure. An input fails when missing,
+  but a relation tuple does not. #215's declared
+  completeness would close this gap.
 - **Correct supplied ids,** where ids are read. The engine trusts them. Ids
   that split two tied people give a household that is too small. A check the
   pilot can add: a derived relation of ties between people with different
@@ -826,11 +836,15 @@ closure is one household.
 - `meal_group` and `age`.
 - `snap_household_exception_may_apply`. The person may be described by
   (b)(2) (60 or older and unable to buy and prepare meals because of a
-  disability), (b)(3) or (b)(4) (a boarder or foster placement), (b)(5) or
-  (b)(6) (a roomer or live-in attendant), or (b)(7)(vi) (a resident of an
-  institution, or one of its listed exceptions).
+  disability), (b)(3) or (b)(4) (a board arrangement, including a person
+  who pays less than reasonable compensation and whom the regulation does not
+  call a boarder, or a foster placement), (b)(5) or (b)(6) (a roomer or live-in attendant), or
+  (b)(7)(vi) (a resident of an institution, or one of its listed exceptions).
 - `snap_household_unit`. The caller's household id, read only in the cases
   above.
+- `under_parental_control_of` carries the (b)(1)(iii) determination itself:
+  the caller supplies a tuple only when the dependence test holds and State
+  law does not treat the child as an adult.
 - (b)(1)(iii) excludes a foster child. `snap_tie` does not test for one,
   because a foster placement is a (b)(4) case. It sets
   `snap_household_exception_may_apply`, so that household comes from the
@@ -847,11 +861,11 @@ closure is one household.
   once the supplied case applies.
 - `lives_with` comes from the roster, so every evaluated person needs a
   `member_of_household` record. A person living alone, (a)(1), is a residence
-  of one. A person with no record has no candidates, so the fixture's tests
-  supply every person's record.
+  of one. The generated cases supply one full-year record per person.
 - The guard's two `exists` depend only on the anchor, but are evaluated again
-  for each candidate (section 5, cost). #231 removes the guard and the
-  supplied ids.
+  for each candidate (section 5, cost). #231 removes the guard and the ids
+  that long chains read. The exception cases still read supplied ids until
+  an encoding decides those paragraphs.
 
 **Hand-worked cases.** The fixture's tests check memberships against these
 households, each worked out by hand from the regulation's text:
@@ -866,7 +880,7 @@ households, each worked out by hand from the regulation's text:
 | A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
 | Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
 | Two separate groups in one residence, each a chain of three ties, with the applicants at the ends of their chains | Each applicant gets exactly their own group from the supplied ids |
-| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (second precondition above). |
+| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (third precondition above). |
 | The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
@@ -906,8 +920,9 @@ it needs no additional format bump.
 3. The encoder encodes the pilot (TheAxiomFoundation/rulespec-us#1428) in
    section 8's guarded form, which supplied ids complete where the chain or
    an exception leaves the computed case.
-4. Recursion (#253, then #231) later makes the household exact and retires
-   the guard and the supplied ids.
+4. Recursion (#253, then #231) later computes long chains exactly and
+   retires the guard. The exceptions keep their supplied ids until an encoding
+   decides those paragraphs, because a (b)(2) separation can split a meal tie.
 
 **Dependencies.**
 
