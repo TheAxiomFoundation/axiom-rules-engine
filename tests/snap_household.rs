@@ -155,6 +155,19 @@ fn a_roster_record_covering_part_of_the_month_gives_an_empty_household() {
     relations.push(in_early_january("member_of_household", "b", "home"));
     check(&data, &ids, &[("a", &["a"]), ("b", &[])], "household_mask");
 }
+/// The first precondition covers people no query names: b lives with a but
+/// has no roster record, so a's household misses their spouse.
+#[test]
+fn a_co_resident_off_the_roster_is_missing_from_the_household() {
+    let ids = ["a", "b"];
+    let mut data = residence(&ids);
+    edge(&mut data, "spouse_of", "a", "b");
+    data["relations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|record| !(record["name"] == "member_of_household" && record["tuple"][0] == "b"));
+    check(&data, &ids, &[("a", &["a"])], "household_mask");
+}
 /// The first precondition again: b lives in both residences, and `lives_with`
 /// stops at each applicant's own co-residents. Correct ids cannot add a person
 /// the source never reaches, so a and c come back short of the three-person

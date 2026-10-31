@@ -688,14 +688,18 @@ comes from the encoder. The fixture shows the constructs on the pilot's scope:
 - the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
 It must never return a wrong household silently, whether too small or too
-large. That holds under three preconditions, which the generated cases meet:
-- **One residence per person.** Every evaluated person has exactly one
-  `member_of_household` record that covers the evaluated period. A person with
-  none, or with a record that covers only part of the period, has no candidates
-  and gets an empty household. A person recorded in two residences bridges
-  them. `lives_with` stops at each applicant's own co-residents, so an
-  applicant on one side misses people on the other, even with correct ids. The
-  fixture does not check this.
+large. The engine trusts what the caller supplies, so a wrong age or a false
+exception flag gives a wrong household. With every supplied fact true, the
+promise holds under three preconditions, which the generated cases meet:
+- **One residence for each co-resident.** Everyone who lives in the residence,
+  evaluated or not, has exactly one `member_of_household` record, and that
+  record covers the whole evaluated period. A person with none, or with records
+  that each cover only part of the period, reaches no one and no one reaches
+  them. Their own household comes back empty, and a co-resident's comes back
+  short. So twelve monthly records do not serve a year query. A person recorded
+  in two residences bridges them. `lives_with` stops at each applicant's own
+  co-residents, so an applicant on one side misses people on the other, even
+  with correct ids. The fixture does not check any of this.
 - **Complete pair facts.** A spouse, parent or parental-control tuple that is
   missing, or that covers only part of the period, reads as false, so the
   people it would tie stay apart with no failure. An input fails when missing,
@@ -833,13 +837,17 @@ closure is one household.
 ```
 
 **Inputs.** All of these have no default.
-- `meal_group` and `age`.
+- `meal_group`, a group-valued fact, and `age`. Purchases that form no single
+  group (a buys with b and b with c, but a does not buy with c) have no true
+  `meal_group`. That is a (c) case: set the exception input and supply ids.
 - `snap_household_exception_may_apply`. The person may be described by
   (b)(2) (60 or older and unable to buy and prepare meals because of a
   disability), (b)(3) or (b)(4) (a board arrangement, including a person
   who pays less than reasonable compensation and whom the regulation does not
-  call a boarder, or a foster placement), (b)(5) or (b)(6) (a roomer or live-in attendant), or
-  (b)(7)(vi) (a resident of an institution, or one of its listed exceptions).
+  call a boarder, or a foster placement), (b)(5) or (b)(6) (a roomer or live-in attendant),
+  (b)(7)(vi) (a resident of an institution, or one of its listed exceptions),
+  or (c) (a situation (a) and (b) do not clearly address, which State policy
+  decides).
 - `snap_household_unit`. The caller's household id, read only in the cases
   above.
 - `under_parental_control_of` carries the (b)(1)(iii) determination itself:
