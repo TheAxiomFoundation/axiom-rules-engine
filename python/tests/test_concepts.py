@@ -174,7 +174,7 @@ def test_a_path_source_is_a_derived_relations_source(tmp_path: Path) -> None:
     path = """      source_path:
         - {relation: member_of_household, from_slot: 0, to_slot: 1}
         - {relation: member_of_household, from_slot: 1, to_slot: 0}"""
-    _write_rule_file(root, "us/statutes/26/62.yaml", PATH_RELATION.replace("SOURCE", path))
+    write_rulespec(root, "us/statutes/26/62.yaml", PATH_RELATION.replace("SOURCE", path))
 
     assert "us:statutes/26/62#lives_with" in {
         concept.concept_id for concept in discover_concepts([root])
@@ -183,7 +183,7 @@ def test_a_path_source_is_a_derived_relations_source(tmp_path: Path) -> None:
 
 def test_a_derived_relation_needs_a_source(tmp_path: Path) -> None:
     root = tmp_path / "rulespec-us"
-    _write_rule_file(
+    write_rulespec(
         root,
         "us/statutes/26/62.yaml",
         PATH_RELATION.replace("SOURCE\n", ""),

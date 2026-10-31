@@ -14,7 +14,7 @@ use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::interface::{EntityInstances, RelationProvenance, RelationReads};
 use axiom_rules_engine::relation_typing::EffectiveSlotEntities;
 use axiom_rules_engine::rulespec::{CanonicalRuleSpecRoots, RULESPEC_ATOMIC_ROOTS};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn is_module(path: &str) -> bool {
     let parts = path.split('/').collect::<Vec<_>>();
@@ -116,6 +116,9 @@ struct ExpressionReads {
     rules: BTreeSet<String>,
     relations: BTreeSet<String>,
     lookup_slots: BTreeMap<String, BTreeSet<usize>>,
+    /// The slots each atom and `exists` binds. Neither names a current slot.
+    bound_slots: BTreeMap<String, BTreeSet<usize>>,
+    uses_relation_roles: bool,
 }
 
 impl ExpressionReads {
@@ -124,7 +127,14 @@ impl ExpressionReads {
     fn collect(&mut self, value: &Value) {
         match value {
             Value::Object(object) => {
-                match object.get("kind").and_then(Value::as_str) {
+                let kind = object.get("kind").and_then(Value::as_str);
+                self.uses_relation_roles |= matches!(
+                    kind,
+                    Some(
+                        "role_input" | "role_derived" | "relation_atom" | "exists" | "same_entity"
+                    )
+                );
+                match kind {
                     Some("input" | "input_or_else" | "role_input") => {
                         self.inputs
                             .insert(object["name"].as_str().unwrap().to_string());
@@ -147,6 +157,13 @@ impl ExpressionReads {
                             .entry(relation.to_string())
                             .or_default()
                             .insert(slot as usize);
+                    }
+                    if let Some(terms) = object.get("terms").and_then(Value::as_array) {
+                        let variable = object.get("variable_slot").and_then(Value::as_u64);
+                        self.bound_slots
+                            .entry(relation.to_string())
+                            .or_default()
+                            .extend((0..terms.len()).filter(|slot| variable != Some(*slot as u64)));
                     }
                 }
                 for value in object.values() {
@@ -198,8 +215,22 @@ fn check_agreement(artifact: &CompiledProgramArtifact) -> Result<(), String> {
                     .entry(step.relation.clone())
                     .or_default()
                     .insert(step.from_slot);
+                all_reads.uses_relation_roles = true;
             }
         }
+    }
+    // A derived atom resolves members at its relation's current slot. A tuple
+    // atom keys on every slot it binds.
+    for (relation, slots) in std::mem::take(&mut all_reads.bound_slots) {
+        let slots = match &program.relations[&relation].derivation {
+            Some(derivation) => BTreeSet::from([derivation.current_slot]),
+            None => slots,
+        };
+        all_reads
+            .lookup_slots
+            .entry(relation)
+            .or_default()
+            .extend(slots);
     }
     equal(
         interface
@@ -295,7 +326,7 @@ fn check_agreement(artifact: &CompiledProgramArtifact) -> Result<(), String> {
         )?;
         equal(
             relation.accepts_supplied_tuples,
-            true,
+            schema.derivation.is_none() || !all_reads.uses_relation_roles,
             "supplied relation tuples",
         )?;
         for kind in relation.slot_entities.iter().flatten() {
@@ -639,6 +670,48 @@ fn corpus_artifacts_preserve_executable_content_and_interface_contract() {
         "{} corpus acceptance differences; see tally above",
         differences.len()
     );
+}
+
+#[test]
+fn the_agreement_oracle_reads_paths_atoms_and_exists() {
+    // No corpus module uses these yet. A correct interface must still pass
+    // when the first one does.
+    let slots = json!(["Person", "Person"]);
+    let positive = json!({
+        "kind": "comparison", "op": "gt",
+        "left": {"kind": "role_derived", "term": "candidate", "name": "allowed"},
+        "right": {"kind": "literal", "value": {"kind": "integer", "value": 0}},
+    });
+    let spec = serde_json::from_value(json!({
+        "relations": [
+            {"name": "edge", "arity": 2, "slot_entities": slots},
+            {"name": "selected", "arity": 2, "slot_entities": slots, "derivation": {
+                "source_path": [{"relation": "edge", "from_slot": 0, "to_slot": 1}],
+                "current_slot": 0, "related_slot": 1, "slot_entities": slots,
+                "predicate": positive,
+            }},
+            {"name": "filtered", "arity": 2, "slot_entities": slots, "derivation": {
+                "source_relation": "edge",
+                "current_slot": 0, "related_slot": 1, "slot_entities": slots,
+                "predicate": {
+                    "kind": "exists", "relation": "edge", "terms": ["anchor", {"var": 0}],
+                    "variable_slot": 1,
+                    "body": {"kind": "relation_atom", "relation": "selected",
+                        "terms": [{"var": 0}, "candidate"]},
+                },
+            }},
+        ],
+        "derived": [
+            {"name": "allowed", "entity": "Person", "dtype": "integer", "semantics": "scalar",
+                "expr": {"kind": "input", "name": "allow"}},
+            {"name": "total", "entity": "Person", "dtype": "integer", "semantics": "scalar",
+                "expr": {"kind": "count_related", "relation": "filtered",
+                    "current_slot": 0, "related_slot": 1}},
+        ],
+    }))
+    .expect("a valid program");
+    let artifact = CompiledProgramArtifact::compile(spec).expect("the program compiles");
+    check_agreement(&artifact).expect("the oracle agrees with the interface");
 }
 
 #[test]

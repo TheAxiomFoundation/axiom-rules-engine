@@ -293,12 +293,24 @@ fn oracle(case: &Case, data: &Value, predicate: bool) -> Result<BTreeSet<usize>,
         Ok(current)
     }
 }
+/// Runs at depth 1, which defers every rule read, and at `usize::MAX`, which
+/// defers none. A failure reaches a path by a different route at each depth,
+/// so every caller also checks invariant 7: outputs, traces and errors match.
 fn run(mode: &str, p: &Value, data: &Value) -> Result<Value, String> {
     let request: ExecutionRequest=serde_json::from_value(json!({"mode":mode,"program":p,"dataset":data,
         "queries":[{"entity_id":"p0","period":{"period_kind":"month","start":"2026-01-01","end":"2026-01-31"},"outputs":["count","mask"]}]})).unwrap();
-    axiom_rules_engine::depth::with_suspend_depth(1, || execute_request(request))
-        .map(|response| serde_json::to_value(response).unwrap())
-        .map_err(|error| error.to_string())
+    let at = |depth| {
+        axiom_rules_engine::depth::with_suspend_depth(depth, || execute_request(request.clone()))
+            .map(|response| serde_json::to_value(response).unwrap())
+            .map_err(|error| error.to_string())
+    };
+    let deferred = at(1);
+    assert_eq!(
+        deferred,
+        at(usize::MAX),
+        "{mode}: deferral changed the result"
+    );
+    deferred
 }
 fn number(value: &Value) -> i64 {
     value["value"]
@@ -664,6 +676,40 @@ fn dense_refuses_paths_by_name_and_issue() {
         error.to_string().contains("path source") && error.to_string().contains("#218"),
         "{error}"
     );
+}
+
+#[test]
+fn dense_names_a_path_behind_a_membership_test_and_a_chain() {
+    let edge = json!({"name":"edge","arity":2,"slot_entities":["Person","Person"]});
+    let step = json!({"relation":"edge","from_slot":0,"to_slot":1});
+    let path = json!({"name":"path","arity":2,"slot_entities":["Person","Person"],"derivation":{
+        "source_path":[step],"current_slot":0,"related_slot":1,
+        "slot_entities":["Person","Person"],"predicate":yes()}});
+    let member = |relation: &str| json!({"kind":"relation_member","relation":relation,"current_slot":0,"related_slot":1});
+    let filter = |relation: &str| derived("filter", "edge", 0, member(relation));
+    let total = json!({"name":"total","entity":"Person","dtype":"integer","semantics":"scalar",
+        "expr":{"kind":"count_related","relation":"filter","current_slot":0,"related_slot":1}});
+    for relations in [
+        vec![edge.clone(), path.clone(), filter("path")],
+        vec![
+            edge.clone(),
+            path.clone(),
+            derived("chain", "path", 0, yes()),
+            filter("chain"),
+        ],
+    ] {
+        let spec = serde_json::from_value(json!({"relations":relations,"derived":[total.clone()]}))
+            .unwrap();
+        let artifact = CompiledProgramArtifact::compile(spec).unwrap();
+        let error = DenseCompiledProgram::from_artifact(&artifact, Some("Person"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("path source of derived relation `path`") && error.contains("#218"),
+            "{error}"
+        );
+    }
 }
 
 #[test]

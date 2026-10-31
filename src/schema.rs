@@ -1136,8 +1136,8 @@ fn derived_relation_ref_schema() -> Value {
         "additionalProperties": true,
         "properties": {
             "arity": { "type": "integer", "minimum": 0 },
-            "source_relation": { "type": "string" },
-            "source": { "type": "string" },
+            "source_relation": { "type": ["string", "null"] },
+            "source": { "type": ["string", "null"] },
             "source_path": nullable_array(json!({
                 "type": "object",
                 "additionalProperties": false,

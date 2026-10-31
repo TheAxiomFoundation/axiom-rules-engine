@@ -698,6 +698,21 @@ fn path_source_unsupported(relation: &str) -> DenseCompileError {
     ))
 }
 
+/// The relation at or below `relation`, down its single sources, that takes
+/// a path source.
+fn path_source_below<'a>(program: &'a Program, relation: &'a str) -> Option<&'a str> {
+    let mut on_chain = HashSet::new();
+    let mut name = relation;
+    while on_chain.insert(name) {
+        let derivation = program.relations.get(name)?.derivation.as_ref()?;
+        if derivation.source_path.is_some() {
+            return Some(name);
+        }
+        name = derivation.source_relation.as_deref()?;
+    }
+    None
+}
+
 fn term_comparison_unsupported() -> DenseCompileError {
     DenseCompileError::Unsupported(
         "a term comparison in a derived relation's predicate; term comparisons run in explain and fast modes, and dense support is #218".to_string(),
@@ -2423,9 +2438,12 @@ impl<'a> DenseCompiler<'a> {
                 {
                     Ok(CompiledRelatedJudgmentExpr::Literal(true))
                 }
-                Some(scope) => Err(DenseCompileError::Unsupported(format!(
-                    "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
-                ))),
+                Some(scope) => Err(match path_source_below(self.program, relation) {
+                    Some(path) => path_source_unsupported(path),
+                    None => DenseCompileError::Unsupported(format!(
+                        "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
+                    )),
+                }),
             },
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items

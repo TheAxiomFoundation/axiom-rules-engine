@@ -654,7 +654,8 @@ and differential tests for them.
    #253 defines polarity through derived relations for recursion.
 7. **Deferral transparency.** Results and traces are identical at every
    suspend depth (`depth::with_suspend_depth`; compare
-   `tests/deferral_transparency.rs`). The resumable `exists` site is the
+   `tests/deferral_transparency.rs` and, for paths,
+   `tests/support/relation_paths.rs`). The resumable `exists` site is the
    riskiest code in the series.
 8. **Determinism.** Two runs produce identical output and trace bytes.
 9. **Modes agree.** Explain and fast agree on every test program, and dense

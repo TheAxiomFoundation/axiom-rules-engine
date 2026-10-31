@@ -556,7 +556,10 @@
                 ]
               },
               "source": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "source_path": {
                 "items": {
@@ -587,7 +590,10 @@
                 ]
               },
               "source_relation": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "type": [

@@ -130,6 +130,40 @@ fn published_schemas_are_valid_draft07() {
 }
 
 #[test]
+fn module_schema_and_loader_agree_on_a_null_source_beside_a_path() {
+    let validator = validator("rulespec-module.v1.schema.json");
+    for field in ["source_relation", "source"] {
+        let module = serde_json::json!({
+            "format": "rulespec/v1",
+            "rules": [
+                {"name": "household", "kind": "data_relation",
+                    "data_relation": {"arity": 2, "arguments": ["Person", "Household"]}},
+                {"name": "resident_count", "kind": "derived", "entity": "Household",
+                    "dtype": "Integer",
+                    "versions": [{"effective_from": "2026-01-01", "formula": "len(household)"}]},
+                {"name": "lives_with", "kind": "derived_relation",
+                    "derived_relation": {
+                        "arity": 2, "slot_entities": ["Person", "Person"],
+                        "current_slot": 0, "related_slot": 1, field: null,
+                        "source_path": [
+                            {"relation": "household", "from_slot": 0, "to_slot": 1},
+                            {"relation": "household", "from_slot": 1, "to_slot": 0},
+                        ],
+                    },
+                    "versions": [{"effective_from": "2026-01-01", "formula": "true"}]},
+            ],
+        });
+        assert_eq!(
+            schema_errors(&validator, &module),
+            Vec::<String>::new(),
+            "{field}"
+        );
+        CompiledProgramArtifact::from_rulespec_str(&module.to_string())
+            .unwrap_or_else(|error| panic!("{field}: {error}"));
+    }
+}
+
+#[test]
 fn artifact_schema_accepts_a_real_compiled_artifact() {
     // A real, engine-valid RuleSpec module lives in the fixtures. Compile it
     // the way the CLI does and validate the serialized artifact against the
