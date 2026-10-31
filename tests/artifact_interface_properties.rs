@@ -284,7 +284,7 @@ fn generated_interface_agrees_with_construction_records() {
                         },
                     ) => {
                         prop_assert_eq!(rule, &relation.name);
-                        prop_assert_eq!(source_relation, &derivation.source_relation);
+                        prop_assert_eq!(Some(source_relation), derivation.source_relation.as_ref());
                         let (inputs, rules, relations) = match relation.name.as_str() {
                             "selected_members" => (
                                 vec!["predicate_age"],

@@ -411,7 +411,8 @@ nesting limits and rule deferral preserve results and traces
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
 a `count` or `sum` over related entities, an `exists` domain, and the resolution
-of a relation's members, which tests a derived relation's predicate on each candidate. The
+of a relation's members, which generates a path's candidates and tests a derived
+relation's predicate on each candidate. The
 retry of the same rule evaluation resumes an interrupted loop at the member
 that deferred, and reuses a loop that had finished, so a household whose
 members each defer is not walked again for every member. A relation's own

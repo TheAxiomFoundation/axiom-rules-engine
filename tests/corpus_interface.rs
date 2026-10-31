@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
-use axiom_rules_engine::interface::{EntityInstances, RelationProvenance};
+use axiom_rules_engine::interface::{EntityInstances, RelationProvenance, RelationReads};
 use axiom_rules_engine::relation_typing::EffectiveSlotEntities;
 use axiom_rules_engine::rulespec::{CanonicalRuleSpecRoots, RULESPEC_ATOMIC_ROOTS};
 use serde_json::Value;
@@ -185,11 +185,20 @@ fn check_agreement(artifact: &CompiledProgramArtifact) -> Result<(), String> {
             reads.collect(&predicate);
             predicates.insert(relation.name.as_str(), reads);
             all_reads.collect(&predicate);
-            all_reads
-                .lookup_slots
-                .entry(derivation.source_relation.clone())
-                .or_default()
-                .insert(derivation.current_slot);
+            if let Some(source) = &derivation.source_relation {
+                all_reads
+                    .lookup_slots
+                    .entry(source.clone())
+                    .or_default()
+                    .insert(derivation.current_slot);
+            }
+            for step in derivation.source_path.iter().flatten() {
+                all_reads
+                    .lookup_slots
+                    .entry(step.relation.clone())
+                    .or_default()
+                    .insert(step.from_slot);
+            }
         }
     }
     equal(
@@ -306,6 +315,37 @@ fn check_agreement(artifact: &CompiledProgramArtifact) -> Result<(), String> {
             lookups.into_iter().collect(),
             "relation lookup slots",
         )?;
+        let derived_reads = |reads: &RelationReads, steps: BTreeSet<String>| {
+            let expected = &predicates[relation.name.as_str()];
+            equal(
+                reads.inputs.clone(),
+                expected.inputs.iter().cloned().collect(),
+                "predicate inputs",
+            )?;
+            equal(
+                reads.rules.clone(),
+                expected
+                    .rules
+                    .iter()
+                    .map(|rule| program.public_derived_key(rule))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                "predicate rules",
+            )?;
+            equal(
+                reads.relations.clone(),
+                expected
+                    .relations
+                    .iter()
+                    .cloned()
+                    .chain(steps)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                "predicate relations",
+            )
+        };
         match (&relation.provenance, &schema.derivation) {
             (RelationProvenance::Supplied, None) => {}
             (
@@ -318,32 +358,34 @@ fn check_agreement(artifact: &CompiledProgramArtifact) -> Result<(), String> {
             ) => {
                 equal(rule, &relation.name, "derived relation rule")?;
                 equal(
-                    source_relation,
-                    &derivation.source_relation,
+                    Some(source_relation),
+                    derivation.source_relation.as_ref(),
                     "derived relation source",
                 )?;
-                let expected = &predicates[relation.name.as_str()];
+                derived_reads(reads, BTreeSet::new())?;
+            }
+            (
+                RelationProvenance::SourcePath {
+                    rule,
+                    source_path,
+                    reads,
+                },
+                Some(derivation),
+            ) => {
+                equal(rule, &relation.name, "path relation rule")?;
+                let steps = derivation.source_path.iter().flatten();
                 equal(
-                    reads.inputs.clone(),
-                    expected.inputs.iter().cloned().collect(),
-                    "predicate inputs",
-                )?;
-                equal(
-                    reads.rules.clone(),
-                    expected
-                        .rules
+                    source_path
                         .iter()
-                        .map(|rule| program.public_derived_key(rule))
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
+                        .map(|step| (&step.relation, step.from_slot, step.to_slot))
+                        .collect::<Vec<_>>(),
+                    steps
+                        .clone()
+                        .map(|step| (&step.relation, step.from_slot, step.to_slot))
                         .collect(),
-                    "predicate rules",
+                    "path relation steps",
                 )?;
-                equal(
-                    reads.relations.clone(),
-                    expected.relations.iter().cloned().collect(),
-                    "predicate relations",
-                )?;
+                derived_reads(reads, steps.map(|step| step.relation.clone()).collect())?;
             }
             _ => return Err(format!("relation provenance disagrees: {}", relation.name)),
         }
@@ -411,6 +453,7 @@ impl Tally {
                 match relation.provenance {
                     RelationProvenance::Supplied => "supplied",
                     RelationProvenance::Derived { .. } => "derived",
+                    RelationProvenance::SourcePath { .. } => "source_path",
                 },
             );
         }

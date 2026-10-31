@@ -496,7 +496,10 @@ over determined ids, which #215 section 7 shows sound.
   members. That copies about n³ ids per anchor, plus one members resolution per
   co-resident, inside the #240/#245 bounds. The engine evaluates an `exists`
   whose result depends only on the anchor, such as section 8's guard, again for
-  every candidate, because its resume key includes the candidate (3.6).
+  every candidate, because its resume key includes the candidate (3.6). A path
+  source copies and sorts each current id's related ids, then sorts what the
+  step reached. A step that reaches r ids, repeats included, takes about
+  r log r time, and a derived step adds one members resolution per current id.
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails
   every membership that reads it. Encodings should put pair atoms before the
   value reads they guard, because `and` stops at the first `not_holds`.
@@ -561,6 +564,8 @@ handle atoms, domains and paths:
   artifacts.
 - Dense's derivation walk (`derivation_of` and its callers).
 - `unit_derivation/interface.rs`, while that module exists (#232 deletes it).
+- `python/axiom_rules_engine`: the rule-shape check in `concepts.py` and the
+  provenance union in `models.py`.
 
 **Input catalog.** `collect_input_slots_from_judgment_expr` collects inputs
 read through a term (3.2).

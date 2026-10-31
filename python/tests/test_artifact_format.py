@@ -63,6 +63,39 @@ rules:
           format_test_income * format_test_rate
 """
 
+PATH_MODULE_SOURCE = """\
+format: rulespec/v1
+module:
+  summary: Path source surface test fixture.
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: lives_with
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+      source_path:
+        - {relation: member_of_household, from_slot: 0, to_slot: 1}
+        - {relation: member_of_household, from_slot: 1, to_slot: 0}
+    versions:
+      - effective_from: '2025-01-01'
+        formula: 'true'
+  - name: co_residents
+    kind: derived
+    entity: Person
+    dtype: Integer
+    period: Year
+    versions:
+      - effective_from: '2025-01-01'
+        formula: len(lives_with)
+"""
+
 TARGET = "us:policies/tests/format-three"
 
 
@@ -150,6 +183,51 @@ def test_format_3_interface_objects_have_exactly_their_keys() -> None:
     for extra in [{"unexpected": True}, {"source_closure": None}]:
         with pytest.raises(ValidationError):
             CompiledProgram.model_validate({**_format_3(), **extra})
+
+
+def test_a_path_provenance_has_exactly_its_keys() -> None:
+    step = {"relation": "member_of", "from_slot": 0, "to_slot": 1}
+    provenance = {
+        "kind": "source_path",
+        "rule": "lives_with",
+        "source_path": [step],
+        "reads": {"inputs": [], "rules": [], "relations": ["member_of"]},
+    }
+    relation = {
+        "name": "lives_with",
+        "arity": 2,
+        "slot_entities": ["Person", "Person"],
+        "lookup_slots": [],
+        "accepts_supplied_tuples": False,
+        "provenance": provenance,
+    }
+    CompiledProgram.model_validate(_format_3(relations=[relation]))
+    for wrong in [
+        {**provenance, "source_relation": "member_of"},
+        {**provenance, "source_path": [{**step, "extra": 1}]},
+        {key: value for key, value in provenance.items() if key != "reads"},
+    ]:
+        with pytest.raises(ValidationError):
+            CompiledProgram.model_validate(
+                _format_3(relations=[{**relation, "provenance": wrong}])
+            )
+
+
+@needs_binary
+def test_a_path_source_compiles_to_a_format_3_compiled_program(tmp_path: Path) -> None:
+    root = (tmp_path / "rulespec-us").resolve()
+    module = root / "us/policies/tests/path-source.yaml"
+    module.parent.mkdir(parents=True)
+    module.write_text(PATH_MODULE_SOURCE, encoding="utf-8")
+
+    compiled = AxiomRulesEngine(binary_path=BINARY).compile(
+        program_path=module, rulespec_roots=(root,), output_path=tmp_path / "path.json"
+    )
+
+    assert isinstance(compiled, CompiledProgram)
+    provenances = [relation.provenance for relation in compiled.program.interface.relations]
+    path = next(provenance for provenance in provenances if provenance.kind == "source_path")
+    assert [(step.from_slot, step.to_slot) for step in path.source_path] == [(0, 1), (1, 0)]
 
 
 def test_a_dump_omits_an_absent_source_closure() -> None:

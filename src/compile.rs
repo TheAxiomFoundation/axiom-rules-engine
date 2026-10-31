@@ -1940,6 +1940,7 @@ fn reject_relation_routed_cycles(
         }
         let mut relations = HashSet::new();
         has_atoms |= collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
+        // A path step reads a relation's members, as an atom does.
         has_atoms |= derivation.source_path.is_some();
         relations.extend(derivation.source_relations().map(str::to_string));
         for relation in aggregated_relations.difference(&relations) {

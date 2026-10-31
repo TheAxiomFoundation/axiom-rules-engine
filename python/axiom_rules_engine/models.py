@@ -196,8 +196,22 @@ class DerivedRelation(_Exact):
     reads: RelationReads
 
 
+class RelationPathStep(_Exact):
+    relation: str
+    from_slot: int
+    to_slot: int
+
+
+class SourcePathRelation(_Exact):
+    kind: Literal["source_path"]
+    rule: str
+    source_path: list[RelationPathStep]
+    reads: RelationReads
+
+
 RelationProvenance = Annotated[
-    SuppliedRelation | DerivedRelation, Field(discriminator="kind")
+    SuppliedRelation | DerivedRelation | SourcePathRelation,
+    Field(discriminator="kind"),
 ]
 
 

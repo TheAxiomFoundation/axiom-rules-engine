@@ -143,6 +143,56 @@ rules:
     }
 
 
+PATH_RELATION = """
+format: rulespec/v1
+module:
+  summary: Internal Revenue Code section 62 defines adjusted gross income.
+  source_verification:
+    corpus_citation_path: us/statutes/26/62
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: lives_with
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      slot_entities: [Person, Person]
+      current_slot: 0
+      related_slot: 1
+SOURCE
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 'true'
+"""
+
+
+def test_a_path_source_is_a_derived_relations_source(tmp_path: Path) -> None:
+    root = tmp_path / "rulespec-us"
+    path = """      source_path:
+        - {relation: member_of_household, from_slot: 0, to_slot: 1}
+        - {relation: member_of_household, from_slot: 1, to_slot: 0}"""
+    _write_rule_file(root, "us/statutes/26/62.yaml", PATH_RELATION.replace("SOURCE", path))
+
+    assert "us:statutes/26/62#lives_with" in {
+        concept.concept_id for concept in discover_concepts([root])
+    }
+
+
+def test_a_derived_relation_needs_a_source(tmp_path: Path) -> None:
+    root = tmp_path / "rulespec-us"
+    _write_rule_file(
+        root,
+        "us/statutes/26/62.yaml",
+        PATH_RELATION.replace("SOURCE\n", ""),
+    )
+
+    with pytest.raises(ValueError, match="source_relation or source_path"):
+        discover_concepts([root])
+
+
 def write_formula_module(
     root: Path,
     formulas: dict[str, str],

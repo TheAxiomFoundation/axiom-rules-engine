@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 const PERSONS: [&str; 3] = ["p0", "p1", "p2"];
 const UNITS: [&str; 2] = ["u0", "u1"];
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Status {
     In,
     Out,
@@ -134,6 +134,44 @@ fn placed_shapes() -> Vec<Shape> {
     ]
 }
 
+/// Each shape reads `participating` at the requested unit, through slot 0 of
+/// its own fold or membership test. A dead branch reports 1.
+fn unit_shapes() -> Vec<Shape> {
+    let count = |relation: &str| {
+        json!({"kind": "count_related", "relation": relation, "current_slot": 0,
+            "related_slot": 1})
+    };
+    let in_dead_branch = |condition: Value| {
+        json!({"kind": "if", "condition": tautology(), "then_expr": literal(1),
+            "else_expr": {"kind": "if", "condition": condition, "then_expr": literal(1),
+                "else_expr": literal(0)}})
+    };
+    let only_eligible = json!({"kind": "only_related", "relation": "participating",
+        "current_slot": 0, "related_slot": 1, "value": {"kind": "input", "name": "eligible"}});
+    let member = json!({"kind": "relation_member", "relation": "participating",
+        "current_slot": 0, "related_slot": 1});
+    let path = json!({"name": "selected", "arity": 2, "slot_entities": ["Unit", "Person"],
+        "derivation": {"source_path": [{"relation": "participating", "from_slot": 0, "to_slot": 1}],
+            "current_slot": 0, "related_slot": 1, "slot_entities": ["Unit", "Person"],
+            "predicate": tautology()}});
+    vec![
+        ("direct count", None, count("participating")),
+        ("count of a derived relation", None, count("members")),
+        ("path source first step", Some(path), count("selected")),
+        (
+            "only related in a dead branch",
+            None,
+            in_dead_branch(json!({"kind": "comparison", "op": "eq", "left": only_eligible,
+                "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}})),
+        ),
+        (
+            "membership test in a dead branch",
+            None,
+            in_dead_branch(member),
+        ),
+    ]
+}
+
 /// Each shape reads `participating` away from the requested person's own
 /// fold, so the walk cannot place the read at that person.
 fn unplaced_shapes() -> Vec<Shape> {
@@ -230,6 +268,10 @@ fn unplaced_shapes() -> Vec<Shape> {
 }
 
 fn program(relation: Option<Value>, total: Value) -> Program {
+    program_with(relation, total, literal(0))
+}
+
+fn program_with(relation: Option<Value>, total: Value, unit_total: Value) -> Program {
     let mut relations = vec![
         json!({"name": "constituent", "arity": 2, "slot_entities": ["Unit", "Person"]}),
         json!({"name": "participating", "arity": 2, "slot_entities": ["Unit", "Person"]}),
@@ -249,6 +291,8 @@ fn program(relation: Option<Value>, total: Value) -> Program {
                 "expr": positive(json!({"kind": "derived", "name": "size"}))},
             {"name": "total", "entity": "Person", "dtype": "integer", "unit": null,
                 "semantics": "scalar", "expr": total},
+            {"name": "unit_total", "entity": "Unit", "dtype": "integer", "unit": null,
+                "semantics": "scalar", "expr": unit_total},
         ],
     }))
     .unwrap();
@@ -490,46 +534,85 @@ fn a_placed_read_holds_on_the_requested_persons_unknown_alone() {
     );
 }
 
-/// `p0` participates in `u0` and another person's status is unknown, so each
-/// placed shape reports the value `p0`'s own membership gives.
+/// `p0` participates and another person's status is unknown, so each placed
+/// shape reports the value `p0`'s own membership gives. Each person holds one
+/// unit, and `p0` holds two choices against 20 of the others' 36 pairs.
 #[test]
 fn a_placed_read_reports_its_value_past_another_persons_unknown() {
-    let world = [(0, Status::In), (1, Status::Unknown), (1, Status::Out)];
+    let past_another_unknown = worlds()
+        .into_iter()
+        .filter(|world| world[0].1 == Status::In)
+        .filter(|world| world[1..].iter().any(|(_, s)| *s == Status::Unknown))
+        .collect::<Vec<_>>();
+    assert_eq!(past_another_unknown.len(), 40);
     for (name, relation, total) in placed_shapes() {
-        assert_eq!(
-            reduce(&program(relation, total), &world, "p0"),
-            Ok(CompleteReduction::Determined(ScalarValue::Integer(1))),
-            "{name}"
-        );
+        let program = program(relation, total);
+        for world in &past_another_unknown {
+            assert_eq!(
+                reduce(&program, world, "p0"),
+                Ok(CompleteReduction::Determined(ScalarValue::Integer(1))),
+                "{name} in {world:?}"
+            );
+        }
     }
 }
 
-/// `size` reads slot 0 at a unit, so only that unit's unknowns hold it.
+/// Each shape reads slot 0 at a unit, so only that unit's unknowns hold it.
+/// Otherwise a count reports the unit's participants.
 #[test]
 fn a_placed_read_at_a_unit_holds_on_that_units_unknowns_alone() {
-    let program = program(None, literal(0));
-    for world in worlds() {
-        for (index, unit) in UNITS.iter().enumerate() {
-            let reduction = evaluate(&program, &world, "size", unit);
-            assert_eq!(
-                matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })),
-                world.contains(&(index, Status::Unknown)),
-                "{world:?} at {unit}: {reduction:?}"
-            );
+    for (name, relation, unit_total) in unit_shapes() {
+        let program = program_with(relation, literal(0), unit_total);
+        for world in worlds() {
+            for (index, unit) in UNITS.iter().enumerate() {
+                let reduction = evaluate(&program, &world, "unit_total", unit);
+                if world.contains(&(index, Status::Unknown)) {
+                    assert!(
+                        matches!(reduction, Ok(CompleteReduction::Indeterminate { .. })),
+                        "{name} in {world:?} at {unit}: {reduction:?}"
+                    );
+                    continue;
+                }
+                let participants = world
+                    .iter()
+                    .filter(|person| **person == (index, Status::In))
+                    .count();
+                let value = if name.ends_with("dead branch") {
+                    1
+                } else {
+                    participants as i64
+                };
+                assert_eq!(
+                    reduction,
+                    Ok(CompleteReduction::Determined(ScalarValue::Integer(value))),
+                    "{name} in {world:?} at {unit}"
+                );
+            }
         }
     }
 }
 
 #[test]
 fn a_determined_answer_holds_in_every_completion() {
-    assert_eq!(worlds().len(), 216);
+    assert_eq!(worlds().into_iter().collect::<BTreeSet<_>>().len(), 216);
     let mut past_an_unknown = 0;
     let mut path_completion_checks = 0;
-    for (name, relation, total) in unplaced_shapes().into_iter().chain(placed_shapes()) {
-        let program = program(relation, total);
+    let person_reads = unplaced_shapes()
+        .into_iter()
+        .chain(placed_shapes())
+        .map(|(name, relation, total)| (name, program(relation, total), "total", &PERSONS[..]));
+    let unit_reads = unit_shapes().into_iter().map(|(name, relation, unit_total)| {
+        (
+            name,
+            program_with(relation, literal(0), unit_total),
+            "unit_total",
+            &UNITS[..],
+        )
+    });
+    for (name, program, rule, entities) in person_reads.chain(unit_reads) {
         for world in worlds() {
-            for person in PERSONS {
-                let answer = reduce(&program, &world, person);
+            for entity in entities {
+                let answer = evaluate(&program, &world, rule, entity);
                 if !matches!(answer, Ok(CompleteReduction::Determined(_))) {
                     continue;
                 }
@@ -538,15 +621,18 @@ fn a_determined_answer_holds_in_every_completion() {
                     .iter()
                     .filter(|(_, status)| *status == Status::Unknown)
                     .count();
-                assert_eq!(resolved_worlds.len(), 1 << unknowns);
+                assert_eq!(
+                    resolved_worlds.iter().collect::<BTreeSet<_>>().len(),
+                    1 << unknowns
+                );
                 for resolved in &resolved_worlds {
-                    let completed = reduce(&program, resolved, person);
+                    let completed = evaluate(&program, resolved, rule, entity);
                     if name.starts_with("path source") {
                         path_completion_checks += 1;
                     }
                     assert_eq!(
                         completed, answer,
-                        "{name} in {world:?} completed as {resolved:?}"
+                        "{name} at {entity} in {world:?} completed as {resolved:?}"
                     );
                 }
                 past_an_unknown += usize::from(resolved_worlds.len() > 1);
