@@ -40,6 +40,74 @@ independent union-find oracle over generated residences, and check symmetry,
 partitioning, participation, order, modes and deferral. The pilot module in
 rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
 
+## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
+
+**Decision.** Every buffer the dense executor sizes by a row count, the
+batch's `row_count` or a relation's related count, is reserved with
+`Vec::try_reserve_exact`, through `row_buffer`, `filled_rows` and
+`copied_rows` in `src/lazy.rs`. When the allocator refuses one, the call
+fails with `EvalError::TypeMismatch` naming the count ("evaluation needs a
+buffer of N rows, more than this process can allocate"), propagated through
+`Flow` like any whole-call error. A batch whose buffers fit gets exactly the
+results it got before.
+
+**Why.** Binding (the entry below) bounds each count by `MAX_DENSE_ROWS` and
+reserves a relation's owners fallibly, but trusts a count up to that bound.
+Execution then filled broadcast literals, operator results, row masks,
+projections and cached rule columns with `vec!`. Two kinds of batch could
+therefore still abort the process, the Python interpreter included:
+
+- a stated related count whose 8-byte owners fit but whose 16-byte decimal or
+  24-byte text buffers did not
+- a huge `row_count` for a rule with no input and no relation, such as
+  `formula: 5` over 2^50 rows
+
+**Consequences.**
+
+- The covered buffers are:
+  - every operator's output column, broadcast literals and period dates
+  - placeholders for missing inputs and failed rows
+  - copies of input columns and of cached rule columns
+  - numeric conversions and comparison outcomes
+  - root and related row masks, and root-to-related projections
+  - related counts and sums, parameter lookups, and the lifetime executor's
+    reductions
+
+  `RowMask`'s set operations now return `Result`, so the bulk evaluator
+  propagates a refusal too; there it sends the request to explain, as any bulk
+  error does.
+- Some buffers are gone rather than made fallible:
+  - a mask with no active row holds no bits
+  - masks and relation offsets share their `Vec` instead of copying it into
+    an `Rc` slice
+  - `not` negates in place
+  - a period-invariant input moves its column out instead of copying it
+  - `RowErrors` renames its entries in place and restricts them by inserting
+    them one at a time; collecting into a
+    new map gathered every entry in one buffer first
+- A rule before its commencement date types its formula, which allocates the
+  formula's column, before it records an error on every row. A batch too large
+  to evaluate is refused before a pass over its rows.
+- Still infallible:
+  - allocations sized by something other than a row count (one per rule,
+    period, output or relation key)
+  - the heap data of each text value, cloned per row with ordinary allocation
+  - the entries `RowErrors` records, one per failing row; dense records them
+    only after a buffer for the same rows was granted
+- A reservation fails only when the allocator refuses it. On a host that
+  overcommits memory, a large but possible count can pass its reservation and
+  still exhaust memory as the buffer is filled. A request no host can grant is
+  an error everywhere. On wasm32 the allocator returns null when linear memory
+  cannot grow, so there a request that does not fit in 4 GiB is an error too.
+- `tests/dense_executor_alloc.rs` runs in its own binary, so a regression aborts
+  only that binary. Its allocator refuses three things: any single allocation
+  above a cap that a test sets, the nth allocation of at least 2 KiB that a
+  test chooses, and anything past 1 GiB live. A regression therefore aborts
+  promptly. The cap tests a count whose narrow buffers fit and whose wide ones
+  do not, with small, real batches. Refusing each large allocation in turn
+  reaches the buffers no wider than one already granted, such as masks and
+  copies, which no cap can single out.
+
 ## 2026-10-14 — Dense batches justify every row count they claim
 
 **Decision.** Dense binding refuses a batch whose row counts nothing confirms,
@@ -104,9 +172,10 @@ already did for root columns.
   `related_row_count` outside `i64` raises `OverflowError`, and a negative
   one raises `ValueError`.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
-  cleanly only when the allocator reports the failure. A count the reservation
-  succeeds for, but that a later per-row buffer cannot hold, can still exhaust
-  memory during execution.
+  cleanly only when the allocator reports the failure. Execution then reserves
+  each per-row buffer fallibly too (the entry above), so a count that fits the
+  owners buffer but not a later, wider buffer is refused there, when the
+  allocator reports that failure.
 - `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
   `input_lengths`), which breaks struct literals outside this crate; it now
   derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
