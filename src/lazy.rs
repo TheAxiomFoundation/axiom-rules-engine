@@ -290,6 +290,15 @@ pub(crate) enum QuotedError {
         second_period: Arc<str>,
         second_value: QuotedValue,
     },
+    /// `sum_top_n`'s `n` differs between two periods. A text `n` compiles,
+    /// so its values can be long texts.
+    OverPeriodsTopNPeriodVarying {
+        reduction: &'static str,
+        first_period: Arc<str>,
+        first_value: QuotedValue,
+        second_period: Arc<str>,
+        second_value: QuotedValue,
+    },
 }
 
 impl Quoted {
@@ -338,6 +347,28 @@ impl Quoted {
                     && first_value.same(other_first_value)
                     && second_value.same(other_second_value)
             }
+            (
+                QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+                QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction: other_reduction,
+                    first_period: other_first_period,
+                    first_value: other_first_value,
+                    second_period: other_second_period,
+                    second_value: other_second_value,
+                },
+            ) => {
+                reduction == other_reduction
+                    && first_period == other_first_period
+                    && second_period == other_second_period
+                    && first_value.same(other_first_value)
+                    && second_value.same(other_second_value)
+            }
             _ => false,
         }
     }
@@ -376,6 +407,21 @@ impl Quoted {
                     second_value: second_value.render()?,
                 })
             })(),
+            QuotedError::OverPeriodsTopNPeriodVarying {
+                reduction,
+                first_period,
+                first_value,
+                second_period,
+                second_value,
+            } => (|| {
+                Some(EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period: copy(first_period)?,
+                    first_value: first_value.render()?,
+                    second_period: copy(second_period)?,
+                    second_value: second_value.render()?,
+                })
+            })(),
         };
         rendered.unwrap_or_else(|| refused(self.rows))
     }
@@ -400,6 +446,20 @@ impl Quoted {
             _ => None,
         }
     }
+}
+
+/// The error to record for a row whose quoted error is `quoted`: the
+/// previous row's, when that quotes the same values, else `quoted` itself,
+/// which later rows may then share.
+pub(crate) fn share_quoted(last: &mut Option<Rc<Quoted>>, quoted: Quoted) -> RowError {
+    if let Some(previous) = last
+        && previous.same(&quoted)
+    {
+        return RowError::Quoted(Rc::clone(previous));
+    }
+    let shared = Rc::new(quoted);
+    *last = Some(Rc::clone(&shared));
+    RowError::Quoted(shared)
 }
 
 /// `args` written into a string whose capacity is reserved fallibly. `None`
@@ -568,6 +628,81 @@ mod tests {
 
     use super::*;
 
+    /// A period-varying error (`kind` 0: an input, 1: `sum_top_n`'s `n`)
+    /// quoting `first` and then `second`.
+    fn varying(kind: u8, first: &Arc<str>, second: &Arc<str>) -> Quoted {
+        let first_value = QuotedValue::Text(Arc::clone(first));
+        let second_value = QuotedValue::Text(Arc::clone(second));
+        let first_period: Arc<str> = Arc::from("in 2024");
+        let second_period: Arc<str> = Arc::from("in 2025");
+        Quoted {
+            rows: 4,
+            error: match kind {
+                0 => QuotedError::LifetimePeriodVaryingInput {
+                    input: Arc::from("name"),
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+                _ => QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction: "sum_top_n",
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+            },
+        }
+    }
+
+    /// The pair of values the error recorded for `row` quotes, rendered.
+    fn reported_pair(errors: &RowErrors, row: usize) -> (String, String) {
+        match errors.get(row).map(RowError::to_eval) {
+            Some(EvalError::LifetimePeriodVaryingInput {
+                first_value,
+                second_value,
+                ..
+            })
+            | Some(EvalError::OverPeriodsTopNPeriodVarying {
+                first_value,
+                second_value,
+                ..
+            }) => (first_value, second_value),
+            other => panic!("row {row}: expected a period-varying error, got {other:?}"),
+        }
+    }
+
+    /// Invariant: rows share a period-varying error only while both values
+    /// are the same, so a later row in a run reports its own pair.
+    #[test]
+    fn each_row_of_a_varying_run_quotes_its_own_pair() {
+        let (a, b, c) = (Arc::from("a"), Arc::from("b"), Arc::from("c"));
+        for kind in [0, 1] {
+            let mut errors = RowErrors::new();
+            let mut last = None;
+            // The second value changes at row 2, the first at row 3.
+            for (row, (first, second)) in [(&a, &b), (&a, &b), (&a, &c), (&b, &c)]
+                .into_iter()
+                .enumerate()
+            {
+                errors.record_error(row, share_quoted(&mut last, varying(kind, first, second)));
+            }
+            let pairs: Vec<(String, String)> =
+                (0..4).map(|row| reported_pair(&errors, row)).collect();
+            let pair = |first: &str, second: &str| (format!("{first:?}"), format!("{second:?}"));
+            assert_eq!(
+                pairs,
+                [
+                    pair("a", "b"),
+                    pair("a", "b"),
+                    pair("a", "c"),
+                    pair("b", "c")
+                ],
+                "kind {kind}"
+            );
+        }
+    }
     #[test]
     fn masks_track_active_rows_through_set_operations() -> Result<(), EvalError> {
         let all = RowMask::all(4);

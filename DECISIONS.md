@@ -14,10 +14,16 @@ cached rule, and each row an `if` or a cached stretch merges. Text literals and
 parameter tables become `Arc<str>` once, at dense compile time, and
 `assign_rows` moves each value instead of cloning it.
 
-An error that quotes a value is not formatted when a row fails. Two errors do
-this: a `match` with no arm for its subject, and a lifetime input that varies
-across periods. The row records a quoted error that shares the text, and the
-compile-time labels of the `match`. Consecutive rows failing on the same value
+An error that quotes a column's value is not formatted when a row fails.
+Three errors do this:
+
+- `NoMatchingArm`: a `match` with no arm for its subject
+- `LifetimePeriodVaryingInput`: a lifetime input that varies across periods
+- `OverPeriodsTopNPeriodVarying`: a `sum_top_n` whose `n` varies across
+  periods. A text `n` compiles, so its values can be texts.
+
+The row records a quoted error that shares the text, and the compile-time
+labels of the `match`. Consecutive rows failing on the same value
 share one. Its message is built only for the error a call reports, with
 strings reserved fallibly. If the allocator refuses one, the call fails with
 the refusal of a buffer of the rows the error was raised on. Every other
@@ -42,8 +48,10 @@ failing row in the same way.
   later row's failure when an earlier row fails first. The plan for this
   change named `Rc<EvalError>` entries; those would still build each message
   when recorded.
-- Ready errors (everything but the two above) are stored and cloned as
-  before. None of them quotes a column's value.
+- Ready errors (everything but the three above) are stored and cloned as
+  before. None of them quotes a text from a column.
+  `OverPeriodsTopNOutOfRange` quotes `n`, but only after `n` converted to a
+  number, so its label is a number; a text `n` fails that conversion first.
 - Text comparison compares contents, as before. Sharing changes no result:
   `tests/dense_text_explain.rs` checks dense against explain on generated
   text programs, in both numeric modes.

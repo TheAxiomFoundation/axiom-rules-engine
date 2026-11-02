@@ -690,6 +690,67 @@ fn a_long_period_varying_text_input_is_named_fallibly() {
     }
 }
 
+#[test]
+fn a_long_period_varying_top_n_text_is_named_fallibly() {
+    let _serial = serial();
+    let [_, _, long_x, long_y] = texts();
+    // `sum_top_n`'s `n` compiles as a text: a text that changes between the
+    // two years fails every row, naming both values.
+    let program = compile(&program(
+        vec![scalar_rule(
+            "life",
+            "decimal",
+            json!({ "kind": "over_periods", "over": "sum_top_n", "value": integer(5), "n": input("name") }),
+        )],
+        None,
+    ))
+    .expect("program compiles");
+    let rows = 64;
+    let outputs = vec!["life".to_string()];
+    let batches = || {
+        vec![
+            root_batch(&vec![long_x.clone(); rows], &vec![0; rows]),
+            root_batch(&vec![long_y.clone(); rows], &vec![0; rows]),
+        ]
+    };
+    for mode in MODES {
+        let label = format!("{mode:?}");
+        let uncapped = execute_lifetime(&program, mode, batches(), &outputs);
+        match &uncapped {
+            Err(EvalError::OverPeriodsTopNPeriodVarying {
+                first_value,
+                second_value,
+                ..
+            }) => {
+                assert_eq!(first_value, &format!("{long_x:?}"), "{label}");
+                assert_eq!(second_value, &format!("{long_y:?}"), "{label}");
+            }
+            other => panic!("{label}: expected the varying n, got {other:?}"),
+        }
+        let input = batches();
+        match capped(CAP, || execute_lifetime(&program, mode, input, &outputs)) {
+            Err(error) => assert_eq!(refused_count(&error), Some(rows), "{label}"),
+            Ok(_) => panic!("{label}: the long labels fit under the cap"),
+        }
+        // Every large allocation is the reported message's; refusing any one
+        // of them refuses the call.
+        let input = batches();
+        let (_, large) =
+            refusing_large(CAP, 0, || execute_lifetime(&program, mode, input, &outputs));
+        assert!(large > 0, "{label}: the message makes no large allocation");
+        for number in 1..=large {
+            let input = batches();
+            let (result, _) = refusing_large(CAP, number, || {
+                execute_lifetime(&program, mode, input, &outputs)
+            });
+            match result {
+                Err(error) => assert_eq!(refused_count(&error), Some(rows), "{label}, {number}"),
+                Ok(_) => panic!("{label}: refusing allocation {number} still succeeded"),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Generated programs
 // ---------------------------------------------------------------------------

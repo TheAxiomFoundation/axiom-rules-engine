@@ -18,7 +18,7 @@ use crate::engine::{
 };
 use crate::lazy::{
     Quoted, QuotedError, QuotedValue, RowError, RowErrors, RowMask, copied_rows, filled_rows,
-    row_buffer,
+    row_buffer, share_quoted,
 };
 use crate::model::{
     ComparisonOp, DType, Derived, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
@@ -699,29 +699,16 @@ impl MatchLabels {
     fn record_failures(&self, subject: &DenseColumn, rows: &RowMask, errors: &mut RowErrors) {
         let mut last: Option<Rc<Quoted>> = None;
         for row in rows.rows() {
-            let value = quoted_value(subject, row);
-            let shared = match &last {
-                Some(quoted)
-                    if matches!(&quoted.error, QuotedError::NoMatchingArm { value: previous, .. }
-                        if previous.same(&value)) =>
-                {
-                    Rc::clone(quoted)
-                }
-                _ => {
-                    let quoted = Rc::new(Quoted {
-                        rows: subject.len(),
-                        error: QuotedError::NoMatchingArm {
-                            rule: Arc::clone(&self.rule),
-                            subject: Arc::clone(&self.subject),
-                            value,
-                            patterns: Arc::clone(&self.patterns),
-                        },
-                    });
-                    last = Some(Rc::clone(&quoted));
-                    quoted
-                }
+            let quoted = Quoted {
+                rows: subject.len(),
+                error: QuotedError::NoMatchingArm {
+                    rule: Arc::clone(&self.rule),
+                    subject: Arc::clone(&self.subject),
+                    value: quoted_value(subject, row),
+                    patterns: Arc::clone(&self.patterns),
+                },
             };
-            errors.record_error(row, RowError::Quoted(shared));
+            errors.record_error(row, share_quoted(&mut last, quoted));
         }
     }
 }
@@ -5735,22 +5722,29 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             .expect("lifetime execution guarantees at least one period");
         // Reject a period-varying n: compare every earlier period against the
         // reference (chronologically-last) period, in each column's own dtype.
+        // Each error quotes both values without copying them (`n` can be a
+        // text); consecutive rows with the same pair share one.
         let mut varying = RowErrors::new();
+        let second_period: Arc<str> = Arc::from(period_label(
+            self.period_executors[self.reference_period].period,
+        ));
         for (index, column) in others.iter().enumerate() {
+            let first_period: Arc<str> =
+                Arc::from(period_label(self.period_executors[index].period));
+            let mut last: Option<Rc<Quoted>> = None;
             for row in live.rows() {
                 if !varying.contains(row) && values_differ(reference, column, row) {
-                    varying.record(
-                        row,
-                        EvalError::OverPeriodsTopNPeriodVarying {
+                    let quoted = Quoted {
+                        rows: self.row_count,
+                        error: QuotedError::OverPeriodsTopNPeriodVarying {
                             reduction,
-                            first_period: period_label(self.period_executors[index].period),
-                            first_value: dense_value_label(column, row),
-                            second_period: period_label(
-                                self.period_executors[self.reference_period].period,
-                            ),
-                            second_value: dense_value_label(reference, row),
+                            first_period: Arc::clone(&first_period),
+                            first_value: quoted_value(column, row),
+                            second_period: Arc::clone(&second_period),
+                            second_value: quoted_value(reference, row),
                         },
-                    );
+                    };
+                    varying.record_error(row, share_quoted(&mut last, quoted));
                 }
             }
         }
@@ -5767,6 +5761,9 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             // Non-finite or beyond the i64 range: a garbage n, reported as out
             // of range rather than saturated to a clamp.
             let Some(as_i64) = raw[row].try_to_i64_trunc() else {
+                // `raw` holds only rows `numeric_values` converted, so `n` is
+                // a number here and its label is short; a text `n` failed
+                // that conversion above.
                 errors.record(
                     row,
                     EvalError::OverPeriodsTopNOutOfRange {
@@ -5854,15 +5851,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                             second_value: quoted_value(column, row),
                         },
                     };
-                    let shared = match &last {
-                        Some(previous) if previous.same(&quoted) => Rc::clone(previous),
-                        _ => {
-                            let shared = Rc::new(quoted);
-                            last = Some(Rc::clone(&shared));
-                            shared
-                        }
-                    };
-                    errors.record_error(row, RowError::Quoted(shared));
+                    errors.record_error(row, share_quoted(&mut last, quoted));
                 }
             }
         }
@@ -6650,4 +6639,58 @@ fn compare_dense<N: DenseNum>(
         }
     }
     Ok(outcomes)
+}
+
+#[cfg(test)]
+mod quoted_failure_tests {
+    use super::*;
+
+    /// The value the error recorded for `row` quotes, rendered.
+    fn reported_value(errors: &RowErrors, row: usize) -> String {
+        match errors.get(row).map(RowError::to_eval) {
+            Some(EvalError::NoMatchingArm { value, .. }) => value,
+            other => panic!("row {row}: expected a match failure, got {other:?}"),
+        }
+    }
+
+    /// Invariant: each row's match failure quotes that row's own value.
+    /// Rows share an error only while their values are the same text, so a
+    /// later row in a run never reports an earlier row's value.
+    #[test]
+    fn each_row_of_a_run_quotes_its_own_value() {
+        let labels = MatchLabels {
+            rule: Arc::from("out"),
+            subject: Arc::from("label"),
+            patterns: Arc::from("\"z\""),
+        };
+        let a: Arc<str> = Arc::from("a");
+        let b: Arc<str> = Arc::from("b");
+        let column = DenseColumn::Text(vec![
+            Arc::clone(&a),
+            Arc::clone(&a),
+            Arc::clone(&b),
+            Arc::clone(&b),
+            Arc::clone(&a),
+        ]);
+        let mut errors = RowErrors::new();
+        labels.record_failures(&column, &RowMask::all(5), &mut errors);
+        let values: Vec<String> = (0..5).map(|row| reported_value(&errors, row)).collect();
+        assert_eq!(values, ["\"a\"", "\"a\"", "\"b\"", "\"b\"", "\"a\""]);
+        // Rows 0 and 1 share one error; rows 1 and 2 do not.
+        let shared = |left: usize, right: usize| match (errors.get(left), errors.get(right)) {
+            (Some(RowError::Quoted(left)), Some(RowError::Quoted(right))) => {
+                Rc::ptr_eq(left, right)
+            }
+            other => panic!("expected quoted errors, got {other:?}"),
+        };
+        assert!(shared(0, 1) && shared(2, 3));
+        assert!(!shared(1, 2) && !shared(3, 4));
+
+        // A non-text subject quotes each row's label the same way.
+        let mut errors = RowErrors::new();
+        let integers = DenseColumn::Integer(vec![7, 7, 8]);
+        labels.record_failures(&integers, &RowMask::all(3), &mut errors);
+        let values: Vec<String> = (0..3).map(|row| reported_value(&errors, row)).collect();
+        assert_eq!(values, ["7", "7", "8"]);
+    }
 }
