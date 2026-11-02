@@ -3339,11 +3339,17 @@ impl RuleDefinition {
                 name: self.name.clone(),
             });
         }
-        // Token columns count bytes, so each string's opening quote is at a
-        // known byte offset. Scan its raw bytes to the closing quote.
+        // Token columns count characters, so find the byte offset of each
+        // string's opening quote on its line, then scan its raw bytes to the
+        // closing quote.
         let bytes = formula.as_bytes();
         for token in tokens.iter().filter(|token| token.ty == TokType::String) {
-            let start = line_offsets[token.line - 1] + token.col - 1;
+            let line_start = line_offsets[token.line - 1];
+            let (in_line, _) = formula[line_start..]
+                .char_indices()
+                .nth(token.col - 1)
+                .expect("a string token starts at a character of its line");
+            let start = line_start + in_line;
             let quote = bytes[start];
             let mut offset = start + 1;
             while offset < bytes.len() && bytes[offset] != quote {
