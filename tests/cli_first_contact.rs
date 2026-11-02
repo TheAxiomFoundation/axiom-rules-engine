@@ -132,20 +132,41 @@ fn every_listed_command_answers_its_own_help() {
 fn no_argument_commands_refuse_arguments_around_their_help_flag() {
     // `version` and `capabilities` take no arguments. `--help` or `-h` alone
     // prints usage; any other argument, before the flag or after it, gets the
-    // error an argument gets without the flag, and no usage.
-    for command in ["version", "--version", "capabilities"] {
+    // error an argument gets without the flag, and no usage. The `--version`
+    // alias names `version` in both.
+    for (command, name) in [
+        ("version", "version"),
+        ("--version", "version"),
+        ("capabilities", "capabilities"),
+    ] {
         let refused = Command::new(ENGINE)
             .args([command, "extra"])
             .output()
             .expect("run engine");
         assert!(!refused.status.success(), "`{command} extra` exits 1");
         let refusal = String::from_utf8_lossy(&refused.stderr).into_owned();
-        assert!(refusal.contains("takes no arguments"), "{refusal}");
+        assert_eq!(refusal, format!("`{name}` takes no arguments\n"));
         for flag in ["--help", "-h"] {
+            let help = Command::new(ENGINE)
+                .args([command, flag])
+                .output()
+                .expect("run engine");
+            assert!(help.status.success(), "`{command} {flag}` exits 0");
+            let usage = String::from_utf8_lossy(&help.stdout);
+            assert!(
+                usage.starts_with(&format!("usage: axiom-rules-engine {name}\n")),
+                "`{command} {flag}` prints usage: {usage}"
+            );
+            assert!(
+                help.stderr.is_empty(),
+                "`{command} {flag}` writes nothing on stderr"
+            );
             for args in [
                 [command, flag, "extra"],
                 [command, "extra", flag],
                 [command, flag, "-h"],
+                [command, flag, "--help"],
+                [command, "extra", "junk"],
             ] {
                 let out = Command::new(ENGINE)
                     .args(args)
@@ -165,6 +186,35 @@ fn no_argument_commands_refuse_arguments_around_their_help_flag() {
                 );
             }
         }
+    }
+}
+
+/// `env::args` panics on an argument that is not valid UTF-8 (exit 101). Every
+/// command now refuses one with a plain error and exit 1, wherever it stands.
+#[cfg(unix)]
+#[test]
+fn arguments_that_are_not_utf8_get_an_error_not_a_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let invalid = OsStr::from_bytes(b"\xff");
+    for args in [
+        vec![invalid],
+        vec![OsStr::new("version"), invalid],
+        vec![OsStr::new("version"), OsStr::new("--help"), invalid],
+        vec![OsStr::new("capabilities"), OsStr::new("-h"), invalid],
+        vec![OsStr::new("compile"), OsStr::new("--program"), invalid],
+    ] {
+        let out = Command::new(ENGINE)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run engine");
+        let shown = format!("{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{shown} exits 1: {stderr}");
+        assert_eq!(stderr, "argument \"\\xFF\" is not valid UTF-8\n", "{shown}");
+        assert!(out.stdout.is_empty(), "{shown} prints nothing on stdout");
     }
 }
 
@@ -224,15 +274,20 @@ fn fixture_root(tag: &str) -> PathBuf {
 }
 
 /// Compile `program` with `command` against the fixture's `rulespec-us` root.
+/// The fixture exists before the compile runs, so its `Drop` removes the
+/// directory even when the compile fails.
 fn compile(command: &str, root: PathBuf, program: &Path) -> Fixture {
-    let artifact = root.join("compiled.json");
+    let fixture = Fixture {
+        artifact: root.join("compiled.json"),
+        root,
+    };
     let out = Command::new(ENGINE)
         .args([command, "--program"])
         .arg(program)
         .arg("--rulespec-root")
-        .arg(root.join("rulespec-us"))
+        .arg(fixture.root.join("rulespec-us"))
         .arg("--output")
-        .arg(&artifact)
+        .arg(&fixture.artifact)
         .output()
         .expect("compile runs");
     assert!(
@@ -240,7 +295,7 @@ fn compile(command: &str, root: PathBuf, program: &Path) -> Fixture {
         "{command}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    Fixture { root, artifact }
+    fixture
 }
 
 fn write_file(path: &Path, contents: &str) {
@@ -464,8 +519,9 @@ fn assert_shared_slot_rule(
 }
 
 // Each shared-slot test runs `amount`, which sorts before the module names,
-// and `wages`, which sorts after them, so the printed name cannot come from
-// the catalog's order alone.
+// and `wages`, which sorts after them. Only the second test's catalog lists
+// the bare slot; there, `wages` shows that the error prefers the bare slot
+// rather than printing the first name in sorted order.
 
 #[test]
 fn shared_slot_missing_input_prints_the_first_module_name() {
