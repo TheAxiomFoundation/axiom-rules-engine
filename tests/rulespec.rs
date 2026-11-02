@@ -4,7 +4,6 @@ use axiom_rules_engine::api::{
 use axiom_rules_engine::compile::{
     CompileError, CompileOptions, CompiledProgramArtifact, compile_program_file_to_json,
 };
-use axiom_rules_engine::relation_typing::RelationTypingCode;
 use axiom_rules_engine::rulespec::{
     CanonicalRuleSpecRoots, RuleSpecDiagnosticCode, RuleSpecError, RuleSpecLoweringOptions,
     ValidationStatus, load_rulespec_file, load_rulespec_file_with_options, lower_rulespec_str,
@@ -1683,13 +1682,12 @@ rules:
     let _ = fs::remove_dir_all(root);
 }
 
-/// A short name the root aggregates without declaring it is the root's own
-/// formula-synthesized relation, separate from an imported declaration of the
-/// same name, and it declares no entity kinds. Relation typing is mandatory,
-/// so compiling refuses the untyped relation, and the error points at the
-/// same-named declaration the author probably meant.
+/// A short name the root aggregates without declaring it reads the one
+/// same-named declaration its imports supply (#226). Lowering rewrites the
+/// read to the declaration's legal id and keeps no separate, untyped relation
+/// of the short name, so tuples supplied under that id reach the rule.
 #[test]
-fn rulespec_refuses_an_unscoped_relation_whose_import_uses_the_same_short_name() {
+fn rulespec_binds_an_undeclared_short_name_to_its_imported_declaration() {
     let root = unique_test_root();
     let imported_file = root.join("rulespec-us/us/statutes/26/63/c.yaml");
     let program_file = root.join("rulespec-us/us/policies/test/unscoped-relation.yaml");
@@ -1731,51 +1729,32 @@ rules:
 
     let program = load_rulespec_file(&program_file, &canonical_roots_for(&program_file))
         .expect("RuleSpec lowers");
-    let declared = program
-        .relations
-        .iter()
-        .find(|relation| relation.name == "us:statutes/26/63/c#relation.member_of_tax_unit")
-        .expect("the imported declaration keeps its scoped name");
-    assert_eq!(declared.slot_entities, vec!["Person", "TaxUnit"]);
-    let unscoped = program
-        .relations
-        .iter()
-        .find(|relation| relation.name == "member_of_tax_unit")
-        .expect("the root's own short-name relation stays unscoped");
-    assert!(
-        unscoped.slot_entities.is_empty(),
-        "the unscoped relation does not take the declaration's kinds: {:?}",
-        unscoped.slot_entities
-    );
-
-    let error =
-        compile_rulespec_file(&program_file).expect_err("the root aggregates an untyped relation");
-    let CompileError::RelationTyping { report, .. } = &error else {
-        panic!("expected a relation typing error, got {error}");
-    };
     assert_eq!(
-        report
-            .violations
+        program
+            .relations
             .iter()
-            .map(|violation| (
-                violation.code,
-                violation.relation.as_str(),
-                violation.citing.as_str()
-            ))
+            .map(|relation| (relation.name.as_str(), relation.slot_entities.clone()))
             .collect::<Vec<_>>(),
         [(
-            RelationTypingCode::UntypedRelation,
-            "member_of_tax_unit",
-            "us:policies/test/unscoped-relation#local_member_count",
+            "us:statutes/26/63/c#relation.member_of_tax_unit",
+            vec!["Person".to_string(), "TaxUnit".to_string()]
         )],
-        "{report}"
+        "no separate short-name relation survives lowering"
     );
-    assert!(
-        report.violations[0]
-            .message
-            .contains("`us:statutes/26/63/c#relation.member_of_tax_unit`"),
-        "{report}"
-    );
+    let count = program
+        .derived
+        .iter()
+        .find(|derived| derived.name == "local_member_count")
+        .expect("the root's rule lowers");
+    let DerivedSemanticsSpec::Scalar {
+        expr: ScalarExprSpec::CountRelated { relation, .. },
+    } = &count.semantics
+    else {
+        panic!("expected a relation count, got {:?}", count.semantics);
+    };
+    assert_eq!(relation, "us:statutes/26/63/c#relation.member_of_tax_unit");
+
+    compile_rulespec_file(&program_file).expect("the bound relation is typed");
 
     let _ = fs::remove_dir_all(root);
 }

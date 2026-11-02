@@ -788,14 +788,17 @@ impl<'a> Checker<'a> {
         };
         let arity = schema.arity;
         let Some(kinds) = self.slot_kinds.get(relation).map(<[String]>::to_vec) else {
-            // A short name aggregated by a module that does not declare it is
-            // its own relation, distinct from same-named declarations.
+            // A short name next to same-named module declarations is its own
+            // relation, which no tuple supplied for them reaches. RuleSpec
+            // lowering binds such a name to its declaration or refuses it
+            // (#226), so this reaches only a program built some other way:
+            // raw IR, or an artifact an earlier compiler wrote.
             let namesakes = self.namesakes(relation);
             let namesakes = if namesakes.is_empty() {
                 String::new()
             } else {
                 format!(
-                    " It is not declared in the module that aggregates it, so it is a separate relation from the same-named {}; declare it there with `arguments`, or aggregate the declared relation through a module that declares it.",
+                    " It is a separate relation from the same-named {}, so no tuple supplied under a declaration's legal id reaches it. Recompile from RuleSpec, which binds a short name the reading module does not declare to the declaration its imports supply, or declare the relation with `arguments` in the module that reads it.",
                     namesakes.join(", ")
                 )
             };

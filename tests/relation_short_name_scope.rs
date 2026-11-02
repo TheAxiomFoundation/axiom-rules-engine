@@ -124,12 +124,20 @@ fn members(relation: &str, count: usize) -> Vec<RelationRecordSpec> {
         .collect()
 }
 
+/// An integer-dtype output's value. Arithmetic over a count can carry the
+/// value as an integral decimal.
 fn integer(output: &OutputValue) -> i64 {
     match output {
         OutputValue::Scalar {
             value: ScalarValueSpec::Integer { value },
             ..
         } => *value,
+        OutputValue::Scalar {
+            value: ScalarValueSpec::Decimal { value },
+            ..
+        } => value
+            .parse()
+            .unwrap_or_else(|_| panic!("expected an integral value, got {value}")),
         other => panic!("expected an integer output, got {other:?}"),
     }
 }
@@ -675,6 +683,44 @@ fn a_composition_root_reads_its_own_declaration_first() {
         &[
             ("us:policies/e1#household_size_a", 2),
             ("household_size_root", 6),
+        ],
+    );
+}
+
+/// The root's own declaration is not in an imported module's scope. `e2`
+/// imports `e1` and reads `member_of_household` without declaring it, and the
+/// root declares a bare `member_of_household` of its own. Before #226 `e2`'s
+/// read stayed on the bare short name, so it read the root's relation and
+/// returned zero for tuples supplied under `e1`'s legal id, with no error.
+#[test]
+fn an_imported_module_never_reads_the_composition_root_declaration() {
+    let checkout = Checkout::new(&[(E1_TARGET, E1), (E2_TARGET, E2)]);
+    let text = composition(&[E2_TARGET], "len(member_of_household)").replace(
+        "rules:\n",
+        "rules:\n  - name: member_of_household\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Household]\n",
+    );
+    let path = checkout.composition(&text);
+    let artifact = checkout
+        .compile_composed(&path)
+        .expect("each module's read is typed");
+    let mut relations = members(E1_RELATION, 2);
+    relations.extend(members("member_of_household", 6));
+    assert_counts(
+        &artifact,
+        relations.clone(),
+        &[
+            ("us:policies/e1#household_size_a", 2),
+            ("us:policies/e2#household_size_b", 2),
+            ("household_size_root", 6),
+        ],
+    );
+    // With only e1's tuples, e2 still sees them and the root sees none.
+    assert_counts(
+        &artifact,
+        members(E1_RELATION, 2),
+        &[
+            ("us:policies/e2#household_size_b", 2),
+            ("household_size_root", 0),
         ],
     );
 }
