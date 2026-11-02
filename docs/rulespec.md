@@ -935,6 +935,14 @@ versions:
 replaces the four-branch expansion whose leaf-reference count grows with the
 square of the option count.
 
+That expansion still happens when a rule is evaluated: `exactly_one` of `n`
+arguments becomes `1 + n²` nodes plus `n` copies of the arguments. Nesting one
+`exactly_one` inside another multiplies those copies, so a formula's expression
+is limited to 99,995 nodes once expanded: 100,000, less the 5 a request pin adds
+(see [nesting depth and size](rulespec-format.md#nesting-depth-and-size)). That
+admits up to 158 arguments that are bare inputs (`1 + 4n²` nodes) or 223 that
+are rule references (`1 + 2n²`).
+
 ### Minimum, maximum and exactly-one over related entities
 
 Beside `len(relation)`, `sum(relation.field)`, `count_where(relation,

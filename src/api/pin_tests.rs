@@ -381,3 +381,34 @@ fn eighty_thousand_pins_apply_in_linear_time() {
     assert!(elapsed < BOUND, "{RULES} pins and a miss took {elapsed:?}");
     assert!(matches!(error, ApiError::UnknownPinnedRule { rule } if rule == MISSING));
 }
+
+/// A pin adds exactly `spec::PIN_NODES` nodes to a rule's runtime expression,
+/// which the formula size bound leaves room for (`spec::MAX_FORMULA_SIZE`).
+#[test]
+fn a_pin_adds_pin_nodes_to_a_rule() {
+    use crate::spec::{MAX_EXPRESSION_SIZE, MAX_FORMULA_SIZE, PIN_NODES};
+    assert_eq!(MAX_FORMULA_SIZE + PIN_NODES, MAX_EXPRESSION_SIZE);
+    let originals = [
+        integer(1),
+        ScalarExprSpec::Add {
+            items: vec![integer(1), integer(2), integer(3)],
+        },
+    ];
+    for original in originals {
+        let mut program = ProgramSpec {
+            derived: vec![rule(
+                "a",
+                DerivedSemanticsSpec::Scalar {
+                    expr: original.clone(),
+                },
+                Vec::new(),
+            )],
+            ..ProgramSpec::default()
+        };
+        apply_pins(&mut program, &[pin("a", 7)]).expect("the rule pins");
+        let DerivedSemanticsSpec::Scalar { expr } = &program.derived[0].semantics else {
+            panic!("a scalar rule stays scalar");
+        };
+        assert_eq!(expr.runtime_size(), original.runtime_size() + PIN_NODES);
+    }
+}

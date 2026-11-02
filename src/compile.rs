@@ -712,7 +712,7 @@ impl CompiledProgramArtifact {
     ) -> Result<Self, CompileError> {
         // A program built in Rust can hold any expression; refuse a too-deep
         // one before the metadata below walks it.
-        program.check_expression_depth()?;
+        program.check_expressions()?;
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
@@ -1050,7 +1050,7 @@ impl CompiledProgramArtifact {
         let artifact: Self = deserialize_artifact(value, path)?;
         // JSON can nest an expression deeper than any formula compiles to;
         // refuse it before anything below walks the program.
-        artifact.program.check_expression_depth()?;
+        artifact.program.check_expressions()?;
         artifact.check_format_3(path, options, &stored_interface)
     }
 
@@ -1154,7 +1154,7 @@ impl CompiledProgramArtifact {
         let artifact: Self = deserialize_artifact(value, path)?;
         // JSON can nest an expression deeper than any formula compiles to;
         // refuse it before anything below walks the program.
-        artifact.program.check_expression_depth()?;
+        artifact.program.check_expressions()?;
         artifact.check_format_2(path, options, catalog_absent, typing)
     }
 

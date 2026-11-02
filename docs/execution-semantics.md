@@ -219,7 +219,7 @@ the inputs its original formula reads. This holds in every mode. A rule pinned
 more than once takes its last pin and is rewritten once, however many pins name
 it. The rewrite makes the rule's expression one level deeper, or three levels
 deep if it was shallower than two (see
-[nesting depth](rulespec-format.md#nesting-depth)).
+[nesting depth](rulespec-format.md#nesting-depth-and-size)).
 
 For reads through terms, explain records evaluated dependencies at the term's
 id. A skipped rule read through `anchor` or `candidate` is also recorded at
@@ -494,7 +494,7 @@ Rule deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. The formula parser bounds that nesting at
 `rulespec::MAX_FORMULA_DEPTH` (128) levels, the release threshold, and refuses
 a deeper formula as a compile error (see
-[the format reference](rulespec-format.md#nesting-depth)). A hand-built
+[the format reference](rulespec-format.md#nesting-depth-and-size)). A hand-built
 `Program` is not bounded this way. Inlined dense expressions have no rule
 references, which is why dense bounds them (see above). Dense computes a rule
 it has never computed even when no row reaches it (to fix the rule's dtype),
