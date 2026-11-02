@@ -2238,6 +2238,10 @@ impl<'a> DenseCompiler<'a> {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
             }),
+            // `compile_aggregation` matches these five and ends in an
+            // `unreachable!` arm, so a variant routed here also needs an arm
+            // there: without one it panics at run time rather than failing
+            // to compile.
             ScalarExpr::OnlyRelated { .. }
             | ScalarExpr::CountRelated { .. }
             | ScalarExpr::SumRelated { .. }
