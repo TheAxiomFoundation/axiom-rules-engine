@@ -156,7 +156,7 @@ fn no_argument_commands_refuse_arguments_around_their_help_flag() {
                 assert_eq!(
                     String::from_utf8_lossy(&out.stderr),
                     refusal,
-                    "`{shown}` is refused like `{command} extra`"
+                    "the engine refuses `{shown}` as it refuses `{command} extra`"
                 );
                 assert!(
                     out.stdout.is_empty(),
@@ -380,8 +380,8 @@ fn bare_slot_name_is_still_refused_for_a_qualified_program() {
 /// Runs the shared-slot rule for one composition in both modes. The artifact
 /// lists `request_names` for `slot`; a missing `slot` prints `printed`; that
 /// name pasted back and every other listed name bind the one shared slot (so
-/// `a_amount` is 16 and `b_amount` 30 whichever name supplies 15); each
-/// `refused` name is refused.
+/// `a_amount` is 16 and `b_amount` 30 whichever name supplies 15); and the
+/// binder refuses each `refused` name.
 fn assert_shared_slot_rule(
     fixture: &Fixture,
     slot: &str,
@@ -419,7 +419,7 @@ fn assert_shared_slot_rule(
             );
             assert!(
                 supplied.status.success(),
-                "{mode}: `{supplied_name}` is accepted: {}",
+                "{mode}: the binder accepts `{supplied_name}`: {}",
                 String::from_utf8_lossy(&supplied.stderr)
             );
             let response: serde_json::Value =
@@ -448,7 +448,10 @@ fn assert_shared_slot_rule(
                 Some(refused_name),
                 SHARED_SLOT_OUTPUTS,
             );
-            assert!(!out.status.success(), "{mode}: `{refused_name}` is refused");
+            assert!(
+                !out.status.success(),
+                "{mode}: the binder refuses `{refused_name}`"
+            );
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(
                 stderr.contains(&format!(

@@ -259,8 +259,8 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// For a command that takes no arguments: whether its arguments are a lone
-/// `--help` or `-h`. Any other argument, before the flag or after it, is
-/// refused rather than ignored.
+/// `--help` or `-h`. It refuses any other argument, before the flag or after
+/// it, rather than ignoring it.
 fn wants_only_help(
     args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>,
     command: &str,
