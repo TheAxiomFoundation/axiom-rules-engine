@@ -700,10 +700,10 @@ def test_every_integer_row_count_is_accepted_or_refused_by_class(
     """The partition of integer row counts, by class representative: negative
     counts raise ValueError; counts past a 64-bit usize raise OverflowError;
     counts above the engine bound raise the engine's RuntimeError; and the
-    rest run with exactly that many rows. Counts from a few thousand up to
-    the bound are left out: the engine accepts them and allocates one value
-    per row, so one larger than memory aborts the process (the per-row
-    executor buffers #255 leaves infallible)."""
+    rest run with that many rows. This test leaves out counts from a few
+    thousand up to the bound: the engine accepts them, and a host that
+    overcommits memory can grant the reservation and then run out as the
+    executor fills the buffer."""
     program = compile_program(FIVE_MODULE, "Household")
     _check_row_count_class(program, run, row_count)
 

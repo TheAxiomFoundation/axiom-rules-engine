@@ -72,9 +72,9 @@ because no row would read the input.
   too large.
 - One Python integer now reaches the executor's per-row buffers, as a Rust
   caller's `row_count` already could. The executor reserves those buffers
-  fallibly (the entry below), so it refuses a count under the bound but larger
-  than memory: `row_count=2**50` on a constant program raises `RuntimeError`
-  naming the count.
+  fallibly (the entry below), so it refuses a count under the bound that the
+  allocator can't serve: `row_count=2**50` on a constant program raises
+  `RuntimeError` naming the count.
 - The extension reads `related_row_count` the same way: it refuses a bool, and
   a count above `i64::MAX` reaches the engine instead of raising
   `OverflowError`.
