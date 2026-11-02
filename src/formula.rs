@@ -1986,7 +1986,7 @@ impl<'a> LoweringSize<'a> {
             {
                 1
             }
-            Expr::Call { func, args } => match func.as_str() {
+            Expr::Call { func: name, args } => match name.as_str() {
                 "max"
                 | "min"
                 | "ceil"
