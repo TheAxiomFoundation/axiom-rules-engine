@@ -226,9 +226,10 @@ pub const MAX_EXPRESSION_DEPTH: usize = crate::formula::MAX_FORMULA_DEPTH + 3;
 ///
 /// The formula lowering refuses a formula past [`MAX_FORMULA_SIZE`], which
 /// leaves room for a request pin ([`PIN_NODES`]) below this bound, as
-/// [`MAX_EXPRESSION_DEPTH`] leaves a level for one: so every compiled rule
-/// passes, pinned or not. A program read from JSON is checked against this
-/// bound itself.
+/// [`MAX_EXPRESSION_DEPTH`] leaves a level for one: so every rule compiled
+/// from a formula passes, pinned or not. A program read from JSON is checked
+/// against this bound itself, so a rule of it within [`PIN_NODES`] of the
+/// bound cannot take a pin.
 ///
 /// The largest rule in the RuleSpec corpora on 2026-10-11 has 462 nodes. At
 /// the bound a rule's runtime expression takes a few megabytes.

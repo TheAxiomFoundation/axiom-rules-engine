@@ -590,14 +590,15 @@ every arm, and evaluating `exactly_one` of `n` arguments copies each argument
 otherwise exhaust memory. The lowering counts a formula's nodes before it
 builds them, and bounds a formula 5 nodes lower (`spec::MAX_FORMULA_SIZE`,
 99,995): a request pin wraps a rule in `if 0 == 0 then <literal> else ...`,
-which adds 5 nodes (`spec::PIN_NODES`), so every compiled rule passes, pinned
-or not, as with depth. It refuses a formula past that with ``the formula of
-`name` expands to more than 99995 expression nodes; split it into named
-rules``. The count includes the subject of a `match` whose only arm is `_`:
-lowering builds that subject to check it, then drops it. A program read from
-JSON is counted the same way, with the depth check, against 100,000 itself,
-and refused past it with ``the expression of derived rule `name` expands to
-more than 100000 expression nodes``. The largest rule in the RuleSpec corpora
+which adds 5 nodes (`spec::PIN_NODES`), so every rule compiled from a formula
+passes, pinned or not, as with depth. It refuses a formula past that with
+``the formula of `name` expands to more than 99995 expression nodes; split it
+into named rules``. The count includes the subject of a `match` whose only arm
+is `_`: lowering builds that subject to check it, then drops it. A program
+read from JSON is counted the same way, with the depth check, against 100,000
+itself, and refused past it with ``the expression of derived rule `name`
+expands to more than 100000 expression nodes``; a rule of 99,996 nodes or
+more in such a program cannot take a pin. The largest rule in the RuleSpec corpora
 on 2026-10-11 has 462 nodes.
 
 Dense execution reads the column of a `match` fallback (no `_`) from the
