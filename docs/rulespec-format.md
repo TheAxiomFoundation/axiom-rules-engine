@@ -505,6 +505,45 @@ Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
 position — the two grammars meet only at comparisons.
 
+## Formula parse errors
+
+When the lexer or parser rejects a formula, lowering fails with a line and a
+column. This formula has `×` where it needs `*`:
+
+```text
+if canton == 'Zürich': base × 1.2
+else: base
+```
+
+Lowering it fails with:
+
+```text
+failed to parse RuleSpec formula: formula parse error at line 1, col 29: unexpected char '×'
+```
+
+The line and column point into the formula's own text as YAML reads it, not
+into the YAML file that holds it. A block scalar's indentation is not part of
+that text, and YAML reads the file's CRLF and CR line breaks as line feeds. A
+folded (`>`) scalar, for example, joins most of its lines with spaces, so its
+positions follow the joined text. Within the formula text only a line feed
+starts a new line; a `\r` escape in a double-quoted scalar takes a column. The
+engine trims whitespace from both ends of a formula before it parses it, so
+blank lines and spaces before the formula do not count: line 1 holds its
+first non-blank character.
+
+A column counts Unicode scalar values (Rust `char`s) from 1, not UTF-8 bytes
+or user-perceived characters. `ü`, `×`, a tab and `😀` take one column each.
+A character that spans several code points takes one column per code point:
+`é` spelled as `e` plus U+0301 takes two, and so does 👍🏽.
+
+The column names the offending character or the first character of the
+offending token, such as the opening quote of an unterminated string. When a
+formula ends too early, the position falls one column past its last
+character. The error for a line break inside a string literal counts columns
+the same way, but in the formula text before trimming. Errors that lowering
+finds after parsing (`formula lower error:`) carry no position.
+`tests/formula_error_positions.rs` checks each of these statements.
+
 ## Nesting depth and size
 
 A formula nests at most 128 levels (`rulespec::MAX_FORMULA_DEPTH`). A deeper
@@ -532,8 +571,8 @@ The bound exists because every stage walks a formula's tree recursively.
 Before it, a formula nested a few thousand levels deep overflowed the stack,
 which aborts the process instead of returning an error. At the bound a
 release build compiles and evaluates a formula in every mode on a 1 MiB
-thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
-levels.
+thread; CI's release stack tests check that on every change. The deepest
+formula in the RuleSpec corpora on 2026-10-10 needs 76 levels.
 
 A program can also arrive as JSON: a compiled artifact, or a request with an
 inline program. Its expressions never pass the parser, so they are checked
@@ -568,8 +607,9 @@ most one dense node per lowered node (#241).
 A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one
 per level of an `if`, an `elif` branch or a `match` arm, so an artifact can
-nest about 260 levels deep. The engine reads an artifact, and a request with
-an inline program, from JSON nested up to 512 levels
+nest about 260 levels deep. The engine reads an artifact (a stage-3 aggregation
+artifact, which embeds its source artifacts, included), and a request with an
+inline program, from JSON nested up to 512 levels
 (`compile::MAX_JSON_DEPTH`, four times the formula bound) and refuses a
 document nested deeper. serde_json alone stops at 128 levels, which used to
 refuse artifacts `compile` had just written: a sum of 61 terms, or an `elif`
