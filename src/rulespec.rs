@@ -187,11 +187,11 @@ pub enum RuleSpecError {
     ModuleNotFound { target: String },
     #[error(transparent)]
     Source(#[from] crate::source::SourceError),
-    /// A formula failed to lex, parse or lower. A parse error's line and
-    /// column point into the failing formula's text, trimmed of surrounding
-    /// whitespace, not into the YAML file; a column counts Unicode scalar
-    /// values from 1. `docs/rulespec-format.md` ("Formula parse errors")
-    /// gives the full rule.
+    /// The formula source failed to lex, parse or lower. A syntax error in a
+    /// formula reports a line and column in that formula's text, trimmed of
+    /// surrounding whitespace, not in the YAML file; a column counts Unicode
+    /// scalar values from 1. `docs/rulespec-format.md` ("Formula parse
+    /// errors") gives the full rule.
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
     /// `name` and `entity` are copied into the generated formula source

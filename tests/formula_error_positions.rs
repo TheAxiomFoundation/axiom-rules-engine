@@ -27,6 +27,18 @@ fn module(before: usize, formula: &str) -> String {
     yaml
 }
 
+/// A module whose one derived rule's formula is a YAML block scalar with
+/// `indicator` (`|-`, `>-`) and one indented line per entry of `lines`.
+fn block_module(indicator: &str, lines: &[&str]) -> String {
+    let mut yaml = format!(
+        "format: rulespec/v1\nrules:\n  - name: subject\n    kind: derived\n    entity: Person\n    dtype: Decimal\n    period: Year\n    versions:\n      - effective_from: '2026-01-01'\n        formula: {indicator}\n"
+    );
+    for line in lines {
+        yaml.push_str(&format!("          {line}\n"));
+    }
+    yaml
+}
+
 /// The error lowering `yaml` reports. It must be a formula error.
 fn formula_error(yaml: &str) -> String {
     match lower_rulespec_str(yaml) {
@@ -80,8 +92,11 @@ fn a_position_names_the_offending_character_or_token() {
         ("'é' + )", (1, 7)),
         // `e` then U+0301 is one grapheme but two columns, and three bytes.
         ("'e\u{301}' $", (1, 6)),
-        // A tab and an emoji are one column each.
+        // A tab and a one-code-point emoji are one column each.
         ("'😀'\t$", (1, 5)),
+        ("'×' $", (1, 5)),
+        // 👍🏽 is two code points (a thumb and a skin-tone modifier).
+        ("'👍🏽' $", (1, 6)),
         // Only a line feed starts a line: a lone carriage return is a column.
         ("'é'\r$", (1, 5)),
         ("'é'\r\n$", (2, 1)),
@@ -129,9 +144,30 @@ fn a_line_break_in_a_string_literal_counts_from_the_formula_as_written() {
 }
 
 #[test]
+fn a_yaml_block_scalar_counts_in_the_text_yaml_reads() {
+    // A literal block keeps its line breaks and drops its indentation.
+    assert_eq!(position(&block_module("|-", &["1 +", "'é' $"])), (2, 5));
+    // YAML reads CRLF and CR line breaks in the file as line feeds.
+    for line_break in ["\r\n", "\r"] {
+        let yaml = block_module("|-", &["1 +", "'é' $"]).replace('\n', line_break);
+        assert_eq!(position(&yaml), (2, 5), "{line_break:?} line breaks");
+    }
+    // A folded block joins its lines with spaces: `1 + 2 $` on one line.
+    assert_eq!(position(&block_module(">-", &["1 +", "2 $"])), (1, 7));
+}
+
+#[test]
 fn a_derived_relation_predicate_counts_the_same_way() {
-    let yaml = "format: rulespec/v1\nrules:\n  - name: pair\n    kind: derived_relation\n    arity: 2\n    versions:\n      - effective_from: '2026-01-01'\n        formula: |-\n\n          'é' == 'a' and\n          'ü' $\n";
-    assert_eq!(position(yaml), (2, 5));
+    let relation = |predicate_lines: &str| {
+        format!(
+            "format: rulespec/v1\nrules:\n  - name: relative_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Person]\n  - name: pair\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: relative_of\n      slot_entities: [Person, Person]\n      current_slot: 0\n      related_slot: 1\n    versions:\n      - effective_from: '2026-01-01'\n        formula: |-\n\n          'é' == 'a' and\n          {predicate_lines}\n"
+        )
+    };
+    // The relation is well formed: only the predicate's last line differs.
+    if let Err(error) = lower_rulespec_str(&relation("'ü' == 'b'")) {
+        panic!("the well-formed relation should lower: {error}");
+    }
+    assert_eq!(position(&relation("'ü' $")), (2, 5));
 }
 
 #[test]
