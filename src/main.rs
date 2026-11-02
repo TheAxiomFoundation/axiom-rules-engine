@@ -145,13 +145,17 @@ fn recognize_top_level_command(name: &str) -> Option<TopLevelCommand> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
     if let Some(command_name) = args.next() {
         let Some(command) = recognize_top_level_command(&command_name) else {
             return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
         };
         match command {
             TopLevelCommand::Version => {
+                if wants_help(&mut args) {
+                    println!("usage: axiom-rules-engine version\n\nPrint the engine version.");
+                    return Ok(());
+                }
                 if args.next().is_some() {
                     return Err("`version` takes no arguments".into());
                 }
@@ -159,6 +163,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             TopLevelCommand::Capabilities => {
+                if wants_help(&mut args) {
+                    println!(
+                        "usage: axiom-rules-engine capabilities\n\nPrint, as JSON, the engine version and build and the artifact formats it reads."
+                    );
+                    return Ok(());
+                }
                 if args.next().is_some() {
                     return Err("`capabilities` takes no arguments".into());
                 }
@@ -204,9 +214,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TopLevelCommand::RunUnitAggregation => return run_unit_aggregation(args.collect()),
             #[cfg(feature = "schema")]
             TopLevelCommand::EmitSchemas => return run_emit_schemas(args.collect()),
+            // The help lists `emit-schemas` in every build, so a build without
+            // the feature says what it lacks rather than `unknown command`.
             #[cfg(not(feature = "schema"))]
             TopLevelCommand::EmitSchemas => {
-                return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
+                return Err("`emit-schemas` needs a build with the `schema` feature: \
+                     cargo build --features schema"
+                    .into());
             }
             TopLevelCommand::Migrate => return run_migrate(args.collect()),
         }
@@ -248,6 +262,11 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let response = execute_request(request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+/// Whether the next argument asks for a command's help, consuming it if so.
+fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> bool {
+    args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
 }
 
 fn version_line() -> String {
@@ -763,6 +782,12 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
             "--out" => {
                 out_dir = iter.next().map(PathBuf::from);
             }
+            "--help" | "-h" => {
+                println!(
+                    "usage: axiom-rules-engine emit-schemas --out <dir>\n\nWrite JSON Schemas for the wire types into <dir>."
+                );
+                return Ok(());
+            }
             _ => {
                 return Err(format!("unknown emit-schemas argument `{arg}`").into());
             }
@@ -780,19 +805,24 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 /// patterns across RuleSpec sources. Detection lowers each module through the
 /// real loader and walks the serialized spec (see `migrate`); files that do
 /// not lower standalone are reported as unscanned, never as pattern-free.
+fn migrate_usage() -> String {
+    format!(
+        "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
+    )
+}
+
 fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("scan") => {}
         Some("apply") => return run_migrate_apply(args.collect()),
         Some("artifact") => return run_migrate_artifact(args.collect()),
-        Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
-        None => {
-            return Err(format!(
-                "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
-            )
-            .into());
+        Some("--help" | "-h") => {
+            println!("{}", migrate_usage());
+            return Ok(());
         }
+        Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
+        None => return Err(migrate_usage().into()),
     }
     let mut json = false;
     let mut roots: Vec<PathBuf> = Vec::new();

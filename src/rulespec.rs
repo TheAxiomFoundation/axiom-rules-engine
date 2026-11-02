@@ -188,6 +188,11 @@ pub enum RuleSpecError {
     ModuleNotFound { target: String },
     #[error(transparent)]
     Source(#[from] crate::source::SourceError),
+    /// The formula source failed to lex, parse or lower. A syntax error in a
+    /// formula reports a line and column in that formula's text, trimmed of
+    /// surrounding whitespace, not in the YAML file; a column counts Unicode
+    /// scalar values from 1. `docs/rulespec-format.md` ("Formula parse
+    /// errors") gives the full rule.
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
     /// `name` and `entity` are copied into the generated formula source
@@ -200,7 +205,9 @@ pub enum RuleSpecError {
         expected: &'static str,
     },
     /// The generated formula source indents every formula line, which would
-    /// change the value of a string literal that spans a line feed.
+    /// change the value of a string literal that spans a line feed. `line`
+    /// and `col` locate the literal's opening quote in the formula text
+    /// before trimming; `col` counts Unicode scalar values from 1.
     #[error(
         "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
     )]
@@ -3340,11 +3347,17 @@ impl RuleDefinition {
                 name: self.name.clone(),
             });
         }
-        // Token columns count bytes, so each string's opening quote is at a
-        // known byte offset. Scan its raw bytes to the closing quote.
+        // Token columns count characters, so find the byte offset of each
+        // string's opening quote on its line, then scan its raw bytes to the
+        // closing quote.
         let bytes = formula.as_bytes();
         for token in tokens.iter().filter(|token| token.ty == TokType::String) {
-            let start = line_offsets[token.line - 1] + token.col - 1;
+            let line_start = line_offsets[token.line - 1];
+            let (in_line, _) = formula[line_start..]
+                .char_indices()
+                .nth(token.col - 1)
+                .expect("a string token starts at a character of its line");
+            let start = line_start + in_line;
             let quote = bytes[start];
             let mut offset = start + 1;
             while offset < bytes.len() && bytes[offset] != quote {
