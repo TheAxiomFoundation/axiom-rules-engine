@@ -30,12 +30,24 @@ use crate::spec::{
 
 #[derive(Debug, Error)]
 pub enum FormulaError {
+    /// The lexer or parser rejected the source. `line` and `col` point into
+    /// the source text given to the [`Lexer`]. RuleSpec lowering parses each
+    /// rule's formula on its own, trimmed, before it parses the module it
+    /// generates, so a syntax error in a formula points into that formula
+    /// (`docs/rulespec-format.md`, "Formula parse errors").
     #[error("formula parse error at line {line}, col {col}: {message}")]
     Parse {
+        /// 1-based line. Only a line feed (`\n`) starts a new line.
         line: usize,
+        /// 1-based column, counted in Unicode scalar values (`char`s), not
+        /// UTF-8 bytes or grapheme clusters: a combining mark is a column of
+        /// its own. It names the offending character or the first character
+        /// of the offending token, or falls one past the last character
+        /// when the source ends too early.
         col: usize,
         message: String,
     },
+    /// Lowering rejected a parsed formula. It carries no position.
     #[error("formula lower error: {0}")]
     Lower(String),
 }
@@ -107,7 +119,9 @@ pub enum TokType {
 pub struct Token {
     pub ty: TokType,
     pub value: String,
+    /// The line the token starts on, counted as in [`FormulaError::Parse`].
     pub line: usize,
+    /// The column the token starts at, counted as in [`FormulaError::Parse`].
     pub col: usize,
 }
 
@@ -177,10 +191,13 @@ impl<'a> Lexer<'a> {
             }
             let c = self.src[self.pos];
             self.pos += 1;
+            // Columns count characters (Unicode scalar values): a UTF-8
+            // continuation byte (0b10xx_xxxx) belongs to the character
+            // already counted (#239).
             if c == b'\n' {
                 self.line += 1;
                 self.col = 1;
-            } else {
+            } else if c & 0xC0 != 0x80 {
                 self.col += 1;
             }
         }
@@ -2861,6 +2878,10 @@ pub(crate) fn lower_judgment_formula(
     };
     lower_to_judgment(&expr, &ctx)
 }
+
+#[cfg(test)]
+#[path = "formula_column_tests.rs"]
+mod column_tests;
 
 #[cfg(test)]
 mod lexer_tests {
