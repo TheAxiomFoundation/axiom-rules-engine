@@ -205,8 +205,8 @@ pub enum RuleSpecError {
     },
     /// The generated formula source indents every formula line, which would
     /// change the value of a string literal that spans a line feed. `line`
-    /// and `col` locate the literal's opening quote in the formula as
-    /// written, before trimming; `col` counts Unicode scalar values from 1.
+    /// and `col` locate the literal's opening quote in the formula text
+    /// before trimming; `col` counts Unicode scalar values from 1.
     #[error(
         "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
     )]

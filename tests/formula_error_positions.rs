@@ -131,9 +131,9 @@ fn whitespace_around_a_formula_does_not_count() {
 }
 
 #[test]
-fn a_line_break_in_a_string_literal_counts_from_the_formula_as_written() {
-    // The second literal's opening quote: line 2, column 9 as written, though
-    // trimming would put it at line 1, column 7.
+fn a_line_break_in_a_string_literal_counts_before_trimming() {
+    // The second literal's opening quote: line 2, column 9 in the untrimmed
+    // text, though trimming would put it at line 1, column 7.
     let yaml = module(0, "  \n  'é' + 'a\nb'");
     match lower_rulespec_str(&yaml) {
         Err(RuleSpecError::MultilineStringLiteral { line, col, .. }) => {

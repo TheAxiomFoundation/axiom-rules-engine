@@ -526,7 +526,7 @@ into the YAML file that holds it. A block scalar's indentation is not part of
 that text, and YAML reads the file's CRLF and CR line breaks as line feeds. A
 folded (`>`) scalar, for example, joins most of its lines with spaces, so its
 positions follow the joined text. Within the formula text only a line feed
-starts a new line; a `\r` escape in a quoted scalar takes a column. The
+starts a new line; a `\r` escape in a double-quoted scalar takes a column. The
 engine trims whitespace from both ends of a formula before it parses it, so
 blank lines and spaces before the formula do not count: line 1 holds its
 first non-blank character.
@@ -540,8 +540,8 @@ The column names the offending character or the first character of the
 offending token, such as the opening quote of an unterminated string. When a
 formula ends too early, the position falls one column past its last
 character. The error for a line break inside a string literal counts columns
-the same way, but from the formula as written, before trimming. Errors that
-lowering finds after parsing (`formula lower error:`) carry no position.
+the same way, but in the formula text before trimming. Errors that lowering
+finds after parsing (`formula lower error:`) carry no position.
 `tests/formula_error_positions.rs` checks each of these statements.
 
 ## The lowered expression vocabulary
