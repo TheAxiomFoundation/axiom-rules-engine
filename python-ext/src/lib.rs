@@ -445,7 +445,8 @@ fn execution_to_pydict(
                     output_dict.set_item(name, PyArray1::from_vec(py, values))?;
                 }
                 DenseColumn::Text(values) => {
-                    output_dict.set_item(name, PyList::new(py, values)?)?;
+                    let texts = values.iter().map(|value| &**value);
+                    output_dict.set_item(name, PyList::new(py, texts)?)?;
                 }
                 DenseColumn::Date(values) => {
                     let materialised = values
@@ -842,7 +843,9 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
         return decimal_column_from_f64(&values);
     }
     if let Ok(values) = value.extract::<Vec<String>>() {
-        return Ok(DenseColumn::Text(values));
+        return Ok(DenseColumn::Text(
+            values.into_iter().map(|value| value.into()).collect(),
+        ));
     }
     Err(PyValueError::new_err(
         "dense columns must be bool/int64/float64 numpy arrays or simple Python lists",

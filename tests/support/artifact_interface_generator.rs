@@ -737,7 +737,7 @@ fn column(value: &ScalarValueSpec, count: usize) -> DenseColumn {
         ScalarValueSpec::Decimal { value } => {
             DenseColumn::Decimal(vec![value.parse().unwrap(); count])
         }
-        ScalarValueSpec::Text { value } => DenseColumn::Text(vec![value.clone(); count]),
+        ScalarValueSpec::Text { value } => DenseColumn::Text(vec![value.as_str().into(); count]),
         ScalarValueSpec::Date { value } => DenseColumn::Date(vec![*value; count]),
     }
 }

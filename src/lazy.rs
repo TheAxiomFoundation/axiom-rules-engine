@@ -21,19 +21,24 @@
 //! not covered.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::engine::EvalError;
+
+/// The error for a buffer of `rows` rows the allocator refused.
+pub(crate) fn refused(rows: usize) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "evaluation needs a buffer of {rows} rows, more than this process can allocate"
+    ))
+}
 
 /// An empty buffer with room for `rows` elements, reserved fallibly: when
 /// the allocator cannot grant it, the error names the count.
 pub(crate) fn row_buffer<T>(rows: usize) -> Result<Vec<T>, EvalError> {
     let mut buffer = Vec::new();
-    buffer.try_reserve_exact(rows).map_err(|_| {
-        EvalError::TypeMismatch(format!(
-            "evaluation needs a buffer of {rows} rows, more than this process can allocate"
-        ))
-    })?;
+    buffer.try_reserve_exact(rows).map_err(|_| refused(rows))?;
     Ok(buffer)
 }
 
@@ -227,10 +232,286 @@ impl Iterator for RowIter<'_> {
     }
 }
 
+/// A value an error quotes. A text is the column's own shared value, so
+/// recording the error copies nothing; any other value is its short label.
+#[derive(Clone, Debug)]
+pub(crate) enum QuotedValue {
+    Text(Arc<str>),
+    Label(String),
+}
+
+impl QuotedValue {
+    /// The value as explain names it: a text in Rust debug quoting, anything
+    /// else as its label.
+    fn render(&self) -> Option<String> {
+        match self {
+            QuotedValue::Text(text) => try_format(format_args!("{:?}", &**text)),
+            QuotedValue::Label(label) => try_format(format_args!("{label}")),
+        }
+    }
+
+    /// The same value: one shared text, or equal labels.
+    pub(crate) fn same(&self, other: &QuotedValue) -> bool {
+        match (self, other) {
+            (QuotedValue::Text(left), QuotedValue::Text(right)) => Arc::ptr_eq(left, right),
+            (QuotedValue::Label(left), QuotedValue::Label(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+/// An error whose message quotes a column's value. A text can be far longer
+/// than any row buffer, so the message is not built when a row fails: the
+/// rows that fail with the same value share one of these, and its message is
+/// built, fallibly, only if it is the error reported.
+#[derive(Clone, Debug)]
+pub(crate) struct Quoted {
+    /// The count of the rows it was raised on. A message the allocator
+    /// refuses is the refusal of a buffer of this many rows.
+    pub(crate) rows: usize,
+    pub(crate) error: QuotedError,
+}
+
+/// The errors that quote a value, with the fields of the [`EvalError`] each
+/// renders to. Labels fixed at compile time are shared, since they can quote
+/// a long text literal.
+#[derive(Clone, Debug)]
+pub(crate) enum QuotedError {
+    NoMatchingArm {
+        rule: Arc<str>,
+        subject: Arc<str>,
+        value: QuotedValue,
+        patterns: Arc<str>,
+    },
+    LifetimePeriodVaryingInput {
+        input: Arc<str>,
+        first_period: Arc<str>,
+        first_value: QuotedValue,
+        second_period: Arc<str>,
+        second_value: QuotedValue,
+    },
+    /// `sum_top_n`'s `n` differs between two periods. A text `n` compiles,
+    /// so its values can be long texts.
+    OverPeriodsTopNPeriodVarying {
+        reduction: &'static str,
+        first_period: Arc<str>,
+        first_value: QuotedValue,
+        second_period: Arc<str>,
+        second_value: QuotedValue,
+    },
+}
+
+impl Quoted {
+    /// Whether `self` is the error `other` would be: the same kind and
+    /// fields, quoting the same values.
+    pub(crate) fn same(&self, other: &Quoted) -> bool {
+        match (&self.error, &other.error) {
+            (
+                QuotedError::NoMatchingArm {
+                    rule,
+                    subject,
+                    value,
+                    patterns,
+                },
+                QuotedError::NoMatchingArm {
+                    rule: other_rule,
+                    subject: other_subject,
+                    value: other_value,
+                    patterns: other_patterns,
+                },
+            ) => {
+                rule == other_rule
+                    && Arc::ptr_eq(subject, other_subject)
+                    && Arc::ptr_eq(patterns, other_patterns)
+                    && value.same(other_value)
+            }
+            (
+                QuotedError::LifetimePeriodVaryingInput {
+                    input,
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+                QuotedError::LifetimePeriodVaryingInput {
+                    input: other_input,
+                    first_period: other_first_period,
+                    first_value: other_first_value,
+                    second_period: other_second_period,
+                    second_value: other_second_value,
+                },
+            ) => {
+                input == other_input
+                    && first_period == other_first_period
+                    && second_period == other_second_period
+                    && first_value.same(other_first_value)
+                    && second_value.same(other_second_value)
+            }
+            (
+                QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+                QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction: other_reduction,
+                    first_period: other_first_period,
+                    first_value: other_first_value,
+                    second_period: other_second_period,
+                    second_value: other_second_value,
+                },
+            ) => {
+                reduction == other_reduction
+                    && first_period == other_first_period
+                    && second_period == other_second_period
+                    && first_value.same(other_first_value)
+                    && second_value.same(other_second_value)
+            }
+            _ => false,
+        }
+    }
+
+    /// The error this quotes, its message built with fallibly reserved
+    /// strings. When the allocator refuses one, the refusal of a buffer of
+    /// `rows` rows instead.
+    pub(crate) fn render(&self) -> EvalError {
+        let copy = |text: &str| try_format(format_args!("{text}"));
+        let rendered = match &self.error {
+            QuotedError::NoMatchingArm {
+                rule,
+                subject,
+                value,
+                patterns,
+            } => (|| {
+                Some(EvalError::NoMatchingArm {
+                    rule: copy(rule)?,
+                    subject: copy(subject)?,
+                    value: value.render()?,
+                    patterns: copy(patterns)?,
+                })
+            })(),
+            QuotedError::LifetimePeriodVaryingInput {
+                input,
+                first_period,
+                first_value,
+                second_period,
+                second_value,
+            } => (|| {
+                Some(EvalError::LifetimePeriodVaryingInput {
+                    input: copy(input)?,
+                    first_period: copy(first_period)?,
+                    first_value: first_value.render()?,
+                    second_period: copy(second_period)?,
+                    second_value: second_value.render()?,
+                })
+            })(),
+            QuotedError::OverPeriodsTopNPeriodVarying {
+                reduction,
+                first_period,
+                first_value,
+                second_period,
+                second_value,
+            } => (|| {
+                Some(EvalError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period: copy(first_period)?,
+                    first_value: first_value.render()?,
+                    second_period: copy(second_period)?,
+                    second_value: second_value.render()?,
+                })
+            })(),
+        };
+        rendered.unwrap_or_else(|| refused(self.rows))
+    }
+
+    /// Name `rule` in a `match` failure that does not name its rule yet.
+    fn within_rule(&self, rule: &str) -> Option<Quoted> {
+        match &self.error {
+            QuotedError::NoMatchingArm {
+                rule: existing,
+                subject,
+                value,
+                patterns,
+            } if existing.is_empty() => Some(Quoted {
+                rows: self.rows,
+                error: QuotedError::NoMatchingArm {
+                    rule: Arc::from(rule),
+                    subject: Arc::clone(subject),
+                    value: value.clone(),
+                    patterns: Arc::clone(patterns),
+                },
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The error to record for a row whose quoted error is `quoted`: the
+/// previous row's, when that quotes the same values, else `quoted` itself,
+/// which later rows may then share.
+pub(crate) fn share_quoted(last: &mut Option<Rc<Quoted>>, quoted: Quoted) -> RowError {
+    if let Some(previous) = last
+        && previous.same(&quoted)
+    {
+        return RowError::Quoted(Rc::clone(previous));
+    }
+    let shared = Rc::new(quoted);
+    *last = Some(Rc::clone(&shared));
+    RowError::Quoted(shared)
+}
+
+/// `args` written into a string whose capacity is reserved fallibly. `None`
+/// when the allocator refuses it. The length is measured first, by writing
+/// to a counter, so the one reservation is exact.
+fn try_format(args: fmt::Arguments<'_>) -> Option<String> {
+    struct Measure(usize);
+    impl fmt::Write for Measure {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            self.0 = self.0.saturating_add(text.len());
+            Ok(())
+        }
+    }
+    let mut measure = Measure(0);
+    fmt::write(&mut measure, args).ok()?;
+    let mut text = String::new();
+    text.try_reserve_exact(measure.0).ok()?;
+    fmt::write(&mut text, args).ok()?;
+    Some(text)
+}
+
+/// A row's error: one ready to report, or one that quotes a value and is
+/// shared by the rows that fail with the same value.
+#[derive(Clone, Debug)]
+pub(crate) enum RowError {
+    Ready(EvalError),
+    Quoted(Rc<Quoted>),
+}
+
+impl RowError {
+    /// The error to report, a quoted one's message built fallibly.
+    pub(crate) fn to_eval(&self) -> EvalError {
+        match self {
+            RowError::Ready(error) => error.clone(),
+            RowError::Quoted(quoted) => quoted.render(),
+        }
+    }
+}
+
+impl fmt::Display for RowError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowError::Ready(error) => error.fmt(formatter),
+            RowError::Quoted(quoted) => quoted.render().fmt(formatter),
+        }
+    }
+}
+
 /// The first error of each failing row of a columnar evaluation.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RowErrors {
-    errors: BTreeMap<usize, EvalError>,
+    errors: BTreeMap<usize, RowError>,
 }
 
 impl RowErrors {
@@ -246,13 +527,19 @@ impl RowErrors {
         self.errors.contains_key(&row)
     }
 
-    pub(crate) fn get(&self, row: usize) -> Option<&EvalError> {
+    pub(crate) fn get(&self, row: usize) -> Option<&RowError> {
         self.errors.get(&row)
     }
 
     /// Record `error` for `row` unless the row already failed: a row stops at
     /// its first error, so a later one never replaces it.
     pub(crate) fn record(&mut self, row: usize, error: EvalError) {
+        self.record_error(row, RowError::Ready(error));
+    }
+
+    /// Record `error`, as [`RowErrors::record`] does: a quoted error is
+    /// shared, not copied.
+    pub(crate) fn record_error(&mut self, row: usize, error: RowError) {
         self.errors.entry(row).or_insert(error);
     }
 
@@ -271,7 +558,7 @@ impl RowErrors {
             return;
         }
         for (row, error) in other.errors {
-            self.record(row, error);
+            self.record_error(row, error);
         }
     }
 
@@ -294,22 +581,41 @@ impl RowErrors {
 
     /// Name `rule` in each `match` failure that does not name its rule yet:
     /// explain names the innermost rule an error leaves. Renamed in place,
-    /// for the same reason `restricted_to` inserts one at a time.
+    /// for the same reason `restricted_to` inserts one at a time. Rows that
+    /// shared a quoted failure share its renamed one.
     pub(crate) fn within_rule(mut self, rule: &str) -> Self {
+        let mut last: Option<(Rc<Quoted>, Rc<Quoted>)> = None;
         for error in self.errors.values_mut() {
-            // `within_rule` takes the error by value; a unit variant holds
-            // its place meanwhile.
-            *error = std::mem::replace(error, EvalError::DivisionByZero).within_rule(rule);
+            match error {
+                RowError::Ready(ready) => {
+                    // `within_rule` takes the error by value; a unit variant
+                    // holds its place meanwhile.
+                    *ready = std::mem::replace(ready, EvalError::DivisionByZero).within_rule(rule);
+                }
+                RowError::Quoted(quoted) => {
+                    if let Some((before, after)) = &last
+                        && Rc::ptr_eq(before, quoted)
+                    {
+                        *quoted = Rc::clone(after);
+                        continue;
+                    }
+                    if let Some(renamed) = quoted.within_rule(rule) {
+                        let renamed = Rc::new(renamed);
+                        last = Some((Rc::clone(quoted), Rc::clone(&renamed)));
+                        *quoted = renamed;
+                    }
+                }
+            }
         }
         self
     }
 
     /// The lowest failing row and its error.
-    pub(crate) fn first(&self) -> Option<(usize, &EvalError)> {
+    pub(crate) fn first(&self) -> Option<(usize, &RowError)> {
         self.errors.iter().next().map(|(row, error)| (*row, error))
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &EvalError)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &RowError)> {
         self.errors.iter().map(|(row, error)| (*row, error))
     }
 }
@@ -322,6 +628,81 @@ mod tests {
 
     use super::*;
 
+    /// A period-varying error (`kind` 0: an input, 1: `sum_top_n`'s `n`)
+    /// quoting `first` and then `second`.
+    fn varying(kind: u8, first: &Arc<str>, second: &Arc<str>) -> Quoted {
+        let first_value = QuotedValue::Text(Arc::clone(first));
+        let second_value = QuotedValue::Text(Arc::clone(second));
+        let first_period: Arc<str> = Arc::from("in 2024");
+        let second_period: Arc<str> = Arc::from("in 2025");
+        Quoted {
+            rows: 4,
+            error: match kind {
+                0 => QuotedError::LifetimePeriodVaryingInput {
+                    input: Arc::from("name"),
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+                _ => QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction: "sum_top_n",
+                    first_period,
+                    first_value,
+                    second_period,
+                    second_value,
+                },
+            },
+        }
+    }
+
+    /// The pair of values the error recorded for `row` quotes, rendered.
+    fn reported_pair(errors: &RowErrors, row: usize) -> (String, String) {
+        match errors.get(row).map(RowError::to_eval) {
+            Some(EvalError::LifetimePeriodVaryingInput {
+                first_value,
+                second_value,
+                ..
+            })
+            | Some(EvalError::OverPeriodsTopNPeriodVarying {
+                first_value,
+                second_value,
+                ..
+            }) => (first_value, second_value),
+            other => panic!("row {row}: expected a period-varying error, got {other:?}"),
+        }
+    }
+
+    /// Invariant: rows share a period-varying error only while both values
+    /// are the same, so a later row in a run reports its own pair.
+    #[test]
+    fn each_row_of_a_varying_run_quotes_its_own_pair() {
+        let (a, b, c) = (Arc::from("a"), Arc::from("b"), Arc::from("c"));
+        for kind in [0, 1] {
+            let mut errors = RowErrors::new();
+            let mut last = None;
+            // The second value changes at row 2, the first at row 3.
+            for (row, (first, second)) in [(&a, &b), (&a, &b), (&a, &c), (&b, &c)]
+                .into_iter()
+                .enumerate()
+            {
+                errors.record_error(row, share_quoted(&mut last, varying(kind, first, second)));
+            }
+            let pairs: Vec<(String, String)> =
+                (0..4).map(|row| reported_pair(&errors, row)).collect();
+            let pair = |first: &str, second: &str| (format!("{first:?}"), format!("{second:?}"));
+            assert_eq!(
+                pairs,
+                [
+                    pair("a", "b"),
+                    pair("a", "b"),
+                    pair("a", "c"),
+                    pair("b", "c")
+                ],
+                "kind {kind}"
+            );
+        }
+    }
     #[test]
     fn masks_track_active_rows_through_set_operations() -> Result<(), EvalError> {
         let all = RowMask::all(4);
@@ -484,7 +865,10 @@ mod tests {
         let mut errors = RowErrors::new();
         errors.record(2, EvalError::DivisionByZero);
         errors.record(2, EvalError::UnknownDerived("later".to_string()));
-        assert!(matches!(errors.get(2), Some(EvalError::DivisionByZero)));
+        assert!(matches!(
+            errors.get(2),
+            Some(RowError::Ready(EvalError::DivisionByZero))
+        ));
 
         let mask = RowMask::all(4).without(&errors)?;
         assert_eq!(mask.rows().collect::<Vec<_>>(), vec![0, 1, 3]);
