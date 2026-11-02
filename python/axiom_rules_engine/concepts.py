@@ -35,6 +35,8 @@ CORPUS_CITATION_PATH_RE = re.compile(
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 NUMBER_RE = re.compile(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?")
+# A number `serde_yaml` reads from a bare scalar and PyYAML leaves as text.
+YAML_EXPONENT_RE = re.compile(r"[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)[eE][-+]?[0-9]+")
 STRING_RES = {
     quote: re.compile(rf"{quote}(?:[^{quote}\\]|\\.)*(?P<close>{quote})?", re.DOTALL)
     for quote in "\"'"
@@ -649,7 +651,11 @@ def _is_parameter_table(rule: dict[str, Any]) -> bool:
 def _parse_formula(formula: Any) -> _ParsedFormula:
     # `deserialize_optional_string_like` in src/rulespec.rs reads a YAML number
     # or boolean as its text.
-    if isinstance(formula, (bool, int, float)):
+    if isinstance(formula, str) and YAML_EXPONENT_RE.fullmatch(formula):
+        formula = float(formula)
+    if isinstance(formula, float):
+        formula = format(formula, "f")
+    elif isinstance(formula, (bool, int)):
         formula = str(formula)
     tokens = _formula_tokens(formula) if isinstance(formula, str) else []
     parser = _FormulaParser(tokens)

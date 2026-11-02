@@ -448,6 +448,17 @@ DECLARED_NAME_CASES = [
     ("member_of_household", {"member_of_household"}),
     ("cites_section_63 + 1", {"cites_section_63"}),
 ]
+# A number to `serde_yaml`, though PyYAML leaves these as text.
+YAML_NUMBER_CASES = [
+    ("1e5", set()),
+    ("1E5", set()),
+    ("1e-5", set()),
+    ("1e+5", set()),
+    ("1.5e3", set()),
+    ("-1e5", set()),
+    (".5e3", set()),
+    ("5.e3", set()),
+]
 # Whitespace around a formula is no part of it, of any kind (`str::trim`).
 TRIM_CASES = [
     ("len(member_of_household) ", set()),
@@ -621,6 +632,7 @@ def test_words_in_strings_and_comments_name_no_input(
     + UNREAD_ARGUMENT_CASES
     + WILDCARD_ONLY_CASES
     + DECLARED_NAME_CASES
+    + YAML_NUMBER_CASES
     + TRIM_CASES,
 )
 def test_a_name_is_an_input_only_where_the_lowering_reads_one(
@@ -729,6 +741,7 @@ COMPILED_CASES = [
         *UNREAD_ARGUMENT_CASES,
         *WILDCARD_ONLY_CASES,
         *DECLARED_NAME_CASES,
+        *YAML_NUMBER_CASES,
         *TRIM_CASES,
     ]
 ]
@@ -1054,6 +1067,14 @@ def mutated(rng: random.Random, formula: str) -> str:
     return " ".join(tokens) or "1"
 
 
+def engine_parses(root: Path, path: Path) -> bool:
+    try:
+        CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+    except ValueError as error:
+        return not re.search("formula parse error|has no formula version", str(error))
+    return True
+
+
 @needs_dense
 @pytest.mark.parametrize("seed", range(4))
 def test_the_parser_accepts_what_the_engine_parses(tmp_path: Path, seed: int) -> None:
@@ -1063,16 +1084,143 @@ def test_the_parser_accepts_what_the_engine_parses(tmp_path: Path, seed: int) ->
     for _ in range(500):
         formula = mutated(rng, random_formula(rng, rng.randint(0, 2)))
         path = write_formula_module(root, {"called": formula})
-        try:
-            CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
-            engine_parses = True
-        except ValueError as error:
-            engine_parses = "formula parse error" not in str(error)
-        assert (_parse_formula(formula).expr is not None) == engine_parses, formula
-        accepted += engine_parses
-        refused += not engine_parses
+        parses = engine_parses(root, path)
+        assert (_parse_formula(formula).expr is not None) == parses, formula
+        accepted += parses
+        refused += not parses
     assert accepted >= 15
     assert refused >= 100
+
+
+PARSER_EDGES = [
+    # Numbers
+    "1_000", "1__0", "1_", "1_.5", "1._5", "1.5_", "1.", "1.x", "x + 1.", "1.5.2", "0x10",
+    ".5", "x + .5", "007", "1_000.5_5", "1 .5", "1. 5", "9223372036854775807",
+    # Numbers `serde_yaml` reads from a bare scalar
+    "1e5", "1E5", "1e-5", "1e+5", "1.5e3", "-1e5", ".5e3", "5.e3", "x + 1e5",
+    # Dates
+    "2026-01-01", "x == 2026-01-01", "2026-1-1", "2026-01-011", "12026-01-01",
+    "2026-01-0", "2026-01", "2026_01-01-01",
+    # Names and paths
+    "a/b", "a/b/c", "a/1", "a/ b", "a /b", "a//b", "a/b/", "/a", "_", "__", "_1", "a1",
+    "1a", "a.b", "a.b.c", "a/b.c", "a.b/c", "a.1", "a._", "a._b", "é", "x é", "aé",
+    # Strings
+    '"s"', "'s'", '"s', "'s", '"', "'", '"a\\"b"', "'a\\'b'", '"a\\', '""', "''",
+    '"a" "b"', '"a\nb"', '"""', '"""x', '"""x"""', 'x """y"""', '"""y""" x',
+    '"""x""" + """y"""', '""""', '"""""', '""""""', '"""""""',
+    # Comments
+    "x # c", "# c", "# c\nx", "x # c\n+ y", "x #", "#", 'x # "unclosed', 'x # """',
+    # Whitespace
+    "x\t+\ty", "x\n+\ny", "x\r\n+ y", "x\x0c+ y", "x\x0b+ y", "x\xa0+ y", "\xa0", " ",
+    " ", "\n", "x + y",
+    # Keywords in odd places
+    "if", "else", "elif", "match", "and", "or", "not", "from", "to", "entity", "amend",
+    "true", "True", "TRUE", "false", "False", "not not x", "not -x", "- not x", "--x",
+    "x and", "and x", "x or or y", "x and not y", "x.if", "x.true", "x.not", "if.x",
+    "true.x", "(true).x", "1 . x", "(1).x", '"s".x',
+    # Operators
+    "x = 1", "x == 1", "x != 1", "x ! 1", "!x", "x -> y", "x => y", "x <= y", "x < = y",
+    "x >= y", "x > = y", "x < y < z", "x == y == z", "(x < y) < z", "x + - y", "x - - y",
+    "x * - y", "x / / y", "x // y", "x / y", "x/y", "x /y", "x/ y", "x/1", "x/ 1", "x / 1",
+    "x%y", "x^y", "x & y", "x | y", "x ~ y", "x ? y : z", "x;", "x; y", "{x}", "@x", "x$",
+    # Grouping, calls and indexes
+    "()", "(x", "x)", "(x))", "((x)", "[x]", "x[", "x[]", "x[1", "x[1]", "x[1][2]",
+    "x[1].y", "x.y[1]", "x(", "x()", "x(1", "x(1,", "x(1,)", "x(,)", "x(,1)", "x(1,,2)",
+    "x(y)(z)", "(x)(y)", "((x))(y)", "x.y(z)", "x[1](z)", "f(x).y", "f(x)[1]", "(x)[1]",
+    "(x).y", "(x + y).z", "(x + y)[1]", "(x + y)(z)", "x y", "x 1", "1 x", "1 2", '"s" x',
+    "x,", ",x", "x, y",
+    # Let
+    "x = y = 1", "a/b = 1", "_ = 1", "(x = 1)", "if a: x = 1 else: 2", "f(x = 1)", "1 = 2",
+    "if = 1", "x == = 1",
+    # Conditionals
+    "if a: 1", "if a: 1 else 2", "if a 1 else: 2", "if a: 1 else: 2", "if a: 1 elif b: 2",
+    "if a: 1 elif b: 2 else: 3", "if a: 1 else: 2 else: 3", "if a: 1 elif: 2 else: 3",
+    "elif a: 1", "else: 1", "if: 1 else: 2", "if a: else: 2", "if a: 1 else:",
+    "if if a: 1 else: 2: 3 else: 4", "1 + if a: 2 else: 3", "(if a: 2 else: 3) + 1",
+    "if a: 2 else: 3 + 1", "not if a: 1 else: 2", "-if a: 1 else: 2",
+    "f(if a: 1 else: 2)", "x[if a: 1 else: 2]", "if a: match b: _ => 1 else: 2",
+    "if a: 1 else: match b: _ => 2",
+    # Match
+    "match", "match x", "match x:", "match x: _ => 1", "match x: 1 => 2",
+    "match x: 1 => 2 _ => 3", "match x: _ => 1 _ => 2", "match x: _ => 1 1 => 2",
+    "match x: a => 1", "match x: a/b => 1", "match x: true => 1", "match x: True => 1",
+    "match x: 'a' => 1", "match x: 1.5 => 1", "match x: -1 => 1", "match x: (1) => 1",
+    "match x: 1 + 1 => 1", "match x: a.b => 1", "match x: 1 2", "match x: 1 =>",
+    "match x: => 1", "match : _ => 1", "match x _ => 1", "match x: _ -> 1",
+    "match x, y: _ => 1", "match x: 1 => 2, 3 => 4", "match x: if => 1",
+    "match if a: 1 else: 2: _ => 3", "match (if a: 1 else: 2): _ => 3",
+    "match match x: _ => 1: _ => 2", "match (match x: _ => 1): _ => 2",
+    "(match x: _ => 1) + 1", "match x: _ => 1 + 1", "match x: _ => match y: _ => 1",
+    "match x: 1 => match y: 2 => 3 _ => 4", "1 + match x: _ => 1", "not match x: _ => 1",
+    "f(match x: _ => 1)", "x[match y: _ => 1]", "match x: 1 => 2 y", "match x: 1 => 2 3",
+    "match x: _ => 1 y", "match x: 2026-01-01 => 1", "match x: and => 1",
+    # Declarations, which a formula refuses
+    "x from 2030-01-01: y", "x\nother:\n  y", "from 2030-01-01: y", "entity Person",
+    "amend x", "x status: foo",
+]  # fmt: skip
+
+
+@needs_dense
+@pytest.mark.parametrize("formula", PARSER_EDGES)
+def test_the_parser_agrees_with_the_engine_at_the_edges(tmp_path: Path, formula: str) -> None:
+    root = canonical_root(tmp_path)
+    path = write_formula_module(root, {"called": formula})
+
+    assert (_parse_formula(formula).expr is not None) == engine_parses(root, path)
+
+
+# The engine refuses these when it converts the number, which the parser leaves
+# to it. They name no input either way.
+@needs_dense
+@pytest.mark.parametrize(
+    ("formula", "refusal"),
+    [
+        ("9223372036854775808", "number too large"),
+        ("99999999999999999999999999999.5", "Invalid decimal"),
+    ],
+)
+def test_only_the_engine_refuses_a_number_too_large(
+    tmp_path: Path, formula: str, refusal: str
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_formula_module(root, {"called": formula})
+
+    assert _parse_formula(formula).expr is not None
+    assert inferred_input_names(root) == set()
+    with pytest.raises(ValueError, match=refusal):
+        CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+
+
+@needs_binary
+@pytest.mark.parametrize(
+    ("scalar", "inputs"),
+    [("yes", {"yes"}), ("no", {"no"}), ("on", {"on"}), ("off", {"off"})],
+)
+def test_pyyaml_reads_these_words_as_booleans_where_the_engine_reads_names(
+    tmp_path: Path, scalar: str, inputs: set[str]
+) -> None:
+    # Intended, for now: discovery sees only what PyYAML loaded, so it can't tell
+    # a bare `yes` from `true`. No corpus formula is one of these words.
+    root = canonical_root(tmp_path)
+    path = write_rulespec(
+        root,
+        "us/statutes/7/2014.yaml",
+        f"""
+format: rulespec/v1
+rules:
+  - name: called
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: {scalar}
+""",
+    )
+
+    assert inferred_input_names(root) == set()
+    assert artifact_inputs(root, path, tmp_path / "artifact.json") == inputs
 
 
 # A formula the parser refuses has no reads to follow, and no program to check
