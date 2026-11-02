@@ -338,7 +338,10 @@ nothing confirms, and execution reserves every such buffer fallibly. When the
 allocator refuses one, the call fails with a `TypeMismatch` naming the count,
 whichever rows reach it. On a host that overcommits memory, a large but
 possible count can pass its reservation and still exhaust memory as the buffer
-is filled. Only a refused request becomes an error.
+is filled. Only a refused request becomes an error. A text column shares
+each value among its rows rather than copying it per row, and an error that
+quotes a text (a `match` with no arm, a lifetime input that varies across
+periods) builds its message only when the call reports it, fallibly.
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
