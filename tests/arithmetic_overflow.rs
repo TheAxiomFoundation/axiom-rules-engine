@@ -62,6 +62,11 @@ rules:
 const MEMBER_INCOME_TOTAL: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: result
     kind: derived
     entity: Household
@@ -118,6 +123,7 @@ fn household_request(
     households: &[(&str, &[(&str, &str)])],
 ) -> ExecutionRequest {
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
             .expect("RuleSpec lowers"),
@@ -177,6 +183,7 @@ fn member_request(
         }
     }
     ExecutionRequest {
+        relation_binding: Default::default(),
         mode,
         program: axiom_rules_engine::rulespec::lower_rulespec_str(rulespec)
             .expect("RuleSpec lowers"),
@@ -247,6 +254,7 @@ fn dense_members(rulespec: &str, households: &[&[&str]]) -> Result<Vec<Decimal>,
                 DenseRelationBatchSpec {
                     offsets,
                     inputs: HashMap::from([("income".to_string(), DenseColumn::Decimal(incomes))]),
+                    ..Default::default()
                 },
             )]),
         },
@@ -603,6 +611,11 @@ fn filtered_aggregation_checks_the_filter_before_the_value_in_every_mode() {
     const RULESPEC: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: earning_member
     kind: derived
     entity: Person
@@ -669,6 +682,11 @@ fn member_predicate_count(predicate: &str) -> String {
         r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: counted_member
     kind: derived
     entity: Person
@@ -730,6 +748,11 @@ fn filtered_related_aggregation_overflow_is_an_error_in_every_mode() {
     const RULESPEC: &str = r#"
 format: rulespec/v1
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: earning_member
     kind: derived
     entity: Person

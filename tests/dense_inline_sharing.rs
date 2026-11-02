@@ -1,8 +1,8 @@
 //! Dense compiles each rule it inlines once, however many paths reach it
 //! (audit finding dense-inline-derived-exponential, 2026-09-26).
 //!
-//! Dense inlines a rule wherever a `sum` value, a `where` clause or a derived
-//! relation's predicate reads it, and inlines the rules that rule reads the
+//! Dense inlines a rule wherever an aggregation's value, a `where` clause or a
+//! derived relation's predicate reads it, and inlines the rules that rule reads the
 //! same way. It inlined a fresh copy at every read, so a rule graph with shared
 //! dependencies compiled to a tree with one node per path: `p_i = p_{i-1} +
 //! p_{i-1}` compiled to 2^k nodes at depth k, and evaluation walked all of
@@ -23,6 +23,12 @@
 //!   whichever rule reads the body.
 //! * **Cycles.** Rules that inline each other in a cycle are refused with an
 //!   error instead of overflowing the stack.
+//! * **Depth bound.** A shared read is held to `MAX_INLINE_DEPTH` as a fresh
+//!   copy compiled there was: whether dense compiles a program does not
+//!   depend on which read compiles a body first.
+//! * **Deferral.** A compile deferral that unwinds a rule takes its reads
+//!   back, so each body counts the reads of the compiled program, deferring
+//!   or not.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -278,6 +284,7 @@ fn dense(
                         "income".to_string(),
                         DenseColumn::Decimal(incomes.clone()),
                     )]),
+                    ..Default::default()
                 },
             )
         })
@@ -966,4 +973,140 @@ fn shares_a_body(compiled: &DenseCompiledProgram) -> bool {
             .and_then(|count| count.parse::<usize>().ok())
             .is_some_and(|count| count > 1)
     })
+}
+
+// ---------------------------------------------------------------------------
+// The inline depth bound, and compile deferral
+// ---------------------------------------------------------------------------
+
+/// Person rules `c_0 = income`, `c_i = c_{i-1} + 1` up to `c_links`, and
+/// `wrapped = ((c_links + 1) + 1) ...` with `wraps` additions in one formula,
+/// so it reads `c_links` `wraps` levels deep. A household rule sums both,
+/// `wrapped` first when `deep_first`.
+fn shallow_and_deep_reads(links: usize, wraps: usize, deep_first: bool) -> Value {
+    let mut rules = vec![scalar_rule("c_0", "Person", input("income"))];
+    for link in 1..=links {
+        rules.push(scalar_rule(
+            &format!("c_{link}"),
+            "Person",
+            add(vec![derived(&format!("c_{}", link - 1)), integer(1)]),
+        ));
+    }
+    let mut wrapped = derived(&format!("c_{links}"));
+    for _ in 0..wraps {
+        wrapped = add(vec![wrapped, integer(1)]);
+    }
+    rules.push(scalar_rule("wrapped", "Person", wrapped));
+    let (shallow, deep) = (
+        sum("member", &format!("c_{links}"), None),
+        sum("member", "wrapped", None),
+    );
+    let items = if deep_first {
+        vec![deep, shallow]
+    } else {
+        vec![shallow, deep]
+    };
+    rules.push(scalar_rule("total", "Household", add(items)));
+    program(vec![member()], rules)
+}
+
+/// A shared body is held to `MAX_INLINE_DEPTH` from every read, as a fresh
+/// copy compiled there was. Whether dense compiles a program cannot depend on
+/// which read compiles the body first: read shallow first and shared deep, or
+/// compiled deep first and shared shallow, dense accepts the same programs and
+/// refuses the rest with the same error. The wraps cross the bound.
+#[test]
+fn a_shared_body_is_held_to_the_inline_depth_bound_from_every_read() {
+    on_large_stack(|| {
+        let (mut accepted, mut refused) = (0, 0);
+        for wraps in (90..=130).step_by(4) {
+            let compile = |deep_first| {
+                compile_dense(&shallow_and_deep_reads(200, wraps, deep_first))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            };
+            let (shallow_first, deep_first) = (compile(false), compile(true));
+            assert_eq!(shallow_first, deep_first, "{wraps} wraps");
+            match deep_first {
+                Ok(()) => accepted += 1,
+                Err(error) => {
+                    assert!(error.contains("nest more than 512 levels"), "{error}");
+                    refused += 1;
+                }
+            }
+        }
+        assert!(
+            accepted > 0 && refused > 0,
+            "{accepted} accepted, {refused} refused"
+        );
+    });
+}
+
+/// The read count of each inlined body, by its `Debug` rendering, sorted.
+fn read_counts(compiled: &DenseCompiledProgram) -> Vec<usize> {
+    let plan = format!("{compiled:?}");
+    let mut counts: Vec<usize> = plan
+        .match_indices("references: ")
+        .filter_map(|(at, prefix)| {
+            plan[at + prefix.len()..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|count| count.parse().ok())
+        })
+        .collect();
+    counts.sort_unstable();
+    counts
+}
+
+/// When compiling defers a rule (see `axiom_rules_engine::depth`), the rules
+/// it unwinds are compiled again and read their bodies again. Each body still
+/// counts the reads of the compiled program: deferring at every rule reference
+/// gives the same counts as never deferring, so a body read once is still
+/// evaluated in place.
+#[test]
+fn compile_deferral_leaves_each_body_with_the_reads_of_the_program() {
+    on_large_stack(|| {
+        for arm in [
+            "related scalar",
+            "related predicate",
+            "current scalar",
+            "current judgment",
+        ] {
+            for depth in [3, 7] {
+                let program = diamond_program(arm, depth);
+                let counts = |levels| {
+                    axiom_rules_engine::depth::with_suspend_depth(levels, || {
+                        read_counts(&compile_dense(&program).expect("dense compiles"))
+                    })
+                };
+                let recursive = counts(usize::MAX);
+                assert!(!recursive.is_empty(), "{arm}: no inlined body");
+                assert_eq!(counts(1), recursive, "{arm} at depth {depth}");
+                assert_eq!(counts(2), recursive, "{arm} at depth {depth}");
+            }
+        }
+        // `total` reads `p`'s body, then a rule not compiled yet, which
+        // defers and unwinds `total` after its read. Dense compiles a
+        // scalar-entity rule only when a rule reads it, so `offset` is not
+        // compiled before `total`, whatever order the rules come in.
+        let program = program(
+            vec![member()],
+            vec![
+                scalar_rule("p", "Person", add(vec![input("income"), integer(1)])),
+                scalar_rule("offset", "Scalar", integer(1)),
+                scalar_rule(
+                    "total",
+                    "Household",
+                    add(vec![sum("member", "p", None), derived("offset")]),
+                ),
+            ],
+        );
+        let counts = |levels| {
+            axiom_rules_engine::depth::with_suspend_depth(levels, || {
+                read_counts(&compile_dense(&program).expect("dense compiles"))
+            })
+        };
+        assert_eq!(counts(usize::MAX), vec![1]);
+        assert_eq!(counts(1), vec![1]);
+    });
 }

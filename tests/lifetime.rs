@@ -1092,6 +1092,42 @@ fn sum_top_n_n_exceeds_period_count_errors_in_f64_path() {
     );
 }
 
+/// An n beyond the i64 range is reported as supplied in both dtype paths, never
+/// saturated. `i64::MAX as f64` rounds up to 2^63, so the f64 path's old range
+/// check let exactly 2^63 through, saturated it, and the error named n as
+/// 9223372036854775807 (`i64::MAX`) rather than the value supplied.
+#[test]
+fn sum_top_n_n_beyond_i64_is_reported_as_supplied_in_both_paths() {
+    let module = single_rule_module("top", "Money", "sum_top_n_over_periods(earnings, k)");
+    let program = compile(&module, "Worker");
+    let periods = vec![year(2001), year(2002)];
+    for n in [9_223_372_036_854_775_808.0, 1e20] {
+        let batches = || {
+            periods
+                .iter()
+                .map(|_| batch_multi(1, &[("earnings", vec![1.0]), ("k", vec![n])]))
+                .collect::<Vec<_>>()
+        };
+        let outputs = ["top".to_string()];
+        for (path, result) in [
+            (
+                "decimal",
+                program.execute_lifetime(&periods, batches(), &outputs),
+            ),
+            (
+                "f64",
+                program.execute_lifetime_f64(&periods, batches(), &outputs),
+            ),
+        ] {
+            let message = result.expect_err("an n beyond i64 must error").to_string();
+            assert!(
+                message.contains(&format!("n resolved to {n} ")),
+                "{path} path, n = {n}: {message}"
+            );
+        }
+    }
+}
+
 /// A parameter-sourced n that varies by period is a data error under the strict
 /// n contract — held to the same period-invariance requirement as an
 /// input-sourced n — not silently pinned to the reference period.

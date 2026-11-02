@@ -3,6 +3,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -12,14 +13,18 @@ use thiserror::Error;
 use crate::compile::CompiledProgramArtifact;
 use crate::engine::{
     ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
-    relation_member_outside_derived_relation,
+    decimal_tie_prefers, extreme_value_type_error, relation_member_outside_derived_relation,
 };
 use crate::lazy::{RowErrors, RowMask};
 use crate::model::{
-    ComparisonOp, DType, DerivedSemantics, IndexedParameter, JudgmentExpr, JudgmentOutcome,
-    OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode, SCALAR_ENTITY,
-    ScalarExpr, ScalarValue,
+    ComparisonOp, DType, Derived, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
+    JudgmentOutcome, OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode,
+    SCALAR_ENTITY, ScalarExpr, ScalarValue, Term,
 };
+
+#[cfg(test)]
+#[path = "dense_relation_chain_tests.rs"]
+mod relation_chain_tests;
 
 #[derive(Clone, Debug)]
 pub enum DenseColumn {
@@ -98,6 +103,11 @@ trait DenseNum: Copy + PartialOrd {
     /// `partial_cmp` made the sort's comparator inconsistent, which lets
     /// `sort_by` panic.
     fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering;
+    /// Whether `self` replaces an equal `other` as a `min`/`max` over related
+    /// entities, so the result does not depend on member order: explain's
+    /// rule for decimals (larger scale, then non-negative zero), and
+    /// non-negative zero for `f64`.
+    fn tie_prefers(&self, other: &Self) -> bool;
     /// Wrap evaluated values in the column variant for this mode.
     fn into_column(values: Vec<Self>) -> DenseColumn;
 }
@@ -151,6 +161,10 @@ impl DenseNum for Decimal {
 
     fn rank_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.cmp(other)
+    }
+
+    fn tie_prefers(&self, other: &Self) -> bool {
+        decimal_tie_prefers(self, other)
     }
 
     fn try_to_i64_trunc(self) -> Option<i64> {
@@ -238,15 +252,17 @@ impl DenseNum for f64 {
         }
     }
 
+    fn tie_prefers(&self, other: &Self) -> bool {
+        !self.is_sign_negative() && other.is_sign_negative()
+    }
+
     fn try_to_i64_trunc(self) -> Option<i64> {
         // Reject non-finite and out-of-range values instead of saturating: the
         // strict n contract errors on a garbage n rather than silently reading
-        // it as 0 (NaN) or a clamped extreme.
-        let truncated = self.trunc();
-        if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
-            return None;
-        }
-        Some(truncated as i64)
+        // it as 0 (NaN) or a clamped extreme. Comparing against
+        // `i64::MAX as f64` let exactly 2^63 through, because that cast rounds
+        // up to 2^63; `f64_as_index` checks the half-open range instead.
+        f64_as_index(self.trunc())
     }
 
     fn into_column(values: Vec<Self>) -> DenseColumn {
@@ -267,12 +283,13 @@ fn round_dense_column<N: DenseNum>(
 ) -> DenseColumn {
     match column {
         DenseColumn::Bool(_) | DenseColumn::Text(_) | DenseColumn::Date(_) => column,
-        numeric => N::into_column(
-            numeric_values::<N>(&numeric, live, errors)
-                .into_iter()
-                .map(|value| value.round_to(rounding))
-                .collect(),
-        ),
+        numeric => {
+            let mut values = numeric_values::<N>(&numeric, live, errors);
+            for row in live.without(errors).rows() {
+                values[row] = values[row].round_to(rounding);
+            }
+            N::into_column(values)
+        }
     }
 }
 
@@ -293,12 +310,38 @@ pub struct DenseRelationSchema {
     filter: Option<CompiledRelatedJudgmentExpr>,
 }
 
-#[derive(Clone, Debug)]
+/// One relation's rows for a batch: root row `r`'s related rows are
+/// `offsets[r]..offsets[r + 1]` of every related column.
+#[derive(Clone, Debug, Default)]
 pub struct DenseRelationBatchSpec {
+    /// `row_count + 1` non-decreasing boundaries starting at 0. The last is the
+    /// relation's related row count.
     pub offsets: Vec<usize>,
+    /// Related columns by input name, one value per related row, whether or
+    /// not the program reads them.
     pub inputs: HashMap<String, DenseColumn>,
+    /// The related row count, stated by the caller. When given it must equal
+    /// the last offset. It is required when the offsets claim related rows but
+    /// no related column is supplied (a `len` over the relation, or a filter
+    /// that reads only the current entity), because nothing else confirms the
+    /// offsets. It is the caller's assertion, not a check: count the related
+    /// rows the offsets index, one per root and member pair (a related entity
+    /// two roots share counts twice), independently of the offsets, rather
+    /// than copying the last offset.
+    pub related_row_count: Option<usize>,
+    /// Related columns supplied by length alone, without their values. Each
+    /// is checked like a column in `inputs` (it must have the related row
+    /// count, and one that does confirms the count), but no rule can read
+    /// one. A binding layer that does not convert the columns no rule reads,
+    /// as the PyO3 extension does not, passes their lengths here.
+    /// A length that equals the last offset confirms the count as a stated
+    /// `related_row_count` would, so it is trusted the same way.
+    pub input_lengths: HashMap<String, usize>,
 }
 
+/// One period's dense input: `row_count` root rows, root columns of that
+/// length, and a batch for every relation the program reads. Batches under
+/// other relation keys are ignored.
 #[derive(Clone, Debug)]
 pub struct DenseBatchSpec {
     pub row_count: usize,
@@ -306,15 +349,62 @@ pub struct DenseBatchSpec {
     pub relations: HashMap<DenseRelationKey, DenseRelationBatchSpec>,
 }
 
+/// The most rows a dense batch or relation may claim. A dense buffer holds one
+/// element per row and a `Vec` holds at most `isize::MAX` bytes, so a larger
+/// count would panic with "capacity overflow" when a buffer of the widest
+/// element is allocated; binding refuses it instead.
+const MAX_DENSE_ROWS: usize = isize::MAX as usize / WIDEST_DENSE_ELEMENT;
+
+/// The size of the widest element a dense buffer holds per row. List any new
+/// per-row element type here.
+const WIDEST_DENSE_ELEMENT: usize = {
+    let sizes = [
+        size_of::<bool>(),
+        size_of::<i64>(),
+        size_of::<f64>(),
+        size_of::<usize>(),
+        size_of::<Decimal>(),
+        size_of::<String>(),
+        size_of::<NaiveDate>(),
+        size_of::<JudgmentOutcome>(),
+        size_of::<ScalarValue>(),
+    ];
+    let mut widest = 1;
+    let mut index = 0;
+    while index < sizes.len() {
+        if sizes[index] > widest {
+            widest = sizes[index];
+        }
+        index += 1;
+    }
+    widest
+};
+
+/// One relation schema's view of its batch. Every link of a derived-relation
+/// chain is keyed to the chain's base relation, so the schemas that share a
+/// key share its offsets, owners and columns rather than each holding a copy.
 #[derive(Clone, Debug)]
 struct DenseRelationBatch {
-    offsets: Vec<usize>,
+    offsets: Rc<[usize]>,
     related_count: usize,
-    /// The root row that owns each related row.
-    owners: Vec<usize>,
-    /// `None` is a column the caller did not supply: a missing input on every
-    /// related row, an error only for the rows that read it.
-    inputs: Vec<Option<DenseColumn>>,
+    /// The root row that owns each related row. Sharing the Vec preserves its
+    /// allocation without copying the rows into an Rc slice.
+    owners: Rc<Vec<usize>>,
+    /// This schema's `related_inputs`, index-aligned. `None` is a column the
+    /// caller did not supply: a missing input on every related row, an error
+    /// only for the rows that read it.
+    inputs: Vec<Option<Rc<DenseColumn>>>,
+}
+
+/// A relation key's batch, bound once for every schema keyed to it.
+struct BoundRelationKey {
+    offsets: Rc<[usize]>,
+    related_count: usize,
+    owners: Rc<Vec<usize>>,
+    /// Supplied columns stay here until a schema first reads them.
+    unbound_inputs: HashMap<String, DenseColumn>,
+    /// Validated columns, shared by every schema that reads them.
+    inputs: HashMap<String, Rc<DenseColumn>>,
 }
 
 #[derive(Clone, Debug)]
@@ -343,6 +433,8 @@ pub struct DenseExecutionResult {
 pub enum DenseCompileError {
     #[error(transparent)]
     Eval(#[from] EvalError),
+    #[error("relation entity typing failed:\n{0}")]
+    RelationTyping(crate::relation_typing::RelationTypingReport),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
     #[error(
@@ -381,6 +473,16 @@ enum CompiledScalarExpr {
     Derived(usize),
     /// A rule body inlined on root rows: `inline_scalars[index]`.
     Inline(usize),
+    /// Commencement of a rule inlined on the current-record axis.
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledScalarExpr>,
+    },
+    /// An inlined rule's output rounding, applied before its dependent reads it.
+    Round {
+        value: Box<CompiledScalarExpr>,
+        rounding: Rounding,
+    },
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledScalarExpr>,
@@ -411,12 +513,35 @@ enum CompiledScalarExpr {
         from: Box<CompiledScalarExpr>,
         to: Box<CompiledScalarExpr>,
     },
+    /// `only_related`; `relation_name` as for `ExtremeRelated`.
+    OnlyRelated {
+        relation: usize,
+        relation_name: String,
+        input: usize,
+    },
     CountRelated {
         relation: usize,
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
     SumRelated {
         relation: usize,
+        value: Box<CompiledRelatedScalarExpr>,
+        predicate: Option<CompiledRelatedJudgmentExpr>,
+    },
+    /// `min`/`max` over related entities. `relation_name` is the relation as
+    /// the formula names it, for explain's errors: a derived relation's schema
+    /// is keyed to its chain's base relation.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: usize,
+        relation_name: String,
+        value: Box<CompiledRelatedScalarExpr>,
+        predicate: Option<CompiledRelatedJudgmentExpr>,
+    },
+    /// `only` over related entities; `relation_name` as for `ExtremeRelated`.
+    SingleRelated {
+        relation: usize,
+        relation_name: String,
         value: Box<CompiledRelatedScalarExpr>,
         predicate: Option<CompiledRelatedJudgmentExpr>,
     },
@@ -436,8 +561,9 @@ enum CompiledScalarExpr {
     },
     /// Cross-period reduction, evaluated only by the lifetime executor. `value`
     /// is compiled as an ordinary per-period scalar (evaluated once per supplied
-    /// period); `n` (SumTopN only) is compiled likewise and read at the
-    /// reference period. The per-period executor rejects this node.
+    /// period); `n` (SumTopN only) is compiled likewise, evaluated in every
+    /// period and required to be period-invariant before its reference-period
+    /// value is used. The per-period executor rejects this node.
     OverPeriods {
         kind: OverPeriodsKind,
         value: Box<CompiledScalarExpr>,
@@ -457,6 +583,17 @@ enum CompiledRelatedScalarExpr {
     /// A related rule's body inlined on this relation's related rows:
     /// `related_inline_scalars[index]`.
     Inline(usize),
+    /// An inlined dependency has its own commencement, independently of the
+    /// aggregate rule that reads it.
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledRelatedScalarExpr>,
+    },
+    /// An inlined related rule's output rounding, under the related-row mask.
+    Round {
+        value: Box<CompiledRelatedScalarExpr>,
+        rounding: Rounding,
+    },
     ParameterLookup {
         parameter: usize,
         index: Box<CompiledRelatedScalarExpr>,
@@ -538,6 +675,55 @@ impl MatchLabels {
 const NO_MATCH_OUTSIDE_IF: &str =
     "a `match` fallback (`no_match`) that is not the `else` branch of an `if`";
 
+/// The refusal of a qualified read (`anchor.name`, `candidate.name`). Dense
+/// compiles no relation roles yet (#218): a program whose reachable
+/// predicates use one runs in explain or fast mode.
+fn relation_role_unsupported(term: Term, name: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the qualified read `{}.{name}` in a derived relation's predicate; relation roles run in explain and fast modes, and dense support is #218",
+        term.as_str()
+    ))
+}
+
+fn relation_atom_unsupported(relation: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the relation atom `{relation}` in a derived relation's predicate; relation atoms run in explain and fast modes, and dense support is #218"
+    ))
+}
+
+fn exists_unsupported() -> DenseCompileError {
+    DenseCompileError::Unsupported(
+        "bounded exists is not supported in dense execution (#218)".to_string(),
+    )
+}
+
+fn path_source_unsupported(relation: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "the path source of derived relation `{relation}`; path sources run in explain and fast modes, and dense support is #218"
+    ))
+}
+
+/// The relation at or below `relation`, down its single sources, that takes
+/// a path source.
+fn path_source_below<'a>(program: &'a Program, relation: &'a str) -> Option<&'a str> {
+    let mut on_chain = HashSet::new();
+    let mut name = relation;
+    while on_chain.insert(name) {
+        let derivation = program.relations.get(name)?.derivation.as_ref()?;
+        if derivation.source_path.is_some() {
+            return Some(name);
+        }
+        name = derivation.source_relation.as_deref()?;
+    }
+    None
+}
+
+fn term_comparison_unsupported() -> DenseCompileError {
+    DenseCompileError::Unsupported(
+        "a term comparison in a derived relation's predicate; term comparisons run in explain and fast modes, and dense support is #218".to_string(),
+    )
+}
+
 #[derive(Clone, Debug)]
 enum CompiledRelatedJudgmentExpr {
     Literal(bool),
@@ -550,6 +736,10 @@ enum CompiledRelatedJudgmentExpr {
     /// A related rule's body inlined on this relation's related rows:
     /// `related_inline_judgments[index]`.
     Inline(usize),
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledRelatedJudgmentExpr>,
+    },
     /// A `relation_member` outside a derived relation's own predicate: in a
     /// `count`/`sum` `where` clause, or in a related rule a predicate reads.
     /// Explain evaluates both without a relation context, so every related
@@ -572,9 +762,72 @@ enum CompiledJudgmentExpr {
     Derived(usize),
     /// A rule body inlined on root rows: `inline_judgments[index]`.
     Inline(usize),
+    Commenced {
+        rule: RuleCommencement,
+        value: Box<CompiledJudgmentExpr>,
+    },
     And(Vec<CompiledJudgmentExpr>),
     Or(Vec<CompiledJudgmentExpr>),
     Not(Box<CompiledJudgmentExpr>),
+}
+
+#[derive(Clone, Debug)]
+struct RuleCommencement {
+    derived: String,
+    effective_from: NaiveDate,
+}
+
+impl RuleCommencement {
+    fn rows(&self, period: &Period, mask: &RowMask) -> (RowMask, RowErrors) {
+        if period.start < self.effective_from {
+            let mut errors = RowErrors::new();
+            errors.record_all(
+                mask,
+                &EvalError::MissingDerivedFormulaVersion {
+                    derived: self.derived.clone(),
+                    at: period.start,
+                },
+            );
+            (RowMask::none(mask.len()), errors)
+        } else {
+            (mask.clone(), RowErrors::new())
+        }
+    }
+}
+
+/// Inlined rules obey the same supported version shape as root rules: one
+/// unbounded version, evaluated only after its commencement. A related rule
+/// can change independently of the aggregate that reads it.
+fn inlined_rule_semantics(
+    derived: &Derived,
+) -> Result<(&DerivedSemantics, Option<RuleCommencement>), DenseCompileError> {
+    match derived.versions.as_slice() {
+        [] => Ok((&derived.semantics, None)),
+        [only] if only.effective_to.is_none() => Ok((
+            &only.semantics,
+            Some(RuleCommencement {
+                derived: derived.name.clone(),
+                effective_from: only.effective_from,
+            }),
+        )),
+        _ => Err(DenseCompileError::Unsupported(format!(
+            "versioned inlined derived formulas in `{}`; use generic API execution",
+            derived.name
+        ))),
+    }
+}
+
+fn named_aggregate_error(
+    function: &str,
+    relation: &str,
+    error: DenseCompileError,
+) -> DenseCompileError {
+    match error {
+        DenseCompileError::Unsupported(message) => DenseCompileError::Unsupported(format!(
+            "{message} (while compiling {function} over relation `{relation}`)"
+        )),
+        other => other,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -606,37 +859,6 @@ struct CompiledParameter {
     parameter: IndexedParameter,
 }
 
-/// A rule body dense inlines, compiled once and read through `Inline(index)`
-/// nodes. Dense inlines a rule wherever an aggregation, a `where` clause or a
-/// derived relation's predicate reads it, and inlines the rules that rule
-/// reads the same way. Inlining each copy afresh made a rule graph with
-/// shared dependencies (`p_i = p_{i-1} + p_{i-1}`) compile to a tree with one
-/// node per path, 2^k for k levels. Each body is now compiled once per place
-/// it is evaluated: a current-entity rule's body on root rows, and a related
-/// rule's body on one relation's related rows.
-///
-/// An inlined body keeps the inline semantics: it is the rule's unversioned
-/// formula (`Derived::semantics`), with no commencement check and no
-/// relabeling of its errors, and a `match` in it names the rule that owns it.
-#[derive(Clone, Debug)]
-struct InlineBody<E> {
-    body: E,
-    /// How many compiled nodes read this body. The executors cache the column
-    /// of a body read by more than one node, so a row is computed once however
-    /// many paths reach it; a body read by one node is evaluated in place, as
-    /// the inlined copy was.
-    references: usize,
-}
-
-/// Where dense inlines a rule's body: on root rows, or on one relation's
-/// related rows. A rule's body compiles to the same expression at every read
-/// from one site, so the site keys the shared body.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-enum InlineSite {
-    Current(String),
-    Related(usize, String),
-}
-
 #[derive(Clone, Debug)]
 pub struct DenseCompiledProgram {
     root_entity: String,
@@ -649,6 +871,51 @@ pub struct DenseCompiledProgram {
     inline_judgments: Vec<InlineBody<CompiledJudgmentExpr>>,
     related_inline_scalars: Vec<InlineBody<CompiledRelatedScalarExpr>>,
     related_inline_judgments: Vec<InlineBody<CompiledRelatedJudgmentExpr>>,
+}
+
+/// A rule body dense inlines, compiled once and read through `Inline(index)`
+/// nodes. Dense inlines a rule wherever an aggregation's value, a `where`
+/// clause or a derived relation's predicate reads it, and inlines the rules
+/// that rule reads the same way. Inlining each copy afresh made a rule graph
+/// with shared dependencies (`p_i = p_{i-1} + p_{i-1}`) compile to a tree with
+/// one node per path, 2^k for k levels. Each body is now compiled once per
+/// place it is evaluated: a current-entity rule's body on root rows, and a
+/// related rule's body on one relation's related rows.
+///
+/// A body is the formula [`inlined_rule_semantics`] selects for the rule, as
+/// the inlined copy was. Its commencement check and its rounding wrap each
+/// read, outside the body, and a `match` in it names the rule that owns it.
+#[derive(Clone, Debug)]
+struct InlineBody<E> {
+    body: E,
+    /// How many compiled nodes read this body. The executors cache the column
+    /// of a body read by more than one node, so a row is computed once however
+    /// many paths reach it; a body read by one node is evaluated in place, as
+    /// the inlined copy was.
+    references: usize,
+    /// The inlining levels compiling the body took (see [`MAX_INLINE_DEPTH`]),
+    /// its own and those of every body it reads. A read from deeper in an
+    /// aggregation would have compiled it that much deeper, so a shared read
+    /// is checked against the bound with this height.
+    height: usize,
+}
+
+/// Where dense inlines a rule's body: on root rows, or on one relation's
+/// related rows. A rule's body compiles to the same expression at every read
+/// from one site, so the site keys the shared body.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum InlineSite {
+    Current(String),
+    Related(usize, String),
+}
+
+/// The side table an inlined body is in.
+#[derive(Clone, Copy, Debug)]
+enum InlineTable {
+    Scalars,
+    Judgments,
+    RelatedScalars,
+    RelatedJudgments,
 }
 
 impl DenseCompiledProgram {
@@ -666,10 +933,17 @@ impl DenseCompiledProgram {
     /// To check a program first, compile it into an artifact
     /// (`CompiledProgramArtifact::compile`, or load one with `from_json_*`)
     /// and pass that to [`Self::from_artifact`], which does not check again.
+    ///
+    /// Relation entity typing is checked here, as at the request and artifact
+    /// entry points, because an artifact deserialized directly (rather than
+    /// through `from_json_*`) or a program built in Rust has not been checked.
+    /// (`Engine::new` alone evaluates a `Program` as given.)
     pub fn from_program(
         program: &Program,
         entity: Option<&str>,
     ) -> Result<Self, DenseCompileError> {
+        crate::relation_typing::check_program(program)
+            .map_err(DenseCompileError::RelationTyping)?;
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
             None => {
@@ -766,17 +1040,25 @@ impl DenseCompiledProgram {
         let requested = self.resolve_outputs(outputs)?;
         let batch = self.bind_batch(batch)?;
         let row_count = batch.row_count;
-        let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch, true);
+        let mut executor: DenseExecutor<'_, N> = DenseExecutor::new(self, period, batch);
         let all = RowMask::all(row_count);
         let mut evaluated = Vec::with_capacity(requested.len());
         for (output, derived_index) in requested {
             let (value, errors) = match &self.derived[derived_index].semantics {
                 CompiledSemantics::Scalar(_) => {
-                    let (column, errors) = executor.evaluate_scalar(derived_index, &all)?;
+                    let (column, errors) = drive(
+                        &mut executor,
+                        |executor| executor.evaluate_scalar(derived_index, &all),
+                        |index| self.derived[index].name.clone(),
+                    )?;
                     (DenseOutputValue::Scalar(column), errors)
                 }
                 CompiledSemantics::Judgment(_) => {
-                    let (values, errors) = executor.evaluate_judgment(derived_index, &all)?;
+                    let (values, errors) = drive(
+                        &mut executor,
+                        |executor| executor.evaluate_judgment(derived_index, &all),
+                        |index| self.derived[index].name.clone(),
+                    )?;
                     (DenseOutputValue::Judgment(values), errors)
                 }
             };
@@ -835,6 +1117,12 @@ impl DenseCompiledProgram {
     /// a derived referenced outside a reduction means its body inlined in this
     /// same lifetime context, and a bare period-invariant input binds its
     /// common value.
+    ///
+    /// Reached rules must have commenced at their evaluation period's start:
+    /// each individual period inside reductions (including top-N counts), and
+    /// the reference period for lifetime-level rules and requested outputs.
+    /// Earlier periods fail with `EvalError::MissingDerivedFormulaVersion`,
+    /// as on the per-period entry points; untaken branches remain unaffected.
     pub fn execute_lifetime_f64(
         &self,
         periods: &[Period],
@@ -901,11 +1189,12 @@ impl DenseCompiledProgram {
 
         // Every requested output must reduce over the period axis; a purely
         // per-period output has no single-column lifetime meaning.
+        let reduces = self.rules_reducing_over_periods();
         for output in outputs {
             let Some(&derived_index) = self.derived_index.get(output) else {
                 return Err(EvalError::UnknownDerived(output.clone()));
             };
-            if !self.derived_reduces_over_periods(derived_index) {
+            if !reduces[derived_index] {
                 return Err(EvalError::LifetimeOutputWithoutReduction(output.clone()));
             }
         }
@@ -918,11 +1207,19 @@ impl DenseCompiledProgram {
             let derived_index = self.derived_index[output];
             let (value, errors) = match &self.derived[derived_index].semantics {
                 CompiledSemantics::Scalar(_) => {
-                    let (column, errors) = executor.evaluate_scalar(derived_index, &all)?;
+                    let (column, errors) = drive(
+                        &mut executor,
+                        |executor| executor.evaluate_scalar(derived_index, &all),
+                        |index| self.derived[index].name.clone(),
+                    )?;
                     (DenseOutputValue::Scalar(column), errors)
                 }
                 CompiledSemantics::Judgment(_) => {
-                    let (values, errors) = executor.evaluate_judgment(derived_index, &all)?;
+                    let (values, errors) = drive(
+                        &mut executor,
+                        |executor| executor.evaluate_judgment(derived_index, &all),
+                        |index| self.derived[index].name.clone(),
+                    )?;
                     (DenseOutputValue::Judgment(values), errors)
                 }
             };
@@ -938,35 +1235,26 @@ impl DenseCompiledProgram {
         })
     }
 
-    /// Does this derived's compiled formula contain an over-periods reduction,
-    /// directly or through the derived values it depends on? Used to gate
-    /// lifetime execution to reduction outputs only.
-    fn derived_reduces_over_periods(&self, derived_index: usize) -> bool {
-        let mut visiting = HashSet::new();
-        self.derived_reduces_over_periods_inner(derived_index, &mut visiting)
-    }
-
-    fn derived_reduces_over_periods_inner(
-        &self,
-        derived_index: usize,
-        visiting: &mut HashSet<usize>,
-    ) -> bool {
-        if !visiting.insert(derived_index) {
-            return false;
+    /// For each compiled rule, whether its formula contains an over-periods
+    /// reduction, directly or through the rules it reads. Used to gate
+    /// lifetime execution to reduction outputs only. A rule is compiled after
+    /// every rule it reads, so one pass in index order sees each dependency's
+    /// answer before it is needed, however long the chain.
+    fn rules_reducing_over_periods(&self) -> Vec<bool> {
+        let mut reduces = Vec::with_capacity(self.derived.len());
+        for derived in &self.derived {
+            let reduction = match &derived.semantics {
+                CompiledSemantics::Scalar(expr) => self.scalar_reduces_over_periods(expr, &reduces),
+                CompiledSemantics::Judgment(expr) => {
+                    self.judgment_reduces_over_periods(expr, &reduces)
+                }
+            };
+            reduces.push(reduction);
         }
-        let result = match &self.derived[derived_index].semantics {
-            CompiledSemantics::Scalar(expr) => self.scalar_reduces_over_periods(expr, visiting),
-            CompiledSemantics::Judgment(expr) => self.judgment_reduces_over_periods(expr, visiting),
-        };
-        visiting.remove(&derived_index);
-        result
+        reduces
     }
 
-    fn scalar_reduces_over_periods(
-        &self,
-        expr: &CompiledScalarExpr,
-        visiting: &mut HashSet<usize>,
-    ) -> bool {
+    fn scalar_reduces_over_periods(&self, expr: &CompiledScalarExpr, reduces: &[bool]) -> bool {
         match expr {
             CompiledScalarExpr::OverPeriods { .. } => true,
             CompiledScalarExpr::Literal(_)
@@ -975,112 +1263,148 @@ impl DenseCompiledProgram {
             | CompiledScalarExpr::PeriodStart
             | CompiledScalarExpr::PeriodEnd => false,
             CompiledScalarExpr::Derived(index) => {
-                self.derived_reduces_over_periods_inner(*index, visiting)
+                // Earlier in index order, so already decided: a rule is
+                // compiled after every rule it reads.
+                debug_assert!(*index < reduces.len(), "a rule reads a later rule");
+                reduces.get(*index).copied().unwrap_or(false)
             }
-            // An inlined body is compiled for a related expression, which
-            // refuses over-periods reductions, and is read only under an
-            // aggregation or a relation's predicate.
+            // A body inlined on root rows compiles as a current-entity
+            // expression, which refuses an over-periods reduction, and only an
+            // aggregation or a relation's predicate reads one.
             CompiledScalarExpr::Inline(_) => false,
             CompiledScalarExpr::ParameterLookup { index, .. } => {
-                self.scalar_reduces_over_periods(index, visiting)
+                self.scalar_reduces_over_periods(index, reduces)
             }
             CompiledScalarExpr::Add(items)
             | CompiledScalarExpr::Max(items)
             | CompiledScalarExpr::Min(items) => items
                 .iter()
-                .any(|item| self.scalar_reduces_over_periods(item, visiting)),
+                .any(|item| self.scalar_reduces_over_periods(item, reduces)),
             CompiledScalarExpr::Sub(left, right)
             | CompiledScalarExpr::Mul(left, right)
             | CompiledScalarExpr::Div(left, right) => {
-                self.scalar_reduces_over_periods(left, visiting)
-                    || self.scalar_reduces_over_periods(right, visiting)
+                self.scalar_reduces_over_periods(left, reduces)
+                    || self.scalar_reduces_over_periods(right, reduces)
             }
-            CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
-                self.scalar_reduces_over_periods(value, visiting)
+            CompiledScalarExpr::Ceil(value)
+            | CompiledScalarExpr::Floor(value)
+            | CompiledScalarExpr::Commenced { value, .. }
+            | CompiledScalarExpr::Round { value, .. } => {
+                self.scalar_reduces_over_periods(value, reduces)
             }
             CompiledScalarExpr::DateAddDays { date, days } => {
-                self.scalar_reduces_over_periods(date, visiting)
-                    || self.scalar_reduces_over_periods(days, visiting)
+                self.scalar_reduces_over_periods(date, reduces)
+                    || self.scalar_reduces_over_periods(days, reduces)
             }
             CompiledScalarExpr::DateAddMonths { date, months } => {
-                self.scalar_reduces_over_periods(date, visiting)
-                    || self.scalar_reduces_over_periods(months, visiting)
+                self.scalar_reduces_over_periods(date, reduces)
+                    || self.scalar_reduces_over_periods(months, reduces)
             }
             CompiledScalarExpr::DateAddYears { date, years } => {
-                self.scalar_reduces_over_periods(date, visiting)
-                    || self.scalar_reduces_over_periods(years, visiting)
+                self.scalar_reduces_over_periods(date, reduces)
+                    || self.scalar_reduces_over_periods(years, reduces)
             }
             CompiledScalarExpr::DaysBetween { from, to } => {
-                self.scalar_reduces_over_periods(from, visiting)
-                    || self.scalar_reduces_over_periods(to, visiting)
+                self.scalar_reduces_over_periods(from, reduces)
+                    || self.scalar_reduces_over_periods(to, reduces)
             }
-            CompiledScalarExpr::CountRelated { .. } | CompiledScalarExpr::SumRelated { .. } => {
-                false
-            }
+            CompiledScalarExpr::OnlyRelated { .. }
+            | CompiledScalarExpr::CountRelated { .. }
+            | CompiledScalarExpr::SumRelated { .. }
+            | CompiledScalarExpr::ExtremeRelated { .. }
+            | CompiledScalarExpr::SingleRelated { .. } => false,
             CompiledScalarExpr::If {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.judgment_reduces_over_periods(condition, visiting)
-                    || self.scalar_reduces_over_periods(then_expr, visiting)
-                    || self.scalar_reduces_over_periods(else_expr, visiting)
+                self.judgment_reduces_over_periods(condition, reduces)
+                    || self.scalar_reduces_over_periods(then_expr, reduces)
+                    || self.scalar_reduces_over_periods(else_expr, reduces)
             }
             CompiledScalarExpr::NoMatch {
                 subject,
                 placeholder,
                 ..
             } => {
-                self.scalar_reduces_over_periods(subject, visiting)
-                    || self.scalar_reduces_over_periods(placeholder, visiting)
+                self.scalar_reduces_over_periods(subject, reduces)
+                    || self.scalar_reduces_over_periods(placeholder, reduces)
             }
         }
     }
 
-    fn judgment_reduces_over_periods(
-        &self,
-        expr: &CompiledJudgmentExpr,
-        visiting: &mut HashSet<usize>,
-    ) -> bool {
+    fn judgment_reduces_over_periods(&self, expr: &CompiledJudgmentExpr, reduces: &[bool]) -> bool {
         match expr {
             CompiledJudgmentExpr::Comparison { left, right, .. } => {
-                self.scalar_reduces_over_periods(left, visiting)
-                    || self.scalar_reduces_over_periods(right, visiting)
+                self.scalar_reduces_over_periods(left, reduces)
+                    || self.scalar_reduces_over_periods(right, reduces)
             }
             CompiledJudgmentExpr::Derived(index) => {
-                self.derived_reduces_over_periods_inner(*index, visiting)
+                // Earlier in index order, so already decided: a rule is
+                // compiled after every rule it reads.
+                debug_assert!(*index < reduces.len(), "a rule reads a later rule");
+                reduces.get(*index).copied().unwrap_or(false)
             }
             // See `scalar_reduces_over_periods`.
             CompiledJudgmentExpr::Inline(_) => false,
             CompiledJudgmentExpr::And(items) | CompiledJudgmentExpr::Or(items) => items
                 .iter()
-                .any(|item| self.judgment_reduces_over_periods(item, visiting)),
-            CompiledJudgmentExpr::Not(item) => self.judgment_reduces_over_periods(item, visiting),
+                .any(|item| self.judgment_reduces_over_periods(item, reduces)),
+            CompiledJudgmentExpr::Not(item)
+            | CompiledJudgmentExpr::Commenced { value: item, .. } => {
+                self.judgment_reduces_over_periods(item, reduces)
+            }
         }
     }
 
-    fn bind_batch(&self, batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
-        for (name, column) in &batch.inputs {
-            if column.len() != batch.row_count {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense root input `{name}` has length {} but row_count is {}",
-                    column.len(),
-                    batch.row_count
-                )));
-            }
+    /// Check a batch against this program, then bind its columns. Every count
+    /// binding or execution sizes a buffer by is justified before any buffer
+    /// of that size is allocated (error messages and schema metadata still
+    /// allocate):
+    ///
+    /// - `row_count` is at most [`MAX_DENSE_ROWS`], and every supplied root
+    ///   column has that length.
+    /// - Each relation's offsets hold `row_count + 1` non-decreasing entries
+    ///   starting at 0; the last is its related row count, which a stated
+    ///   `related_row_count` must equal and each read column must have.
+    /// - A nonzero related count is confirmed by a supplied related column of
+    ///   that length or by a stated count, and is at most [`MAX_DENSE_ROWS`];
+    ///   every supplied related column, read or not, must have it.
+    ///
+    /// Relations are checked in two passes. The first walks the schemas in
+    /// order and reports what a per-schema binding reports first: a key's
+    /// offsets when its first schema reaches it, then each schema's read
+    /// columns in its input order. The second runs the checks above that a
+    /// per-schema binding never made (confirmation, the bound, and columns no
+    /// schema reads), key by key in the order the program first reads them.
+    /// Root columns, and the columns no schema reads within a key, are reported
+    /// smallest name first, so a malformed batch reports the same error every
+    /// run.
+    fn bind_batch(&self, mut batch: DenseBatchSpec) -> Result<DenseBoundBatch, EvalError> {
+        let row_count = batch.row_count;
+        if row_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} exceeds {MAX_DENSE_ROWS}, the most rows a dense batch can hold"
+            )));
+        }
+        if let Some((name, column)) =
+            first_by_name(&batch.inputs, |column| column.len() != row_count)
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense root input `{name}` has length {} but row_count is {row_count}",
+                column.len()
+            )));
         }
 
-        // An absent input column is a missing input on every row. It fails
-        // only the rows whose evaluation reads it, as a missing record does on
-        // the explain path; a column read only on branches no row takes may be
-        // omitted.
-        let bound_inputs = self
-            .root_inputs
-            .iter()
-            .map(|name| batch.inputs.get(name).cloned())
-            .collect::<Vec<Option<DenseColumn>>>();
-
-        let mut bound_relations = Vec::with_capacity(self.relations.len());
+        // Every link of a derived-relation chain is keyed to the chain's base
+        // relation, so many schemas can share one key. A key's offsets are
+        // checked when the first schema keyed to it is reached, and every
+        // schema length-checks the columns it reads. A column's length and a
+        // key's related count never change, so checking a shared column again
+        // for a later schema reports nothing new; the first error is the one a
+        // per-schema binding reports.
+        let mut related_counts: HashMap<&DenseRelationKey, usize> = HashMap::new();
+        let mut key_order = Vec::new();
         for relation in &self.relations {
             let relation_batch = batch.relations.get(&relation.key).ok_or_else(|| {
                 EvalError::UnknownRelation(format!(
@@ -1091,68 +1415,384 @@ impl DenseCompiledProgram {
                     self.root_entity
                 ))
             })?;
+            let related_count = match related_counts.get(&relation.key) {
+                Some(&related_count) => related_count,
+                None => {
+                    let related_count =
+                        Self::check_offsets(&relation.key, relation_batch, row_count)?;
+                    related_counts.insert(&relation.key, related_count);
+                    key_order.push(&relation.key);
+                    related_count
+                }
+            };
+            for input in &relation.related_inputs {
+                if let Some(column) = relation_batch.inputs.get(input)
+                    && column.len() != related_count
+                {
+                    return Err(related_length_mismatch(
+                        input,
+                        &relation.key.name,
+                        column.len(),
+                        related_count,
+                    ));
+                }
+            }
+        }
+        for &key in &key_order {
+            Self::confirm_related_count(key, &batch.relations[key], related_counts[key])?;
+        }
 
-            if relation_batch.offsets.len() != batch.row_count + 1 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must have length {}",
-                    relation.key.name,
-                    batch.row_count + 1
-                )));
-            }
-            if relation_batch.offsets.first().copied().unwrap_or_default() != 0 {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must start at 0",
-                    relation.key.name
-                )));
-            }
-            if !relation_batch
-                .offsets
-                .windows(2)
-                .all(|pair| pair[0] <= pair[1])
-            {
-                return Err(EvalError::TypeMismatch(format!(
-                    "dense relation `{}` offsets must be non-decreasing",
-                    relation.key.name
-                )));
-            }
+        // The batch is valid. An absent input column is a missing input on
+        // every row. It fails only the rows whose evaluation reads it, as a
+        // missing record does on the explain path; a column read only on
+        // branches no row takes may be omitted. Root input names are distinct,
+        // so each column is moved out of the batch rather than copied.
+        let bound_inputs = self
+            .root_inputs
+            .iter()
+            .map(|name| batch.inputs.remove(name))
+            .collect::<Vec<Option<DenseColumn>>>();
 
-            let related_count = *relation_batch.offsets.last().unwrap_or(&0);
-            let bound_inputs = relation
+        // A key's owners are built once and every schema keyed to it shares
+        // them, its offsets and its columns; a column is wrapped for sharing
+        // when a schema first reads it.
+        let mut bound_keys: HashMap<&DenseRelationKey, BoundRelationKey> = HashMap::new();
+        for &key in &key_order {
+            let relation_batch = batch
+                .relations
+                .remove(key)
+                .expect("every key was checked above");
+            bound_keys.insert(
+                key,
+                Self::bind_relation_key(key, relation_batch, related_counts[key])?,
+            );
+        }
+        let mut bound_relations = Vec::with_capacity(self.relations.len());
+        for relation in &self.relations {
+            let key = bound_keys
+                .get_mut(&relation.key)
+                .expect("every key was bound above");
+            let inputs = relation
                 .related_inputs
                 .iter()
                 .map(|name| {
-                    let column = relation_batch.inputs.get(name).cloned();
-                    if let Some(column) = &column {
-                        if column.len() != related_count {
-                            return Err(EvalError::TypeMismatch(format!(
-                                "dense relation input `{}` for `{}` has length {} but related row count is {}",
-                                name,
-                                relation.key.name,
-                                column.len(),
-                                related_count
-                            )));
-                        }
+                    if let Some(column) = key.inputs.get(name) {
+                        return Some(Rc::clone(column));
                     }
-                    Ok(column)
+                    let (name, column) = key.unbound_inputs.remove_entry(name)?;
+                    let column = Rc::new(column);
+                    key.inputs.insert(name, Rc::clone(&column));
+                    Some(column)
                 })
-                .collect::<Result<Vec<Option<DenseColumn>>, EvalError>>()?;
-
-            let mut owners = Vec::with_capacity(related_count);
-            for (row, pair) in relation_batch.offsets.windows(2).enumerate() {
-                owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
-            }
+                .collect();
             bound_relations.push(DenseRelationBatch {
-                offsets: relation_batch.offsets.clone(),
-                related_count,
-                owners,
-                inputs: bound_inputs,
+                offsets: Rc::clone(&key.offsets),
+                related_count: key.related_count,
+                owners: Rc::clone(&key.owners),
+                inputs,
             });
         }
 
         Ok(DenseBoundBatch {
-            row_count: batch.row_count,
+            row_count,
             inputs: bound_inputs,
             relations: bound_relations,
+        })
+    }
+
+    /// Check a key's offsets and stated count, returning its related count.
+    fn check_offsets(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
+        row_count: usize,
+    ) -> Result<usize, EvalError> {
+        let name = &key.name;
+        let offsets = &relation_batch.offsets;
+        // `bind_batch` bounds `row_count` by `MAX_DENSE_ROWS`, so this cannot
+        // overflow; it is checked rather than left to wrap to zero.
+        let expected = row_count.checked_add(1).ok_or_else(|| {
+            EvalError::TypeMismatch(format!(
+                "dense batch row_count {row_count} leaves no room for relation `{name}`'s offsets, which need row_count + 1 entries"
+            ))
+        })?;
+        if offsets.len() != expected {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must have length {expected} (row_count + 1) but has {}",
+                offsets.len()
+            )));
+        }
+        // `expected` is at least 1, so the offsets are non-empty from here on.
+        if offsets[0] != 0 {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must start at 0 but starts at {}",
+                offsets[0]
+            )));
+        }
+        if let Some(index) = offsets.windows(2).position(|pair| pair[0] > pair[1]) {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets must be non-decreasing, but offsets[{index}] = {} is greater than offsets[{}] = {}",
+                offsets[index],
+                index + 1,
+                offsets[index + 1]
+            )));
+        }
+        let related_count = offsets[row_count];
+        if let Some(stated) = relation_batch.related_row_count
+            && stated != related_count
+        {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count} but related_row_count is {stated}"
+            )));
+        }
+        Ok(related_count)
+    }
+
+    /// The offsets alone could claim any number of related rows, and binding
+    /// allocates one owner per related row. So a nonzero count must be
+    /// confirmed by a supplied column with one value per related row, or by
+    /// the caller's `related_row_count`, and must fit [`MAX_DENSE_ROWS`].
+    /// Every column the schemas read was length-checked already, so any
+    /// supplied column that disagrees here is one no schema reads.
+    fn confirm_related_count(
+        key: &DenseRelationKey,
+        relation_batch: &DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<(), EvalError> {
+        let name = &key.name;
+        // Every supplied column's length: the columns with values, then the
+        // ones supplied by length alone.
+        let lengths = || {
+            relation_batch
+                .inputs
+                .iter()
+                .map(|(input, column)| (input, column.len()))
+                .chain(
+                    relation_batch
+                        .input_lengths
+                        .iter()
+                        .map(|(input, length)| (input, *length)),
+                )
+        };
+        let disagreeing = lengths()
+            .filter(|(_, length)| *length != related_count)
+            .min_by_key(|(input, _)| *input);
+        let confirmed = related_count == 0
+            || relation_batch.related_row_count.is_some()
+            || lengths().any(|(_, length)| length == related_count);
+        if !confirmed && disagreeing.is_none() {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` offsets end at {related_count}, but no related column was supplied to confirm {related_count} related rows; supply the relation's related columns or set related_row_count to the number of related rows the offsets index (one per root and member pair)"
+            )));
+        }
+        if confirmed && related_count > MAX_DENSE_ROWS {
+            return Err(EvalError::TypeMismatch(format!(
+                "dense relation `{name}` claims {related_count} related rows, more than the {MAX_DENSE_ROWS} a dense batch can hold"
+            )));
+        }
+        // A supplied column that disagrees confirms nothing and is malformed.
+        if let Some((input, length)) = disagreeing {
+            return Err(related_length_mismatch(input, name, length, related_count));
+        }
+        Ok(())
+    }
+
+    /// Build a checked key's owners, reserved with `try_reserve_exact`: a
+    /// stated count is trusted up to [`MAX_DENSE_ROWS`], and a reservation the
+    /// allocator reports as failed is an error rather than an abort. A
+    /// reservation that succeeds says nothing about later allocations.
+    fn bind_relation_key(
+        key: &DenseRelationKey,
+        relation_batch: DenseRelationBatchSpec,
+        related_count: usize,
+    ) -> Result<BoundRelationKey, EvalError> {
+        let offsets = relation_batch.offsets;
+        let mut owners = Vec::new();
+        owners.try_reserve_exact(related_count).map_err(|_| {
+            EvalError::TypeMismatch(format!(
+                "dense relation `{}` claims {related_count} related rows, more than this process can allocate",
+                key.name
+            ))
+        })?;
+        for (row, pair) in offsets.windows(2).enumerate() {
+            owners.extend(std::iter::repeat_n(row, pair[1] - pair[0]));
+        }
+        Ok(BoundRelationKey {
+            offsets: offsets.into(),
+            related_count,
+            owners: Rc::new(owners),
+            unbound_inputs: relation_batch.inputs,
+            inputs: HashMap::new(),
+        })
+    }
+}
+
+/// Among the columns `pick` selects, the one with the smallest name, found in
+/// one pass without allocating, so a malformed batch reports the same column
+/// whatever the map's iteration order.
+fn first_by_name<'a>(
+    columns: &'a HashMap<String, DenseColumn>,
+    pick: impl Fn(&DenseColumn) -> bool,
+) -> Option<(&'a String, &'a DenseColumn)> {
+    columns
+        .iter()
+        .filter(|(_, column)| pick(column))
+        .min_by_key(|(name, _)| *name)
+}
+
+fn related_length_mismatch(
+    input: &str,
+    relation: &str,
+    length: usize,
+    related_count: usize,
+) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "dense relation input `{input}` for `{relation}` has length {length} but related row count is {related_count}"
+    ))
+}
+
+/// The refusal of a rule or derived relation reached again while it is being
+/// compiled.
+fn cyclic_dependency(name: &str) -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "cyclic dense compilation dependency involving `{name}`"
+    ))
+}
+
+/// Dense declines an aggregation nested past [`MAX_INLINE_DEPTH`].
+fn inlined_too_deep() -> DenseCompileError {
+    DenseCompileError::Unsupported(format!(
+        "a relation aggregation whose inlined rules nest more than {MAX_INLINE_DEPTH} levels deep; use generic API execution"
+    ))
+}
+
+/// A source graph is a forest directed from each source to its derived
+/// relations. DFS intervals let a membership query find the first edge below
+/// its tested ancestor without walking or retaining every intervening pair.
+struct CandidateAncestry<'a> {
+    scopes: HashMap<&'a str, CandidateScope>,
+    #[cfg(test)]
+    visits: usize,
+}
+
+struct CandidateScope {
+    start: usize,
+    end: usize,
+    /// Direct children, in DFS order; their intervals are disjoint.
+    children: Vec<CandidateBranch>,
+}
+
+struct CandidateBranch {
+    start: usize,
+    end: usize,
+    current_slot: usize,
+    related_slot: usize,
+}
+
+impl<'a> CandidateAncestry<'a> {
+    fn new(program: &'a Program) -> Self {
+        let mut children: HashMap<&str, Vec<(&str, usize, usize)>> = HashMap::new();
+        let mut derived = HashSet::new();
+        for (name, schema) in &program.relations {
+            children.entry(name).or_default();
+            // Paths are refused when compilation reaches them. They do not
+            // belong to this single-source forest, including when unused.
+            if let Some(derivation) = &schema.derivation
+                && derivation.source_path.is_none()
+                && let Some(source) = &derivation.source_relation
+            {
+                derived.insert(name.as_str());
+                children.entry(source).or_default().push((
+                    name,
+                    derivation.current_slot,
+                    derivation.related_slot,
+                ));
+            }
+        }
+        let mut intervals: HashMap<&str, (usize, usize)> = HashMap::new();
+        let mut next = 0;
+        for root in children
+            .keys()
+            .copied()
+            .filter(|name| !derived.contains(name))
+        {
+            let mut stack = vec![(root, false)];
+            while let Some((name, exiting)) = stack.pop() {
+                if exiting {
+                    intervals.get_mut(name).expect("entered before exiting").1 = next;
+                } else {
+                    intervals.insert(name, (next, next));
+                    next += 1;
+                    stack.push((name, true));
+                    for &(child, _, _) in children[name].iter().rev() {
+                        stack.push((child, false));
+                    }
+                }
+            }
+        }
+        // Cyclic components have no root and receive no interval. The
+        // compilation walk still refuses them with its existing diagnostic.
+        let scopes = intervals
+            .iter()
+            .map(|(&name, &(start, end))| {
+                let branches = children[name]
+                    .iter()
+                    .filter_map(|&(child, current_slot, related_slot)| {
+                        let &(start, end) = intervals.get(child)?;
+                        Some(CandidateBranch {
+                            start,
+                            end,
+                            current_slot,
+                            related_slot,
+                        })
+                    })
+                    .collect();
+                (
+                    name,
+                    CandidateScope {
+                        start,
+                        end,
+                        children: branches,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            scopes,
+            #[cfg(test)]
+            visits: next,
+        }
+    }
+
+    fn holds(
+        &mut self,
+        scope: &str,
+        relation: &str,
+        current_slot: usize,
+        related_slot: usize,
+    ) -> bool {
+        #[cfg(test)]
+        {
+            self.visits += 1;
+        }
+        let (Some(scope), Some(relation)) = (self.scopes.get(scope), self.scopes.get(relation))
+        else {
+            return false;
+        };
+        if scope.start <= relation.start || scope.start >= relation.end {
+            return false;
+        }
+        let child = relation.children.partition_point(|child| {
+            #[cfg(test)]
+            {
+                self.visits += 1;
+            }
+            child.start <= scope.start
+        });
+        child.checked_sub(1).is_some_and(|child| {
+            let child = &relation.children[child];
+            scope.start < child.end
+                && child.current_slot == current_slot
+                && child.related_slot == related_slot
         })
     }
 }
@@ -1169,28 +1809,82 @@ struct DenseCompiler<'a> {
     parameter_index: HashMap<String, usize>,
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
+    /// The rules on the current compilation path: each root rule being
+    /// compiled into its own column and each rule being inlined into a related
+    /// or current-entity expression. Reaching one again means the rules form a
+    /// cycle, which compiling an artifact refuses but a raw `Program` does
+    /// not, so compiling it again would recurse until the stack overflowed.
     visiting: HashSet<String>,
-    inline_scalars: Vec<InlineBody<CompiledScalarExpr>>,
-    inline_judgments: Vec<InlineBody<CompiledJudgmentExpr>>,
-    related_inline_scalars: Vec<InlineBody<CompiledRelatedScalarExpr>>,
-    related_inline_judgments: Vec<InlineBody<CompiledRelatedJudgmentExpr>>,
-    /// Each inlined body's index in the table its site and kind select.
-    inline_index: HashMap<InlineSite, usize>,
-    /// The rules whose bodies are being inlined, outermost first. Reaching
-    /// one again means the rules inline each other in a cycle, which
-    /// compiling an artifact refuses but a raw `Program` does not.
-    inlining: HashSet<String>,
     /// The rules whose formulas are being compiled, innermost last. Related
     /// expressions inline a related entity's rules, so a `match` in one names
     /// the innermost rule here, as explain does.
     related_rules: Vec<String>,
     /// The derived relation whose own predicate is being compiled, if any.
     /// Explain evaluates a `relation_member` there with the candidate tuple in
-    /// scope, including under `if` conditions and other operands. It is `None`
-    /// in `where` clauses and in the rules a predicate reads, which explain
-    /// evaluates without that scope.
+    /// scope, and selects a referenced rule's record by its declared entity,
+    /// including under `if` conditions and other operands. It is `None` in
+    /// `where` clauses, in `sum` values and in the rules a predicate reads,
+    /// which explain evaluates without that scope.
     membership_scope: Option<String>,
+    /// Only explicitly requested membership answers, rather than every
+    /// intermediate scope/target pair along their source paths.
+    candidate_membership: HashMap<(String, String, usize, usize), bool>,
+    candidate_ancestry: Option<CandidateAncestry<'a>>,
+    /// Expression levels on the stack since the driver's current task began.
+    depth: usize,
+    /// The level at which a rule not yet compiled is deferred to the driver
+    /// (see [`crate::depth`]).
+    suspend_depth: usize,
+    /// Nesting of the expression being inlined into a relation aggregation
+    /// (see [`MAX_INLINE_DEPTH`]).
+    inline_depth: usize,
+    /// The deepest `inline_depth` reached, counting a shared body's height,
+    /// since the body being compiled began (see [`InlineBody::height`]).
+    inline_peak: usize,
+    inline_scalars: Vec<InlineBody<CompiledScalarExpr>>,
+    inline_judgments: Vec<InlineBody<CompiledJudgmentExpr>>,
+    related_inline_scalars: Vec<InlineBody<CompiledRelatedScalarExpr>>,
+    related_inline_judgments: Vec<InlineBody<CompiledRelatedJudgmentExpr>>,
+    /// Each inlined body's index in the table its site and kind select.
+    inline_index: HashMap<InlineSite, usize>,
+    /// The reads of inlined bodies (each a `references` increment) made by
+    /// rules still compiling. A rule that finishes keeps its reads; when a
+    /// task defers, the reads of the rules it unwinds are taken back, since
+    /// the retry reads them again (see [`Self::compile_tasks`]).
+    inline_reads: Vec<(InlineTable, usize)>,
+    /// Expression levels evaluated since compiling last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
 }
+
+/// How deep an expression inlined into a relation aggregation may nest.
+///
+/// A `where` clause or a summed value inlines the rules it reads, and a rule
+/// of the current entity read there inlines the same way, so the compiled
+/// expression nests as deep as the chain of rules it inlines. Inlined rules
+/// have no compiled index to defer to (see [`crate::depth`]), so compiling
+/// and evaluating them recurse through the whole chain. Past this bound dense
+/// declines the program; the generic API evaluates it. The bound is a property
+/// of the program alone, so every build and host declines the same programs.
+/// It also caps the stack inlining uses: measured in a release build, a
+/// chain at the bound compiles and evaluates on a 1 MiB thread, not on
+/// 512 KiB. Debug frames are far larger.
+pub const MAX_INLINE_DEPTH: usize = 512;
+
+/// Why compiling a rule stopped: an error, or a dependency deferred to the
+/// driver, which compiles it and retries.
+enum CompileStop {
+    Error(DenseCompileError),
+    Defer(String),
+}
+
+impl From<DenseCompileError> for CompileStop {
+    fn from(error: DenseCompileError) -> Self {
+        Self::Error(error)
+    }
+}
+
+type Compiling<T> = Result<T, CompileStop>;
 
 impl<'a> DenseCompiler<'a> {
     fn new(program: &'a Program, root_entity: String) -> Result<Self, DenseCompileError> {
@@ -1207,19 +1901,42 @@ impl<'a> DenseCompiler<'a> {
             derived: Vec::new(),
             derived_index: HashMap::new(),
             visiting: HashSet::new(),
+            related_rules: Vec::new(),
+            membership_scope: None,
+            candidate_membership: HashMap::new(),
+            candidate_ancestry: None,
+            depth: 0,
+            suspend_depth: crate::depth::suspend_depth(),
+            inline_depth: 0,
+            inline_peak: 0,
             inline_scalars: Vec::new(),
             inline_judgments: Vec::new(),
             related_inline_scalars: Vec::new(),
             related_inline_judgments: Vec::new(),
             inline_index: HashMap::new(),
-            inlining: HashSet::new(),
-            related_rules: Vec::new(),
-            membership_scope: None,
+            inline_reads: Vec::new(),
+            visits: 0,
         })
     }
 
     /// How explain names `rule` when an error leaves it: by its id when it has
     /// one. An empty `rule` (a derived relation's predicate) stays empty.
+    /// Compile one level of an expression inlined into a relation
+    /// aggregation, declining past [`MAX_INLINE_DEPTH`].
+    fn inlined<T>(
+        &mut self,
+        compile: impl FnOnce(&mut Self) -> Result<T, DenseCompileError>,
+    ) -> Result<T, DenseCompileError> {
+        if self.inline_depth >= MAX_INLINE_DEPTH {
+            return Err(inlined_too_deep());
+        }
+        self.inline_depth += 1;
+        self.inline_peak = self.inline_peak.max(self.inline_depth);
+        let compiled = compile(self);
+        self.inline_depth -= 1;
+        compiled
+    }
+
     fn rule_label(&self, rule: &str) -> String {
         self.program
             .derived
@@ -1264,146 +1981,72 @@ impl<'a> DenseCompiler<'a> {
         }
     }
 
-    /// The body already inlined at `site`, if any. Each read from a site
-    /// after the first shares the first read's body. The inlining helpers
-    /// below call the `compile_*` functions directly, not through closures,
-    /// so an inlined rule costs one small extra stack frame.
-    fn shared_inline(&self, site: &InlineSite) -> Option<usize> {
-        self.inline_index.get(site).copied()
-    }
-
-    /// Put `rule` on the inlining path while its body compiles. A rule that
-    /// inlines itself, directly or through others, is refused rather than
-    /// inlined forever.
-    fn enter_inline(&mut self, rule: &str) -> Result<(), DenseCompileError> {
-        if self.inlining.insert(rule.to_string()) {
-            Ok(())
-        } else {
-            Err(DenseCompileError::Unsupported(format!(
-                "cyclic dense compilation dependency involving `{rule}`"
-            )))
-        }
-    }
-
-    /// Take `rule` off the inlining path and record its compiled body as
-    /// `site`'s, at the end of `bodies`.
-    fn finish_inline<E>(
-        &mut self,
-        site: InlineSite,
-        rule: &str,
-        body: Result<E, DenseCompileError>,
-        bodies: fn(&mut Self) -> &mut Vec<InlineBody<E>>,
-    ) -> Result<usize, DenseCompileError> {
-        self.inlining.remove(rule);
-        let body = body?;
-        let table = bodies(self);
-        let index = table.len();
-        table.push(InlineBody {
-            body,
-            references: 1,
-        });
-        self.inline_index.insert(site, index);
-        Ok(index)
-    }
-
-    /// `rule`'s scalar body on root rows, compiled once (see [`InlineBody`]).
-    fn inline_current_scalar(
-        &mut self,
-        rule: &str,
-        entity: &str,
-        expr: &ScalarExpr,
-    ) -> Result<CompiledScalarExpr, DenseCompileError> {
-        let site = InlineSite::Current(rule.to_string());
-        if let Some(index) = self.shared_inline(&site) {
-            self.inline_scalars[index].references += 1;
-            return Ok(CompiledScalarExpr::Inline(index));
-        }
-        self.enter_inline(rule)?;
-        let body = self.compile_current_scalar_expr(rule, entity, expr);
-        let index =
-            self.finish_inline(site, rule, body, |compiler| &mut compiler.inline_scalars)?;
-        Ok(CompiledScalarExpr::Inline(index))
-    }
-
-    /// `rule`'s judgment body on root rows, compiled once.
-    fn inline_current_judgment(
-        &mut self,
-        rule: &str,
-        entity: &str,
-        expr: &JudgmentExpr,
-    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
-        let site = InlineSite::Current(rule.to_string());
-        if let Some(index) = self.shared_inline(&site) {
-            self.inline_judgments[index].references += 1;
-            return Ok(CompiledJudgmentExpr::Inline(index));
-        }
-        self.enter_inline(rule)?;
-        let body = self.compile_current_judgment_expr(rule, entity, expr);
-        let index =
-            self.finish_inline(site, rule, body, |compiler| &mut compiler.inline_judgments)?;
-        Ok(CompiledJudgmentExpr::Inline(index))
-    }
-
-    /// `rule`'s scalar body on `relation_index`'s related rows, compiled
-    /// once. It compiles with `rule` as the innermost rule, which names a
-    /// `match` in it, and outside any derived relation's own predicate, as
-    /// explain evaluates a rule body.
-    fn inline_related_scalar(
-        &mut self,
-        relation_index: usize,
-        rule: &str,
-        expr: &ScalarExpr,
-    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
-        let site = InlineSite::Related(relation_index, rule.to_string());
-        if let Some(index) = self.shared_inline(&site) {
-            self.related_inline_scalars[index].references += 1;
-            return Ok(CompiledRelatedScalarExpr::Inline(index));
-        }
-        self.enter_inline(rule)?;
-        self.related_rules.push(rule.to_string());
-        let scope = self.membership_scope.take();
-        let body = self.compile_related_scalar(relation_index, expr);
-        self.membership_scope = scope;
-        self.related_rules.pop();
-        let index = self.finish_inline(site, rule, body, |compiler| {
-            &mut compiler.related_inline_scalars
-        })?;
-        Ok(CompiledRelatedScalarExpr::Inline(index))
-    }
-
-    /// `rule`'s judgment body on `relation_index`'s related rows, compiled
-    /// once, as [`Self::inline_related_scalar`] compiles a scalar body.
-    fn inline_related_judgment(
-        &mut self,
-        relation_index: usize,
-        rule: &str,
-        expr: &JudgmentExpr,
-    ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
-        let site = InlineSite::Related(relation_index, rule.to_string());
-        if let Some(index) = self.shared_inline(&site) {
-            self.related_inline_judgments[index].references += 1;
-            return Ok(CompiledRelatedJudgmentExpr::Inline(index));
-        }
-        self.enter_inline(rule)?;
-        self.related_rules.push(rule.to_string());
-        let scope = self.membership_scope.take();
-        let body = self.compile_related_predicate(relation_index, expr);
-        self.membership_scope = scope;
-        self.related_rules.pop();
-        let index = self.finish_inline(site, rule, body, |compiler| {
-            &mut compiler.related_inline_judgments
-        })?;
-        Ok(CompiledRelatedJudgmentExpr::Inline(index))
-    }
-
+    /// Compile `name` and the rules it depends on. When compiling defers a
+    /// dependency (see [`crate::depth`]), compile that dependency as a task of
+    /// its own, from level zero, and retry. A retry reaches the same
+    /// references in the same order, so rules, inputs, relations and
+    /// parameters are registered in the order the recursion registers them.
     fn compile_derived(&mut self, name: &str) -> Result<usize, DenseCompileError> {
+        let compiled = self.compile_tasks(name);
+        crate::depth::add_visits(std::mem::take(&mut self.visits));
+        compiled
+    }
+
+    fn compile_tasks(&mut self, name: &str) -> Result<usize, DenseCompileError> {
+        let mut tasks: Vec<String> = Vec::new();
+        loop {
+            // A deferral unwinds every rule in progress; nothing is being
+            // compiled or inlined when a task starts.
+            self.depth = 0;
+            self.visiting.clear();
+            self.related_rules.clear();
+            self.membership_scope = None;
+            let target = tasks.last().cloned().unwrap_or_else(|| name.to_string());
+            let compiled = self.compile_rule(&target);
+            if let Err(CompileStop::Defer(_)) = compiled {
+                // The retry reads each body the unwound rules read again, and
+                // shares the bodies they compiled: take their reads back, so a
+                // body counts the reads of the compiled program.
+                for (table, index) in std::mem::take(&mut self.inline_reads) {
+                    *self.inline_references(table, index) -= 1;
+                }
+            }
+            match compiled {
+                Ok(index) => {
+                    if tasks.pop().is_none() {
+                        return Ok(index);
+                    }
+                }
+                Err(CompileStop::Error(error)) => return Err(error),
+                Err(CompileStop::Defer(dependency)) => {
+                    if dependency == name || tasks.contains(&dependency) {
+                        return Err(cyclic_dependency(&dependency));
+                    }
+                    tasks.push(dependency);
+                }
+            }
+        }
+    }
+
+    fn compile_rule(&mut self, name: &str) -> Compiling<usize> {
+        let reads = self.inline_reads.len();
+        let compiled = self.compile_rule_formula(name);
+        if compiled.is_ok() {
+            // The rule is compiled for good, and keeps the reads it made.
+            self.inline_reads.truncate(reads);
+        }
+        compiled
+    }
+
+    fn compile_rule_formula(&mut self, name: &str) -> Compiling<usize> {
         if let Some(&index) = self.derived_index.get(name) {
             return Ok(index);
         }
         if self.visiting.contains(name) {
-            return Err(DenseCompileError::Unsupported(format!(
-                "cyclic dense compilation dependency involving `{name}`"
-            )));
+            return Err(cyclic_dependency(name).into());
+        }
+        if self.depth >= self.suspend_depth {
+            return Err(CompileStop::Defer(name.to_string()));
         }
 
         let derived =
@@ -1422,7 +2065,8 @@ impl<'a> DenseCompiler<'a> {
             _ => {
                 return Err(DenseCompileError::Unsupported(format!(
                     "versioned derived formulas in `{name}`; use generic API execution"
-                )));
+                ))
+                .into());
             }
         };
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
@@ -1430,7 +2074,8 @@ impl<'a> DenseCompiler<'a> {
                 derived: name.to_string(),
                 dependency: name.to_string(),
                 entity: derived.entity.clone(),
-            });
+            }
+            .into());
         }
 
         let (source_semantics, effective_from) = match versioned_semantics {
@@ -1463,13 +2108,208 @@ impl<'a> DenseCompiler<'a> {
         Ok(index)
     }
 
+    /// Run `compile`, which inlines `rule`'s formula, with `rule` on the
+    /// compilation path. A body is recorded for sharing only once it has
+    /// compiled (see [`Self::inline_body`]), so a rule that reads itself
+    /// would inline itself again, without end; a rule already on the path is
+    /// refused.
+    fn inline_rule<T>(
+        &mut self,
+        rule: &str,
+        compile: impl FnOnce(&mut Self) -> Result<T, DenseCompileError>,
+    ) -> Result<T, DenseCompileError> {
+        if !self.visiting.insert(rule.to_string()) {
+            return Err(cyclic_dependency(rule));
+        }
+        let compiled = compile(self);
+        self.visiting.remove(rule);
+        compiled
+    }
+
+    fn inline_references(&mut self, table: InlineTable, index: usize) -> &mut usize {
+        match table {
+            InlineTable::Scalars => &mut self.inline_scalars[index].references,
+            InlineTable::Judgments => &mut self.inline_judgments[index].references,
+            InlineTable::RelatedScalars => &mut self.related_inline_scalars[index].references,
+            InlineTable::RelatedJudgments => &mut self.related_inline_judgments[index].references,
+        }
+    }
+
+    fn inline_height(&self, table: InlineTable, index: usize) -> usize {
+        match table {
+            InlineTable::Scalars => self.inline_scalars[index].height,
+            InlineTable::Judgments => self.inline_judgments[index].height,
+            InlineTable::RelatedScalars => self.related_inline_scalars[index].height,
+            InlineTable::RelatedJudgments => self.related_inline_judgments[index].height,
+        }
+    }
+
+    /// Record a read of the body at `index`.
+    fn read_inline(&mut self, table: InlineTable, index: usize) {
+        *self.inline_references(table, index) += 1;
+        self.inline_reads.push((table, index));
+    }
+
+    /// The index of `rule`'s body at `site`, compiling it with `compile` on
+    /// the first read and sharing it after (see [`InlineBody`]).
+    ///
+    /// A shared read refuses or accepts exactly what compiling the body again
+    /// there would have. A rule on the compilation path is a cycle, checked
+    /// first, as [`Self::inline_rule`] checks it. A body already compiled
+    /// compiled without error, and compiles to the same expression from every
+    /// read at its site, so the one other way compiling it again could fail is
+    /// [`MAX_INLINE_DEPTH`]: the read is refused when the body's height,
+    /// from the read's depth, passes the bound.
+    fn inline_body<E>(
+        &mut self,
+        table: InlineTable,
+        site: InlineSite,
+        rule: &str,
+        compile: impl FnOnce(&mut Self) -> Result<E, DenseCompileError>,
+        bodies: fn(&mut Self) -> &mut Vec<InlineBody<E>>,
+    ) -> Result<usize, DenseCompileError> {
+        if self.visiting.contains(rule) {
+            return Err(cyclic_dependency(rule));
+        }
+        if let Some(&index) = self.inline_index.get(&site) {
+            let reached = self.inline_depth + self.inline_height(table, index);
+            if reached > MAX_INLINE_DEPTH {
+                return Err(inlined_too_deep());
+            }
+            self.inline_peak = self.inline_peak.max(reached);
+            self.read_inline(table, index);
+            return Ok(index);
+        }
+        let start = self.inline_depth;
+        let outer_peak = std::mem::replace(&mut self.inline_peak, start);
+        let body = self.inline_rule(rule, compile);
+        let height = self.inline_peak - start;
+        self.inline_peak = outer_peak.max(self.inline_peak);
+        let body = body?;
+        let table_entries = bodies(self);
+        let index = table_entries.len();
+        table_entries.push(InlineBody {
+            body,
+            references: 0,
+            height,
+        });
+        self.inline_index.insert(site, index);
+        self.read_inline(table, index);
+        Ok(index)
+    }
+
+    /// `rule`'s scalar body on root rows, compiled once.
+    fn inline_current_scalar(
+        &mut self,
+        rule: &str,
+        entity: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledScalarExpr, DenseCompileError> {
+        let index = self.inline_body(
+            InlineTable::Scalars,
+            InlineSite::Current(rule.to_string()),
+            rule,
+            |compiler| compiler.compile_current_scalar_expr(rule, entity, expr),
+            |compiler| &mut compiler.inline_scalars,
+        )?;
+        Ok(CompiledScalarExpr::Inline(index))
+    }
+
+    /// `rule`'s judgment body on root rows, compiled once.
+    fn inline_current_judgment(
+        &mut self,
+        rule: &str,
+        entity: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
+        let index = self.inline_body(
+            InlineTable::Judgments,
+            InlineSite::Current(rule.to_string()),
+            rule,
+            |compiler| compiler.compile_current_judgment_expr(rule, entity, expr),
+            |compiler| &mut compiler.inline_judgments,
+        )?;
+        Ok(CompiledJudgmentExpr::Inline(index))
+    }
+
+    /// `rule`'s scalar body on `relation_index`'s related rows, compiled
+    /// once. It compiles with `rule` as the innermost rule, which names a
+    /// `match` in it, and outside any derived relation's own predicate, as
+    /// explain evaluates a rule body.
+    fn inline_related_scalar(
+        &mut self,
+        relation_index: usize,
+        rule: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
+        let index = self.inline_body(
+            InlineTable::RelatedScalars,
+            InlineSite::Related(relation_index, rule.to_string()),
+            rule,
+            |compiler| {
+                compiler.related_rules.push(rule.to_string());
+                let scope = compiler.membership_scope.take();
+                let compiled = compiler.compile_related_scalar(relation_index, expr);
+                compiler.membership_scope = scope;
+                compiler.related_rules.pop();
+                compiled
+            },
+            |compiler| &mut compiler.related_inline_scalars,
+        )?;
+        Ok(CompiledRelatedScalarExpr::Inline(index))
+    }
+
+    /// `rule`'s judgment body on `relation_index`'s related rows, compiled
+    /// once, as [`Self::inline_related_scalar`] compiles a scalar body.
+    fn inline_related_judgment(
+        &mut self,
+        relation_index: usize,
+        rule: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
+        let index = self.inline_body(
+            InlineTable::RelatedJudgments,
+            InlineSite::Related(relation_index, rule.to_string()),
+            rule,
+            |compiler| {
+                compiler.related_rules.push(rule.to_string());
+                let scope = compiler.membership_scope.take();
+                let compiled = compiler.compile_related_predicate(relation_index, expr);
+                compiler.membership_scope = scope;
+                compiler.related_rules.pop();
+                compiled
+            },
+            |compiler| &mut compiler.related_inline_judgments,
+        )?;
+        Ok(CompiledRelatedJudgmentExpr::Inline(index))
+    }
+
     fn compile_scalar_expr(
         &mut self,
         derived_name: &str,
         expr: &ScalarExpr,
-    ) -> Result<CompiledScalarExpr, DenseCompileError> {
+    ) -> Compiling<CompiledScalarExpr> {
+        self.visits += 1;
+        self.depth += 1;
+        let compiled = self.compile_scalar_node(derived_name, expr);
+        self.depth -= 1;
+        compiled
+    }
+
+    fn compile_scalar_node(
+        &mut self,
+        derived_name: &str,
+        expr: &ScalarExpr,
+    ) -> Compiling<CompiledScalarExpr> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name).into())
+            }
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),
@@ -1486,9 +2326,10 @@ impl<'a> DenseCompiler<'a> {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
                         entity: dependency.entity.clone(),
-                    });
+                    }
+                    .into());
                 }
-                Ok(CompiledScalarExpr::Derived(self.compile_derived(name)?))
+                Ok(CompiledScalarExpr::Derived(self.compile_rule(name)?))
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 Ok(CompiledScalarExpr::ParameterLookup {
@@ -1500,7 +2341,7 @@ impl<'a> DenseCompiler<'a> {
                 items
                     .iter()
                     .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Result<Vec<CompiledScalarExpr>, DenseCompileError>>()?,
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
             )),
             ScalarExpr::Sub(left, right) => Ok(CompiledScalarExpr::Sub(
                 Box::new(self.compile_scalar_expr(derived_name, left)?),
@@ -1518,13 +2359,13 @@ impl<'a> DenseCompiler<'a> {
                 items
                     .iter()
                     .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Result<Vec<CompiledScalarExpr>, DenseCompileError>>()?,
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
             )),
             ScalarExpr::Min(items) => Ok(CompiledScalarExpr::Min(
                 items
                     .iter()
                     .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Result<Vec<CompiledScalarExpr>, DenseCompileError>>()?,
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
             )),
             ScalarExpr::Ceil(value) => Ok(CompiledScalarExpr::Ceil(Box::new(
                 self.compile_scalar_expr(derived_name, value)?,
@@ -1550,6 +2391,27 @@ impl<'a> DenseCompiler<'a> {
                 from: Box::new(self.compile_scalar_expr(derived_name, from)?),
                 to: Box::new(self.compile_scalar_expr(derived_name, to)?),
             }),
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                let RelatedValueRef::Input(name) = value else {
+                    return Err(DenseCompileError::Unsupported(
+                        "only_related requires a Boolean input".into(),
+                    )
+                    .into());
+                };
+                let relation_name = relation.clone();
+                let relation = self.relation(relation, *current_slot, *related_slot)?;
+                let input = self.related_input(relation, name);
+                Ok(CompiledScalarExpr::OnlyRelated {
+                    relation,
+                    relation_name,
+                    input,
+                })
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1574,22 +2436,65 @@ impl<'a> DenseCompiler<'a> {
                 where_clause,
             } => {
                 let relation_index = self.relation(relation, *current_slot, *related_slot)?;
-                let value = match value {
-                    RelatedValueRef::Input(name) => {
-                        let input_index = self.related_input(relation_index, name);
-                        CompiledRelatedScalarExpr::Input(input_index)
-                    }
-                    RelatedValueRef::Derived(name) => self.compile_related_scalar(
-                        relation_index,
-                        &ScalarExpr::Derived(name.clone()),
-                    )?,
-                };
+                let value = self.compile_related_value(relation_index, value)?;
                 let predicate = where_clause
                     .as_deref()
                     .map(|inner| self.compile_related_predicate(relation_index, inner))
                     .transpose()?;
                 Ok(CompiledScalarExpr::SumRelated {
                     relation: relation_index,
+                    value: Box::new(value),
+                    predicate,
+                })
+            }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let function = extreme.call_name(where_clause.is_some());
+                // A relation schema may be shared by several aggregations.
+                // Its own unsupported construct determines the error, so a
+                // different first reader cannot change the refusal text.
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
+                let value = self
+                    .compile_related_value(relation_index, value)
+                    .map_err(|error| named_aggregate_error(function, relation, error))?;
+                let predicate = where_clause
+                    .as_deref()
+                    .map(|inner| self.compile_related_predicate(relation_index, inner))
+                    .transpose()
+                    .map_err(|error| named_aggregate_error(function, relation, error))?;
+                Ok(CompiledScalarExpr::ExtremeRelated {
+                    extreme: *extreme,
+                    relation: relation_index,
+                    relation_name: relation.clone(),
+                    value: Box::new(value),
+                    predicate,
+                })
+            }
+            ScalarExpr::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => {
+                let relation_index = self.relation(relation, *current_slot, *related_slot)?;
+                let value = self
+                    .compile_related_value(relation_index, value)
+                    .map_err(|error| named_aggregate_error("only", relation, error))?;
+                let predicate = where_clause
+                    .as_deref()
+                    .map(|inner| self.compile_related_predicate(relation_index, inner))
+                    .transpose()
+                    .map_err(|error| named_aggregate_error("only", relation, error))?;
+                Ok(CompiledScalarExpr::SingleRelated {
+                    relation: relation_index,
+                    relation_name: relation.clone(),
                     value: Box::new(value),
                     predicate,
                 })
@@ -1610,9 +2515,9 @@ impl<'a> DenseCompiler<'a> {
                     else_expr => self.compile_scalar_expr(derived_name, else_expr)?,
                 }),
             }),
-            ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
-                NO_MATCH_OUTSIDE_IF.to_string(),
-            )),
+            ScalarExpr::NoMatch { .. } => {
+                Err(DenseCompileError::Unsupported(NO_MATCH_OUTSIDE_IF.to_string()).into())
+            }
             ScalarExpr::OverPeriods { kind, value, n } => {
                 let value = self.compile_scalar_expr(derived_name, value)?;
                 let n = n
@@ -1629,7 +2534,8 @@ impl<'a> DenseCompiler<'a> {
                     return Err(DenseCompileError::NestedOverPeriods {
                         outer: kind.as_call_name(),
                         inner: inner.as_call_name(),
-                    });
+                    }
+                    .into());
                 }
                 Ok(CompiledScalarExpr::OverPeriods {
                     kind: *kind,
@@ -1644,8 +2550,28 @@ impl<'a> DenseCompiler<'a> {
         &mut self,
         derived_name: &str,
         expr: &JudgmentExpr,
-    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
+    ) -> Compiling<CompiledJudgmentExpr> {
+        self.visits += 1;
+        self.depth += 1;
+        let compiled = self.compile_judgment_node(derived_name, expr);
+        self.depth -= 1;
+        compiled
+    }
+
+    fn compile_judgment_node(
+        &mut self,
+        derived_name: &str,
+        expr: &JudgmentExpr,
+    ) -> Compiling<CompiledJudgmentExpr> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name).into())
+            }
+            JudgmentExpr::RelationAtom { relation, .. } => {
+                Err(relation_atom_unsupported(relation).into())
+            }
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported().into()),
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported().into()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_scalar_expr(derived_name, left)?,
                 op: *op,
@@ -1662,24 +2588,26 @@ impl<'a> DenseCompiler<'a> {
                         derived: derived_name.to_string(),
                         dependency: name.clone(),
                         entity: dependency.entity.clone(),
-                    });
+                    }
+                    .into());
                 }
-                Ok(CompiledJudgmentExpr::Derived(self.compile_derived(name)?))
+                Ok(CompiledJudgmentExpr::Derived(self.compile_rule(name)?))
             }
             JudgmentExpr::RelationMember { relation, .. } => Err(DenseCompileError::Unsupported(
                 format!("relation predicate `{relation}`"),
-            )),
+            )
+            .into()),
             JudgmentExpr::And(items) => Ok(CompiledJudgmentExpr::And(
                 items
                     .iter()
                     .map(|item| self.compile_judgment_expr(derived_name, item))
-                    .collect::<Result<Vec<CompiledJudgmentExpr>, DenseCompileError>>()?,
+                    .collect::<Compiling<Vec<CompiledJudgmentExpr>>>()?,
             )),
             JudgmentExpr::Or(items) => Ok(CompiledJudgmentExpr::Or(
                 items
                     .iter()
                     .map(|item| self.compile_judgment_expr(derived_name, item))
-                    .collect::<Result<Vec<CompiledJudgmentExpr>, DenseCompileError>>()?,
+                    .collect::<Compiling<Vec<CompiledJudgmentExpr>>>()?,
             )),
             JudgmentExpr::Not(item) => Ok(CompiledJudgmentExpr::Not(Box::new(
                 self.compile_judgment_expr(derived_name, item)?,
@@ -1692,7 +2620,19 @@ impl<'a> DenseCompiler<'a> {
         relation_index: usize,
         expr: &JudgmentExpr,
     ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
+        self.inlined(|compiler| compiler.compile_related_predicate_node(relation_index, expr))
+    }
+
+    fn compile_related_predicate_node(
+        &mut self,
+        relation_index: usize,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledRelatedJudgmentExpr, DenseCompileError> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
+            JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported()),
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => {
                 Ok(CompiledRelatedJudgmentExpr::Comparison {
                     left: self.compile_related_scalar(relation_index, left)?,
@@ -1706,11 +2646,14 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related judgment dependency `{name}`"
                     ))
                 })?;
-                let relation = &self.relations[relation_index];
-                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
-                    || derived.entity == self.root_entity
-                {
-                    return match &derived.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(derived)?;
+                let compiled = if self.reads_current_record(
+                    relation_index,
+                    "predicate",
+                    name,
+                    &derived.entity,
+                )? {
+                    match semantics {
                         DerivedSemantics::Judgment(expr) => {
                             Ok(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
                                 self.inline_current_judgment(name, &derived.entity, expr)?,
@@ -1721,36 +2664,38 @@ impl<'a> DenseCompiler<'a> {
                                 "where-clause predicates cannot reference scalar derived values (`{name}`)"
                             )))
                         }
-                    };
-                }
-                if relation.related_entity.is_some()
-                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
-                {
-                    return Err(DenseCompileError::Unsupported(format!(
-                        "related predicate `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
-                        derived.entity, relation.key.name
-                    )));
-                }
-                match &derived.semantics {
-                    DerivedSemantics::Judgment(expr) => {
-                        self.inline_related_judgment(relation_index, name, expr)
                     }
-                    DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
-                        "where-clause predicates cannot reference scalar derived values (`{name}`)"
-                    ))),
-                }
+                } else {
+                    match semantics {
+                        DerivedSemantics::Judgment(expr) => {
+                            self.inline_related_judgment(relation_index, name, expr)
+                        }
+                        DerivedSemantics::Scalar(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
+                                "where-clause predicates cannot reference scalar derived values (`{name}`)"
+                            )))
+                        }
+                    }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledRelatedJudgmentExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             JudgmentExpr::RelationMember {
                 relation,
                 current_slot,
                 related_slot,
-            } => match self.membership_scope.as_deref() {
+            } => match self.membership_scope.clone() {
                 None => Ok(CompiledRelatedJudgmentExpr::RelationMemberWithoutContext {
                     relation: relation.clone(),
                 }),
                 Some(scope)
                     if self.holds_for_every_candidate(
-                        scope,
+                        &scope,
                         relation,
                         *current_slot,
                         *related_slot,
@@ -1758,9 +2703,12 @@ impl<'a> DenseCompiler<'a> {
                 {
                     Ok(CompiledRelatedJudgmentExpr::Literal(true))
                 }
-                Some(scope) => Err(DenseCompileError::Unsupported(format!(
-                    "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
-                ))),
+                Some(scope) => Err(match path_source_below(self.program, relation) {
+                    Some(path) => path_source_unsupported(path),
+                    None => DenseCompileError::Unsupported(format!(
+                        "`relation_member` of `{relation}` (slots {current_slot}, {related_slot}) in the predicate of derived relation `{scope}`; dense can test only a source of that relation, read with the slots its derivation reads it with"
+                    )),
+                }),
             },
             JudgmentExpr::And(items) => Ok(CompiledRelatedJudgmentExpr::And(
                 items
@@ -1780,13 +2728,45 @@ impl<'a> DenseCompiler<'a> {
         }
     }
 
+    /// The value an aggregation reads on each related row: the related input,
+    /// or the related rule inlined for the related rows.
+    fn compile_related_value(
+        &mut self,
+        relation_index: usize,
+        value: &RelatedValueRef,
+    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
+        match value {
+            RelatedValueRef::Input(name) => Ok(CompiledRelatedScalarExpr::Input(
+                self.related_input(relation_index, name),
+            )),
+            RelatedValueRef::Derived(name) => {
+                self.compile_related_scalar(relation_index, &ScalarExpr::Derived(name.clone()))
+            }
+        }
+    }
+
     fn compile_related_scalar(
         &mut self,
         relation_index: usize,
         expr: &ScalarExpr,
     ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
+        self.inlined(|compiler| compiler.compile_related_scalar_node(relation_index, expr))
+    }
+
+    fn compile_related_scalar_node(
+        &mut self,
+        relation_index: usize,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledRelatedScalarExpr, DenseCompileError> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name))
+            }
             ScalarExpr::Literal(value) => Ok(CompiledRelatedScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => {
                 let input_index = self.related_input(relation_index, name);
                 Ok(CompiledRelatedScalarExpr::Input(input_index))
@@ -1804,40 +2784,57 @@ impl<'a> DenseCompiler<'a> {
                         "unknown related scalar dependency `{name}`"
                     ))
                 })?;
-                let relation = &self.relations[relation_index];
-                if relation.current_entity.as_deref() == Some(derived.entity.as_str())
-                    || derived.entity == self.root_entity
-                    || derived.entity == SCALAR_ENTITY
-                {
-                    return match &derived.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(derived)?;
+                let compiled = if self.reads_current_record(
+                    relation_index,
+                    "scalar",
+                    name,
+                    &derived.entity,
+                )? {
+                    match semantics {
                         DerivedSemantics::Scalar(expr) => {
-                            Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(
-                                self.inline_current_scalar(name, &derived.entity, expr)?,
-                            )))
+                            let value = self.inline_current_scalar(name, &derived.entity, expr)?;
+                            let value = match derived.rounding {
+                                Some(rounding) => CompiledScalarExpr::Round {
+                                    value: Box::new(value),
+                                    rounding,
+                                },
+                                None => value,
+                            };
+                            Ok(CompiledRelatedScalarExpr::RootScalar(Box::new(value)))
                         }
                         DerivedSemantics::Judgment(_) => {
                             Err(DenseCompileError::Unsupported(format!(
                                 "related scalar expressions cannot reference judgment derived values (`{name}`)"
                             )))
                         }
-                    };
-                }
-                if relation.related_entity.is_some()
-                    && relation.related_entity.as_deref() != Some(derived.entity.as_str())
-                {
-                    return Err(DenseCompileError::Unsupported(format!(
-                        "related scalar `{name}` has entity `{}`, which is neither current nor related for relation `{}`",
-                        derived.entity, relation.key.name
-                    )));
-                }
-                match &derived.semantics {
-                    DerivedSemantics::Scalar(expr) => {
-                        self.inline_related_scalar(relation_index, name, expr)
                     }
-                    DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
-                        "related scalar expressions cannot reference judgment derived values (`{name}`)"
-                    ))),
-                }
+                } else {
+                    match semantics {
+                        DerivedSemantics::Scalar(expr) => {
+                            let value = self.inline_related_scalar(relation_index, name, expr)?;
+                            Ok(match derived.rounding {
+                                Some(rounding) => CompiledRelatedScalarExpr::Round {
+                                    value: Box::new(value),
+                                    rounding,
+                                },
+                                None => value,
+                            })
+                        }
+                        DerivedSemantics::Judgment(_) => {
+                            Err(DenseCompileError::Unsupported(format!(
+                                "related scalar expressions cannot reference judgment derived values (`{name}`)"
+                            )))
+                        }
+                    }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledRelatedScalarExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 Ok(CompiledRelatedScalarExpr::ParameterLookup {
@@ -1928,11 +2925,25 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { relation, .. } | ScalarExpr::SumRelated { relation, .. } => {
+            ScalarExpr::OnlyRelated { relation, .. }
+            | ScalarExpr::CountRelated { relation, .. }
+            | ScalarExpr::SumRelated { relation, .. } => {
                 Err(DenseCompileError::Unsupported(format!(
                     "aggregation over relation `{relation}` nested inside a related expression"
                 )))
             }
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                where_clause,
+                ..
+            } => Err(DenseCompileError::Unsupported(format!(
+                "{} over relation `{relation}` nested inside a related expression",
+                extreme.call_name(where_clause.is_some())
+            ))),
+            ScalarExpr::SingleRelated { relation, .. } => Err(DenseCompileError::Unsupported(
+                format!("only over relation `{relation}` nested inside a related expression"),
+            )),
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a related expression",
                 kind.as_call_name()
@@ -1946,8 +2957,26 @@ impl<'a> DenseCompiler<'a> {
         entity: &str,
         expr: &ScalarExpr,
     ) -> Result<CompiledScalarExpr, DenseCompileError> {
+        self.inlined(|compiler| {
+            compiler.compile_current_scalar_expr_node(derived_name, entity, expr)
+        })
+    }
+
+    fn compile_current_scalar_expr_node(
+        &mut self,
+        derived_name: &str,
+        entity: &str,
+        expr: &ScalarExpr,
+    ) -> Result<CompiledScalarExpr, DenseCompileError> {
         match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name))
+            }
             ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),
@@ -1969,14 +2998,29 @@ impl<'a> DenseCompiler<'a> {
                         entity: dependency.entity.clone(),
                     });
                 }
-                match &dependency.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(dependency)?;
+                let compiled = match semantics {
                     DerivedSemantics::Scalar(expr) => {
-                        self.inline_current_scalar(name, &dependency.entity, expr)
+                        let value = self.inline_current_scalar(name, &dependency.entity, expr)?;
+                        Ok(match dependency.rounding {
+                            Some(rounding) => CompiledScalarExpr::Round {
+                                value: Box::new(value),
+                                rounding,
+                            },
+                            None => value,
+                        })
                     }
                     DerivedSemantics::Judgment(_) => Err(DenseCompileError::Unsupported(format!(
                         "scalar expression cannot reference judgment derived value (`{name}`)"
                     ))),
-                }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledScalarExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             ScalarExpr::ParameterLookup { parameter, index } => {
                 Ok(CompiledScalarExpr::ParameterLookup {
@@ -2079,11 +3123,25 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::NoMatch { .. } => Err(DenseCompileError::Unsupported(
                 NO_MATCH_OUTSIDE_IF.to_string(),
             )),
-            ScalarExpr::CountRelated { .. } | ScalarExpr::SumRelated { .. } => {
-                Err(DenseCompileError::Unsupported(
-                    "current-entity derived relation predicates cannot aggregate another relation"
-                        .to_string(),
-                ))
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. } => Err(DenseCompileError::Unsupported(
+                "current-entity derived relation predicates cannot aggregate another relation"
+                    .to_string(),
+            )),
+            ScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                where_clause,
+                ..
+            } => Err(DenseCompileError::Unsupported(format!(
+                "current-entity derived relation predicates cannot use {} over relation `{relation}`",
+                extreme.call_name(where_clause.is_some())
+            ))),
+            ScalarExpr::SingleRelated { relation, .. } => {
+                Err(DenseCompileError::Unsupported(format!(
+                    "current-entity derived relation predicates cannot use only over relation `{relation}`"
+                )))
             }
             ScalarExpr::OverPeriods { kind, .. } => Err(DenseCompileError::Unsupported(format!(
                 "over-periods reduction `{}` nested inside a current-entity related expression",
@@ -2098,7 +3156,22 @@ impl<'a> DenseCompiler<'a> {
         entity: &str,
         expr: &JudgmentExpr,
     ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
+        self.inlined(|compiler| {
+            compiler.compile_current_judgment_expr_node(derived_name, entity, expr)
+        })
+    }
+
+    fn compile_current_judgment_expr_node(
+        &mut self,
+        derived_name: &str,
+        entity: &str,
+        expr: &JudgmentExpr,
+    ) -> Result<CompiledJudgmentExpr, DenseCompileError> {
         match expr {
+            JudgmentExpr::RoleDerived { term, name } => Err(relation_role_unsupported(*term, name)),
+            JudgmentExpr::RelationAtom { relation, .. } => Err(relation_atom_unsupported(relation)),
+            JudgmentExpr::Exists { .. } => Err(exists_unsupported()),
+            JudgmentExpr::SameEntity { .. } => Err(term_comparison_unsupported()),
             JudgmentExpr::Comparison { left, op, right } => Ok(CompiledJudgmentExpr::Comparison {
                 left: self.compile_current_scalar_expr(derived_name, entity, left)?,
                 op: *op,
@@ -2120,14 +3193,22 @@ impl<'a> DenseCompiler<'a> {
                         entity: dependency.entity.clone(),
                     });
                 }
-                match &dependency.semantics {
+                let (semantics, commencement) = inlined_rule_semantics(dependency)?;
+                let compiled = match semantics {
                     DerivedSemantics::Judgment(expr) => {
                         self.inline_current_judgment(name, &dependency.entity, expr)
                     }
                     DerivedSemantics::Scalar(_) => Err(DenseCompileError::Unsupported(format!(
                         "judgment expression cannot reference scalar derived value (`{name}`)"
                     ))),
-                }
+                }?;
+                Ok(match commencement {
+                    Some(rule) => CompiledJudgmentExpr::Commenced {
+                        rule,
+                        value: Box::new(compiled),
+                    },
+                    None => compiled,
+                })
             }
             JudgmentExpr::RelationMember { relation, .. } => Err(DenseCompileError::Unsupported(
                 format!("current-entity relation predicate `{relation}`"),
@@ -2172,72 +3253,153 @@ impl<'a> DenseCompiler<'a> {
             related_slot,
         };
         if let Some(&index) = self.relation_index.get(&lookup_key) {
-            Ok(index)
-        } else {
-            let relation = self.program.relations.get(name);
-            if let Some(derivation) = relation.and_then(|relation| relation.derivation.as_ref()) {
-                let source_key = DenseRelationKey {
-                    name: derivation.source_relation.clone(),
+            return Ok(index);
+        }
+        let program = self.program;
+        let Some(derivation) = program
+            .relations
+            .get(name)
+            .and_then(|relation| relation.derivation.as_ref())
+        else {
+            let index = self.relations.len();
+            self.relations.push(DenseRelationSchema {
+                key: lookup_key.clone(),
+                related_inputs: Vec::new(),
+                current_entity: None,
+                related_entity: None,
+                parent_relation: None,
+                filter: None,
+            });
+            self.relation_index.insert(lookup_key, index);
+            return Ok(index);
+        };
+
+        // Down the chain of source relations, collect the derived links not
+        // compiled yet, with a loop rather than one call per link. A link's
+        // source is looked up at the slots the link's derivation reads.
+        let mut links = vec![(lookup_key, derivation)];
+        let mut on_chain = HashSet::from([name]);
+        let mut parent = None;
+        loop {
+            let (key, derivation) = links.last().expect("the chain starts with one link");
+            if derivation.source_path.is_some() {
+                return Err(path_source_unsupported(&key.name));
+            }
+            let source = derivation
+                .source_relation
+                .as_deref()
+                .expect("validated single source");
+            let Some(source_derivation) = program
+                .relations
+                .get(source)
+                .and_then(|relation| relation.derivation.as_ref())
+            else {
+                break;
+            };
+            let source_key = DenseRelationKey {
+                name: source.to_string(),
+                current_slot: derivation.current_slot,
+                related_slot: derivation.related_slot,
+            };
+            if let Some(&index) = self.relation_index.get(&source_key) {
+                parent = Some(index);
+                break;
+            }
+            if !on_chain.insert(source) {
+                return Err(cyclic_dependency(source));
+            }
+            links.push((source_key, source_derivation));
+        }
+
+        // Compile the deepest link first, as each link's parent must exist
+        // before it: push its schema, register it, then compile its filter.
+        for (lookup_key, derivation) in links.into_iter().rev() {
+            let key = parent.map_or_else(
+                || DenseRelationKey {
+                    name: derivation
+                        .source_relation
+                        .clone()
+                        .expect("validated single source"),
                     current_slot: derivation.current_slot,
                     related_slot: derivation.related_slot,
-                };
-                let parent_relation = self
-                    .program
-                    .relations
-                    .get(&derivation.source_relation)
-                    .and_then(|relation| relation.derivation.as_ref())
-                    .map(|_| {
-                        self.relation(
-                            &derivation.source_relation,
-                            derivation.current_slot,
-                            derivation.related_slot,
-                        )
-                    })
-                    .transpose()?;
-                let key = parent_relation
-                    .map(|parent| self.relations[parent].key.clone())
-                    .unwrap_or(source_key);
-                let index = self.relations.len();
-                self.relations.push(DenseRelationSchema {
-                    key,
-                    related_inputs: Vec::new(),
-                    current_entity: derivation
-                        .slot_entities
-                        .get(derivation.current_slot)
-                        .cloned(),
-                    related_entity: derivation
-                        .slot_entities
-                        .get(derivation.related_slot)
-                        .cloned(),
-                    parent_relation,
-                    filter: None,
-                });
-                self.relation_index.insert(lookup_key, index);
-                // The predicate is compiled once per relation, so a `match` in
-                // it is named by whichever rule evaluates the relation.
-                self.related_rules.push(String::new());
-                let scope = self.membership_scope.replace(name.to_string());
-                let filter = self.compile_related_predicate(index, &derivation.predicate);
-                self.membership_scope = scope;
-                self.related_rules.pop();
-                let filter = filter?;
-                self.relations[index].filter = Some(filter);
-                return Ok(index);
-            } else {
-                let index = self.relations.len();
-                let key = lookup_key.clone();
-                self.relations.push(DenseRelationSchema {
-                    key,
-                    related_inputs: Vec::new(),
-                    current_entity: None,
-                    related_entity: None,
-                    parent_relation: None,
-                    filter: None,
-                });
-                self.relation_index.insert(lookup_key, index);
-                Ok(index)
-            }
+                },
+                |parent: usize| self.relations[parent].key.clone(),
+            );
+            let index = self.relations.len();
+            self.relations.push(DenseRelationSchema {
+                key,
+                related_inputs: Vec::new(),
+                current_entity: derivation
+                    .slot_entities
+                    .get(derivation.current_slot)
+                    .cloned(),
+                related_entity: derivation
+                    .slot_entities
+                    .get(derivation.related_slot)
+                    .cloned(),
+                parent_relation: parent,
+                filter: None,
+            });
+            let scope = self.membership_scope.replace(lookup_key.name.clone());
+            self.relation_index.insert(lookup_key, index);
+            // The predicate is compiled once per relation, so a `match` in
+            // it is named by whichever rule evaluates the relation.
+            self.related_rules.push(String::new());
+            let filter = self.compile_related_predicate(index, &derivation.predicate);
+            self.membership_scope = scope;
+            self.related_rules.pop();
+            self.relations[index].filter = Some(filter?);
+            parent = Some(index);
         }
+        Ok(parent.expect("the chain compiled at least one link"))
+    }
+
+    /// Whether a rule that a related expression references is evaluated on the
+    /// current record (compiled for the root row and projected to its related
+    /// rows) rather than inlined on the related rows.
+    ///
+    /// Explain reads a referenced rule's declared entity only in a derived
+    /// relation's own predicate, where it selects the current record when the
+    /// entity is the relation's current slot entity and the related record
+    /// otherwise (`RelationEvalContext::entity_id_for`, falling back to the
+    /// related id). A `where` clause, a `sum`'s value and every rule body run
+    /// with no relation context, so explain evaluates each rule they reference
+    /// for the related entity, whatever entity the rule declares: a
+    /// `Household` rule in a `where` clause over household members is
+    /// evaluated for each member, and a `Person` rule in a `where` clause over
+    /// a person-to-person relation is evaluated for each related person, not
+    /// for the root person.
+    ///
+    /// In a predicate of a derived relation whose related slot entity is
+    /// declared, a rule of an entity that is neither slot's (other than an
+    /// entity-free `Scalar` rule) is declined rather than evaluated on the
+    /// related record as explain's fallback does.
+    fn reads_current_record(
+        &self,
+        relation_index: usize,
+        kind: &str,
+        name: &str,
+        entity: &str,
+    ) -> Result<bool, DenseCompileError> {
+        if self.membership_scope.is_none() {
+            return Ok(false);
+        }
+        let relation = &self.relations[relation_index];
+        if relation.current_entity.as_deref() == Some(entity) {
+            return Ok(true);
+        }
+        if entity != SCALAR_ENTITY
+            && relation
+                .related_entity
+                .as_deref()
+                .is_some_and(|related| related != entity)
+        {
+            return Err(DenseCompileError::Unsupported(format!(
+                "related {kind} `{name}` has entity `{entity}`, which is neither current nor related for relation `{}`",
+                relation.key.name
+            )));
+        }
+        Ok(false)
     }
 
     /// Whether dense accepts a `relation_member` of `relation` (with these
@@ -2253,35 +3415,33 @@ impl<'a> DenseCompiler<'a> {
     /// read with other slots holds too, through explain ignoring the requested
     /// slots of a derived relation, and dense declines it rather than rely on
     /// that.
+    ///
+    /// The source forest is indexed once. A query checks the target's direct
+    /// child whose subtree contains `scope`, then that child's source slots.
+    /// This takes constant work per query on chains, including when every
+    /// link tests a different ancestor, and retains only linear forest state.
     fn holds_for_every_candidate(
-        &self,
+        &mut self,
         scope: &str,
         relation: &str,
         current_slot: usize,
         related_slot: usize,
     ) -> bool {
-        let derivation_of = |name: &str| {
-            self.program
-                .relations
-                .get(name)
-                .and_then(|schema| schema.derivation.as_ref())
-        };
-        let mut next = derivation_of(scope);
-        // A validated chain names each relation once; the bound only ends a
-        // cyclic chain in a program that skipped validation.
-        for _ in 0..self.program.relations.len() {
-            let Some(derivation) = next else {
-                return false;
-            };
-            if derivation.source_relation == relation
-                && derivation.current_slot == current_slot
-                && derivation.related_slot == related_slot
-            {
-                return true;
-            }
-            next = derivation_of(&derivation.source_relation);
+        let key = (
+            scope.to_string(),
+            relation.to_string(),
+            current_slot,
+            related_slot,
+        );
+        if let Some(&holds) = self.candidate_membership.get(&key) {
+            return holds;
         }
-        false
+        let ancestry = self
+            .candidate_ancestry
+            .get_or_insert_with(|| CandidateAncestry::new(self.program));
+        let holds = ancestry.holds(scope, relation, current_slot, related_slot);
+        self.candidate_membership.insert(key, holds);
+        holds
     }
 
     fn related_input(&mut self, relation: usize, name: &str) -> usize {
@@ -2329,6 +3489,94 @@ impl<'a> DenseCompiler<'a> {
 type DenseEval = (DenseColumn, RowErrors);
 type JudgmentEval = (Vec<JudgmentOutcome>, RowErrors);
 
+/// A derived rule's rows an executor deferred to its driver instead of
+/// recursing into them (see [`crate::depth`]).
+#[derive(Clone, Debug)]
+struct Deferred {
+    derived: usize,
+    judgment: bool,
+    rows: RowMask,
+}
+
+/// Why a column evaluation stopped before producing a column: an error that
+/// fails the whole call, or a rule deferred to the driver, which evaluates it
+/// and retries. Row-level errors are values in [`RowErrors`], never a `Stop`.
+#[derive(Debug)]
+enum Stop {
+    Error(EvalError),
+    Defer(Deferred),
+}
+
+impl From<EvalError> for Stop {
+    fn from(error: EvalError) -> Self {
+        Self::Error(error)
+    }
+}
+
+type Flow<T> = Result<T, Stop>;
+
+/// An executor that can defer a rule's rows to [`drive`].
+trait Deferring {
+    /// Start a driver task: no expression levels are on the stack.
+    fn reset_depth(&mut self);
+    /// Evaluate a deferred rule's rows, from level zero.
+    fn run_deferred(&mut self, task: &Deferred) -> Flow<()>;
+    /// The expression levels evaluated since the last call (see
+    /// [`crate::depth::count_visits`]).
+    fn take_visits(&mut self) -> usize;
+}
+
+/// Run `root` to completion on `executor`. When it defers a rule (see
+/// [`crate::depth`]), evaluate that rule's rows as a task of its own and
+/// retry. Tasks form a stack: a task can defer a rule it reaches, which runs
+/// first. A rule deferred while a task waiting on it is still open reaches
+/// itself; compiled dense programs are acyclic, so that is reported as a cycle
+/// rather than deferred forever.
+fn drive<X: Deferring, T>(
+    executor: &mut X,
+    root: impl FnMut(&mut X) -> Flow<T>,
+    rule_name: impl Fn(usize) -> String,
+) -> Result<T, EvalError> {
+    let result = run_tasks(executor, root, rule_name);
+    crate::depth::add_visits(executor.take_visits());
+    result
+}
+
+fn run_tasks<X: Deferring, T>(
+    executor: &mut X,
+    mut root: impl FnMut(&mut X) -> Flow<T>,
+    rule_name: impl Fn(usize) -> String,
+) -> Result<T, EvalError> {
+    let mut tasks: Vec<Deferred> = Vec::new();
+    let mut waiting: HashSet<(usize, bool)> = HashSet::new();
+    loop {
+        executor.reset_depth();
+        let stop = match tasks.last() {
+            None => match root(executor) {
+                Ok(value) => return Ok(value),
+                Err(stop) => stop,
+            },
+            Some(task) => match executor.run_deferred(task) {
+                Ok(()) => {
+                    let done = tasks.pop().expect("a task was running");
+                    waiting.remove(&(done.derived, done.judgment));
+                    continue;
+                }
+                Err(stop) => stop,
+            },
+        };
+        match stop {
+            Stop::Error(error) => return Err(error),
+            Stop::Defer(deferred) => {
+                if !waiting.insert((deferred.derived, deferred.judgment)) {
+                    return Err(EvalError::DependencyCycle(rule_name(deferred.derived)));
+                }
+                tasks.push(deferred);
+            }
+        }
+    }
+}
+
 /// A derived rule's column, computed so far for the `computed` rows.
 struct DerivedColumn<T> {
     values: T,
@@ -2344,6 +3592,16 @@ fn pending_rows<T>(cached: Option<&DerivedColumn<T>>, mask: &RowMask) -> RowMask
         Some(cached) => mask.difference(&cached.computed),
         None => mask.clone(),
     }
+}
+
+/// Whether evaluating a rule computes it: when rows are pending, or when it
+/// has never been computed, which it is even under an empty mask to fix its
+/// dtype. Deferral must cover both. A rule no row reaches still reads the
+/// rules its formula references, so a deep chain behind an untaken branch,
+/// or in an empty batch, recursed through every link when only pending rows
+/// deferred.
+fn computes<T>(cached: Option<&DerivedColumn<T>>, pending: &RowMask) -> bool {
+    cached.is_none() || !pending.is_empty()
 }
 
 fn merge_scalar<N: DenseNum>(
@@ -2418,33 +3676,28 @@ fn merge_judgment<T: Copy>(
     cached
 }
 
-/// The rows of `mask` of a column cached per row, as `evaluate_scalar`
-/// caches a derived rule's: `compute` evaluates only the rows of `mask` not
-/// computed yet (under an empty mask on the first read, to fix the dtype),
-/// and `merge` adds them to `cached`. Returns the column with the errors of
-/// `mask`'s rows, and the cache entry to keep.
+/// The rows of `mask` of a shared inlined body's column, cached per row as
+/// [`DenseExecutor::evaluate_scalar`] caches a rule's: `compute` evaluates
+/// only the rows of `mask` not computed yet (under an empty mask on the first
+/// read, to fix the dtype), and `merge` adds them to the cache. A deferral
+/// leaves the cache as it was, so the retry extends it.
 fn cached_rows<T: Clone>(
-    cached: Option<DerivedColumn<T>>,
+    cache: &mut Option<DerivedColumn<T>>,
     mask: &RowMask,
-    compute: impl FnOnce(&RowMask) -> Result<(T, RowErrors), EvalError>,
+    compute: impl FnOnce(&RowMask) -> Flow<(T, RowErrors)>,
     merge: impl FnOnce(
         Option<DerivedColumn<T>>,
         RowMask,
         (T, RowErrors),
     ) -> Result<DerivedColumn<T>, EvalError>,
-) -> Result<((T, RowErrors), DerivedColumn<T>), EvalError> {
-    let pending = pending_rows(cached.as_ref(), mask);
-    let cached = match cached {
-        Some(cached) if pending.is_empty() => cached,
-        cached => {
-            let computed = compute(&pending)?;
-            merge(cached, pending, computed)?
-        }
-    };
-    Ok((
-        (cached.values.clone(), cached.errors.restricted_to(mask)),
-        cached,
-    ))
+) -> Flow<(T, RowErrors)> {
+    let pending = pending_rows(cache.as_ref(), mask);
+    if cache.is_none() || !pending.is_empty() {
+        let computed = compute(&pending)?;
+        *cache = Some(merge(cache.take(), pending, computed)?);
+    }
+    let cached = cache.as_ref().expect("computed above");
+    Ok((cached.values.clone(), cached.errors.restricted_to(mask)))
 }
 
 /// Per-executor columns of the inlined bodies read by more than one node
@@ -2504,7 +3757,7 @@ fn first_row_error<'e>(outputs: impl Iterator<Item = &'e RowErrors>) -> Result<(
 /// every axis shares is written once against this trait.
 trait ColumnAxis<N: DenseNum, E> {
     fn axis_len(&self) -> usize;
-    fn eval_column(&mut self, expr: &E, mask: &RowMask) -> Result<DenseEval, EvalError>;
+    fn eval_column(&mut self, expr: &E, mask: &RowMask) -> Flow<DenseEval>;
 }
 
 /// Judgment evaluation over root or lifetime rows, for the shared
@@ -2515,7 +3768,7 @@ trait JudgmentAxis {
         &mut self,
         expr: &CompiledJudgmentExpr,
         mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError>;
+    ) -> Flow<JudgmentEval>;
 }
 
 /// Evaluate `expr` for the rows of `mask` and read it as numbers. Returns the
@@ -2525,7 +3778,7 @@ fn numeric_operand<N: DenseNum, E, A: ColumnAxis<N, E>>(
     expr: &E,
     mask: &RowMask,
     errors: &mut RowErrors,
-) -> Result<(Vec<N>, RowMask), EvalError> {
+) -> Flow<(Vec<N>, RowMask)> {
     let (column, operand_errors) = axis.eval_column(expr, mask)?;
     let mut live = mask.without(&operand_errors);
     errors.absorb(operand_errors);
@@ -2544,7 +3797,7 @@ fn date_operand<N: DenseNum, E, A: ColumnAxis<N, E>>(
     mask: &RowMask,
     errors: &mut RowErrors,
     message: &str,
-) -> Result<(Vec<NaiveDate>, RowMask), EvalError> {
+) -> Flow<(Vec<NaiveDate>, RowMask)> {
     let (column, operand_errors) = axis.eval_column(expr, mask)?;
     let live = mask.without(&operand_errors);
     errors.absorb(operand_errors);
@@ -2566,7 +3819,7 @@ fn index_operand<N: DenseNum, E, A: ColumnAxis<N, E>>(
     mask: &RowMask,
     errors: &mut RowErrors,
     message: &str,
-) -> Result<(Vec<i64>, RowMask), EvalError> {
+) -> Flow<(Vec<i64>, RowMask)> {
     let (column, operand_errors) = axis.eval_column(expr, mask)?;
     let live = mask.without(&operand_errors);
     errors.absorb(operand_errors);
@@ -2587,7 +3840,7 @@ fn eval_add<N: DenseNum, E, A: ColumnAxis<N, E>>(
     axis: &mut A,
     items: &[E],
     mask: &RowMask,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let mut live = mask.clone();
     let mut total = vec![N::ZERO; axis.axis_len()];
@@ -2612,7 +3865,7 @@ fn eval_binary<N: DenseNum, E, A: ColumnAxis<N, E>>(
     right: &E,
     mask: &RowMask,
     operation: impl Fn(N, N) -> Result<N, ArithmeticError>,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let (left, live) = numeric_operand::<N, E, A>(axis, left, mask, &mut errors)?;
     let (right, live) = numeric_operand::<N, E, A>(axis, right, &live, &mut errors)?;
@@ -2637,7 +3890,7 @@ fn eval_div<N: DenseNum, E, A: ColumnAxis<N, E>>(
     right: &E,
     mask: &RowMask,
     divisor_first: bool,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let (dividends, divisors, live) = if divisor_first {
         let (divisors, live) = numeric_operand::<N, E, A>(axis, right, mask, &mut errors)?;
@@ -2672,7 +3925,7 @@ fn eval_extremum<N: DenseNum, E, A: ColumnAxis<N, E>>(
     mask: &RowMask,
     function: &str,
     replaces: impl Fn(N, N) -> bool,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let Some((first, rest)) = items.split_first() else {
         return Ok(fail_numeric::<N>(
             axis.axis_len(),
@@ -2694,12 +3947,24 @@ fn eval_extremum<N: DenseNum, E, A: ColumnAxis<N, E>>(
     Ok((N::into_column(best), errors))
 }
 
+fn eval_round<N: DenseNum, E, A: ColumnAxis<N, E>>(
+    axis: &mut A,
+    value: &E,
+    rounding: Rounding,
+    mask: &RowMask,
+) -> Flow<DenseEval> {
+    let (column, mut errors) = axis.eval_column(value, mask)?;
+    let live = mask.without(&errors);
+    let column = round_dense_column::<N>(column, rounding, &live, &mut errors);
+    Ok((column, errors))
+}
+
 fn eval_unary<N: DenseNum, E, A: ColumnAxis<N, E>>(
     axis: &mut A,
     value: &E,
     mask: &RowMask,
     operation: impl Fn(N) -> N,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let (values, live) = numeric_operand::<N, E, A>(axis, value, mask, &mut errors)?;
     let mut result = vec![N::ZERO; axis.axis_len()];
@@ -2719,7 +3984,7 @@ fn eval_date_shift<N: DenseNum, E, A: ColumnAxis<N, E>>(
     function: &str,
     unit: &str,
     shift: fn(NaiveDate, i64) -> Result<NaiveDate, EvalError>,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let (dates, live) = date_operand::<N, E, A>(
         axis,
@@ -2750,7 +4015,7 @@ fn eval_days_between<N: DenseNum, E, A: ColumnAxis<N, E>>(
     from: &E,
     to: &E,
     mask: &RowMask,
-) -> Result<DenseEval, EvalError> {
+) -> Flow<DenseEval> {
     let mut errors = RowErrors::new();
     let (from, live) = date_operand::<N, E, A>(
         axis,
@@ -2781,7 +4046,7 @@ fn eval_short_circuit<A: JudgmentAxis>(
     items: &[CompiledJudgmentExpr],
     mask: &RowMask,
     decisive: JudgmentOutcome,
-) -> Result<JudgmentEval, EvalError> {
+) -> Flow<JudgmentEval> {
     let exhausted = match decisive {
         JudgmentOutcome::NotHolds => JudgmentOutcome::Holds,
         _ => JudgmentOutcome::NotHolds,
@@ -2834,14 +4099,48 @@ struct DenseExecutor<'a, N: DenseNum> {
     program: &'a DenseCompiledProgram,
     period: &'a Period,
     batch: DenseBoundBatch,
-    /// Enforce each rule's commencement date (#84): a row that reaches a rule
-    /// before it commences fails. The per-period entry points do; the
-    /// lifetime executor's per-period executors never have.
-    enforce_commencement: bool,
     scalar_cache: Vec<Option<DerivedColumn<DenseColumn>>>,
     judgment_cache: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
+    /// Each relation's members for the candidates it was last resolved for,
+    /// with the root-row errors resolving them found. Aggregations over the
+    /// links of one chain share these instead of re-filtering every link
+    /// below each.
+    relation_members: Vec<Option<ResolvedMembers>>,
     inline_cache: InlineCaches,
+    /// Expression levels on the stack since the driver's current task began.
+    depth: usize,
+    /// The level at which a rule's pending rows are deferred to the driver
+    /// (see [`crate::depth`]).
+    suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
     _numeric_mode: std::marker::PhantomData<N>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedMembers {
+    candidates: RowMask,
+    members: RowMask,
+    root_errors: RowErrors,
+}
+
+impl<N: DenseNum> Deferring for DenseExecutor<'_, N> {
+    fn reset_depth(&mut self) {
+        self.depth = 0;
+    }
+
+    fn take_visits(&mut self) -> usize {
+        std::mem::take(&mut self.visits)
+    }
+
+    fn run_deferred(&mut self, task: &Deferred) -> Flow<()> {
+        if task.judgment {
+            self.evaluate_judgment(task.derived, &task.rows).map(|_| ())
+        } else {
+            self.evaluate_scalar(task.derived, &task.rows).map(|_| ())
+        }
+    }
 }
 
 impl<N: DenseNum> ColumnAxis<N, CompiledScalarExpr> for DenseExecutor<'_, N> {
@@ -2849,11 +4148,7 @@ impl<N: DenseNum> ColumnAxis<N, CompiledScalarExpr> for DenseExecutor<'_, N> {
         self.batch.row_count
     }
 
-    fn eval_column(
-        &mut self,
-        expr: &CompiledScalarExpr,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn eval_column(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         self.eval_scalar_expr(expr, mask)
     }
 }
@@ -2867,7 +4162,7 @@ impl<N: DenseNum> JudgmentAxis for DenseExecutor<'_, N> {
         &mut self,
         expr: &CompiledJudgmentExpr,
         mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    ) -> Flow<JudgmentEval> {
         self.eval_judgment_expr(expr, mask)
     }
 }
@@ -2883,47 +4178,67 @@ impl<N: DenseNum> ColumnAxis<N, CompiledRelatedScalarExpr> for RelatedAxis<'_, '
         self.executor.batch.relations[self.relation].related_count
     }
 
-    fn eval_column(
-        &mut self,
-        expr: &CompiledRelatedScalarExpr,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn eval_column(&mut self, expr: &CompiledRelatedScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         self.executor
             .resolve_related_scalar(self.relation, expr, mask)
     }
 }
 
 impl<'a, N: DenseNum> DenseExecutor<'a, N> {
-    fn new(
-        program: &'a DenseCompiledProgram,
-        period: &'a Period,
-        batch: DenseBoundBatch,
-        enforce_commencement: bool,
-    ) -> Self {
+    fn new(program: &'a DenseCompiledProgram, period: &'a Period, batch: DenseBoundBatch) -> Self {
         Self {
             program,
             period,
             scalar_cache: (0..program.derived.len()).map(|_| None).collect(),
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
+            relation_members: vec![None; program.relations.len()],
             inline_cache: InlineCaches::new(program),
             batch,
-            enforce_commencement,
+            depth: 0,
+            suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
             _numeric_mode: std::marker::PhantomData,
         }
     }
 
+    /// Evaluate an expression outside any rule to completion, deferring as
+    /// [`drive`] does. The lifetime executor evaluates a reduction's operand
+    /// in each period this way.
+    fn drive_expr(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        let program = self.program;
+        Ok(drive(
+            self,
+            |executor| executor.eval_scalar_expr(expr, mask),
+            |index| program.derived[index].name.clone(),
+        )?)
+    }
+
     /// A derived scalar's column for the rows in `mask`, computing it only
     /// for rows no earlier reference asked for.
-    fn evaluate_scalar(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn evaluate_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let pending = pending_rows(self.scalar_cache[derived_index].as_ref(), mask);
+        if computes(self.scalar_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
+            return Err(Stop::Defer(Deferred {
+                derived: derived_index,
+                judgment: false,
+                rows: pending,
+            }));
+        }
         let cached = match self.scalar_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_scalar(derived_index, &pending)?;
+                let computed = match self.compute_scalar(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.scalar_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_scalar::<N>(cached, pending, computed)?
             }
         };
@@ -2932,11 +4247,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         Ok(result)
     }
 
-    fn compute_scalar(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn compute_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let program = self.program;
         let derived = &program.derived[derived_index];
         let CompiledSemantics::Scalar(expr) = &derived.semantics else {
@@ -2967,8 +4278,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
     /// empty mask.
     fn commenced_rows(&self, derived_index: usize, mask: &RowMask) -> (RowMask, RowErrors) {
         let derived = &self.program.derived[derived_index];
-        if self.enforce_commencement
-            && let Some(effective_from) = derived.effective_from
+        if let Some(effective_from) = derived.effective_from
             && self.period.start < effective_from
         {
             let mut errors = RowErrors::new();
@@ -2984,16 +4294,30 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         (mask.clone(), RowErrors::new())
     }
 
-    fn evaluate_judgment(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn evaluate_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let pending = pending_rows(self.judgment_cache[derived_index].as_ref(), mask);
+        if computes(self.judgment_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
+            return Err(Stop::Defer(Deferred {
+                derived: derived_index,
+                judgment: true,
+                rows: pending,
+            }));
+        }
         let cached = match self.judgment_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_judgment(derived_index, &pending)?;
+                let computed = match self.compute_judgment(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.judgment_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_judgment(cached, pending, computed)
             }
         };
@@ -3002,11 +4326,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         Ok(result)
     }
 
-    fn compute_judgment(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn compute_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let program = self.program;
         let derived = &program.derived[derived_index];
         let placeholder = vec![JudgmentOutcome::NotHolds; self.batch.row_count];
@@ -3026,46 +4346,38 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
 
     /// An inlined body's column for the rows of `mask`. A body read by one
     /// node is evaluated in place; a shared one is computed once per row.
-    fn evaluate_inline_scalar(
-        &mut self,
-        index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn evaluate_inline_scalar(&mut self, index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let program = self.program;
         let inline = &program.inline_scalars[index];
         if inline.references < 2 {
             return self.eval_scalar_expr(&inline.body, mask);
         }
-        let cached = self.inline_cache.scalars[index].take();
-        let (result, cached) = cached_rows(
-            cached,
+        let mut cache = self.inline_cache.scalars[index].take();
+        let result = cached_rows(
+            &mut cache,
             mask,
             |pending| self.eval_scalar_expr(&inline.body, pending),
             merge_scalar::<N>,
-        )?;
-        self.inline_cache.scalars[index] = Some(cached);
-        Ok(result)
+        );
+        self.inline_cache.scalars[index] = cache;
+        result
     }
 
-    fn evaluate_inline_judgment(
-        &mut self,
-        index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn evaluate_inline_judgment(&mut self, index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let program = self.program;
         let inline = &program.inline_judgments[index];
         if inline.references < 2 {
             return self.eval_judgment_expr(&inline.body, mask);
         }
-        let cached = self.inline_cache.judgments[index].take();
-        let (result, cached) = cached_rows(
-            cached,
+        let mut cache = self.inline_cache.judgments[index].take();
+        let result = cached_rows(
+            &mut cache,
             mask,
             |pending| self.eval_judgment_expr(&inline.body, pending),
             |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
-        )?;
-        self.inline_cache.judgments[index] = Some(cached);
-        Ok(result)
+        );
+        self.inline_cache.judgments[index] = cache;
+        result
     }
 
     /// A related rule's inlined body on `relation`'s related rows, for the
@@ -3075,21 +4387,21 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         relation: usize,
         index: usize,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let program = self.program;
         let inline = &program.related_inline_scalars[index];
         if inline.references < 2 {
             return self.resolve_related_scalar(relation, &inline.body, mask);
         }
-        let cached = self.inline_cache.related_scalars[index].take();
-        let (result, cached) = cached_rows(
-            cached,
+        let mut cache = self.inline_cache.related_scalars[index].take();
+        let result = cached_rows(
+            &mut cache,
             mask,
             |pending| self.resolve_related_scalar(relation, &inline.body, pending),
             merge_scalar::<N>,
-        )?;
-        self.inline_cache.related_scalars[index] = Some(cached);
-        Ok(result)
+        );
+        self.inline_cache.related_scalars[index] = cache;
+        result
     }
 
     fn evaluate_related_inline_judgment(
@@ -3097,28 +4409,32 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         relation: usize,
         index: usize,
         mask: &RowMask,
-    ) -> Result<(Vec<bool>, RowErrors), EvalError> {
+    ) -> Flow<(Vec<bool>, RowErrors)> {
         let program = self.program;
         let inline = &program.related_inline_judgments[index];
         if inline.references < 2 {
             return self.eval_related_predicate(relation, &inline.body, mask);
         }
-        let cached = self.inline_cache.related_judgments[index].take();
-        let (result, cached) = cached_rows(
-            cached,
+        let mut cache = self.inline_cache.related_judgments[index].take();
+        let result = cached_rows(
+            &mut cache,
             mask,
             |pending| self.eval_related_predicate(relation, &inline.body, pending),
             |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
-        )?;
-        self.inline_cache.related_judgments[index] = Some(cached);
-        Ok(result)
+        );
+        self.inline_cache.related_judgments[index] = cache;
+        result
     }
 
-    fn eval_scalar_expr(
-        &mut self,
-        expr: &CompiledScalarExpr,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn eval_scalar_expr(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.scalar_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn scalar_node(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         let len = self.batch.row_count;
         match expr {
             CompiledScalarExpr::Literal(value) => {
@@ -3148,6 +4464,15 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             )),
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
             CompiledScalarExpr::Inline(index) => self.evaluate_inline_scalar(*index, mask),
+            CompiledScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, mask);
+                let (values, formula_errors) = self.eval_scalar_expr(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
+            CompiledScalarExpr::Round { value, rounding } => {
+                eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
+            }
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
                 let live = mask.without(&errors);
@@ -3224,6 +4549,11 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             CompiledScalarExpr::DaysBetween { from, to } => {
                 eval_days_between::<N, _, _>(self, from, to, mask)
             }
+            CompiledScalarExpr::OnlyRelated {
+                relation,
+                relation_name,
+                input,
+            } => self.eval_only_related((*relation, relation_name), *input, mask),
             CompiledScalarExpr::CountRelated {
                 relation,
                 predicate,
@@ -3233,6 +4563,30 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 value,
                 predicate,
             } => self.eval_sum_related(*relation, value, predicate.as_ref(), mask),
+            CompiledScalarExpr::ExtremeRelated {
+                extreme,
+                relation,
+                relation_name,
+                value,
+                predicate,
+            } => self.eval_extreme_related(
+                *extreme,
+                (*relation, relation_name),
+                value,
+                predicate.as_ref(),
+                mask,
+            ),
+            CompiledScalarExpr::SingleRelated {
+                relation,
+                relation_name,
+                value,
+                predicate,
+            } => self.eval_single_related(
+                (*relation, relation_name),
+                value,
+                predicate.as_ref(),
+                mask,
+            ),
             CompiledScalarExpr::NoMatch {
                 subject,
                 placeholder,
@@ -3350,30 +4704,56 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         related.filter(|related| !root_errors.contains(owners[related]))
     }
 
-    /// The related rows of `candidates` that are members of `relation`: a
-    /// derived relation's parent filter first, then its own filter, each only
-    /// for the rows the previous stage kept (the explain order). Errors are
-    /// returned on the root rows that own the failing related rows.
+    /// The members of `relation` among `candidates`, and the root-row errors
+    /// found resolving them. A derived relation's parent is resolved first,
+    /// then its own filter runs on the parent's members. The chain of parents
+    /// is walked by a loop, deepest link first, and stops early at a link
+    /// already resolved for the same candidates.
     fn relation_members(
         &mut self,
         relation: usize,
         candidates: &RowMask,
-    ) -> Result<(RowMask, RowErrors), EvalError> {
+    ) -> Flow<(RowMask, RowErrors)> {
         let program = self.program;
-        let schema = &program.relations[relation];
-        let mut root_errors = RowErrors::new();
-        let mut members = candidates.clone();
-        if let Some(parent) = schema.parent_relation {
-            let (kept, parent_errors) = self.relation_members(parent, &members)?;
-            root_errors.absorb(parent_errors);
-            members = self.without_failed_roots(relation, &kept, &root_errors);
+        let resolved_for = |resolved: &Option<ResolvedMembers>| {
+            resolved
+                .as_ref()
+                .is_some_and(|resolved| resolved.candidates.same_rows(candidates))
+        };
+        let mut chain = Vec::new();
+        let mut link = Some(relation);
+        let mut resolved = None;
+        while let Some(current) = link {
+            if resolved_for(&self.relation_members[current]) {
+                resolved = self.relation_members[current].clone();
+                break;
+            }
+            chain.push(current);
+            link = program.relations[current].parent_relation;
         }
-        if let Some(filter) = &schema.filter {
-            let (holds, filter_errors) = self.eval_related_predicate(relation, filter, &members)?;
-            let live = members.without(&filter_errors);
-            root_errors.absorb(self.lift_errors(relation, &filter_errors));
-            members = live.filter(|related| holds[related]);
-            members = self.without_failed_roots(relation, &members, &root_errors);
+        let (mut members, mut root_errors) = resolved.map_or_else(
+            || (candidates.clone(), RowErrors::new()),
+            |resolved| (resolved.members, resolved.root_errors),
+        );
+        for link in chain.into_iter().rev() {
+            let schema = &program.relations[link];
+            if schema.parent_relation.is_some() {
+                members = self.without_failed_roots(link, &members, &root_errors);
+            }
+            if let Some(filter) = &schema.filter
+                && !members.is_empty()
+            {
+                let (holds, filter_errors) = self.eval_related_predicate(link, filter, &members)?;
+                let live = members.without(&filter_errors);
+                root_errors.absorb(self.lift_errors(link, &filter_errors));
+                members = live.filter(|related| holds[related]);
+                members = self.without_failed_roots(link, &members, &root_errors);
+            }
+            self.relation_members[link] = Some(ResolvedMembers {
+                candidates: candidates.clone(),
+                members: members.clone(),
+                root_errors: root_errors.clone(),
+            });
         }
         Ok((members, root_errors))
     }
@@ -3386,7 +4766,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         relation: usize,
         predicate: Option<&CompiledRelatedJudgmentExpr>,
         mask: &RowMask,
-    ) -> Result<(RowMask, RowErrors, RowErrors), EvalError> {
+    ) -> Flow<(RowMask, RowErrors, RowErrors)> {
         let candidates = self.related_rows_of(relation, mask);
         let (members, root_errors) = self.relation_members(relation, &candidates)?;
         let Some(predicate) = predicate else {
@@ -3399,12 +4779,67 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         Ok((kept, where_errors, root_errors))
     }
 
+    fn eval_only_related(
+        &mut self,
+        (relation, relation_name): (usize, &str),
+        input: usize,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let (members, _, mut errors) = self.filtered_members(relation, None, mask)?;
+        let owners = self.batch.relations[relation].owners.clone();
+        let mut counts = vec![0; self.batch.row_count];
+        for related in members.rows() {
+            counts[owners[related]] += 1;
+        }
+        for row in mask.without(&errors).rows() {
+            let error = match counts[row] {
+                0 => Some(EvalError::MissingRelation {
+                    relation: relation_name.to_string(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                }),
+                1 => None,
+                count => Some(EvalError::AmbiguousRelation {
+                    relation: relation_name.to_string(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                    count,
+                }),
+            };
+            if let Some(error) = error {
+                errors.record(row, error);
+            }
+        }
+        let selected = members.filter(|related| !errors.contains(owners[related]));
+        let (values, value_errors) = self.resolve_related_scalar(
+            relation,
+            &CompiledRelatedScalarExpr::Input(input),
+            &selected,
+        )?;
+        errors.absorb(self.lift_errors(relation, &value_errors));
+        let mut result = vec![false; self.batch.row_count];
+        for related in selected.without(&value_errors).rows() {
+            let row = owners[related];
+            if let DenseColumn::Bool(values) = &values {
+                result[row] = values[related];
+            } else {
+                errors.record(
+                    row,
+                    EvalError::TypeMismatch("only_related requires a Boolean input".into()),
+                );
+            }
+        }
+        Ok((DenseColumn::Bool(result), errors))
+    }
+
     fn eval_count_related(
         &mut self,
         relation: usize,
         predicate: Option<&CompiledRelatedJudgmentExpr>,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let (members, where_errors, mut errors) =
             self.filtered_members(relation, predicate, mask)?;
         errors.absorb(self.lift_errors(relation, &where_errors));
@@ -3413,15 +4848,22 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         for related in members.rows() {
             counts[owners[related]] += 1;
         }
-        Ok((
-            DenseColumn::Integer(
-                counts
-                    .into_iter()
-                    .map(|count| i64::try_from(count).unwrap_or(i64::MAX))
-                    .collect(),
-            ),
-            errors,
-        ))
+        // Binding bounds every related count by `MAX_DENSE_ROWS`, far below
+        // `i64::MAX`, so no count fails to convert; one that did would be an
+        // error on its row, not a clamped count.
+        let mut values = vec![0_i64; counts.len()];
+        for (row, count) in counts.into_iter().enumerate() {
+            match i64::try_from(count) {
+                Ok(count) => values[row] = count,
+                Err(_) => errors.record(
+                    row,
+                    EvalError::TypeMismatch(format!(
+                        "dense relation count {count} does not fit in an integer column"
+                    )),
+                ),
+            }
+        }
+        Ok((DenseColumn::Integer(values), errors))
     }
 
     /// For each member (in batch order) the `where` clause and then the
@@ -3433,7 +4875,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         value: &CompiledRelatedScalarExpr,
         predicate: Option<&CompiledRelatedJudgmentExpr>,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let (members, mut related_errors, mut errors) =
             self.filtered_members(relation, predicate, mask)?;
         let (values, value_errors) = self.resolve_related_scalar(relation, value, &members)?;
@@ -3470,14 +4912,174 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         Ok((N::into_column(totals), errors))
     }
 
+    /// `min`/`max` over each root row's members, walked as `sum` walks them:
+    /// for each member (in batch order) the `where` clause and then the value,
+    /// so a root fails with its first failing member's error. Numbers compare
+    /// in mode `N` and dates chronologically; a boolean or text value is
+    /// explain's type error. A root left with no member fails with explain's
+    /// empty-aggregate error, which names the root entity kind where explain
+    /// names the id (dense rows carry none), as `MissingInput` does.
+    fn eval_extreme_related(
+        &mut self,
+        extreme: Extreme,
+        (relation, relation_name): (usize, &str),
+        value: &CompiledRelatedScalarExpr,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let function = extreme.call_name(predicate.is_some());
+        let (members, mut related_errors, mut errors) =
+            self.filtered_members(relation, predicate, mask)?;
+        let (values, value_errors) = self.resolve_related_scalar(relation, value, &members)?;
+        let live = members.without(&value_errors);
+        related_errors.absorb(value_errors);
+        let owners = Rc::clone(&self.batch.relations[relation].owners);
+        let row_count = self.batch.row_count;
+        let mut extremes = match &values {
+            DenseColumn::Date(dates) => Extremes::Dates {
+                values: dates,
+                best: vec![None; row_count],
+            },
+            DenseColumn::Bool(_) | DenseColumn::Text(_) => {
+                let found = if matches!(values, DenseColumn::Bool(_)) {
+                    "a boolean"
+                } else {
+                    "text"
+                };
+                related_errors.record_all(
+                    &live,
+                    &extreme_value_type_error(function, relation_name, found),
+                );
+                Extremes::Numbers {
+                    values: Vec::new(),
+                    best: vec![None; row_count],
+                }
+            }
+            numeric => Extremes::Numbers {
+                values: numeric_values::<N>(numeric, &live, &mut related_errors),
+                best: vec![None; row_count],
+            },
+        };
+        // Membership errors (already in `errors`) come before every member's;
+        // then a root takes its first failing member's error, in batch order.
+        // No member's value can fail the comparison itself, so that order is
+        // the whole of explain's.
+        for (failed, error) in related_errors.iter() {
+            errors.record(owners[failed], error.clone());
+        }
+        let live = live.without(&related_errors);
+        for related in live.rows() {
+            let owner = owners[related];
+            if !errors.contains(owner) {
+                extremes.take(extreme, owner, related);
+            }
+        }
+        let empty = |errors: &mut RowErrors, row: usize| {
+            errors.record(
+                row,
+                EvalError::EmptyRelatedAggregate {
+                    function,
+                    relation: relation_name.to_string(),
+                    entity_id: self.program.root_entity.clone(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                },
+            );
+        };
+        let column = match extremes {
+            Extremes::Numbers { best, .. } => {
+                let mut column = vec![N::ZERO; row_count];
+                for row in mask.without(&errors).rows() {
+                    match best[row] {
+                        Some(value) => column[row] = value,
+                        None => empty(&mut errors, row),
+                    }
+                }
+                N::into_column(column)
+            }
+            Extremes::Dates { best, .. } => {
+                let mut column = vec![NaiveDate::default(); row_count];
+                for row in mask.without(&errors).rows() {
+                    match best[row] {
+                        Some(value) => column[row] = value,
+                        None => empty(&mut errors, row),
+                    }
+                }
+                DenseColumn::Date(column)
+            }
+        };
+        Ok((column, errors))
+    }
+
+    /// `only` over each root row's members: the `where` clause for every
+    /// member, then the value of the one member a root selects. A root that
+    /// selects none or several fails with explain's error and reads no value;
+    /// the error names the row, as `eval_only_related` does, so each of these
+    /// errors means one thing in dense whichever expression raised it. The
+    /// value keeps its column's type, as an input read does.
+    fn eval_single_related(
+        &mut self,
+        (relation, relation_name): (usize, &str),
+        value: &CompiledRelatedScalarExpr,
+        predicate: Option<&CompiledRelatedJudgmentExpr>,
+        mask: &RowMask,
+    ) -> Flow<DenseEval> {
+        let (members, where_errors, mut errors) =
+            self.filtered_members(relation, predicate, mask)?;
+        errors.absorb(self.lift_errors(relation, &where_errors));
+        let owners = Rc::clone(&self.batch.relations[relation].owners);
+        let row_count = self.batch.row_count;
+        let mut counts = vec![0_usize; row_count];
+        let mut single = vec![0_usize; row_count];
+        for related in members.rows() {
+            counts[owners[related]] += 1;
+            single[owners[related]] = related;
+        }
+        let mut chosen = vec![false; self.batch.relations[relation].related_count];
+        for row in mask.without(&errors).rows() {
+            let error = match counts[row] {
+                1 => {
+                    chosen[single[row]] = true;
+                    continue;
+                }
+                0 => EvalError::MissingRelation {
+                    relation: relation_name.to_string(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                },
+                count => EvalError::AmbiguousRelation {
+                    relation: relation_name.to_string(),
+                    entity_id: row.to_string(),
+                    period_start: self.period.start,
+                    period_end: self.period.end,
+                    count,
+                },
+            };
+            errors.record(row, error);
+        }
+        let chosen = RowMask::from_bits(chosen);
+        let (values, value_errors) = self.resolve_related_scalar(relation, value, &chosen)?;
+        let read = chosen.without(&value_errors);
+        errors.absorb(self.lift_errors(relation, &value_errors));
+        Ok((gather_to_owners(&values, &owners, &read, row_count), errors))
+    }
+
     fn eval_related_predicate(
         &mut self,
         relation: usize,
         expr: &CompiledRelatedJudgmentExpr,
         mask: &RowMask,
-    ) -> Result<(Vec<bool>, RowErrors), EvalError> {
+    ) -> Flow<(Vec<bool>, RowErrors)> {
         let length = self.batch.relations[relation].related_count;
         match expr {
+            CompiledRelatedJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, mask);
+                let (values, formula_errors) =
+                    self.eval_related_predicate(relation, value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledRelatedJudgmentExpr::Literal(value) => {
                 Ok((vec![*value; length], RowErrors::new()))
             }
@@ -3496,6 +5098,9 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     errors,
                 ))
             }
+            CompiledRelatedJudgmentExpr::Inline(index) => {
+                self.evaluate_related_inline_judgment(relation, *index, mask)
+            }
             CompiledRelatedJudgmentExpr::RootJudgment(expr) => {
                 let roots = self.root_rows_of(relation, mask);
                 let (values, root_errors) = self.eval_judgment_expr(expr, &roots)?;
@@ -3504,9 +5109,6 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                     &self.batch.relations[relation].offsets,
                 )?;
                 Ok((projected, self.lower_errors(relation, &root_errors, mask)))
-            }
-            CompiledRelatedJudgmentExpr::Inline(index) => {
-                self.evaluate_related_inline_judgment(relation, *index, mask)
             }
             CompiledRelatedJudgmentExpr::RelationMemberWithoutContext { relation: name } => {
                 let mut errors = RowErrors::new();
@@ -3551,16 +5153,23 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         relation: usize,
         expr: &CompiledRelatedScalarExpr,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let length = self.batch.relations[relation].related_count;
         match expr {
+            CompiledRelatedScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, mask);
+                let (values, formula_errors) =
+                    self.resolve_related_scalar(relation, value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledRelatedScalarExpr::Literal(value) => Ok((
                 broadcast_scalar_literal::<N>(value, length),
                 RowErrors::new(),
             )),
             CompiledRelatedScalarExpr::Input(index) => {
                 Ok(match &self.batch.relations[relation].inputs[*index] {
-                    Some(column) => (column.clone(), RowErrors::new()),
+                    Some(column) => (DenseColumn::clone(column), RowErrors::new()),
                     None => {
                         let schema = &self.program.relations[relation];
                         fail_numeric::<N>(
@@ -3578,11 +5187,20 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledRelatedScalarExpr::InputOrElse { input, default } => Ok((
                 match &self.batch.relations[relation].inputs[*input] {
-                    Some(column) => column.clone(),
+                    Some(column) => DenseColumn::clone(column),
                     None => broadcast_scalar_literal::<N>(default, length),
                 },
                 RowErrors::new(),
             )),
+            CompiledRelatedScalarExpr::Round { value, rounding } => eval_round::<N, _, _>(
+                &mut RelatedAxis {
+                    executor: self,
+                    relation,
+                },
+                value.as_ref(),
+                *rounding,
+                mask,
+            ),
             CompiledRelatedScalarExpr::Inline(index) => {
                 self.evaluate_related_inline_scalar(relation, *index, mask)
             }
@@ -3785,7 +5403,15 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         &mut self,
         expr: &CompiledJudgmentExpr,
         mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    ) -> Flow<JudgmentEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.judgment_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn judgment_node(&mut self, expr: &CompiledJudgmentExpr, mask: &RowMask) -> Flow<JudgmentEval> {
         match expr {
             CompiledJudgmentExpr::Comparison { left, op, right } => {
                 let (left, mut errors) = self.eval_scalar_expr(left, mask)?;
@@ -3798,6 +5424,12 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
             CompiledJudgmentExpr::Inline(index) => self.evaluate_inline_judgment(*index, mask),
+            CompiledJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) = rule.rows(self.period, mask);
+                let (values, formula_errors) = self.eval_judgment_expr(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -3842,10 +5474,37 @@ struct LifetimeExecutor<'a, N: DenseNum> {
     /// applied before caching, mirroring the per-period path.
     scalar_cache: Vec<Option<DerivedColumn<DenseColumn>>>,
     judgment_cache: Vec<Option<DerivedColumn<Vec<JudgmentOutcome>>>>,
-    /// Lifetime-level columns of shared inlined bodies. An inlined body is
-    /// read only under an aggregation or a relation's predicate, which the
-    /// per-period executors evaluate, so these stay empty in practice.
+    /// Lifetime-level columns of shared inlined bodies. Only an aggregation
+    /// or a relation's predicate reads an inlined body, and the lifetime
+    /// executor evaluates those in its per-period executors, so these stay
+    /// empty in practice.
     inline_cache: InlineCaches,
+    /// Expression levels on the stack since the driver's current task began.
+    depth: usize,
+    /// The level at which a rule's pending rows are deferred to the driver
+    /// (see [`crate::depth`]).
+    suspend_depth: usize,
+    /// Expression levels evaluated since the driver last reported them (see
+    /// [`crate::depth::count_visits`]).
+    visits: usize,
+}
+
+impl<N: DenseNum> Deferring for LifetimeExecutor<'_, N> {
+    fn reset_depth(&mut self) {
+        self.depth = 0;
+    }
+
+    fn take_visits(&mut self) -> usize {
+        std::mem::take(&mut self.visits)
+    }
+
+    fn run_deferred(&mut self, task: &Deferred) -> Flow<()> {
+        if task.judgment {
+            self.evaluate_judgment(task.derived, &task.rows).map(|_| ())
+        } else {
+            self.evaluate_scalar(task.derived, &task.rows).map(|_| ())
+        }
+    }
 }
 
 impl<N: DenseNum> ColumnAxis<N, CompiledScalarExpr> for LifetimeExecutor<'_, N> {
@@ -3853,11 +5512,7 @@ impl<N: DenseNum> ColumnAxis<N, CompiledScalarExpr> for LifetimeExecutor<'_, N> 
         self.row_count
     }
 
-    fn eval_column(
-        &mut self,
-        expr: &CompiledScalarExpr,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn eval_column(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         self.eval_scalar(expr, mask)
     }
 }
@@ -3871,7 +5526,7 @@ impl<N: DenseNum> JudgmentAxis for LifetimeExecutor<'_, N> {
         &mut self,
         expr: &CompiledJudgmentExpr,
         mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    ) -> Flow<JudgmentEval> {
         self.eval_judgment(expr, mask)
     }
 }
@@ -3886,7 +5541,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let period_executors = periods
             .iter()
             .zip(bound)
-            .map(|(period, batch)| DenseExecutor::new(program, period, batch, false))
+            .map(|(period, batch)| DenseExecutor::new(program, period, batch))
             .collect();
         Self {
             program,
@@ -3896,61 +5551,36 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             scalar_cache: (0..program.derived.len()).map(|_| None).collect(),
             judgment_cache: (0..program.derived.len()).map(|_| None).collect(),
             inline_cache: InlineCaches::new(program),
+            depth: 0,
+            suspend_depth: crate::depth::suspend_depth(),
+            visits: 0,
         }
     }
 
-    fn evaluate_inline_scalar(
-        &mut self,
-        index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
-        let program = self.program;
-        let inline = &program.inline_scalars[index];
-        if inline.references < 2 {
-            return self.eval_scalar(&inline.body, mask);
-        }
-        let cached = self.inline_cache.scalars[index].take();
-        let (result, cached) = cached_rows(
-            cached,
-            mask,
-            |pending| self.eval_scalar(&inline.body, pending),
-            merge_scalar::<N>,
-        )?;
-        self.inline_cache.scalars[index] = Some(cached);
-        Ok(result)
-    }
-
-    fn evaluate_inline_judgment(
-        &mut self,
-        index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
-        let program = self.program;
-        let inline = &program.inline_judgments[index];
-        if inline.references < 2 {
-            return self.eval_judgment(&inline.body, mask);
-        }
-        let cached = self.inline_cache.judgments[index].take();
-        let (result, cached) = cached_rows(
-            cached,
-            mask,
-            |pending| self.eval_judgment(&inline.body, pending),
-            |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
-        )?;
-        self.inline_cache.judgments[index] = Some(cached);
-        Ok(result)
-    }
-
-    fn evaluate_scalar(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn evaluate_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let pending = pending_rows(self.scalar_cache[derived_index].as_ref(), mask);
+        if computes(self.scalar_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
+            return Err(Stop::Defer(Deferred {
+                derived: derived_index,
+                judgment: false,
+                rows: pending,
+            }));
+        }
         let cached = match self.scalar_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_scalar(derived_index, &pending)?;
+                let computed = match self.compute_scalar(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.scalar_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_scalar::<N>(cached, pending, computed)?
             }
         };
@@ -3959,11 +5589,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         Ok(result)
     }
 
-    fn compute_scalar(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    fn compute_scalar(&mut self, derived_index: usize, mask: &RowMask) -> Flow<DenseEval> {
         let program = self.program;
         let derived = &program.derived[derived_index];
         let CompiledSemantics::Scalar(expr) = &derived.semantics else {
@@ -3973,27 +5599,43 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 EvalError::ExpectedScalar(derived.name.clone()),
             ));
         };
-        let (column, errors) = self.eval_scalar(expr, mask)?;
-        let mut errors = errors.within_rule(&derived.label);
+        let (live, mut errors) =
+            self.period_executors[self.reference_period].commenced_rows(derived_index, mask);
+        let (column, formula_errors) = self.eval_scalar(expr, &live)?;
+        errors.absorb(formula_errors.within_rule(&derived.label));
         let column = match derived.rounding {
             Some(rounding) => {
-                round_dense_column::<N>(column, rounding, &mask.without(&errors), &mut errors)
+                round_dense_column::<N>(column, rounding, &live.without(&errors), &mut errors)
             }
             None => column,
         };
         Ok((column, errors))
     }
 
-    fn evaluate_judgment(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn evaluate_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let pending = pending_rows(self.judgment_cache[derived_index].as_ref(), mask);
+        if computes(self.judgment_cache[derived_index].as_ref(), &pending)
+            && self.depth >= self.suspend_depth
+        {
+            return Err(Stop::Defer(Deferred {
+                derived: derived_index,
+                judgment: true,
+                rows: pending,
+            }));
+        }
         let cached = match self.judgment_cache[derived_index].take() {
             Some(cached) if pending.is_empty() => cached,
             cached => {
-                let computed = self.compute_judgment(derived_index, &pending)?;
+                let computed = match self.compute_judgment(derived_index, &pending) {
+                    Ok(computed) => computed,
+                    Err(stop) => {
+                        // A deferral retries this rule for the same rows;
+                        // keep the rows it computed earlier, as recursion
+                        // would have, so the retry extends them.
+                        self.judgment_cache[derived_index] = cached;
+                        return Err(stop);
+                    }
+                };
                 merge_judgment(cached, pending, computed)
             }
         };
@@ -4002,33 +5644,70 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         Ok(result)
     }
 
-    fn compute_judgment(
-        &mut self,
-        derived_index: usize,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn compute_judgment(&mut self, derived_index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
         let program = self.program;
         let derived = &program.derived[derived_index];
-        match &derived.semantics {
-            CompiledSemantics::Judgment(expr) => self
-                .eval_judgment(expr, mask)
-                .map(|(values, errors)| (values, errors.within_rule(&derived.label))),
-            CompiledSemantics::Scalar(_) => {
-                let (_, errors) = fail_numeric::<N>(
-                    self.row_count,
-                    mask,
-                    EvalError::ExpectedJudgment(derived.name.clone()),
-                );
-                Ok((vec![JudgmentOutcome::NotHolds; self.row_count], errors))
-            }
-        }
+        let placeholder = vec![JudgmentOutcome::NotHolds; self.row_count];
+        let CompiledSemantics::Judgment(expr) = &derived.semantics else {
+            let (_, errors) = fail_numeric::<N>(
+                self.row_count,
+                mask,
+                EvalError::ExpectedJudgment(derived.name.clone()),
+            );
+            return Ok((placeholder, errors));
+        };
+        let (live, mut errors) =
+            self.period_executors[self.reference_period].commenced_rows(derived_index, mask);
+        let (values, formula_errors) = self.eval_judgment(expr, &live)?;
+        errors.absorb(formula_errors.within_rule(&derived.label));
+        Ok((values, errors))
     }
 
-    fn eval_scalar(
-        &mut self,
-        expr: &CompiledScalarExpr,
-        mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    /// An inlined body's column for the rows of `mask`. A body read by one
+    /// node is evaluated in place; a shared one is computed once per row.
+    fn evaluate_inline_scalar(&mut self, index: usize, mask: &RowMask) -> Flow<DenseEval> {
+        let program = self.program;
+        let inline = &program.inline_scalars[index];
+        if inline.references < 2 {
+            return self.eval_scalar(&inline.body, mask);
+        }
+        let mut cache = self.inline_cache.scalars[index].take();
+        let result = cached_rows(
+            &mut cache,
+            mask,
+            |pending| self.eval_scalar(&inline.body, pending),
+            merge_scalar::<N>,
+        );
+        self.inline_cache.scalars[index] = cache;
+        result
+    }
+
+    fn evaluate_inline_judgment(&mut self, index: usize, mask: &RowMask) -> Flow<JudgmentEval> {
+        let program = self.program;
+        let inline = &program.inline_judgments[index];
+        if inline.references < 2 {
+            return self.eval_judgment(&inline.body, mask);
+        }
+        let mut cache = self.inline_cache.judgments[index].take();
+        let result = cached_rows(
+            &mut cache,
+            mask,
+            |pending| self.eval_judgment(&inline.body, pending),
+            |cached, pending, computed| Ok(merge_judgment(cached, pending, computed)),
+        );
+        self.inline_cache.judgments[index] = cache;
+        result
+    }
+
+    fn eval_scalar(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.scalar_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn scalar_node(&mut self, expr: &CompiledScalarExpr, mask: &RowMask) -> Flow<DenseEval> {
         let len = self.row_count;
         let ambiguous = |placeholder: DenseColumn, leaf: &str| {
             fail_all(
@@ -4046,6 +5725,16 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledScalarExpr::Derived(index) => self.evaluate_scalar(*index, mask),
             CompiledScalarExpr::Inline(index) => self.evaluate_inline_scalar(*index, mask),
+            CompiledScalarExpr::Commenced { rule, value } => {
+                let (live, mut errors) =
+                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (column, formula_errors) = self.eval_scalar(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((column, errors))
+            }
+            CompiledScalarExpr::Round { value, rounding } => {
+                eval_round::<N, _, _>(self, value.as_ref(), *rounding, mask)
+            }
             CompiledScalarExpr::ParameterLookup { parameter, index } => {
                 // Period-specific: resolve at the reference period. The index
                 // expression is itself lifetime-evaluated (typically a literal
@@ -4164,6 +5853,10 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 DenseColumn::Integer(vec![0; len]),
                 "days_between",
             )),
+            CompiledScalarExpr::OnlyRelated { .. } => Ok(ambiguous(
+                DenseColumn::Bool(vec![false; len]),
+                "only_related over a relation",
+            )),
             CompiledScalarExpr::CountRelated { .. } => Ok(ambiguous(
                 DenseColumn::Integer(vec![0; len]),
                 "count/len over a relation",
@@ -4171,6 +5864,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             CompiledScalarExpr::SumRelated { .. } => Ok(ambiguous(
                 N::into_column(vec![N::ZERO; len]),
                 "sum over a relation",
+            )),
+            CompiledScalarExpr::ExtremeRelated { extreme, .. } => Ok(ambiguous(
+                N::into_column(vec![N::ZERO; len]),
+                match extreme {
+                    Extreme::Min => "min over a relation",
+                    Extreme::Max => "max over a relation",
+                },
+            )),
+            CompiledScalarExpr::SingleRelated { .. } => Ok(ambiguous(
+                N::into_column(vec![N::ZERO; len]),
+                "only over a relation",
             )),
         }
     }
@@ -4185,7 +5889,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         value: &CompiledScalarExpr,
         n: Option<&CompiledScalarExpr>,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let period_count = self.period_executors.len();
         let mut errors = RowErrors::new();
         let mut live = mask.clone();
@@ -4200,7 +5904,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         if kind == OverPeriodsKind::Count {
             let mut counts = vec![0_i64; self.row_count];
             for executor in &mut self.period_executors {
-                let (column, period_errors) = executor.eval_scalar_expr(value, &live)?;
+                let (column, period_errors) = executor.drive_expr(value, &live)?;
                 live = live.without(&period_errors);
                 errors.absorb(period_errors);
                 let mut count_errors = RowErrors::new();
@@ -4214,7 +5918,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         // period-major: per_period[p][r] is entity r's inner value in period p.
         let mut per_period: Vec<Vec<N>> = Vec::with_capacity(period_count);
         for executor in &mut self.period_executors {
-            let (column, period_errors) = executor.eval_scalar_expr(value, &live)?;
+            let (column, period_errors) = executor.drive_expr(value, &live)?;
             live = live.without(&period_errors);
             errors.absorb(period_errors);
             let mut conversion = RowErrors::new();
@@ -4302,7 +6006,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         period_count: usize,
         mask: &RowMask,
         errors: &mut RowErrors,
-    ) -> Result<Vec<usize>, EvalError> {
+    ) -> Flow<Vec<usize>> {
         let mut counts = vec![0; self.row_count];
         let Some(n) = n else {
             errors.record_all(
@@ -4324,7 +6028,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let mut live = mask.clone();
         let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
         for executor in &mut self.period_executors {
-            let (column, period_errors) = executor.eval_scalar_expr(n, &live)?;
+            let (column, period_errors) = executor.drive_expr(n, &live)?;
             live = live.without(&period_errors);
             errors.absorb(period_errors);
             per_period.push(column);
@@ -4418,12 +6122,12 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         expr: &CompiledScalarExpr,
         input_name: &str,
         mask: &RowMask,
-    ) -> Result<DenseEval, EvalError> {
+    ) -> Flow<DenseEval> {
         let mut errors = RowErrors::new();
         let mut live = mask.clone();
         let mut per_period: Vec<DenseColumn> = Vec::with_capacity(self.period_executors.len());
         for executor in &mut self.period_executors {
-            let (column, period_errors) = executor.eval_scalar_expr(expr, &live)?;
+            let (column, period_errors) = executor.drive_expr(expr, &live)?;
             live = live.without(&period_errors);
             errors.absorb(period_errors);
             per_period.push(column);
@@ -4454,11 +6158,15 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         Ok((first.clone(), errors))
     }
 
-    fn eval_judgment(
-        &mut self,
-        expr: &CompiledJudgmentExpr,
-        mask: &RowMask,
-    ) -> Result<JudgmentEval, EvalError> {
+    fn eval_judgment(&mut self, expr: &CompiledJudgmentExpr, mask: &RowMask) -> Flow<JudgmentEval> {
+        self.visits += 1;
+        self.depth += 1;
+        let result = self.judgment_node(expr, mask);
+        self.depth -= 1;
+        result
+    }
+
+    fn judgment_node(&mut self, expr: &CompiledJudgmentExpr, mask: &RowMask) -> Flow<JudgmentEval> {
         match expr {
             CompiledJudgmentExpr::Comparison { left, op, right } => {
                 let (left, mut errors) = self.eval_scalar(left, mask)?;
@@ -4471,6 +6179,13 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             }
             CompiledJudgmentExpr::Derived(index) => self.evaluate_judgment(*index, mask),
             CompiledJudgmentExpr::Inline(index) => self.evaluate_inline_judgment(*index, mask),
+            CompiledJudgmentExpr::Commenced { rule, value } => {
+                let (live, mut errors) =
+                    rule.rows(self.period_executors[self.reference_period].period, mask);
+                let (values, formula_errors) = self.eval_judgment(value, &live)?;
+                errors.absorb(formula_errors);
+                Ok((values, errors))
+            }
             CompiledJudgmentExpr::And(items) => {
                 eval_short_circuit(self, items, mask, JudgmentOutcome::NotHolds)
             }
@@ -4493,16 +6208,32 @@ fn period_label(period: &Period) -> String {
 }
 
 /// Format the value at `row` of a dense column for an error message, in the
-/// column's own dtype (so an integer year reads `1985`, not `1985.0`).
+/// column's own dtype (so an integer year reads `1985`, not `1985.0`). A row
+/// the column lacks is described by the column's dtype and length instead, so
+/// building an error never panics.
 fn dense_value_label(column: &DenseColumn, row: usize) -> String {
-    match column {
-        DenseColumn::Bool(values) => values[row].to_string(),
-        DenseColumn::Integer(values) => values[row].to_string(),
-        DenseColumn::Decimal(values) => values[row].to_string(),
-        DenseColumn::Float(values) => values[row].to_string(),
-        DenseColumn::Text(values) => format!("{:?}", values[row]),
-        DenseColumn::Date(values) => values[row].to_string(),
-    }
+    let value = match column {
+        DenseColumn::Bool(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Integer(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Decimal(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Float(values) => values.get(row).map(ToString::to_string),
+        DenseColumn::Text(values) => values.get(row).map(|value| format!("{value:?}")),
+        DenseColumn::Date(values) => values.get(row).map(ToString::to_string),
+    };
+    value.unwrap_or_else(|| {
+        let dtype = match column {
+            DenseColumn::Bool(_) => "bool",
+            DenseColumn::Integer(_) => "integer",
+            DenseColumn::Decimal(_) => "decimal",
+            DenseColumn::Float(_) => "float",
+            DenseColumn::Text(_) => "text",
+            DenseColumn::Date(_) => "date",
+        };
+        format!(
+            "no value (row {row} of a {}-row {dtype} column)",
+            column.len()
+        )
+    })
 }
 
 /// Find a directly-nested over-periods reduction inside a compiled scalar
@@ -4522,8 +6253,11 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Inline(_)
         | CompiledScalarExpr::PeriodStart
         | CompiledScalarExpr::PeriodEnd
+        | CompiledScalarExpr::OnlyRelated { .. }
         | CompiledScalarExpr::CountRelated { .. }
-        | CompiledScalarExpr::SumRelated { .. } => None,
+        | CompiledScalarExpr::SumRelated { .. }
+        | CompiledScalarExpr::ExtremeRelated { .. }
+        | CompiledScalarExpr::SingleRelated { .. } => None,
         CompiledScalarExpr::ParameterLookup { index, .. } => nested_over_periods_kind(index),
         CompiledScalarExpr::Add(items)
         | CompiledScalarExpr::Max(items)
@@ -4533,9 +6267,10 @@ fn nested_over_periods_kind(expr: &CompiledScalarExpr) -> Option<OverPeriodsKind
         | CompiledScalarExpr::Div(left, right) => {
             nested_over_periods_kind(left).or_else(|| nested_over_periods_kind(right))
         }
-        CompiledScalarExpr::Ceil(value) | CompiledScalarExpr::Floor(value) => {
-            nested_over_periods_kind(value)
-        }
+        CompiledScalarExpr::Ceil(value)
+        | CompiledScalarExpr::Floor(value)
+        | CompiledScalarExpr::Commenced { value, .. }
+        | CompiledScalarExpr::Round { value, .. } => nested_over_periods_kind(value),
         CompiledScalarExpr::DateAddDays { date, days } => {
             nested_over_periods_kind(date).or_else(|| nested_over_periods_kind(days))
         }
@@ -4779,16 +6514,18 @@ fn index_at(column: &DenseColumn, row: usize) -> Option<i64> {
     match column {
         DenseColumn::Integer(values) => Some(values[row]),
         DenseColumn::Decimal(values) if values[row].fract().is_zero() => values[row].to_i64(),
-        DenseColumn::Float(values) => {
-            let value = values[row];
-            // 2^63 is exactly representable; `value < 2^63` keeps the cast
-            // exact rather than saturating.
-            (value.fract() == 0.0
-                && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value))
-            .then_some(value as i64)
-        }
+        DenseColumn::Float(values) => f64_as_index(values[row]),
         _ => None,
     }
+}
+
+/// An `f64` as an exact `i64`: `None` unless it is integral and in range.
+fn f64_as_index(value: f64) -> Option<i64> {
+    // 2^63 is exactly representable; `value < 2^63` keeps the cast exact
+    // rather than saturating, and NaN and the infinities fail both tests.
+    (value.fract() == 0.0
+        && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value))
+    .then_some(value as i64)
 }
 
 fn broadcast_scalar_literal<N: DenseNum>(value: &ScalarValue, length: usize) -> DenseColumn {
@@ -4927,6 +6664,95 @@ fn lookup_parameter_dense<N: DenseNum>(
             }
             N::into_column(values)
         }
+    }
+}
+
+/// The running `min`/`max` of each root row over its related rows' values:
+/// numbers in mode `N`, or dates.
+enum Extremes<'v, N: DenseNum> {
+    Numbers {
+        values: Vec<N>,
+        best: Vec<Option<N>>,
+    },
+    Dates {
+        values: &'v [NaiveDate],
+        best: Vec<Option<NaiveDate>>,
+    },
+}
+
+impl<N: DenseNum> Extremes<'_, N> {
+    /// Fold `related`'s value into `owner`'s extreme. Ties keep the first
+    /// unless `tie_prefers` says otherwise, so member order never shows.
+    fn take(&mut self, extreme: Extreme, owner: usize, related: usize) {
+        match self {
+            Self::Numbers { values, best } => {
+                let candidate = values[related];
+                best[owner] = Some(match best[owner] {
+                    Some(current)
+                        if !(extreme.improves(&candidate, &current)
+                            || (candidate == current && candidate.tie_prefers(&current))) =>
+                    {
+                        current
+                    }
+                    _ => candidate,
+                });
+            }
+            Self::Dates { values, best } => {
+                let candidate = values[related];
+                best[owner] = Some(match best[owner] {
+                    Some(current) if !extreme.improves(&candidate, &current) => current,
+                    _ => candidate,
+                });
+            }
+        }
+    }
+}
+
+/// A root-row column holding, for each related row of `rows`, its value of
+/// `values` at the root row that owns it. Rows of no related row hold the
+/// column type's default.
+fn gather_to_owners(
+    values: &DenseColumn,
+    owners: &[usize],
+    rows: &RowMask,
+    row_count: usize,
+) -> DenseColumn {
+    fn gather<T: Clone>(
+        values: &[T],
+        default: T,
+        owners: &[usize],
+        rows: &RowMask,
+        row_count: usize,
+    ) -> Vec<T> {
+        let mut gathered = vec![default; row_count];
+        for related in rows.rows() {
+            gathered[owners[related]] = values[related].clone();
+        }
+        gathered
+    }
+    match values {
+        DenseColumn::Bool(values) => {
+            DenseColumn::Bool(gather(values, false, owners, rows, row_count))
+        }
+        DenseColumn::Integer(values) => {
+            DenseColumn::Integer(gather(values, 0, owners, rows, row_count))
+        }
+        DenseColumn::Decimal(values) => {
+            DenseColumn::Decimal(gather(values, Decimal::ZERO, owners, rows, row_count))
+        }
+        DenseColumn::Float(values) => {
+            DenseColumn::Float(gather(values, 0.0, owners, rows, row_count))
+        }
+        DenseColumn::Text(values) => {
+            DenseColumn::Text(gather(values, String::new(), owners, rows, row_count))
+        }
+        DenseColumn::Date(values) => DenseColumn::Date(gather(
+            values,
+            NaiveDate::default(),
+            owners,
+            rows,
+            row_count,
+        )),
     }
 }
 

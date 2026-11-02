@@ -12,6 +12,11 @@ module:
 
     Synthetic RuleSpec module — not modelled on any specific statute.
 rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
   - name: family_allowance_per_child
     kind: parameter
     dtype: Money

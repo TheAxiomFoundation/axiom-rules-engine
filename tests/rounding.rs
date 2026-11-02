@@ -125,6 +125,7 @@ fn run_three_paths(
         .collect();
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: dataset.clone(),
@@ -134,6 +135,7 @@ fn run_three_paths(
     assert_eq!(explain.metadata.actual_mode, ExecutionMode::Explain);
 
     let fast = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Fast,
         program: artifact.program.clone(),
         dataset,
@@ -476,6 +478,7 @@ fn explain_trace_shows_rounding_mode_and_pre_rounding_value() {
         .expect("compiles");
     let period = month_period();
     let response: ExecutionResponse = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -531,6 +534,7 @@ fn explain_trace_omits_pre_rounding_value_when_value_unchanged() {
         .expect("compiles");
     let period = month_period();
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {
@@ -693,6 +697,7 @@ fn golden_fixture_rounds_in_explain_and_dense() {
     let period = month_period();
 
     let explain = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset: DatasetSpec {

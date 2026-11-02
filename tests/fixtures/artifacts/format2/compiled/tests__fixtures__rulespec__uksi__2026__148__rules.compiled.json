@@ -1,0 +1,337 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Social Security Benefits Up-rating Order 2026 (SI 2026/148) — April 2026\nuprating of Universal Credit rates.\n\nIn the deployed DSL this would be an `amend` block against the base UC\nRegulations 2013 RuleSpec module (`tests/fixtures/rulespec/uksi/2013/376`). The Rust loader\ndoes not yet compose amendments, so the new rates are declared as\nstandalone parameters with `from 2026-04-06:` values; callers picking the\nApril 2026 version will get these figures.\n\nNotable change: LCWRA element halved to £217.26 for new claimants (a\nprotected rate of £429.80 applies to pre-2026 / terminally-ill / severe\ncases; this file uses the new-claimant figure and flags the protected\npath as out of scope)."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [
+      {
+        "name": "uc_standard_allowance_single_under_25",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "338.58"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_single_25_or_over",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "424.9"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_couple_under_25",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "528.34"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_couple_25_or_over",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "666.97"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_child_element_higher",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "351.88"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_child_element_standard",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "303.94"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_disabled_child_lower",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "164.79"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_disabled_child_higher",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "514.71"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_lcwra_element",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": "SI 2026/148; halved for new claimants",
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "217.26"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_carer_element",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "209.34"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_work_allowance_with_housing",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "427"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_work_allowance_without_housing",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2026-04-06",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "711"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": []
+  },
+  "metadata": {
+    "evaluation_order": [],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": []
+  }
+}

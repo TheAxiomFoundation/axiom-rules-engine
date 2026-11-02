@@ -108,6 +108,7 @@ fn run(rulespec: &str, statuses: [bool; 4]) -> JudgmentOutcomeSpec {
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     let response = execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: status_dataset(&period, statuses),
@@ -222,6 +223,7 @@ fn run_partial(rulespec: &str, supplied: &[(&str, bool)]) -> Result<JudgmentOutc
     let program =
         axiom_rules_engine::rulespec::lower_rulespec_str(rulespec).expect("RuleSpec lowers");
     execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program,
         dataset: partial_status_dataset(&period, supplied),

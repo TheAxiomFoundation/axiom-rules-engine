@@ -1,0 +1,500 @@
+//! Long chains of derived relations.
+//!
+//! Validation and evaluation visit each relation once without recursing per
+//! link. Source chains, membership predicates and nested counts retain the
+//! recursive evaluator's values and errors. These end-to-end tests also cover
+//! the linear typing and binding supplied independently by the typing walker.
+//! Direct evaluator and cycle-search tests isolate this change from those
+//! earlier pipeline stages.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use axiom_rules_engine::api::{
+    ApiError, CompiledExecutionRequest, ExecutionMode, ExecutionRequest, ExecutionResponse,
+    OutputValue, execute_compiled_request, execute_request,
+};
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
+use axiom_rules_engine::dense::{
+    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue, DenseRelationBatchSpec,
+    DenseRelationKey,
+};
+use axiom_rules_engine::model::Period;
+use axiom_rules_engine::spec::{ProgramSpec, ScalarValueSpec};
+use serde_json::{Value, json};
+
+const LINKS: usize = 20_000;
+
+/// Generous for a debug build, where each case takes a few seconds at most.
+/// The code this replaced needed minutes at this size, when it did not
+/// overflow the stack first.
+const BOUND: Duration = Duration::from_secs(90);
+
+fn relation_name(link: usize) -> String {
+    format!("rel{link:07}")
+}
+
+fn literal(value: i64) -> Value {
+    json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
+}
+
+fn always() -> Value {
+    json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)})
+}
+
+fn count_related(relation: &str) -> Value {
+    json!({"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1})
+}
+
+fn step(relation: &str) -> Value {
+    json!({"relation": relation, "from_slot": 0, "to_slot": 1})
+}
+
+fn rule(name: &str, expr: Value) -> Value {
+    json!({
+        "name": name, "entity": "Household", "dtype": "integer", "unit": null,
+        "semantics": "scalar", "expr": expr,
+    })
+}
+
+/// How each link of the chain reaches the next.
+#[derive(Clone, Copy)]
+enum Link {
+    /// `rel_i.source_relation = rel_{i+1}`, with an always-true predicate.
+    Source,
+    /// `rel_i.source_relation = rel_{i+1}`, and its predicate tests membership
+    /// in `base`, which only the last link reads directly.
+    SourceTestingBase,
+    /// `rel_i` draws on `base`, and its predicate is `relation_member` of
+    /// `rel_{i+1}` for the same pair.
+    Member,
+    /// `rel_i` draws on `base`, and its predicate counts `rel_{i+1}` at the
+    /// candidate.
+    Counted,
+    /// `rel_i.source_path` is the one step `rel_{i+1}`.
+    Path,
+    /// `rel_i.source_path` is `base`, then `rel_{i+1}`, so each link resolves
+    /// the next at every id `base` reaches.
+    PathThroughBase,
+}
+
+/// A chain of `LINKS` derived relations over the data relation `base`, typed
+/// `[Household, Person]` throughout when `typed`.
+fn chain_relations(link: Link, typed: bool) -> Vec<Value> {
+    chain_relations_with_links(link, typed, LINKS)
+}
+
+fn chain_relations_with_links(link: Link, typed: bool, links: usize) -> Vec<Value> {
+    let slots = if matches!(link, Link::Counted | Link::PathThroughBase) {
+        // Nested links run on the candidate, so both sides have the same kind.
+        json!(["Household", "Household"])
+    } else {
+        json!(["Household", "Person"])
+    };
+    let mut base = json!({"name": "base", "arity": 2});
+    if typed {
+        base["slot_entities"] = slots.clone();
+    }
+    let mut relations = vec![base];
+    for index in 0..links {
+        let next = (index + 1 < links).then(|| relation_name(index + 1));
+        let (field, source, predicate) = match (link, next) {
+            (Link::Source, Some(next)) => ("source_relation", json!(next), always()),
+            (Link::SourceTestingBase, Some(next)) => (
+                "source_relation",
+                json!(next),
+                json!({"kind": "relation_member", "relation": "base", "current_slot": 0, "related_slot": 1}),
+            ),
+            (Link::Member, Some(next)) => (
+                "source_relation",
+                json!("base"),
+                json!({"kind": "relation_member", "relation": next, "current_slot": 0, "related_slot": 1}),
+            ),
+            (Link::Counted, Some(next)) => (
+                "source_relation",
+                json!("base"),
+                json!({"kind": "comparison", "left": count_related(&next), "op": "gte", "right": literal(0)}),
+            ),
+            (Link::Path, Some(next)) => ("source_path", json!([step(&next)]), always()),
+            (Link::PathThroughBase, Some(next)) => {
+                ("source_path", json!([step("base"), step(&next)]), always())
+            }
+            (_, None) => ("source_relation", json!("base"), always()),
+        };
+        let mut relation = json!({
+            "name": relation_name(index),
+            "arity": 2,
+            "derivation": {
+                field: source, "current_slot": 0, "related_slot": 1,
+                "predicate": predicate,
+            },
+        });
+        if typed {
+            relation["slot_entities"] = slots.clone();
+            relation["derivation"]["slot_entities"] = slots.clone();
+        }
+        relations.push(relation);
+    }
+    relations
+}
+
+fn program(relations: Vec<Value>, derived: Vec<Value>) -> ProgramSpec {
+    serde_json::from_value(json!({"relations": relations, "derived": derived}))
+        .expect("a valid program")
+}
+
+fn period() -> Value {
+    json!({"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"})
+}
+
+fn dataset(tuples: &[(&str, &str)]) -> Value {
+    let interval = json!({"start": "2026-01-01", "end": "2026-12-31"});
+    json!({
+        "inputs": [],
+        "relations": tuples
+            .iter()
+            .map(|(left, right)| json!({"name": "base", "tuple": [left, right], "interval": interval}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn request(
+    program: &ProgramSpec,
+    mode: &str,
+    tuples: &[(&str, &str)],
+    entity: &str,
+    outputs: &[&str],
+) -> ExecutionRequest {
+    serde_json::from_value(json!({
+        "mode": mode,
+        "program": program,
+        "dataset": dataset(tuples),
+        "queries": [{"entity_id": entity, "period": period(), "outputs": outputs}],
+    }))
+    .expect("a valid request")
+}
+
+fn timed<T>(label: &str, run: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = run();
+    let elapsed = started.elapsed();
+    assert!(elapsed < BOUND, "{label} took {elapsed:?}");
+    result
+}
+
+fn integer_output(response: &ExecutionResponse, output: &str) -> i64 {
+    let value = response.results[0]
+        .outputs
+        .get(output)
+        .unwrap_or_else(|| panic!("output `{output}` is present"));
+    match value {
+        OutputValue::Scalar {
+            value: ScalarValueSpec::Integer { value },
+            ..
+        } => *value,
+        other => panic!("`{output}` is an integer, found {other:?}"),
+    }
+}
+
+/// Runs `request` in explain and fast mode, each within the bound, and
+/// returns both responses.
+fn explain_and_fast(
+    program: &ProgramSpec,
+    tuples: &[(&str, &str)],
+    entity: &str,
+    outputs: &[&str],
+    label: &str,
+) -> [ExecutionResponse; 2] {
+    ["explain", "fast"].map(|mode| {
+        timed(&format!("{label} ({mode})"), || {
+            execute_request(request(program, mode, tuples, entity, outputs))
+                .unwrap_or_else(|error| panic!("{label} ({mode}) failed: {error}"))
+        })
+    })
+}
+
+#[test]
+fn an_unqueried_chain_binds_and_validates_in_linear_time() {
+    // The reviewer's shape: nothing reads the chain, yet binding walked it
+    // from every relation.
+    let program = program(
+        chain_relations(Link::Source, false),
+        vec![rule("k", literal(3))],
+    );
+    for response in explain_and_fast(&program, &[], "h1", &["k"], "unqueried chain") {
+        assert_eq!(integer_output(&response, "k"), 3);
+    }
+}
+
+#[test]
+fn a_queried_typed_chain_evaluates_in_linear_time() {
+    // Declared slots let typing and binding check every link; querying the head makes
+    // every evaluator resolve the whole chain.
+    let program = program(
+        chain_relations(Link::Source, true),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("h1", "p1"), ("h1", "p2")];
+    for response in explain_and_fast(&program, &tuples, "h1", &["head"], "queried chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn counting_every_link_of_a_chain_resolves_each_link_once() {
+    // One aggregation per link: resolving each from scratch walks the chain
+    // below it again, which is quadratic in the chain length.
+    let program = program(
+        chain_relations(Link::Source, true),
+        vec![rule(
+            "all",
+            json!({"kind": "add", "items": (0..LINKS).map(|link| count_related(&relation_name(link))).collect::<Vec<_>>()}),
+        )],
+    );
+    let expected = i64::try_from(LINKS).expect("fits") * 2;
+    for response in explain_and_fast(
+        &program,
+        &[("h1", "p1"), ("h1", "p2")],
+        "h1",
+        &["all"],
+        "every link counted",
+    ) {
+        let OutputValue::Scalar {
+            value: ScalarValueSpec::Decimal { value },
+            ..
+        } = &response.results[0].outputs["all"]
+        else {
+            panic!("`all` is a decimal sum");
+        };
+        assert_eq!(value.to_string(), expected.to_string());
+    }
+}
+
+#[test]
+fn a_chain_through_relation_member_predicates_is_linear_not_exponential() {
+    // Two candidates per link: re-resolving the next link for each candidate
+    // doubled the work per link.
+    let program = program(
+        chain_relations(Link::Member, true),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("h1", "p1"), ("h1", "p2")];
+    for response in explain_and_fast(&program, &tuples, "h1", &["head"], "member chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_chain_through_count_related_predicates_is_linear_not_exponential() {
+    check_count_related_chain(LINKS);
+}
+
+#[test]
+fn count_related_chain_stays_within_a_bounded_stack() {
+    // On aarch64-apple-darwin, rustc 1.94.1, this counted chain needed
+    // 576 KiB with debug nesting 8, versus 2048 KiB with nesting 32
+    // (16 KiB measurement resolution). A 1 MiB thread is 1.8 times the
+    // measured need, yet fails if the debug limit returns to 32 or
+    // each link's native stack use doubles. Keep this budget independent
+    // of the runtime limit. CI's compiler floats, so if a new rustc trips
+    // this guard, re-measure before raising it.
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        // More than both limits, so the native segment is just as deep as
+        // in the 20,000-link linearity test without repeating all its work.
+        .spawn(|| check_count_related_chain(128))
+        .expect("spawn bounded-stack count chain")
+        .join()
+        .expect("count chain stays within its stack budget");
+}
+
+fn check_count_related_chain(links: usize) {
+    // Each link counts the next at its candidate, a different entity, so the
+    // resolutions nest across entities as well as links.
+    let program = program(
+        chain_relations_with_links(Link::Counted, true, links),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("n1", "n1"), ("n1", "n2"), ("n2", "n1"), ("n2", "n2")];
+    for response in explain_and_fast(&program, &tuples, "n1", &["head"], "counted chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_chain_of_path_sources_evaluates_in_linear_time() {
+    let program = program(
+        chain_relations(Link::Path, true),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("h1", "p1"), ("h1", "p2")];
+    for response in explain_and_fast(&program, &tuples, "h1", &["head"], "path chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_chain_of_paths_through_two_ids_is_linear_not_exponential() {
+    check_path_through_base_chain(LINKS);
+}
+
+#[test]
+fn a_path_chain_stays_within_a_bounded_stack() {
+    // On aarch64-apple-darwin, rustc 1.94.1, this chain needed at most 236 KiB
+    // with debug nesting 8 (16 KiB measurement resolution). A 512 KiB thread
+    // is 2.2 times the measured need, yet fails if each level's native stack
+    // use more than doubles. CI's compiler floats, so if a new rustc trips
+    // this guard, re-measure before raising it.
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| check_path_through_base_chain(128))
+        .expect("spawn bounded-stack path chain")
+        .join()
+        .expect("path chain stays within its stack budget");
+}
+
+fn check_path_through_base_chain(links: usize) {
+    // Each link resolves the next at both ids, so re-resolving a link doubles
+    // the work per link, and the resolutions nest across entities.
+    let program = program(
+        chain_relations_with_links(Link::PathThroughBase, true, links),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("n1", "n1"), ("n1", "n2"), ("n2", "n1"), ("n2", "n2")];
+    for response in explain_and_fast(
+        &program,
+        &tuples,
+        "n1",
+        &["head"],
+        "path-through-base chain",
+    ) {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_path_chain_closed_into_a_cycle_is_refused_without_recursing() {
+    let mut relations = chain_relations(Link::Path, true);
+    let derivation = &mut relations.last_mut().expect("the chain has links")["derivation"];
+    derivation
+        .as_object_mut()
+        .expect("a derivation is an object")
+        .remove("source_relation");
+    derivation["source_path"] = json!([step(&relation_name(0))]);
+    assert_cycle_refused(program(relations, vec![rule("k", literal(3))]));
+}
+
+#[test]
+fn a_chain_closed_into_a_cycle_is_refused_without_recursing() {
+    let mut relations = chain_relations(Link::Source, false);
+    relations.last_mut().expect("the chain has links")["derivation"]["source_relation"] =
+        json!(relation_name(0));
+    assert_cycle_refused(program(relations, vec![rule("k", literal(3))]));
+}
+
+fn assert_cycle_refused(program: ProgramSpec) {
+    let error = timed("cyclic chain", || {
+        execute_request(request(&program, "explain", &[], "h1", &["k"]))
+            .expect_err("a cycle of source relations is refused")
+    });
+    let ApiError::InvalidProgram(error) = error else {
+        panic!("expected an invalid program, found {error}");
+    };
+    let CompileError::CyclicRelationDependency { cycle } = *error else {
+        panic!("expected a relation cycle, found {error}");
+    };
+    assert_eq!(cycle.split(", ").count(), LINKS);
+}
+
+#[test]
+fn a_compiled_chain_loads_and_runs_in_linear_time() {
+    // Loading an artifact runs mandatory entity typing and the cycle search
+    // over the whole chain. A path chain also runs the source-edge walk that
+    // single sources skip.
+    for link in [Link::Source, Link::Path] {
+        let program = program(
+            chain_relations(link, true),
+            vec![rule("head", count_related(&relation_name(0)))],
+        );
+        let artifact = timed("compile", || {
+            CompiledProgramArtifact::compile(program).expect("the chain compiles")
+        });
+        let request: CompiledExecutionRequest = serde_json::from_value(json!({
+            "mode": "explain",
+            "dataset": dataset(&[("h1", "p1"), ("h1", "p2")]),
+            "queries": [{"entity_id": "h1", "period": period(), "outputs": ["head"]}],
+        }))
+        .expect("a valid compiled request");
+        assert_eq!(request.mode, ExecutionMode::Explain);
+        let response = timed("compiled run", || {
+            execute_compiled_request(artifact, request).expect("the compiled chain runs")
+        });
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_chain_testing_its_base_relation_at_every_link_is_linear() {
+    let program = program(
+        chain_relations(Link::SourceTestingBase, true),
+        vec![rule("head", count_related(&relation_name(0)))],
+    );
+    let tuples = [("h1", "p1"), ("h1", "p2")];
+    for response in explain_and_fast(&program, &tuples, "h1", &["head"], "base-testing chain") {
+        assert_eq!(integer_output(&response, "head"), 2);
+    }
+}
+
+#[test]
+fn a_dense_chain_compiles_and_runs_in_linear_time() {
+    // Every link's predicate tests membership in `base`, which dense accepts
+    // after checking that the link's chain of sources reads `base` so.
+    let program = program(
+        chain_relations(Link::SourceTestingBase, true),
+        vec![
+            rule("head", count_related(&relation_name(0))),
+            rule("tail", count_related(&relation_name(LINKS - 1))),
+        ],
+    )
+    .to_program()
+    .expect("the chain lowers");
+    let dense = timed("dense compile", || {
+        DenseCompiledProgram::from_program(&program, Some("Household"))
+            .expect("dense compiles the chain")
+    });
+    // Two households: the first has two members, the second one.
+    let batch = DenseBatchSpec {
+        row_count: 2,
+        inputs: HashMap::new(),
+        relations: HashMap::from([(
+            DenseRelationKey {
+                name: "base".to_string(),
+                current_slot: 0,
+                related_slot: 1,
+            },
+            DenseRelationBatchSpec {
+                offsets: vec![0, 2, 3],
+                inputs: HashMap::new(),
+                related_row_count: Some(3),
+                ..Default::default()
+            },
+        )]),
+    };
+    let result = timed("dense run", || {
+        dense
+            .execute(
+                &Period::month(2026, 1),
+                batch,
+                &["head".to_string(), "tail".to_string()],
+            )
+            .expect("dense runs the chain")
+    });
+    for output in ["head", "tail"] {
+        let Some(DenseOutputValue::Scalar(DenseColumn::Integer(counts))) =
+            result.outputs.get(output)
+        else {
+            panic!("`{output}` is an integer column");
+        };
+        assert_eq!(counts, &vec![2, 1], "{output}");
+    }
+}

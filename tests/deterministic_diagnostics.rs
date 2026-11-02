@@ -122,6 +122,7 @@ fn rules_sharing_a_public_id_are_rejected_not_resolved_by_hash_order() {
     for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
         for run in 0..32 {
             let error = execute_request(ExecutionRequest {
+                relation_binding: Default::default(),
                 mode: mode.clone(),
                 program: ProgramSpec {
                     derived: vec![

@@ -168,7 +168,8 @@ fn derived_relation_gate_program() -> crate::model::Program {
             arity: 2,
             slot_entities: vec!["snap_household".to_string(), "person".to_string()],
             derivation: Some(RelationDerivation {
-                source_relation: constituent.to_string(),
+                source_relation: Some(constituent.to_string()),
+                source_path: None,
                 current_slot: 0,
                 related_slot: 1,
                 entity: Some("person".to_string()),
@@ -3016,8 +3017,12 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
             ),
         ),
         (
-            "/phase_two_artifact/engine_version",
-            serde_json::json!("tampered-engine"),
+            "/phase_two_artifact/program/relations/0/slot_entities",
+            serde_json::json!(["Household", "Person"]),
+        ),
+        (
+            "/phase_two_artifact/metadata/evaluation_order",
+            serde_json::json!(["tampered"]),
         ),
         (
             "/source_artifact_digest",
@@ -3039,6 +3044,26 @@ fn compiled_artifact_digest_tampering_and_plan_semantic_mutations_are_detected()
                 .is_err(),
             "registry accepted artifact mutation at `{pointer}`"
         );
+    }
+
+    // The phase-two check compares executable content: the stored
+    // artifact's identity is its own, so another engine's stamp loads.
+    for (pointer, replacement) in [
+        (
+            "/phase_two_artifact/engine_version",
+            serde_json::json!("0.0.1"),
+        ),
+        (
+            "/phase_two_artifact/engine_build",
+            serde_json::json!({"commit": "0123456789abcdef0123456789abcdef01234567", "dirty": true}),
+        ),
+    ] {
+        let mut rebuilt = pristine.clone();
+        *rebuilt.pointer_mut(pointer).unwrap() = replacement;
+        let mut registry = UnitDerivationDocumentRegistry::default();
+        registry
+            .register_aggregation_json(&serde_json::to_string(&rebuilt).unwrap())
+            .unwrap_or_else(|error| panic!("`{pointer}` from another build must load: {error}"));
     }
 
     let mut registry = UnitDerivationDocumentRegistry::default();
@@ -3638,4 +3663,27 @@ fn synthetic_snap_pilot_shape_fixtures_match_7_cfr_projection_shapes() {
             case.id
         );
     }
+}
+
+#[test]
+fn phase_two_programs_declare_only_base_relations() {
+    // Stage 3 binds request tuples straight into a dataset for the phase-two
+    // program, with no request binding. That is sound only while every
+    // phase-two relation is a base relation, so a tuple can never be supplied
+    // for a relation the program derives.
+    let artifact = compile_aggregation_plan(
+        include_str!("../../tests/fixtures/unit_derivation/renamed_child_gross_plan.yaml"),
+        &nz_source_artifact(),
+    )
+    .unwrap();
+    let spec = &artifact.phase_two_artifact.program;
+    assert!(!spec.relations.is_empty());
+    assert!(
+        spec.relations
+            .iter()
+            .all(|relation| relation.derivation.is_none())
+    );
+    let program = spec.to_program().unwrap();
+    assert!(!program.uses_relation_roles());
+    assert!(!program.uses_relation_atoms());
 }

@@ -1,0 +1,467 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "member_of_household",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ]
+      }
+    ],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "member_income",
+        "entity": "Person",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "input",
+              "name": "earned_income"
+            },
+            {
+              "kind": "input",
+              "name": "unearned_income"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "input",
+                  "name": "earned_income"
+                },
+                {
+                  "kind": "input",
+                  "name": "unearned_income"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "member_counts",
+        "entity": "Person",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "member_income"
+          },
+          "op": "gt",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "member_income"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "days_in_period",
+        "entity": "Household",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "days_between",
+          "from": {
+            "kind": "period_start"
+          },
+          "to": {
+            "kind": "period_end"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "days_between",
+              "from": {
+                "kind": "period_start"
+              },
+              "to": {
+                "kind": "period_end"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "household_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sum_related",
+          "relation": "member_of_household",
+          "current_slot": 1,
+          "related_slot": 0,
+          "value": {
+            "kind": "derived",
+            "name": "member_income"
+          },
+          "where": null
+        },
+        "versions": [
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sum_related",
+              "relation": "member_of_household",
+              "current_slot": 1,
+              "related_slot": 0,
+              "value": {
+                "kind": "derived",
+                "name": "member_income"
+              },
+              "where": null
+            }
+          }
+        ]
+      },
+      {
+        "name": "counted_income",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "days_between",
+              "from": {
+                "kind": "period_start"
+              },
+              "to": {
+                "kind": "period_end"
+              }
+            },
+            "op": "gt",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 27
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "add",
+            "items": [
+              {
+                "kind": "sum_related",
+                "relation": "member_of_household",
+                "current_slot": 1,
+                "related_slot": 0,
+                "value": {
+                  "kind": "derived",
+                  "name": "member_income"
+                },
+                "where": {
+                  "kind": "derived",
+                  "name": "member_counts"
+                }
+              },
+              {
+                "kind": "derived",
+                "name": "household_income"
+              }
+            ]
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "effective_to": "2025-12-31",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sum_related",
+              "relation": "member_of_household",
+              "current_slot": 1,
+              "related_slot": 0,
+              "value": {
+                "kind": "derived",
+                "name": "member_income"
+              },
+              "where": {
+                "kind": "derived",
+                "name": "member_counts"
+              }
+            }
+          },
+          {
+            "effective_from": "2026-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "days_between",
+                  "from": {
+                    "kind": "period_start"
+                  },
+                  "to": {
+                    "kind": "period_end"
+                  }
+                },
+                "op": "gt",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 27
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "add",
+                "items": [
+                  {
+                    "kind": "sum_related",
+                    "relation": "member_of_household",
+                    "current_slot": 1,
+                    "related_slot": 0,
+                    "value": {
+                      "kind": "derived",
+                      "name": "member_income"
+                    },
+                    "where": {
+                      "kind": "derived",
+                      "name": "member_counts"
+                    }
+                  },
+                  {
+                    "kind": "derived",
+                    "name": "household_income"
+                  }
+                ]
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "days_in_period",
+      "member_income",
+      "household_income",
+      "member_counts",
+      "counted_income"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": false,
+      "blockers": [
+        "days_in_period: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_period: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "household_income: fast mode does not yet support sum_related over related derived values",
+        "household_income: fast mode does not yet support sum_related over related derived values",
+        "counted_income: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "counted_income: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "counted_income: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "counted_income: fast mode does not yet support sum_related over related derived values",
+        "counted_income: fast mode does not yet support sum_related over related derived values",
+        "counted_income: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "counted_income: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "counted_income: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "counted_income: fast mode does not yet support sum_related over related derived values"
+      ]
+    },
+    "input_catalog": [
+      {
+        "slot": "earned_income",
+        "canonical_request_name": "earned_income",
+        "request_names": [
+          "earned_income"
+        ]
+      },
+      {
+        "slot": "unearned_income",
+        "canonical_request_name": "unearned_income",
+        "request_names": [
+          "unearned_income"
+        ]
+      }
+    ]
+  }
+}

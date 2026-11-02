@@ -289,6 +289,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: person_by_status
     kind: derived
     entity: Person
@@ -870,6 +871,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Household]
   - name: person_by_status
     kind: derived
     entity: Person
@@ -976,6 +978,7 @@ fn dense_names_a_match_reached_through_a_derived_relation_as_explain_does() {
                             "status".to_string(),
                             DenseColumn::Integer(statuses.clone()),
                         )]),
+                        ..Default::default()
                     },
                 )]),
             };
@@ -1481,6 +1484,7 @@ fn household_batch(households: &[Household]) -> DenseBatchSpec {
                     ("eligible".to_string(), DenseColumn::Integer(eligible)),
                     ("status".to_string(), DenseColumn::Integer(status)),
                 ]),
+                ..Default::default()
             },
         )]),
     }
@@ -1538,6 +1542,7 @@ fn explain(
     outputs: &[&str],
 ) -> Result<Vec<HashMap<String, OutputValue>>, String> {
     execute_request(ExecutionRequest {
+        relation_binding: Default::default(),
         mode: ExecutionMode::Explain,
         program: artifact.program.clone(),
         dataset,
