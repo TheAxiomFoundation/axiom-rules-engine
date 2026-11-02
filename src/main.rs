@@ -945,12 +945,6 @@ fn collect_yaml_files(
     Ok(())
 }
 
-/// `migrate apply [--json] [--write] <file-or-dir>...`: rewrite detected
-/// hand-expanded exactly-one sites to `exactly_one(...)`, gating every
-/// rewrite on engine-executed behavioral equivalence over all 2^n base
-/// assignments plus a rescan proving the pattern is gone. Dry-run by
-/// default; `--write` saves. Sites with non-fact bases are reported for
-/// hands and left untouched.
 const MIGRATE_ARTIFACT_USAGE: &str = "migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]";
 
 /// `migrate artifact`: type the relations of a compiled artifact that the
@@ -1038,6 +1032,12 @@ fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// `migrate apply [--json] [--write] <file-or-dir>...`: rewrite detected
+/// hand-expanded exactly-one sites to `exactly_one(...)`, gating every
+/// rewrite on engine-executed behavioral equivalence over all 2^n base
+/// assignments plus a rescan proving the pattern is gone. Dry-run by
+/// default; `--write` saves. Sites with non-fact bases are reported for
+/// hands and left untouched.
 fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
     let mut write = false;
