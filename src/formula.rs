@@ -2863,6 +2863,10 @@ pub(crate) fn lower_judgment_formula(
 }
 
 #[cfg(test)]
+#[path = "formula_column_tests.rs"]
+mod column_tests;
+
+#[cfg(test)]
 mod lexer_tests {
     use proptest::prelude::*;
 
