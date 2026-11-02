@@ -65,6 +65,19 @@ jobs:
       - name: cargo build --release
         run: cargo build --release --verbose
 
+      # The other test steps build in debug, whose frames are several times
+      # larger. These tests state their stack figures for a release build:
+      # a formula at the bound, and deep chains of rules, compile and
+      # evaluate in every mode on a 1 MiB thread. Only a release run checks
+      # that; a change that grows a recursive frame fails it here.
+      - name: release stack tests
+        run: >-
+          cargo test --release
+          --test formula_depth
+          --test evaluation_depth
+          --test deferral_transparency
+          --verbose
+
       # The PyO3 extension is a separate crate that CI otherwise never
       # compiles — a core enum change once broke it silently (the
       # DenseColumn::Float arm). Type-check it on every run. `cargo check`

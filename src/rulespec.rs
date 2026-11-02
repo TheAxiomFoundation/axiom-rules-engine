@@ -9,6 +9,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::formula::MAX_FORMULA_DEPTH;
 use crate::source::ModuleSource;
 
 use crate::spec::{

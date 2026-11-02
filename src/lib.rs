@@ -15,6 +15,7 @@ mod digest;
 pub mod engine;
 mod formula;
 pub mod interface;
+mod json;
 mod lazy;
 pub mod migrate;
 pub mod model;

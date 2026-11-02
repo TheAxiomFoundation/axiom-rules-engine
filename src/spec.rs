@@ -40,6 +40,8 @@ pub enum SpecError {
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
     InvalidDecimal { literal: String },
+    #[error("{location} nests more than {max} levels deep")]
+    ExpressionTooDeep { location: String, max: usize },
     #[error("{location} declares non-canonical corpus_citation_path `{value}`")]
     InvalidCorpusCitationPath { location: String, value: String },
     #[error(
@@ -192,7 +194,58 @@ impl InputElection {
     }
 }
 
+/// The deepest a program's expressions may nest, counting each expression
+/// node as a level.
+///
+/// The formula parser bounds a RuleSpec formula at
+/// [`crate::rulespec::MAX_FORMULA_DEPTH`] levels, and lowering adds at most two
+/// (`src/formula.rs` tests it), so every compiled rule is within
+/// `MAX_FORMULA_DEPTH + 2`. A request pin wraps a rule's expression in one more
+/// `if`, which makes `MAX_FORMULA_DEPTH + 3`.
+///
+/// A program read from JSON never passes the parser, and the engine reads JSON
+/// nested deeper than serde_json's 128 levels ([`crate::compile::MAX_JSON_DEPTH`]),
+/// so its expressions are checked against this bound instead, before any stage
+/// walks them: [`ProgramSpec::to_program`] checks every program, and the
+/// artifact loader and `api::execute_request` check before anything else.
+pub const MAX_EXPRESSION_DEPTH: usize = crate::formula::MAX_FORMULA_DEPTH + 3;
+
 impl ProgramSpec {
+    /// Refuse an expression that nests deeper than [`MAX_EXPRESSION_DEPTH`].
+    ///
+    /// The check recurses at most `MAX_EXPRESSION_DEPTH + 1` levels, however
+    /// deep the expression is, so it is safe on any program.
+    pub fn check_expression_depth(&self) -> Result<(), SpecError> {
+        let too_deep = |location: String| SpecError::ExpressionTooDeep {
+            location,
+            max: MAX_EXPRESSION_DEPTH,
+        };
+        for derived in &self.derived {
+            if std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics))
+                .any(|semantics| semantics.deeper_than(MAX_EXPRESSION_DEPTH))
+            {
+                return Err(too_deep(format!(
+                    "the expression of derived rule `{}`",
+                    derived.name
+                )));
+            }
+        }
+        for relation in &self.relations {
+            if relation
+                .derivation
+                .as_ref()
+                .is_some_and(|derivation| derivation.predicate.deeper_than(MAX_EXPRESSION_DEPTH))
+            {
+                return Err(too_deep(format!(
+                    "the predicate of derived relation `{}`",
+                    relation.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate provenance carried by compiled IR, including artifacts loaded
     /// directly without passing through RuleSpec lowering.
     pub fn validate_provenance(&self) -> Result<(), SpecError> {
@@ -290,6 +343,17 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        self.to_program_with(|_| Ok(()))
+    }
+
+    /// [`Self::to_program`], calling `check_rule` with each derived rule's
+    /// name just before that rule's expressions are converted.
+    pub(crate) fn to_program_with(
+        &self,
+        mut check_rule: impl FnMut(&str) -> Result<(), SpecError>,
+    ) -> Result<Program, SpecError> {
+        self.check_expression_depth()?;
+        // After the depth check: this serializes every expression.
         crate::selected_year::validate(self)?;
         let mut program = Program::default();
         program.selected_year_inputs = self
@@ -316,7 +380,7 @@ impl ProgramSpec {
         // the compile-time validation the contract requires, enforced on every
         // `to_program` so a malformed artifact cannot execute either.
         for derived in &self.derived {
-            let mut model = derived.to_model()?;
+            let mut model = derived.to_model(&mut check_rule)?;
             model.rounding = derived.resolve_rounding(&program)?;
             program.add_derived(model)?;
         }
@@ -943,13 +1007,17 @@ pub struct DerivedSpec {
 }
 
 impl DerivedSpec {
-    fn to_model(&self) -> Result<Derived, SpecError> {
+    fn to_model(
+        &self,
+        check_rule: &mut impl FnMut(&str) -> Result<(), SpecError>,
+    ) -> Result<Derived, SpecError> {
         validate_effective_ranges(
             &self.name,
             self.versions
                 .iter()
                 .map(|version| (version.effective_from, version.effective_to)),
         )?;
+        check_rule(&self.name)?;
         Ok(Derived {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -1147,6 +1215,13 @@ pub enum DerivedSemanticsSpec {
 }
 
 impl DerivedSemanticsSpec {
+    fn deeper_than(&self, levels: usize) -> bool {
+        match self {
+            Self::Scalar { expr } => expr.deeper_than(levels),
+            Self::Judgment { expr } => expr.deeper_than(levels),
+        }
+    }
+
     fn to_model(&self) -> Result<DerivedSemantics, SpecError> {
         match self {
             Self::Scalar { expr } => Ok(DerivedSemantics::Scalar(expr.to_model()?)),
@@ -1219,6 +1294,11 @@ impl ScalarValueSpec {
             ScalarValue::Text(value) => Self::Text { value },
             ScalarValue::Date(value) => Self::Date { value },
         }
+    }
+
+    /// Whether this value converts, as a literal in a program would.
+    pub(crate) fn check_literal(&self) -> Result<(), SpecError> {
+        self.to_model().map(|_| ())
     }
 
     fn to_model(&self) -> Result<ScalarValue, SpecError> {
@@ -1501,6 +1581,62 @@ fn extremum_operands(
 }
 
 impl ScalarExprSpec {
+    /// Whether this expression nests more than `levels` nodes deep. It
+    /// recurses at most `levels + 1` deep, however deep the expression is.
+    pub(crate) fn deeper_than(&self, levels: usize) -> bool {
+        let Some(below) = levels.checked_sub(1) else {
+            return true;
+        };
+        match self {
+            Self::Literal { .. }
+            | Self::Input { .. }
+            | Self::InputForYear { .. }
+            | Self::InputOrElse { .. }
+            | Self::Derived { .. }
+            | Self::OnlyRelated { .. }
+            | Self::RoleInput { .. }
+            | Self::RoleDerived { .. }
+            | Self::PeriodStart
+            | Self::PeriodEnd => false,
+            Self::ParameterLookup { index, .. } => index.deeper_than(below),
+            Self::Add { items } | Self::Max { items } | Self::Min { items } => {
+                items.iter().any(|item| item.deeper_than(below))
+            }
+            Self::Sub { left, right } | Self::Mul { left, right } | Self::Div { left, right } => {
+                left.deeper_than(below) || right.deeper_than(below)
+            }
+            Self::Ceil { value } | Self::Floor { value } => value.deeper_than(below),
+            Self::DateAddDays { date, days: by }
+            | Self::DateAddMonths { date, months: by }
+            | Self::DateAddYears { date, years: by } => {
+                date.deeper_than(below) || by.deeper_than(below)
+            }
+            Self::DaysBetween { from, to } => from.deeper_than(below) || to.deeper_than(below),
+            Self::CountRelated { where_clause, .. }
+            | Self::SumRelated { where_clause, .. }
+            | Self::ExtremeRelated { where_clause, .. }
+            | Self::SingleRelated { where_clause, .. } => where_clause
+                .as_deref()
+                .is_some_and(|clause| clause.deeper_than(below)),
+            Self::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.deeper_than(below)
+                    || then_expr.deeper_than(below)
+                    || else_expr.deeper_than(below)
+            }
+            Self::NoMatch { subject, patterns } => {
+                subject.deeper_than(below)
+                    || patterns.iter().any(|pattern| pattern.deeper_than(below))
+            }
+            Self::OverPeriods { value, n, .. } => {
+                value.deeper_than(below) || n.as_deref().is_some_and(|n| n.deeper_than(below))
+            }
+        }
+    }
+
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
@@ -1758,6 +1894,29 @@ pub enum JudgmentExprSpec {
 }
 
 impl JudgmentExprSpec {
+    /// Whether this expression nests more than `levels` nodes deep (see
+    /// [`ScalarExprSpec::deeper_than`]).
+    pub(crate) fn deeper_than(&self, levels: usize) -> bool {
+        let Some(below) = levels.checked_sub(1) else {
+            return true;
+        };
+        match self {
+            Self::Derived { .. }
+            | Self::RelationMember { .. }
+            | Self::RelationAtom { .. }
+            | Self::SameEntity { .. }
+            | Self::RoleDerived { .. } => false,
+            Self::Exists { body, .. } => body.deeper_than(below),
+            Self::Comparison { left, right, .. } => {
+                left.deeper_than(below) || right.deeper_than(below)
+            }
+            Self::And { items } | Self::Or { items } | Self::ExactlyOne { items } => {
+                items.iter().any(|item| item.deeper_than(below))
+            }
+            Self::Not { item } => item.deeper_than(below),
+        }
+    }
+
     fn to_model(&self) -> Result<JudgmentExpr, SpecError> {
         match self {
             Self::Comparison { left, op, right } => Ok(JudgmentExpr::Comparison {
@@ -2124,6 +2283,521 @@ mod namespace_tests {
         let spec = program_with("derived", json!([derived.clone(), derived]));
 
         assert_collision(spec, "derived rule", "benefit");
+    }
+}
+
+#[cfg(test)]
+mod expression_depth_tests {
+    //! [`MAX_EXPRESSION_DEPTH`] and the walk that checks it.
+
+    use super::*;
+
+    fn lit(value: i64) -> ScalarExprSpec {
+        ScalarExprSpec::Literal {
+            value: ScalarValueSpec::Integer { value },
+        }
+    }
+
+    fn holds() -> JudgmentExprSpec {
+        JudgmentExprSpec::Comparison {
+            left: Box::new(lit(0)),
+            op: ComparisonOpSpec::Eq,
+            right: Box::new(lit(0)),
+        }
+    }
+
+    /// A deterministic generator, as in `tests/execution.rs`.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from((self.0 >> 33) % u64::try_from(bound).expect("bound fits"))
+                .expect("value fits")
+        }
+    }
+
+    /// Any scalar expression about `size` levels deep, every kind reachable.
+    fn scalar(rng: &mut Rng, size: usize) -> ScalarExprSpec {
+        if size == 0 {
+            return match rng.below(10) {
+                0 => lit(1),
+                1 => ScalarExprSpec::Input { name: "x".into() },
+                2 => ScalarExprSpec::InputOrElse {
+                    name: "x".into(),
+                    default: ScalarValueSpec::Integer { value: 0 },
+                },
+                3 => ScalarExprSpec::Derived { name: "d".into() },
+                4 => ScalarExprSpec::PeriodStart,
+                5 => ScalarExprSpec::InputForYear {
+                    input: "m#input.x".into(),
+                    year: 2026,
+                },
+                6 => ScalarExprSpec::OnlyRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                },
+                7 => ScalarExprSpec::RoleInput {
+                    term: TermSpec::Candidate,
+                    name: "x".into(),
+                },
+                8 => ScalarExprSpec::RoleDerived {
+                    term: TermSpec::Anchor,
+                    name: "d".into(),
+                },
+                _ => ScalarExprSpec::PeriodEnd,
+            };
+        }
+        let deep = |rng: &mut Rng| Box::new(scalar(rng, size - 1));
+        let any = |rng: &mut Rng| {
+            let size = rng.below(size);
+            Box::new(scalar(rng, size))
+        };
+        let both = |rng: &mut Rng| {
+            if rng.below(2) == 0 {
+                (deep(rng), any(rng))
+            } else {
+                (any(rng), deep(rng))
+            }
+        };
+        let items = |rng: &mut Rng| {
+            let (first, second) = both(rng);
+            vec![*first, *second]
+        };
+        let clause = |rng: &mut Rng| (rng.below(3) > 0).then(|| Box::new(judgment(rng, size - 1)));
+        match rng.below(21) {
+            0 => ScalarExprSpec::ParameterLookup {
+                parameter: "p".into(),
+                index: deep(rng),
+            },
+            1 => ScalarExprSpec::Add { items: items(rng) },
+            2 => ScalarExprSpec::Max { items: items(rng) },
+            3 => ScalarExprSpec::Min { items: items(rng) },
+            4 => {
+                let (left, right) = both(rng);
+                ScalarExprSpec::Sub { left, right }
+            }
+            5 => {
+                let (left, right) = both(rng);
+                ScalarExprSpec::Mul { left, right }
+            }
+            6 => {
+                let (left, right) = both(rng);
+                ScalarExprSpec::Div { left, right }
+            }
+            7 => ScalarExprSpec::Ceil { value: deep(rng) },
+            8 => ScalarExprSpec::Floor { value: deep(rng) },
+            9 => {
+                let (date, days) = both(rng);
+                ScalarExprSpec::DateAddDays { date, days }
+            }
+            10 => {
+                let (date, months) = both(rng);
+                ScalarExprSpec::DateAddMonths { date, months }
+            }
+            11 => {
+                let (date, years) = both(rng);
+                ScalarExprSpec::DateAddYears { date, years }
+            }
+            12 => {
+                let (from, to) = both(rng);
+                ScalarExprSpec::DaysBetween { from, to }
+            }
+            13 => ScalarExprSpec::CountRelated {
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                where_clause: clause(rng),
+            },
+            14 => ScalarExprSpec::SumRelated {
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                value: RelatedValueRefSpec::Input { name: "x".into() },
+                where_clause: clause(rng),
+            },
+            15 => {
+                let condition_size = rng.below(size);
+                ScalarExprSpec::If {
+                    condition: Box::new(judgment(rng, condition_size)),
+                    then_expr: deep(rng),
+                    else_expr: any(rng),
+                }
+            }
+            16 => ScalarExprSpec::NoMatch {
+                subject: any(rng),
+                patterns: items(rng),
+            },
+            17 => ScalarExprSpec::OverPeriods {
+                over: OverPeriodsKindSpec::SumTopN,
+                value: any(rng),
+                n: Some(deep(rng)),
+            },
+            18 => ScalarExprSpec::ExtremeRelated {
+                extreme: ExtremeSpec::Max,
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                value: RelatedValueRefSpec::Input { name: "x".into() },
+                where_clause: clause(rng),
+            },
+            19 => ScalarExprSpec::SingleRelated {
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                value: RelatedValueRefSpec::Derived { name: "d".into() },
+                where_clause: clause(rng),
+            },
+            _ => scalar(rng, 0),
+        }
+    }
+
+    /// Any judgment about `size` levels deep, every kind reachable.
+    fn judgment(rng: &mut Rng, size: usize) -> JudgmentExprSpec {
+        if size == 0 {
+            return match rng.below(5) {
+                0 => JudgmentExprSpec::Derived { name: "j".into() },
+                1 => JudgmentExprSpec::RelationAtom {
+                    relation: "r".into(),
+                    terms: vec![TermSpec::Candidate, TermSpec::Anchor],
+                },
+                2 => JudgmentExprSpec::SameEntity {
+                    left: TermSpec::Anchor,
+                    right: TermSpec::Var(0),
+                    negated: true,
+                },
+                3 => JudgmentExprSpec::RoleDerived {
+                    term: TermSpec::Candidate,
+                    name: "j".into(),
+                },
+                _ => JudgmentExprSpec::RelationMember {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                },
+            };
+        }
+        let items = |rng: &mut Rng| {
+            let other = rng.below(size);
+            let mut items = vec![judgment(rng, size - 1), judgment(rng, other)];
+            if rng.below(2) == 0 {
+                items.swap(0, 1);
+            }
+            items
+        };
+        match rng.below(6) {
+            0 => {
+                let right_size = rng.below(size);
+                JudgmentExprSpec::Comparison {
+                    left: Box::new(scalar(rng, size - 1)),
+                    op: ComparisonOpSpec::Lt,
+                    right: Box::new(scalar(rng, right_size)),
+                }
+            }
+            1 => JudgmentExprSpec::And { items: items(rng) },
+            2 => JudgmentExprSpec::Or { items: items(rng) },
+            3 => JudgmentExprSpec::ExactlyOne { items: items(rng) },
+            4 => JudgmentExprSpec::Exists {
+                relation: "r".into(),
+                terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                variable_slot: 0,
+                body: Box::new(judgment(rng, size - 1)),
+            },
+            _ => JudgmentExprSpec::Not {
+                item: Box::new(judgment(rng, size - 1)),
+            },
+        }
+    }
+
+    /// The depth of an expression, by plain recursion: the definition the
+    /// bounded walk must agree with.
+    fn scalar_depth(expr: &ScalarExprSpec) -> usize {
+        let deepest = |children: &[&ScalarExprSpec]| {
+            children
+                .iter()
+                .map(|child| scalar_depth(child))
+                .max()
+                .unwrap_or(0)
+        };
+        1 + match expr {
+            ScalarExprSpec::Literal { .. }
+            | ScalarExprSpec::Input { .. }
+            | ScalarExprSpec::InputForYear { .. }
+            | ScalarExprSpec::InputOrElse { .. }
+            | ScalarExprSpec::Derived { .. }
+            | ScalarExprSpec::OnlyRelated { .. }
+            | ScalarExprSpec::RoleInput { .. }
+            | ScalarExprSpec::RoleDerived { .. }
+            | ScalarExprSpec::PeriodStart
+            | ScalarExprSpec::PeriodEnd => 0,
+            ScalarExprSpec::ParameterLookup { index, .. } => scalar_depth(index),
+            ScalarExprSpec::Add { items }
+            | ScalarExprSpec::Max { items }
+            | ScalarExprSpec::Min { items } => deepest(&items.iter().collect::<Vec<_>>()),
+            ScalarExprSpec::Sub { left, right }
+            | ScalarExprSpec::Mul { left, right }
+            | ScalarExprSpec::Div { left, right } => deepest(&[left, right]),
+            ScalarExprSpec::Ceil { value } | ScalarExprSpec::Floor { value } => scalar_depth(value),
+            ScalarExprSpec::DateAddDays { date, days } => deepest(&[date, days]),
+            ScalarExprSpec::DateAddMonths { date, months } => deepest(&[date, months]),
+            ScalarExprSpec::DateAddYears { date, years } => deepest(&[date, years]),
+            ScalarExprSpec::DaysBetween { from, to } => deepest(&[from, to]),
+            ScalarExprSpec::CountRelated { where_clause, .. }
+            | ScalarExprSpec::SumRelated { where_clause, .. }
+            | ScalarExprSpec::ExtremeRelated { where_clause, .. }
+            | ScalarExprSpec::SingleRelated { where_clause, .. } => {
+                where_clause.as_deref().map_or(0, judgment_depth)
+            }
+            ScalarExprSpec::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => judgment_depth(condition).max(deepest(&[then_expr, else_expr])),
+            ScalarExprSpec::NoMatch { subject, patterns } => {
+                scalar_depth(subject).max(deepest(&patterns.iter().collect::<Vec<_>>()))
+            }
+            ScalarExprSpec::OverPeriods { value, n, .. } => {
+                scalar_depth(value).max(n.as_deref().map_or(0, scalar_depth))
+            }
+        }
+    }
+
+    fn judgment_depth(expr: &JudgmentExprSpec) -> usize {
+        1 + match expr {
+            JudgmentExprSpec::Derived { .. }
+            | JudgmentExprSpec::RelationMember { .. }
+            | JudgmentExprSpec::RelationAtom { .. }
+            | JudgmentExprSpec::SameEntity { .. }
+            | JudgmentExprSpec::RoleDerived { .. } => 0,
+            JudgmentExprSpec::Exists { body, .. } => judgment_depth(body),
+            JudgmentExprSpec::Comparison { left, right, .. } => {
+                scalar_depth(left).max(scalar_depth(right))
+            }
+            JudgmentExprSpec::And { items }
+            | JudgmentExprSpec::Or { items }
+            | JudgmentExprSpec::ExactlyOne { items } => {
+                items.iter().map(judgment_depth).max().unwrap_or(0)
+            }
+            JudgmentExprSpec::Not { item } => judgment_depth(item),
+        }
+    }
+
+    /// On generated expressions of every kind, the bounded walk says an
+    /// expression is deeper than `levels` exactly when it is.
+    #[test]
+    fn the_walk_agrees_with_the_depth_at_every_bound() {
+        let mut deepest = 0;
+        for seed in 0..3_000_u64 {
+            let mut rng = Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
+            let size = usize::try_from(seed % 30).expect("small size");
+            let (depth, walk): (usize, Box<dyn Fn(usize) -> bool>) = if seed % 3 == 0 {
+                let expr = judgment(&mut rng, size);
+                (
+                    judgment_depth(&expr),
+                    Box::new(move |levels| expr.deeper_than(levels)),
+                )
+            } else {
+                let expr = scalar(&mut rng, size);
+                (
+                    scalar_depth(&expr),
+                    Box::new(move |levels| expr.deeper_than(levels)),
+                )
+            };
+            deepest = deepest.max(depth);
+            for levels in 0..=depth + 2 {
+                assert_eq!(
+                    walk(levels),
+                    depth > levels,
+                    "seed {seed}: depth {depth} at {levels}"
+                );
+            }
+        }
+        assert!(deepest > 25, "the generator reached only {deepest} levels");
+    }
+
+    /// The walk recurses at most one level past the bound, so it refuses an
+    /// expression of any depth on a small stack.
+    #[test]
+    fn the_walk_refuses_an_expression_of_any_depth_on_a_small_stack() {
+        let mut scalar = lit(1);
+        let mut judgment = holds();
+        for _ in 0..200_000 {
+            scalar = ScalarExprSpec::Ceil {
+                value: Box::new(scalar),
+            };
+            judgment = JudgmentExprSpec::Not {
+                item: Box::new(judgment),
+            };
+        }
+        let (scalar_too_deep, judgment_too_deep, scalar, judgment) = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, move || {
+                    (
+                        scalar.deeper_than(MAX_EXPRESSION_DEPTH),
+                        judgment.deeper_than(MAX_EXPRESSION_DEPTH),
+                        scalar,
+                        judgment,
+                    )
+                })
+                .expect("spawn test thread")
+                .join()
+                .expect("test thread")
+        });
+        assert!(scalar_too_deep && judgment_too_deep);
+        // Dropping a tree 200,000 levels deep recurses through it.
+        std::mem::forget((scalar, judgment));
+    }
+
+    /// A program is refused for an expression too deep in a rule, in a dated
+    /// version of a rule, or in a derived relation's predicate, and the error
+    /// names where.
+    #[test]
+    fn a_program_names_the_expression_that_is_too_deep() {
+        let deep = |depth: usize| {
+            let mut expr = lit(1);
+            for _ in 1..depth {
+                expr = ScalarExprSpec::Ceil {
+                    value: Box::new(expr),
+                };
+            }
+            expr
+        };
+        let program = |semantics: ScalarExprSpec,
+                       version: ScalarExprSpec,
+                       predicate_depth: usize| {
+            let mut predicate = holds();
+            for _ in 2..predicate_depth {
+                predicate = JudgmentExprSpec::Not {
+                    item: Box::new(predicate),
+                };
+            }
+            let spec: ProgramSpec = serde_json::from_value(serde_json::json!({
+                "relations": [{
+                    "name": "r", "arity": 2, "slot_entities": ["Person", "Household"],
+                    "derivation": {
+                        "source_relation": "s", "current_slot": 1, "related_slot": 0,
+                        "predicate": predicate,
+                    },
+                }],
+                "derived": [{
+                    "name": "d", "entity": "Household", "dtype": "decimal", "unit": null,
+                    "semantics": "scalar", "expr": semantics,
+                    "versions": [{"effective_from": "2026-01-01", "semantics": "scalar", "expr": version}],
+                }],
+            }))
+            .expect("program deserializes");
+            spec.check_expression_depth()
+                .map_err(|error| error.to_string())
+        };
+        let at = MAX_EXPRESSION_DEPTH;
+        assert_eq!(program(deep(at), deep(at), at), Ok(()));
+        let message = |location: &str| format!("{location} nests more than {at} levels deep");
+        assert_eq!(
+            program(deep(at + 1), deep(at), at),
+            Err(message("the expression of derived rule `d`"))
+        );
+        assert_eq!(
+            program(deep(at), deep(at + 1), at),
+            Err(message("the expression of derived rule `d`"))
+        );
+        assert_eq!(
+            program(deep(at), deep(at), at + 1),
+            Err(message("the predicate of derived relation `r`"))
+        );
+    }
+    /// The kinds main added after the bound was set, each with a judgment
+    /// below it (`max_where`/`min_where`, `only` with a filter, and `exists`):
+    /// a chain through one of them exactly at the bound passes, and one node
+    /// deeper is refused.
+    #[test]
+    fn each_recursive_relation_kind_is_bounded() {
+        let below = |depth: usize| {
+            let mut expr = holds();
+            for _ in 2..depth {
+                expr = JudgmentExprSpec::Not {
+                    item: Box::new(expr),
+                };
+            }
+            expr
+        };
+        let kinds: [(&str, fn(JudgmentExprSpec) -> DerivedSemanticsSpec); 3] = [
+            ("extreme_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::ExtremeRelated {
+                    extreme: ExtremeSpec::Min,
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("single_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::SingleRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("exists", |body| DerivedSemanticsSpec::Judgment {
+                expr: JudgmentExprSpec::Exists {
+                    relation: "r".into(),
+                    terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                    variable_slot: 0,
+                    body: Box::new(body),
+                },
+            }),
+        ];
+        let at = MAX_EXPRESSION_DEPTH;
+        for (kind, wrap) in kinds {
+            let check = |depth: usize| {
+                let semantics = wrap(below(depth - 1));
+                let expr = match &semantics {
+                    DerivedSemanticsSpec::Scalar { expr } => {
+                        assert_eq!(scalar_depth(expr), depth, "{kind}");
+                        expr.deeper_than(at)
+                    }
+                    DerivedSemanticsSpec::Judgment { expr } => {
+                        assert_eq!(judgment_depth(expr), depth, "{kind}");
+                        expr.deeper_than(at)
+                    }
+                };
+                let mut rule = serde_json::json!({
+                    "name": "d", "entity": "Household", "dtype": "decimal", "unit": null,
+                });
+                let serde_json::Value::Object(fields) =
+                    serde_json::to_value(&semantics).expect("semantics serialize")
+                else {
+                    panic!("semantics serialize to an object");
+                };
+                rule.as_object_mut().expect("object").extend(fields);
+                let spec: ProgramSpec =
+                    serde_json::from_value(serde_json::json!({ "derived": [rule] }))
+                        .expect("program deserializes");
+                (
+                    expr,
+                    spec.check_expression_depth().map_err(|e| e.to_string()),
+                )
+            };
+            assert_eq!(check(at), (false, Ok(())), "{kind} at the bound");
+            assert_eq!(
+                check(at + 1),
+                (
+                    true,
+                    Err(format!(
+                        "the expression of derived rule `d` nests more than {at} levels deep"
+                    ))
+                ),
+                "{kind} one past the bound"
+            );
+        }
     }
 }
 

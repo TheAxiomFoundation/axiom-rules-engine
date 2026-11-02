@@ -5,8 +5,8 @@
 //! exactly as the frozen pre-change implementation (`reference`) does and
 //! returns the same result. That covers what the change must keep: pins apply
 //! in request order, the first failing pin reports (an unknown rule or a
-//! judgment rule), a rule pinned twice is wrapped twice with the later pin
-//! outermost, and with duplicate rule names the first is pinned. The named
+//! judgment rule), a rule pinned twice is wrapped once with its later pin,
+//! and with duplicate rule names the first is pinned. The named
 //! tests pin those cases, and a scaled-up version of the audit's pin shape in
 //! time.
 
@@ -24,8 +24,9 @@ use crate::spec::{
 };
 
 /// `apply_pins` as `origin/main` had it at 5e6a8fd (unchanged since the
-/// 2026-09-26 audit), one linear search per pin. Frozen: the body is the
-/// code as it stood.
+/// 2026-09-26 audit), one linear search per pin, with one change: a rule
+/// pinned more than once is wrapped only by its last pin, as #240 made it.
+/// Otherwise frozen: the body is the code as it stood.
 mod reference {
     use super::super::{ApiError, RulePin};
     use crate::spec::{
@@ -34,7 +35,12 @@ mod reference {
     };
 
     pub(super) fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
-        for pin in pins {
+        let last_pin: std::collections::HashMap<&str, usize> = pins
+            .iter()
+            .enumerate()
+            .map(|(index, pin)| (pin.rule.as_str(), index))
+            .collect();
+        for (index, pin) in pins.iter().enumerate() {
             let rule = program
                 .derived
                 .iter_mut()
@@ -50,6 +56,9 @@ mod reference {
                 return Err(ApiError::JudgmentRuleNotPinnable {
                     rule: pin.rule.clone(),
                 });
+            }
+            if last_pin[pin.rule.as_str()] != index {
+                continue;
             }
             let pin_expr = |original: ScalarExprSpec| DerivedSemanticsSpec::Scalar {
                 expr: ScalarExprSpec::If {
@@ -258,7 +267,7 @@ fn scalar_semantics(expr: ScalarExprSpec) -> serde_json::Value {
 }
 
 #[test]
-fn a_rule_pinned_twice_is_wrapped_twice_with_the_later_pin_outermost() {
+fn a_rule_pinned_twice_is_wrapped_once_with_the_later_pin() {
     let mut program = ProgramSpec {
         derived: vec![scalar("a", 1), scalar("b", 2)],
         ..ProgramSpec::default()
@@ -266,7 +275,7 @@ fn a_rule_pinned_twice_is_wrapped_twice_with_the_later_pin_outermost() {
     apply_pins(&mut program, &[pin("a", 10), pin("b", 20), pin("a", 30)]).expect("both rules pin");
     assert_eq!(
         expr(&program.derived[0]),
-        scalar_semantics(pinned(30, pinned(10, integer(1))))
+        scalar_semantics(pinned(30, integer(1)))
     );
     assert_eq!(
         expr(&program.derived[1]),

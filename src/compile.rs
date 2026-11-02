@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::interface::ProgramInterface;
+pub use crate::json::MAX_JSON_DEPTH;
 use crate::rulespec::ModuleMetadata;
 use crate::spec::{
     DerivedSemanticsSpec, DerivedSpec, IndexedParameterSpec, JudgmentExprSpec,
@@ -709,6 +710,9 @@ impl CompiledProgramArtifact {
         options: CompileOptions,
         source_closure: Option<SourceClosure>,
     ) -> Result<Self, CompileError> {
+        // A program built in Rust can hold any expression; refuse a too-deep
+        // one before the metadata below walks it.
+        program.check_expression_depth()?;
         program.validate_provenance()?;
         // Reject a rounding declaration on a non-currency (or undeclared) unit
         // at compile time, so a malformed artifact never ships. Execution paths
@@ -1044,6 +1048,9 @@ impl CompiledProgramArtifact {
         validate_raw_artifact_contract(&value, path)?;
         let stored_interface = value["program"]["interface"].clone();
         let artifact: Self = deserialize_artifact(value, path)?;
+        // JSON can nest an expression deeper than any formula compiles to;
+        // refuse it before anything below walks the program.
+        artifact.program.check_expression_depth()?;
         artifact.check_format_3(path, options, &stored_interface)
     }
 
@@ -1145,6 +1152,9 @@ impl CompiledProgramArtifact {
             .and_then(serde_json::Value::as_object)
             .is_some_and(|metadata| !metadata.contains_key("input_catalog"));
         let artifact: Self = deserialize_artifact(value, path)?;
+        // JSON can nest an expression deeper than any formula compiles to;
+        // refuse it before anything below walks the program.
+        artifact.program.check_expression_depth()?;
         artifact.check_format_2(path, options, catalog_absent, typing)
     }
 
@@ -1332,8 +1342,10 @@ pub(crate) fn canonical_request_name<'a>(slot: &str, request_names: &'a [String]
         .expect("every discovered input slot has an owning request name")
 }
 
+/// Read an artifact's JSON with the loader's nesting budget,
+/// [`MAX_JSON_DEPTH`], so every artifact `compile` writes loads.
 fn parse_artifact_json(source: &str, path: &str) -> Result<serde_json::Value, CompileError> {
-    serde_json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
+    crate::json::from_str(source).map_err(|error| CompileError::DeserializeArtifact {
         path: path.to_string(),
         error,
     })
