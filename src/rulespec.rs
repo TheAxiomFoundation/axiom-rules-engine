@@ -187,6 +187,11 @@ pub enum RuleSpecError {
     ModuleNotFound { target: String },
     #[error(transparent)]
     Source(#[from] crate::source::SourceError),
+    /// The formula source failed to lex, parse or lower. A syntax error in a
+    /// formula reports a line and column in that formula's text, trimmed of
+    /// surrounding whitespace, not in the YAML file; a column counts Unicode
+    /// scalar values from 1. `docs/rulespec-format.md` ("Formula parse
+    /// errors") gives the full rule.
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
     /// `name` and `entity` are copied into the generated formula source
@@ -199,7 +204,9 @@ pub enum RuleSpecError {
         expected: &'static str,
     },
     /// The generated formula source indents every formula line, which would
-    /// change the value of a string literal that spans a line feed.
+    /// change the value of a string literal that spans a line feed. `line`
+    /// and `col` locate the literal's opening quote in the formula text
+    /// before trimming; `col` counts Unicode scalar values from 1.
     #[error(
         "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
     )]
