@@ -2,7 +2,7 @@
 // uses the checked helpers in engine.rs instead (see clippy.toml).
 #![deny(clippy::arithmetic_side_effects)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use chrono::NaiveDate;
@@ -857,6 +857,12 @@ pub struct DenseCompiledProgram {
     parameters: Vec<CompiledParameter>,
     derived: Vec<CompiledDerived>,
     derived_index: HashMap<String, usize>,
+    /// Root-entity rules the dense plan cannot express, and why. A rule here
+    /// is not an output: `output_names` omits it, and requesting it reports
+    /// the recorded reason rather than `UnknownDerived`. Compiling the rest of
+    /// the module is still correct, because a module names every rule its
+    /// import closure reaches, not only the ones a caller asks for.
+    unavailable: BTreeMap<String, String>,
 }
 
 impl DenseCompiledProgram {
@@ -907,7 +913,7 @@ impl DenseCompiledProgram {
             }
         };
 
-        let available = program
+        let mut available = program
             .derived
             .values()
             .filter(|derived| derived.entity == root_entity)
@@ -916,12 +922,45 @@ impl DenseCompiledProgram {
         if available.is_empty() {
             return Err(DenseCompileError::UnknownEntity(root_entity));
         }
+        // Compile in a stable order so the inputs, relations and parameters a
+        // caller binds do not depend on the program map's iteration order.
+        available.sort();
 
         let mut compiler = DenseCompiler::new(program, root_entity.clone())?;
+        let mut unavailable: BTreeMap<String, String> = BTreeMap::new();
         for name in available {
-            compiler.compile_derived(&name)?;
+            // A module names every rule its import closure reaches. One of them
+            // reading another entity without a relation says nothing about the
+            // rule a caller wants, so record it and carry on; refusing the
+            // module would make an unrelated import decide what can run.
+            let mark = compiler.mark();
+            match compiler.compile_derived(&name) {
+                Ok(_) => {}
+                Err(error @ DenseCompileError::CrossEntityDependency { .. }) => {
+                    compiler.rewind(mark);
+                    unavailable.insert(name, error.to_string());
+                }
+                Err(error) => return Err(error),
+            }
         }
-        Ok(compiler.finish())
+        if compiler.derived.is_empty() {
+            // Nothing compiled, so there is no program to hand back. Report the
+            // first recorded reason rather than an empty success.
+            let (name, reason) = unavailable
+                .into_iter()
+                .next()
+                .expect("a non-empty entity compiles a rule or records why not");
+            return Err(DenseCompileError::Unsupported(format!(
+                "no rule of entity `{root_entity}` compiles; first: {name}: {reason}"
+            )));
+        }
+        Ok(compiler.finish(unavailable))
+    }
+
+    /// Root-entity rules the dense plan cannot express, each with the reason.
+    /// Requesting one from `execute` reports that reason.
+    pub fn unavailable_outputs(&self) -> &BTreeMap<String, String> {
+        &self.unavailable
     }
 
     pub fn root_entity(&self) -> &str {
@@ -1019,10 +1058,18 @@ impl DenseCompiledProgram {
         outputs
             .iter()
             .map(|output| {
-                self.derived_index
-                    .get(output)
-                    .map(|&index| (output.clone(), index))
-                    .ok_or_else(|| EvalError::UnknownDerived(output.clone()))
+                if let Some(&index) = self.derived_index.get(output) {
+                    return Ok((output.clone(), index));
+                }
+                // The rule may exist and simply have no dense plan. Say which,
+                // so a caller is not sent looking for a missing name.
+                match self.unavailable.get(output) {
+                    Some(reason) => Err(EvalError::UnavailableDenseOutput {
+                        output: output.clone(),
+                        reason: reason.clone(),
+                    }),
+                    None => Err(EvalError::UnknownDerived(output.clone())),
+                }
             })
             .collect()
     }
@@ -1725,6 +1772,15 @@ impl<'a> CandidateAncestry<'a> {
     }
 }
 
+/// The compiler's size before one root rule, for [`DenseCompiler::rewind`].
+#[derive(Clone, Copy, Debug)]
+struct DenseCompilerMark {
+    root_inputs: usize,
+    relations: usize,
+    parameters: usize,
+    derived: usize,
+}
+
 struct DenseCompiler<'a> {
     program: &'a Program,
     root_entity: String,
@@ -1874,7 +1930,39 @@ impl<'a> DenseCompiler<'a> {
         self.related_rules.last().cloned().unwrap_or_default()
     }
 
-    fn finish(self) -> DenseCompiledProgram {
+    /// The compiler's size before compiling one root rule, so a rule the dense
+    /// plan cannot express leaves nothing behind. Every collection here is
+    /// append-only: each `push` is paired with an index entry holding the new
+    /// position, so truncating and dropping the entries at or past the mark
+    /// restores the state exactly.
+    fn mark(&self) -> DenseCompilerMark {
+        DenseCompilerMark {
+            root_inputs: self.root_inputs.len(),
+            relations: self.relations.len(),
+            parameters: self.parameters.len(),
+            derived: self.derived.len(),
+        }
+    }
+
+    fn rewind(&mut self, mark: DenseCompilerMark) {
+        self.root_inputs.truncate(mark.root_inputs);
+        self.root_input_index.retain(|_, &mut i| i < mark.root_inputs);
+        self.relations.truncate(mark.relations);
+        self.relation_index.retain(|_, &mut i| i < mark.relations);
+        self.relation_input_index
+            .retain(|(relation, _), _| *relation < mark.relations);
+        self.parameters.truncate(mark.parameters);
+        self.parameter_index.retain(|_, &mut i| i < mark.parameters);
+        self.derived.truncate(mark.derived);
+        self.derived_index.retain(|_, &mut i| i < mark.derived);
+        // A failed compile unwinds through `?`, so these per-rule scopes keep
+        // whatever the failing path pushed. The next rule starts from scratch.
+        self.visiting.clear();
+        self.related_rules.clear();
+        self.membership_scope = None;
+    }
+
+    fn finish(self, unavailable: BTreeMap<String, String>) -> DenseCompiledProgram {
         DenseCompiledProgram {
             root_entity: self.root_entity,
             root_inputs: self.root_inputs,
@@ -1882,6 +1970,7 @@ impl<'a> DenseCompiler<'a> {
             parameters: self.parameters,
             derived: self.derived,
             derived_index: self.derived_index,
+            unavailable,
         }
     }
 

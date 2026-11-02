@@ -176,6 +176,16 @@ class CompiledDenseProgram:
         return list(self._native.output_names())
 
     @property
+    def unavailable_outputs(self) -> dict[str, str]:
+        """Root-entity rules with no dense plan, each with the reason.
+
+        A module names every rule its import closure reaches, so one that reads
+        another entity without a relation is left out rather than refusing the
+        module. These names are not in ``output_names``; requesting one raises.
+        """
+        return dict(self._native.unavailable_outputs())
+
+    @property
     def input_catalog(self) -> dict[str, str]:
         """Preferred canonical request name keyed by runtime slot."""
         return dict(self._native.input_catalog())

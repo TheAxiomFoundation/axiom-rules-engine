@@ -817,10 +817,24 @@ fn from_program_refuses_exactly_the_cycles_it_reaches() {
             },
         }
         if reaches_cycle {
-            prop_assert!(
-                result.is_err(),
-                "compiled a program whose root rules reach a cycle through {cyclic:?}"
-            );
+            // A rule on a cycle is never an output. Since #266 a root rule
+            // that reads another entity without a relation is left out instead
+            // of refusing the module, and that exclusion can cut the path to a
+            // cycle before the walk reaches it. So the guarantee is stated as
+            // what it protects — no compiled output sits on or reaches a cycle
+            // — rather than as a whole-module refusal.
+            if let Ok(program) = &result {
+                for output in program.output_names() {
+                    let from = vec![format!("rule:{output}")];
+                    let touches = reachable(&graph, &from)
+                        .iter()
+                        .any(|node| cyclic.contains(node));
+                    prop_assert!(
+                        !touches,
+                        "compiled `{output}`, which reaches a cycle through {cyclic:?}"
+                    );
+                }
+            }
         }
 
         // The artifact compiler checks the graph before typing, so a cyclic
