@@ -231,11 +231,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut relation_binding = None;
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--relation-binding" => {
+                relation_binding = Some(parse_relation_binding(option_value(
+                    "--relation-binding",
+                    iter.next(),
+                )?)?)
+            }
             "--help" | "-h" => {
+                help_alone("run", &arg, arg_count)?;
                 println!("{RUN_USAGE}");
                 return Ok(());
             }
@@ -267,6 +274,40 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 /// Whether the next argument asks for a command's help, consuming it if so.
 fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> bool {
     args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
+}
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
+/// An option-parsing command prints its usage for a help flag only when the
+/// flag is its one argument. Beside any other argument, before or after it,
+/// the flag is refused, so a command never prints usage and silently drops
+/// the rest (#290).
+fn help_alone(
+    command: &str,
+    flag: &str,
+    arg_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if arg_count == 1 {
+        Ok(())
+    } else {
+        Err(format!("`{command} {flag}` takes no other arguments").into())
+    }
+}
+
+/// The value that follows `option`. A help flag is never a value: taken as
+/// one, `emit-schemas --out --help` wrote the schemas into `./--help/` (#290).
+fn option_value(
+    option: &str,
+    value: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match value {
+        Some(value) if is_help_flag(&value) => {
+            Err(format!("`{option}` takes a value, not `{value}`").into())
+        }
+        value => Ok(value),
+    }
 }
 
 fn version_line() -> String {
@@ -435,30 +476,37 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
     let mut rulespec_roots: Vec<PathBuf> = Vec::new();
     let mut provisions_paths: Vec<PathBuf> = Vec::new();
 
+    let command = if composed {
+        "compile-composed"
+    } else {
+        "compile"
+    };
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--program" => {
-                program_path = iter.next().map(PathBuf::from);
+                program_path = option_value("--program", iter.next())?.map(PathBuf::from);
             }
             "--output" => {
-                output_path = iter.next().map(PathBuf::from);
+                output_path = option_value("--output", iter.next())?.map(PathBuf::from);
             }
             "--rulespec-root" => {
                 rulespec_roots.push(
-                    iter.next()
+                    option_value("--rulespec-root", iter.next())?
                         .map(PathBuf::from)
                         .ok_or("`--rulespec-root` requires a path argument")?,
                 );
             }
             "--corpus-provisions" => {
                 provisions_paths.push(
-                    iter.next()
+                    option_value("--corpus-provisions", iter.next())?
                         .map(PathBuf::from)
                         .ok_or("`--corpus-provisions` requires a path argument")?,
                 );
             }
             "--help" | "-h" => {
+                help_alone(command, &arg, arg_count)?;
                 println!("{COMPILE_USAGE}");
                 return Ok(());
             }
@@ -577,20 +625,30 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut relation_binding = None;
     let mut accept_format_2 = false;
 
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--relation-binding" => {
+                relation_binding = Some(parse_relation_binding(option_value(
+                    "--relation-binding",
+                    iter.next(),
+                )?)?)
+            }
             "--accept-artifact-format" => {
-                parse_accept_artifact_format(iter.next())?;
+                parse_accept_artifact_format(option_value(
+                    "--accept-artifact-format",
+                    iter.next(),
+                )?)?;
                 accept_format_2 = true;
             }
             "--help" | "-h" => {
+                help_alone("run-compiled", &arg, arg_count)?;
                 println!("{RUN_COMPILED_USAGE}");
                 return Ok(());
             }
             "--artifact" => {
-                artifact_path = iter.next().map(PathBuf::from);
+                artifact_path = option_value("--artifact", iter.next())?.map(PathBuf::from);
             }
             _ => {
                 return Err(format!("unknown run-compiled argument `{arg}`").into());
@@ -631,30 +689,37 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
     let mut source_artifact_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut accept_format_2 = false;
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--accept-artifact-format" => {
-                parse_accept_artifact_format(iter.next())?;
+                parse_accept_artifact_format(option_value(
+                    "--accept-artifact-format",
+                    iter.next(),
+                )?)?;
                 accept_format_2 = true;
             }
             "--plan" => {
                 plan_path = Some(PathBuf::from(
-                    iter.next().ok_or("`--plan` requires a path argument")?,
+                    option_value("--plan", iter.next())?
+                        .ok_or("`--plan` requires a path argument")?,
                 ));
             }
             "--output" => {
                 output_path = Some(PathBuf::from(
-                    iter.next().ok_or("`--output` requires a path argument")?,
+                    option_value("--output", iter.next())?
+                        .ok_or("`--output` requires a path argument")?,
                 ));
             }
             "--source-artifact" => {
                 source_artifact_path = Some(PathBuf::from(
-                    iter.next()
+                    option_value("--source-artifact", iter.next())?
                         .ok_or("`--source-artifact` requires a path argument")?,
                 ));
             }
             "--help" | "-h" => {
+                help_alone("compile-unit-aggregation", &arg, arg_count)?;
                 println!("{COMPILE_UNIT_AGGREGATION_USAGE}");
                 return Ok(());
             }
@@ -705,20 +770,26 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let mut artifact_path: Option<PathBuf> = None;
     let mut enabled = false;
     let mut accept_format_2 = false;
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--accept-artifact-format" => {
-                parse_accept_artifact_format(iter.next())?;
+                parse_accept_artifact_format(option_value(
+                    "--accept-artifact-format",
+                    iter.next(),
+                )?)?;
                 accept_format_2 = true;
             }
             "--artifact" => {
                 artifact_path = Some(PathBuf::from(
-                    iter.next().ok_or("`--artifact` requires a path argument")?,
+                    option_value("--artifact", iter.next())?
+                        .ok_or("`--artifact` requires a path argument")?,
                 ));
             }
             "--enable-experimental-unit-derivation" => enabled = true,
             "--help" | "-h" => {
+                help_alone("run-unit-aggregation", &arg, arg_count)?;
                 println!("{UNIT_AGGREGATION_USAGE}");
                 return Ok(());
             }
@@ -776,13 +847,15 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
 #[cfg(feature = "schema")]
 fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut out_dir: Option<PathBuf> = None;
+    let arg_count = args.len();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--out" => {
-                out_dir = iter.next().map(PathBuf::from);
+                out_dir = option_value("--out", iter.next())?.map(PathBuf::from);
             }
             "--help" | "-h" => {
+                help_alone("emit-schemas", &arg, arg_count)?;
                 println!(
                     "usage: axiom-rules-engine emit-schemas --out <dir>\n\nWrite JSON Schemas for the wire types into <dir>."
                 );
@@ -805,6 +878,29 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 /// patterns across RuleSpec sources. Detection lowers each module through the
 /// real loader and walks the serialized spec (see `migrate`); files that do
 /// not lower standalone are reported as unscanned, never as pattern-free.
+const MIGRATE_SCAN_USAGE: &str = "\
+usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
+
+Inventory hand-expanded exactly-one patterns across RuleSpec sources. Each
+module is lowered through the real loader; a file that does not lower on its
+own is reported as unscanned, never as pattern-free. Writes nothing.";
+
+const MIGRATE_APPLY_USAGE: &str = "\
+usage: axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
+
+Rewrite each detected hand-expanded exactly-one site to `exactly_one(...)`,
+after the engine shows the old and new formulas agree on every assignment of
+their bases and a rescan finds the pattern gone. A dry run by default;
+--write saves the rewritten files.";
+
+const MIGRATE_HELP: &str = "\
+usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
+       axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
+       axiom-rules-engine migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]
+
+Corpus-migration tooling. Run `axiom-rules-engine migrate <subcommand> --help`
+for a subcommand's usage.";
+
 fn migrate_usage() -> String {
     format!(
         "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
@@ -812,13 +908,15 @@ fn migrate_usage() -> String {
 }
 
 fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let arg_count = args.len();
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("scan") => {}
         Some("apply") => return run_migrate_apply(args.collect()),
         Some("artifact") => return run_migrate_artifact(args.collect()),
-        Some("--help" | "-h") => {
-            println!("{}", migrate_usage());
+        Some(flag @ ("--help" | "-h")) => {
+            help_alone("migrate", flag, arg_count)?;
+            println!("{MIGRATE_HELP}");
             return Ok(());
         }
         Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
@@ -826,9 +924,14 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut json = false;
     let mut roots: Vec<PathBuf> = Vec::new();
+    let arg_count = args.len();
     for arg in args {
         if arg == "--json" {
             json = true;
+        } else if is_help_flag(&arg) {
+            help_alone("migrate scan", &arg, arg_count)?;
+            println!("{MIGRATE_SCAN_USAGE}");
+            return Ok(());
         } else {
             roots.push(PathBuf::from(arg));
         }
@@ -946,15 +1049,24 @@ fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let mut output_path: Option<PathBuf> = None;
     let mut overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut json = false;
+    let arg_count = args.len();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--artifact" => artifact_path = args.next().map(PathBuf::from),
-            "--output" => output_path = args.next().map(PathBuf::from),
+            "--artifact" => {
+                artifact_path = option_value("--artifact", args.next())?.map(PathBuf::from)
+            }
+            "--output" => output_path = option_value("--output", args.next())?.map(PathBuf::from),
             "--json" => json = true,
+            "--help" | "-h" => {
+                help_alone("migrate artifact", &arg, arg_count)?;
+                println!(
+                    "usage: axiom-rules-engine {MIGRATE_ARTIFACT_USAGE}\n\nType the relations of a compiled artifact that the loader refuses under\nmandatory relation entity typing. Without --output it reports what it would\nchange and writes nothing."
+                );
+                return Ok(());
+            }
             "--relation-entities" => {
-                let value = args
-                    .next()
+                let value = option_value("--relation-entities", args.next())?
                     .ok_or_else(|| format!("usage: {MIGRATE_ARTIFACT_USAGE}"))?;
                 let (relation, kinds) = value.split_once('=').ok_or_else(|| {
                     format!("--relation-entities expects <relation>=<Kind>,<Kind>, got `{value}`")
@@ -1027,10 +1139,16 @@ fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>
     let mut json = false;
     let mut write = false;
     let mut roots: Vec<PathBuf> = Vec::new();
+    let arg_count = args.len();
     for arg in args {
         match arg.as_str() {
             "--json" => json = true,
             "--write" => write = true,
+            "--help" | "-h" => {
+                help_alone("migrate apply", &arg, arg_count)?;
+                println!("{MIGRATE_APPLY_USAGE}");
+                return Ok(());
+            }
             other => roots.push(PathBuf::from(other)),
         }
     }
