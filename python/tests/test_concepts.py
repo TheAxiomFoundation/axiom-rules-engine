@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -8,16 +9,27 @@ from pathlib import Path
 import pytest
 import yaml
 
-from axiom_rules_engine import CompiledDenseProgram
+from axiom_rules_engine import AxiomRulesEngine, CompiledDenseProgram
 from axiom_rules_engine.cli import main
 from axiom_rules_engine.concepts import (
     _infer_input_names,
+    _parse_formula,
     discover_concepts,
     search_concepts,
     show_concept,
     validate_concept_id,
 )
 from axiom_rules_engine.dense import NativeCompiledDenseProgram
+
+BINARY = Path(__file__).resolve().parents[2] / "target" / "debug" / "axiom-rules-engine"
+needs_binary = pytest.mark.skipif(
+    not BINARY.exists() and not os.environ.get("CI"),
+    reason="the engine binary is not built (cargo build)",
+)
+needs_dense = pytest.mark.skipif(
+    NativeCompiledDenseProgram is None,
+    reason="axiom_rules_engine_dense extension is not built",
+)
 
 
 def write_rulespec(root: Path, relative: str, body: str) -> Path:
@@ -202,21 +214,23 @@ def write_formula_module(
     dtype: str = "Money",
     inputs: list[dict[str, str]] | None = None,
     imports: list[str] | None = None,
+    rules: list[dict[str, object]] | None = None,
 ) -> Path:
     document: dict[str, object] = {"format": "rulespec/v1"}
     if imports:
         document["imports"] = imports
     if inputs:
         document["inputs"] = inputs
-    rules: list[dict[str, object]] = [
+    module_rules: list[dict[str, object]] = [
         {
             "name": "member_of_household",
             "kind": "data_relation",
             "data_relation": {"arity": 2, "arguments": ["Person", "Household"]},
-        }
+        },
+        *(rules or []),
     ]
     for name, formula in formulas.items():
-        rules.append(
+        module_rules.append(
             {
                 "name": name,
                 "kind": "derived",
@@ -226,7 +240,7 @@ def write_formula_module(
                 "versions": [{"effective_from": "2026-01-01", "formula": formula}],
             }
         )
-    document["rules"] = rules
+    document["rules"] = module_rules
     return write_rulespec(
         root,
         "us/statutes/7/2014.yaml",
@@ -384,6 +398,98 @@ PATH_CASES = [
     ("wages/ months", {"months", "wages"}),
     ("wages/12", {"wages"}),
 ]
+# `lower_to_scalar` lowers only the first argument of `len` and of `sum`, and
+# reads no field through `len`'s: nothing reads the arguments after it.
+UNREAD_ARGUMENT_CASES = [
+    ("len(member_of_household, wages)", set()),
+    ("len(member_of_household.age, wages)", set()),
+    ("len(member_of_household, member_of_household.age)", set()),
+    ("sum(member_of_household.wages, extra)", {"wages"}),
+    ("match len(member_of_household, z): _ => 1", set()),
+]
+# A `match` with only a wildcard arm lowers to that arm, so nothing reads its
+# subject. With any other arm, the comparison reads it.
+WILDCARD_ONLY_CASES = [
+    ("match x: _ => 1", set()),
+    ("match x + y: _ => z", {"z"}),
+    ("match x: 1 => (match y: _ => 2) _ => 3", {"x"}),
+    ("(match a/b: _ => wages) + 1", {"wages"}),
+    ("max(match x: _ => 1, wages)", {"wages"}),
+    ("match count_where(member_of_household, is_adult): _ => wages", {"wages"}),
+]
+# What a declaration's name reads ("Declaration names" in docs/rulespec.md).
+DECLARED_NAME_CASES = [
+    # Bare, a parameter, a table or a rule reads itself.
+    ("local_rate + 1", set()),
+    ("local_table + 1", set()),
+    ("local_table[local_rate]", set()),
+    ("local_table[wages]", {"wages"}),
+    ("person_pay + 1", set()),
+    # Read by name, only a derived rule shadows the input of its name.
+    ("sum(member_of_household.person_pay)", set()),
+    ("count_where(member_of_household, person_is_adult)", set()),
+    ("count_where(member_of_household, is_eligible)", {"is_eligible"}),
+    ("sum(member_of_household.local_rate)", {"local_rate"}),
+    ("sum(member_of_household.local_table)", {"local_table"}),
+    ("max(member_of_household.local_rate)", {"local_rate"}),
+    ("only(member_of_household.local_rate)", {"local_rate"}),
+    ("sum_where(member_of_household, local_rate, is_eligible)", {"local_rate", "is_eligible"}),
+    ("min_where(member_of_household, local_rate, is_eligible)", {"local_rate", "is_eligible"}),
+    # A rule with no entity and only literal values is a parameter, a grouped
+    # literal included. `-1` computes, so that rule is a derived rule.
+    ("count_where(member_of_household, literal_rule)", {"literal_rule"}),
+    ("count_where(member_of_household, grouped_literal_rule)", {"grouped_literal_rule"}),
+    ("count_where(member_of_household, yaml_number_rule)", {"yaml_number_rule"}),
+    ("count_where(member_of_household, negative_rule)", set()),
+    ("literal_rule + grouped_literal_rule + yaml_number_rule + negative_rule", set()),
+    # Outside a predicate a relation's name reads an input, and a source
+    # relation's reads one everywhere.
+    ("member_of_household + 1", {"member_of_household"}),
+    ("member_of_household", {"member_of_household"}),
+    ("cites_section_63 + 1", {"cites_section_63"}),
+]
+# Whitespace around a formula is no part of it, of any kind (`str::trim`).
+TRIM_CASES = [
+    ("len(member_of_household) ", set()),
+    (" wages", {"wages"}),
+]
+# A rule of each other kind in the module. None reads an input, so the compiled
+# program's inputs come from the formula under test alone.
+LOCAL_TABLE_LABEL = "local_table_index"
+DECLARED_RULES: list[dict[str, object]] = [
+    {
+        "name": name,
+        "kind": kind,
+        "dtype": dtype,
+        **({"entity": entity, "period": "Month"} if entity else {}),
+        "versions": [{"effective_from": "2026-01-01", "formula": formula}],
+    }
+    for name, kind, dtype, entity, formula in [
+        ("local_rate", "parameter", "Integer", None, "35"),
+        ("is_eligible", "parameter", "Judgment", None, "true"),
+        ("yaml_number_rule", "parameter", "Money", None, 0.5),
+        ("literal_rule", "derived", "Money", None, "1"),
+        ("grouped_literal_rule", "derived", "Money", None, "(1)"),
+        ("negative_rule", "derived", "Money", None, "-1"),
+        ("person_pay", "derived", "Money", "Person", "3"),
+        ("person_is_adult", "derived", "Judgment", "Person", "true"),
+    ]
+] + [
+    {
+        "name": "local_table",
+        "kind": "parameter",
+        "dtype": "Money",
+        "indexed_by": LOCAL_TABLE_LABEL,
+        "versions": [{"effective_from": "2026-01-01", "values": {1: 10, 2: 20}}],
+    },
+    {
+        "name": "cites_section_63",
+        "kind": "source_relation",
+        "source": "7 USC 2014",
+        "source_relation": {"type": "cites", "target": "us:statutes/7/2013"},
+    },
+]
+DECLARED_NAME_FORMULAS = {formula for formula, _ in DECLARED_NAME_CASES}
 # What some formulas need to compile: a result dtype other than Money, an
 # input declaration, or an imported module.
 CALL_DTYPES = {
@@ -405,6 +511,7 @@ CALL_DTYPES = {
     "len((member_of_household).age)": "Integer",
     "len((member_of_household.age))": "Integer",
     "count_where(household_members, is_adult)": "Integer",
+    "member_of_household": "Judgment",
 }
 RATE_TABLE_MODULE = "us:statutes/7/2013"
 CALL_IMPORTS = {
@@ -437,6 +544,7 @@ def write_call_module(root: Path, formula: str) -> Path:
         dtype=CALL_DTYPES.get(formula, "Money"),
         inputs=CALL_INPUTS.get(formula),
         imports=imports,
+        rules=DECLARED_RULES if formula in DECLARED_NAME_FORMULAS else None,
     )
 
 
@@ -509,7 +617,11 @@ def test_words_in_strings_and_comments_name_no_input(
     + MATCH_CASES
     + PERIOD_CASES
     + POSITION_CASES
-    + PATH_CASES,
+    + PATH_CASES
+    + UNREAD_ARGUMENT_CASES
+    + WILDCARD_ONLY_CASES
+    + DECLARED_NAME_CASES
+    + TRIM_CASES,
 )
 def test_a_name_is_an_input_only_where_the_lowering_reads_one(
     tmp_path: Path, formula: str, inputs: set[str]
@@ -541,7 +653,7 @@ def test_names_start_where_the_lexer_starts_them(
 ) -> None:
     rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
 
-    assert _infer_input_names(rules, {"r"}) == inputs
+    assert _infer_input_names(rules) == inputs
 
 
 class SearchCountingFormula(str):
@@ -571,7 +683,7 @@ def test_inference_searches_each_comment_once(text: str) -> None:
     formula = SearchCountingFormula(text)
     rules = [{"name": "long", "kind": "derived", "versions": [{"formula": formula}]}]
 
-    assert _infer_input_names(rules, {"long"}) == {"x"}
+    assert _infer_input_names(rules) == {"x"}
     assert formula.searched <= len(formula)
 
 
@@ -594,6 +706,11 @@ COMPILE_REFUSALS = {
     "not period_end": "`period_end` is a date, so it cannot be tested as a judgment",
     "count_where(household_members, is_adult)": "typing is mandatory",
     "sum(household_members.wages)": "typing is mandatory",
+    # The dense compiler covers less than the artifact, which checks these two.
+    "person_pay + 1": "dense compilation only supports dependencies within the same root",
+    "count_where(member_of_household, negative_rule)": (
+        "dense compilation does not yet support where-clause predicates"
+    ),
 }
 COMPILED_CASES = [
     (formula, inputs, COMPILE_REFUSALS.get(formula))
@@ -609,14 +726,31 @@ COMPILED_CASES = [
         *PERIOD_CASES,
         *POSITION_CASES,
         *PATH_CASES,
+        *UNREAD_ARGUMENT_CASES,
+        *WILDCARD_ONLY_CASES,
+        *DECLARED_NAME_CASES,
+        *TRIM_CASES,
     ]
 ]
 
 
-@pytest.mark.skipif(
-    NativeCompiledDenseProgram is None,
-    reason="axiom_rules_engine_dense extension is not built",
-)
+def dense_inputs(program: CompiledDenseProgram) -> set[str]:
+    return set(program.root_inputs) | {
+        name for relation in program.relations for name in relation.related_inputs
+    }
+
+
+def artifact_inputs(root: Path, path: Path, output: Path) -> set[str]:
+    """The inputs the compiled artifact lists for the whole module, whichever
+    rule or predicate reads them. It also lists a table's `indexed_by` label,
+    read or not."""
+    compiled = AxiomRulesEngine(binary_path=BINARY).compile(
+        program_path=path, rulespec_roots=(root,), output_path=output
+    )
+    return {entry.slot for entry in compiled.metadata.input_catalog} - {LOCAL_TABLE_LABEL}
+
+
+@needs_dense
 @pytest.mark.parametrize(("formula", "inputs", "refusal"), COMPILED_CASES)
 def test_inferred_inputs_are_the_compiled_program_inputs(
     tmp_path: Path, formula: str, inputs: set[str], refusal: str | None
@@ -634,23 +768,141 @@ def test_inferred_inputs_are_the_compiled_program_inputs(
     program = CompiledDenseProgram.from_file(
         path, rulespec_roots=[root], entity="Household"
     )
-    compiled = set(program.root_inputs) | {
-        name for relation in program.relations for name in relation.related_inputs
-    }
-    assert compiled == inputs
+    assert dense_inputs(program) == inputs
     # The engine accepts each input under the concept ID discovery gives it.
-    assert set(program.input_request_names) == inputs
+    assert set(program.input_request_names) - {LOCAL_TABLE_LABEL} == inputs
     assert all(
         f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
         for name in inputs
     )
 
 
+@needs_binary
+@pytest.mark.parametrize(
+    ("formula", "inputs"),
+    [
+        (formula, inputs)
+        for formula, inputs, refusal in COMPILED_CASES
+        if refusal is None or refusal.startswith("dense compilation")
+    ],
+)
+def test_inferred_inputs_are_the_compiled_artifact_inputs(
+    tmp_path: Path, formula: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_call_module(root, formula)
+
+    assert artifact_inputs(root, path, tmp_path / "artifact.json") == inputs
+
+
+def write_predicate_module(root: Path, predicate: str) -> Path:
+    document = {
+        "format": "rulespec/v1",
+        "rules": [
+            {
+                "name": "member_of_household",
+                "kind": "data_relation",
+                "data_relation": {"arity": 2, "arguments": ["Person", "Household"]},
+            },
+            {
+                "name": "relative_of",
+                "kind": "data_relation",
+                "data_relation": {"arity": 2, "arguments": ["Person", "Person"]},
+            },
+            *DECLARED_RULES,
+            {
+                "name": "kin",
+                "kind": "derived_relation",
+                "derived_relation": {
+                    "arity": 2,
+                    "source_relation": "relative_of",
+                    "slot_entities": ["Person", "Person"],
+                    "current_slot": 0,
+                    "related_slot": 1,
+                },
+                "versions": [{"effective_from": "2026-01-01", "formula": predicate}],
+            },
+        ],
+    }
+    return write_rulespec(
+        root,
+        "us/statutes/7/2014.yaml",
+        yaml.safe_dump(document, sort_keys=False),
+    )
+
+
+# What a derived relation's predicate reads (`lower_judgment_formula`).
+PREDICATE_CASES = [
+    # `anchor`, `candidate` and what an `exists` binds are terms: a read through
+    # one reads the name after it, and a term alone reads nothing.
+    ("candidate.age > anchor.age", {"age"}),
+    ("anchor == candidate", set()),
+    ("relative_of(anchor, candidate)", set()),
+    ("not relative_of(candidate, anchor)", set()),
+    ("exists(relative_of(anchor, p), p.age >= 65)", {"age"}),
+    ("exists(relative_of(anchor, p), p != candidate)", set()),
+    ("exists(relative_of(p, anchor), p.age > local_rate)", {"age"}),
+    ("exists(relative_of(anchor, p), exists(relative_of(p, q), q.age > p.age))", {"age"}),
+    ("exists(relative_of(anchor, p), p.age > 1) or other", {"age", "other"}),
+    # An `exists` nothing lowers still binds no input.
+    ("len(member_of_household, exists(relative_of(anchor, p), true)) > 0 and free", {"free"}),
+    ("max(candidate.age) > 1", {"age"}),
+    ("candidate.person_is_adult", set()),
+    ("exists(relative_of(anchor, p), p.person_is_adult)", set()),
+    # A relation's name reads the relation only in the judgment position.
+    ("member_of_household", set()),
+    ("(if member_of_household: 1 else: 0) > 0", set()),
+    ("exactly_one(member_of_household, is_kin)", {"is_kin"}),
+    ("member_of_household == true", {"member_of_household"}),
+    ("cites_section_63", {"cites_section_63"}),
+    ("cites_section_63 > 1", {"cites_section_63"}),
+    # Other names read as they do in a rule.
+    ("is_eligible", set()),
+    ("candidate.age > 1 and shared", {"age", "shared"}),
+    ("true", set()),
+    ("'text' == x", {"x"}),
+    ("period_start == period_end", set()),
+    ("days_between(period_start, birth_date) > 0", {"birth_date"}),
+    ("local_table[wages] > 0", {"wages"}),
+    ("(match x: _ => 1) > 0", set()),
+    ("(match x: 1 => y _ => 1) > 0", {"x", "y"}),
+    ("sum(member_of_household.age) > 0", {"age"}),
+    ("sum(member_of_household.local_rate) > 0", {"local_rate"}),
+    ("min(member_of_household.age) > 0", {"age"}),
+    ("only(member_of_household.age) > 0", {"age"}),
+    ("len(member_of_household, wages) > 0", set()),
+    ("len(member_of_household) > 0 and person_is_adult", set()),
+    ("count_where(member_of_household, is_adult) > 0", {"is_adult"}),
+    ("count_where(member_of_household, person_is_adult) > 0", set()),
+    ("count_where(member_of_household, is_eligible) > 0", {"is_eligible"}),
+    ("sum_where(member_of_household, local_rate, is_eligible) > 0", {"local_rate", "is_eligible"}),
+    # The writer's checks on a rule's formula do not cover a predicate.
+    ('x """ y', {"x"}),
+]
+
+
+@needs_binary
+@pytest.mark.parametrize(("predicate", "inputs"), PREDICATE_CASES)
+def test_inferred_predicate_inputs_are_the_compiled_artifact_inputs(
+    tmp_path: Path, predicate: str, inputs: set[str]
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_predicate_module(root, predicate)
+
+    assert inferred_input_names(root) == inputs
+    assert artifact_inputs(root, path, tmp_path / "artifact.json") == inputs
+
+
 RANDOM_NAMES = [
     "wages", "age", "then", "in", "_", "period_start", "period_end",
     "household/size", "single", "max", "floor", "sum", "len",
+    "local_rate", "is_eligible", "local_table", "literal_rule", "negative_rule",
+    "person_pay", "person_is_adult", "member_of_household", "cites_section_63",
 ]  # fmt: skip
-RANDOM_FIELDS = ["age", "wages", "period_start", "_", "then"]
+RANDOM_FIELDS = [
+    "age", "wages", "period_start", "_", "then", "local_rate", "local_table",
+    "person_pay", "person_is_adult", "member_of_household", "cites_section_63",
+]  # fmt: skip
 
 
 def random_formula(rng: random.Random, depth: int) -> str:
@@ -675,6 +927,9 @@ def random_formula(rng: random.Random, depth: int) -> str:
         lambda: f"{rng.choice(['max', 'min'])}({operand()}, {operand()})",
         lambda: f"days_between({operand()}, {operand()})",
         lambda: f"len({relation}{rng.choice(['', '.' + rng.choice(RANDOM_FIELDS)])})",
+        lambda: f"len({relation}, {operand()})",
+        lambda: f"sum({relation}.{rng.choice(RANDOM_FIELDS)}, {operand()})",
+        lambda: f"local_table[{operand()}]",
         lambda: f"count_where({relation}, {name()})",
         lambda: f"sum_where({relation}, {name()}, {name()})",
         lambda: f"{rng.choice(['sum', 'max', 'only'])}({relation}.{rng.choice(RANDOM_FIELDS)})",
@@ -682,16 +937,14 @@ def random_formula(rng: random.Random, depth: int) -> str:
             f"(match {name()}: {rng.choice(['1', 'single', 'period_end'])} => "
             f"{operand()}{rng.choice(['', f' _ => {operand()}'])})"
         ),
+        lambda: f"(match {operand()}: _ => {operand()})",
         lambda: f"(if {operand()}: {operand()} elif {operand()}: {operand()} else: {operand()})",
         lambda: f"{operand()} {rng.choice(['>=', '==', 'and', 'or not'])} {operand()}",
     ]
     return rng.choice(shapes)()
 
 
-@pytest.mark.skipif(
-    NativeCompiledDenseProgram is None,
-    reason="axiom_rules_engine_dense extension is not built",
-)
+@needs_dense
 @pytest.mark.parametrize("seed", range(4))
 def test_random_formulas_infer_the_compiled_program_inputs(
     tmp_path: Path, seed: int
@@ -704,7 +957,9 @@ def test_random_formulas_infer_the_compiled_program_inputs(
     for _ in range(50):
         formula = random_formula(rng, rng.randint(1, 2))
         for dtype in ("Money", "Judgment", "Integer", "Date"):
-            path = write_formula_module(root, {"called": formula}, dtype=dtype)
+            path = write_formula_module(
+                root, {"called": formula}, dtype=dtype, rules=DECLARED_RULES
+            )
             try:
                 program = CompiledDenseProgram.from_file(
                     path, rulespec_roots=[root], entity="Household"
@@ -712,12 +967,9 @@ def test_random_formulas_infer_the_compiled_program_inputs(
             except ValueError:
                 continue
             compiled_formulas += 1
-            compiled = set(program.root_inputs) | {
-                name
-                for relation in program.relations
-                for name in relation.related_inputs
-            }
+            compiled = dense_inputs(program)
             assert inferred_input_names(root) == compiled, formula
+            assert set(program.input_request_names) - {LOCAL_TABLE_LABEL} == compiled, formula
             assert all(
                 f"us:statutes/7/2014#input.{name}" in program.input_request_names[name]
                 for name in compiled
@@ -726,10 +978,232 @@ def test_random_formulas_infer_the_compiled_program_inputs(
     assert compiled_formulas >= 25
 
 
-@pytest.mark.skipif(
-    NativeCompiledDenseProgram is None,
-    reason="axiom_rules_engine_dense extension is not built",
+def random_predicate(
+    rng: random.Random, depth: int, terms: tuple[str, ...] = ("anchor", "candidate")
+) -> str:
+    """A predicate over terms, atoms and `exists`, with scalar formulas in it."""
+
+    def term() -> str:
+        return rng.choice(terms)
+
+    def read() -> str:
+        return f"{term()}.{rng.choice(RANDOM_FIELDS)}"
+
+    def inner(scope: tuple[str, ...] = terms) -> str:
+        return random_predicate(rng, depth - 1, scope) if depth else read()
+
+    variable = f"v{len(terms)}"
+    shapes = [
+        read,
+        lambda: rng.choice(RANDOM_NAMES),
+        lambda: f"{term()} {rng.choice(['==', '!='])} {term()}",
+        lambda: f"relative_of({term()}, {term()})",
+        lambda: f"{read()} {rng.choice(['>=', '=='])} {random_formula(rng, 0)}",
+        lambda: f"{random_formula(rng, 1)} {rng.choice(['>=', '=='])} 1",
+        lambda: f"{inner()} {rng.choice(['and', 'or'])} {inner()}",
+        lambda: f"not ({inner()})",
+        lambda: f"exactly_one({inner()}, {inner()})",
+        lambda: f"exists(relative_of({term()}, {variable}), {inner((*terms, variable))})",
+        lambda: f"exists(relative_of({variable}, {term()}), {inner((*terms, variable))})",
+    ]
+    return rng.choice(shapes)()
+
+
+@needs_binary
+@pytest.mark.parametrize("seed", range(4))
+def test_random_predicates_infer_the_compiled_artifact_inputs(
+    tmp_path: Path, seed: int
+) -> None:
+    # The dense compiler refuses most predicates, so the artifact is the check.
+    rng = random.Random(seed)
+    root = canonical_root(tmp_path)
+    compiled_predicates = 0
+    for _ in range(100):
+        predicate = random_predicate(rng, rng.randint(1, 3))
+        path = write_predicate_module(root, predicate)
+        try:
+            compiled = artifact_inputs(root, path, tmp_path / "artifact.json")
+        except RuntimeError:
+            continue
+        compiled_predicates += 1
+        assert inferred_input_names(root) == compiled, predicate
+    assert compiled_predicates >= 25
+
+
+# What mutation adds to a formula: every kind of token the lexer yields, and
+# some it refuses.
+RANDOM_TOKENS = [
+    "wages", "a/b", "_", "1", "2.5", '"s"', "True", "2026-01-01", "if", "elif",
+    "else", "match", "and", "or", "not", "from", "to", "entity", "amend", "(",
+    ")", "[", "]", ",", ".", ":", "=", "=>", "->", "+", "-", "*", "/", "<",
+    "<=", "==", "!=", ">", ">=", "$", "!", "'open",
+]  # fmt: skip
+
+
+def mutated(rng: random.Random, formula: str) -> str:
+    tokens = re.findall(r"(?:[^\s()\[\],:.]|(?<=\d)\.(?=\d))+|[()\[\],:.]", formula)
+    for _ in range(rng.choice((1, 1, 2))):
+        index = rng.randrange(len(tokens) + 1)
+        roll = rng.random()
+        if roll < 0.4 and index < len(tokens):
+            del tokens[index]
+        elif roll < 0.7 and index < len(tokens):
+            tokens[index] = rng.choice(RANDOM_TOKENS)
+        else:
+            tokens.insert(index, rng.choice(RANDOM_TOKENS))
+    return " ".join(tokens) or "1"
+
+
+@needs_dense
+@pytest.mark.parametrize("seed", range(4))
+def test_the_parser_accepts_what_the_engine_parses(tmp_path: Path, seed: int) -> None:
+    rng = random.Random(seed)
+    root = canonical_root(tmp_path)
+    accepted = refused = 0
+    for _ in range(500):
+        formula = mutated(rng, random_formula(rng, rng.randint(0, 2)))
+        path = write_formula_module(root, {"called": formula})
+        try:
+            CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+            engine_parses = True
+        except ValueError as error:
+            engine_parses = "formula parse error" not in str(error)
+        assert (_parse_formula(formula).expr is not None) == engine_parses, formula
+        accepted += engine_parses
+        refused += not engine_parses
+    assert accepted >= 15
+    assert refused >= 100
+
+
+# A formula the parser refuses has no reads to follow, and no program to check
+# them against: every undeclared name in it counts.
+@pytest.mark.parametrize(
+    ("formula", "inputs", "refusal"),
+    [
+        ("x = 1", {"x"}, "let-bindings are not supported"),
+        ("f(x)(y)", {"f", "x", "y"}, "can only call named functions"),
+        ("x.from", {"x"}, "expected Ident, got From"),
+        ("match x: a/b => 1", {"a/b", "x"}, "unexpected trailing token"),
+        ("match x: _ => 1 2 => 3", {"_", "x"}, "wildcard arm must be final"),
+        ("a < b < c", {"a", "b", "c"}, "unexpected trailing token"),
+        ("1 + if x: 2 else: 3", {"x"}, "unexpected token in expression"),
+        ("x + 'open", {"x"}, "unterminated string"),
+        ("x $", {"x"}, "unexpected char"),
+        ("x y", {"x", "y"}, "unexpected trailing token"),
+    ],
 )
+def test_a_refused_formula_counts_every_undeclared_name(
+    tmp_path: Path, formula: str, inputs: set[str], refusal: str
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_formula_module(root, {"called": formula})
+
+    assert inferred_input_names(root) == inputs
+    if NativeCompiledDenseProgram is not None:
+        with pytest.raises(ValueError, match=refusal):
+            CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+
+
+@pytest.mark.parametrize(
+    ("formula", "inputs"),
+    [
+        (
+            f"max({', '.join(f'x{index}' for index in range(4_000))})",
+            {f"x{index}" for index in range(4_000)},
+        ),
+        ("if a: 1 " + "elif a: 1 " * 4_000 + "else: 1", {"a"}),
+        ("a" + " + a" * 4_000, {"a"}),
+        # The parser loops over this chain and the reads recurse down it, so the
+        # stack ends in the reads: every name counts, as in a refused formula.
+        ("a" + ".b" * 4_000, {"a", "b"}),
+        ("(" * 4_000 + "a" + ")" * 4_000, {"a"}),
+        ("if a: 1 else: " * 4_000 + "1", {"a"}),
+        ("-" * 4_000 + "a", {"a"}),
+    ],
+    ids=[
+        "wide call",
+        "elif chain",
+        "operator chain",
+        "field chain",
+        "parentheses",
+        "else if",
+        "negation",
+    ],
+)
+def test_long_and_deep_formulas_keep_their_names(formula: str, inputs: set[str]) -> None:
+    rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules) == inputs
+
+
+def test_a_formula_nested_past_the_recursion_limit_counts_every_undeclared_name() -> None:
+    # The parser gives up where Python's stack ends, not where the engine's does,
+    # so this counts `len` and `s` where a shallower formula counts neither.
+    formula = "(" * 4_000 + "len(s)" + ")" * 4_000
+    rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+
+    assert _infer_input_names(rules) == {"len", "s"}
+
+
+@needs_dense
+def test_a_table_label_is_a_request_name_discovery_does_not_name(tmp_path: Path) -> None:
+    # `input_catalog` accepts a table's `indexed_by` label as a request name even
+    # with no formula reading it. Discovery names the reads, so it omits this one.
+    root = canonical_root(tmp_path)
+    write_rate_table_module(root)
+    path = write_formula_module(
+        root, {"called": "rate_table[2] * 2"}, imports=[RATE_TABLE_MODULE]
+    )
+
+    program = CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+
+    assert inferred_input_names(root) == set()
+    assert dense_inputs(program) == set()
+    assert program.input_request_names == {
+        "household_size": (f"{RATE_TABLE_MODULE}#input.household_size",)
+    }
+
+
+def test_data_relation_and_table_formulas_read_nothing() -> None:
+    # Lowering reads neither: a data relation has no body and a table lowers to
+    # its values.
+    rules = [
+        {"name": "held", "kind": "data_relation", "versions": [{"formula": "a"}]},
+        {
+            "name": "table",
+            "kind": "parameter",
+            "versions": [{"values": {1: 1}}, {"formula": "b"}],
+        },
+    ]
+
+    assert _infer_input_names(rules) == set()
+
+
+def test_top_level_formula_reads_like_a_version() -> None:
+    # `effective_versions` in src/rulespec.rs: a rule with no versions has one.
+    rules = [
+        {"name": "rate", "kind": "parameter", "formula": 0.5},
+        {"name": "total", "kind": "derived", "formula": "rate * wages"},
+    ]
+
+    assert _infer_input_names(rules) == {"wages"}
+
+
+def test_every_discovered_concept_id_validates(tmp_path: Path) -> None:
+    root = canonical_root(tmp_path)
+    write_formula_module(root, {"household/rate": "household/size * 2"})
+
+    ids = {concept.concept_id for concept in discover_concepts([root])}
+
+    assert {
+        "us:statutes/7/2014#household/rate",
+        "us:statutes/7/2014#input.household/size",
+    } <= ids
+    for concept_id in ids:
+        assert validate_concept_id([root], concept_id).valid, concept_id
+
+
+@needs_dense
 def test_a_path_that_names_a_rule_is_compiled_as_the_rule(tmp_path: Path) -> None:
     root = canonical_root(tmp_path)
     path = write_formula_module(root, PATH_RULES)
@@ -906,6 +1380,10 @@ def test_concepts_reject_yml_wrong_country_and_missing_explicit_root(
         ),
         (
             "format: rulespec/v1\nimports: [us:policies/base.YAML]\nrules: []",
+            "exact absolute canonical atomic targets",
+        ),
+        (
+            "format: rulespec/v1\nimports: ['us:policies/base#rate']\nrules: []",
             "exact absolute canonical atomic targets",
         ),
         (
