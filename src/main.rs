@@ -878,29 +878,6 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 /// patterns across RuleSpec sources. Detection lowers each module through the
 /// real loader and walks the serialized spec (see `migrate`); files that do
 /// not lower standalone are reported as unscanned, never as pattern-free.
-const MIGRATE_SCAN_USAGE: &str = "\
-usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
-
-Inventory hand-expanded exactly-one patterns across RuleSpec sources. Each
-module is lowered through the real loader; a file that does not lower on its
-own is reported as unscanned, never as pattern-free. Writes nothing.";
-
-const MIGRATE_APPLY_USAGE: &str = "\
-usage: axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
-
-Rewrite each detected hand-expanded exactly-one site to `exactly_one(...)`,
-after the engine shows the old and new formulas agree on every assignment of
-their bases and a rescan finds the pattern gone. A dry run by default;
---write saves the rewritten files.";
-
-const MIGRATE_HELP: &str = "\
-usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
-       axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
-       axiom-rules-engine migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]
-
-Corpus-migration tooling. Run `axiom-rules-engine migrate <subcommand> --help`
-for a subcommand's usage.";
-
 fn migrate_usage() -> String {
     format!(
         "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
@@ -1004,6 +981,29 @@ fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+const MIGRATE_SCAN_USAGE: &str = "\
+usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
+
+Inventory hand-expanded exactly-one patterns across RuleSpec sources. Each
+module is lowered through the real loader; a file that does not lower on its
+own is reported as unscanned, never as pattern-free. Writes nothing.";
+
+const MIGRATE_APPLY_USAGE: &str = "\
+usage: axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
+
+Rewrite each detected hand-expanded exactly-one site to `exactly_one(...)`,
+after the engine shows the old and new formulas agree on every assignment of
+their bases and a rescan finds the pattern gone. A dry run by default;
+--write saves the rewritten files.";
+
+const MIGRATE_HELP: &str = "\
+usage: axiom-rules-engine migrate scan [--json] <file-or-dir>...
+       axiom-rules-engine migrate apply [--json] [--write] <file-or-dir>...
+       axiom-rules-engine migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]
+
+Corpus-migration tooling. Run `axiom-rules-engine migrate <subcommand> --help`
+for a subcommand's usage.";
 
 /// Recursively collect `.yaml` sources under `root`, skipping companion test
 /// files and dot-directories.
