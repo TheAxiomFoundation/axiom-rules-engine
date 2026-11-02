@@ -389,6 +389,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Member, Worker]
   - name: history_total
     kind: derived
     entity: Worker
@@ -542,11 +543,14 @@ fn decimal_and_f64_lifetime_enforce_scalar_commencement() {
         inputs: HashMap::from([("amount".into(), DenseColumn::Decimal(vec![Decimal::ONE]))]),
         relations: HashMap::new(),
     };
-    let scalar = dense
-        .execute(&period, batch.clone(), &[])
-        .unwrap_err()
-        .to_string();
-    assert!(scalar.contains("history_total"));
+    // Commencement is checked per rule reached (#84, #270): the lifetime
+    // output fails at its reference period, as a per-period call reaching
+    // the rule would.
+    let scalar = axiom_rules_engine::engine::EvalError::MissingDerivedFormulaVersion {
+        derived: "history_total".into(),
+        at: period.start,
+    }
+    .to_string();
     assert_eq!(
         dense
             .execute_lifetime(
@@ -565,9 +569,12 @@ fn decimal_and_f64_lifetime_enforce_scalar_commencement() {
             .to_string(),
         scalar
     );
+    // An earlier observation that only supplies an input is not an
+    // evaluation of the rule: the requested output is checked at the
+    // reference period, and its reduction reads no rule in 1999.
     let mut value = request();
     value["periods"][0] = year(1999);
-    assert!(rejection(value).to_string().contains("history_total"));
+    run_request(artifact("sum_over_periods(amount)", "Money"), value).unwrap();
 }
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);

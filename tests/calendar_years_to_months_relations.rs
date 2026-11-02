@@ -21,6 +21,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
+      arguments: [Person, Family]
   - name: family_months
     kind: derived
     entity: Family
@@ -71,9 +72,21 @@ rules:
     }
     .to_model()
     .unwrap();
+    // The member predicate reads the family's rule from the person side, so
+    // the family's input travels with each member tuple: two members per
+    // family, in tuple order.
+    let per_member = |family_years: DenseColumn| match family_years {
+        DenseColumn::Decimal(values) => {
+            DenseColumn::Decimal(values.iter().flat_map(|value| [*value, *value]).collect())
+        }
+        DenseColumn::Integer(values) => {
+            DenseColumn::Integer(values.iter().flat_map(|value| [*value, *value]).collect())
+        }
+        other => panic!("unexpected family column {other:?}"),
+    };
     let batch = |family_years, person_years| DenseBatchSpec {
         row_count: 2,
-        inputs: HashMap::from([("family_years".into(), family_years)]),
+        inputs: HashMap::new(),
         relations: HashMap::from([(
             DenseRelationKey {
                 name: "member_of_family".into(),
@@ -82,7 +95,12 @@ rules:
             },
             DenseRelationBatchSpec {
                 offsets: vec![0, 2, 4],
-                inputs: HashMap::from([("person_years".into(), person_years)]),
+                inputs: HashMap::from([
+                    ("person_years".into(), person_years),
+                    ("family_years".into(), per_member(family_years)),
+                ]),
+                related_row_count: None,
+                input_lengths: HashMap::new(),
             },
         )]),
     };

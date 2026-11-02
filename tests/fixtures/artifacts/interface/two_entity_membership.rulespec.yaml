@@ -1,0 +1,50 @@
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: age >= 18
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: member_eligible
+  - name: member_income
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: earned_income + unearned_income
+  - name: unit_size
+    kind: derived
+    entity: SnapUnit
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(snap_unit)
+  - name: household_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: sum(member_of_household.member_income)

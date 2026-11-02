@@ -192,3 +192,57 @@ class TestExecutionModes:
         np.testing.assert_allclose(
             result["outputs"]["dense_test_tax"], [0.0, 1_000.0, 0.0]
         )
+
+
+OVERFLOW_MODULE_SOURCE = """\
+format: rulespec/v1
+module:
+  summary: |-
+    Dense-surface test fixture: doubling an amount, to exercise a result
+    beyond the exact Decimal range.
+  source_verification:
+    corpus_citation_path: us/guidance/tests/dense-overflow
+    upstream_source_check:
+      status: official_parameter_source
+      checked_paths:
+        - us/statute/tests/dense-overflow
+      rationale: The synthetic guidance supplies the test formula.
+rules:
+  - name: dense_test_doubled
+    kind: derived
+    entity: Person
+    dtype: Decimal
+    period: Year
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          dense_test_amount * 2
+"""
+
+
+def test_decimal_overflow_is_a_runtime_error_not_a_panic(tmp_path) -> None:
+    root = (tmp_path / "rulespec-us").resolve()
+    path = root / "us/policies/tests/dense_overflow.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(OVERFLOW_MODULE_SOURCE, encoding="utf-8")
+    compiled = CompiledDenseProgram.from_file(
+        path, rulespec_roots=[root], entity="Person"
+    )
+    execution = dict(
+        period_kind="calendar_year",
+        start="2025-01-01",
+        end="2025-12-31",
+        inputs={"dense_test_amount": np.array([1.0, 7.0e28])},
+    )
+    # 1.4e29 is beyond Decimal's range (about 7.9e28). Exact execution reports
+    # that as an ordinary error; it used to raise pyo3's PanicException, a
+    # BaseException that `except Exception` does not catch.
+    with pytest.raises(
+        RuntimeError, match="arithmetic overflow: multiplication result"
+    ):
+        compiled.execute(**execution)
+    # f64 execution follows IEEE 754 and answers.
+    result = compiled.execute_f64(**execution)
+    np.testing.assert_allclose(
+        result["outputs"]["dense_test_doubled"], [2.0, 1.4e29]
+    )

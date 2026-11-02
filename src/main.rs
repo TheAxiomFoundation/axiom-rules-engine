@@ -3,10 +3,12 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use axiom_rules_engine::api::{
-    CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
+    CompiledExecutionRequest, ExecutionRequest, RelationBinding, execute_compiled_request,
+    execute_request,
 };
 use axiom_rules_engine::compile::{
-    ARTIFACT_FORMAT_VERSION, CompiledProgramArtifact, CorpusProvisionIndex, compile_summary_lines,
+    ARTIFACT_FORMAT_VERSION, CompileError, CompiledProgramArtifact, CorpusProvisionIndex,
+    EngineBuild, LEGACY_ARTIFACT_FORMATS, compile_summary_lines,
 };
 use axiom_rules_engine::lifetime_api::{
     LifetimeApiError, MAX_ARTIFACT_BYTES, MAX_REQUEST_BYTES, execute_lifetime_wire_request,
@@ -25,6 +27,7 @@ fn main() {
 enum TopLevelCommand {
     Compile,
     CompileComposed,
+    Run,
     RunCompiled,
     RunLifetime,
     #[cfg(feature = "unit-derivation")]
@@ -64,6 +67,12 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
             "Compile an originless `module.kind: composition` produced by",
             "axiom-compose.",
         ],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::Run,
+        name: "run",
+        aliases: &[],
+        description: &["Execute a self-contained JSON request on stdin."],
     },
     CommandMetadata {
         command: TopLevelCommand::RunCompiled,
@@ -109,7 +118,9 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         aliases: &[],
         description: &[
             "Corpus-migration tooling; `migrate scan <path>...` inventories",
-            "hand-expanded exactly-one patterns (#152).",
+            "hand-expanded exactly-one patterns (#152); `migrate artifact`",
+            "types the relations of an artifact compiled before relation",
+            "entity typing became mandatory.",
         ],
     },
     CommandMetadata {
@@ -117,9 +128,10 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         name: "capabilities",
         aliases: &[],
         description: &[
-            "Print, as JSON, the engine version and the artifact format",
-            "version the loader enforces. Semver alone cannot answer",
-            "whether an artifact will load; this can.",
+            "Print, as JSON, the engine version and build, the artifact",
+            "format the loader reads and the older formats it reads on",
+            "request. Semver alone cannot answer whether an artifact will",
+            "load; this can.",
         ],
     },
     CommandMetadata {
@@ -144,13 +156,17 @@ fn recognize_top_level_command(name: &str) -> Option<TopLevelCommand> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
     if let Some(command_name) = args.next() {
         let Some(command) = recognize_top_level_command(&command_name) else {
             return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
         };
         match command {
             TopLevelCommand::Version => {
+                if wants_help(&mut args) {
+                    println!("usage: axiom-rules-engine version\n\nPrint the engine version.");
+                    return Ok(());
+                }
                 if args.next().is_some() {
                     return Err("`version` takes no arguments".into());
                 }
@@ -158,6 +174,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             TopLevelCommand::Capabilities => {
+                if wants_help(&mut args) {
+                    println!(
+                        "usage: axiom-rules-engine capabilities\n\nPrint, as JSON, the engine version and build and the artifact formats it reads."
+                    );
+                    return Ok(());
+                }
                 if args.next().is_some() {
                     return Err("`capabilities` takes no arguments".into());
                 }
@@ -165,7 +187,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "engine_version": env!("CARGO_PKG_VERSION"),
+                        "engine_build": EngineBuild::current(),
                         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                        // Read only when the caller asks, through the
+                        // format-2 compatibility loader.
+                        "legacy_artifact_formats": LEGACY_ARTIFACT_FORMATS,
+                        // A format-2 artifact whose executed relations
+                        // declare no slot kinds loads in engines without
+                        // `relation_entity_typing` and is refused by engines
+                        // with it (`migrate artifact` types it). An artifact
+                        // that uses `min`/`max`/`only` over related entities
+                        // (`extreme_related`, `single_related`) loads only in
+                        // engines listing `related_min_max_only`. Engines
+                        // with `artifact_interface` write and check
+                        // `program.interface`.
+                        // `relation_roles` supports predicate terms, qualified
+                        // reads, parameters, atoms, term comparisons,
+                        // bounded exists and paths.
+                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
                     }))?
                 );
                 return Ok(());
@@ -176,6 +215,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             TopLevelCommand::Compile => return run_compile(args.collect(), false),
             TopLevelCommand::CompileComposed => return run_compile(args.collect(), true),
+            TopLevelCommand::Run => return run_request(args.collect()),
             TopLevelCommand::RunCompiled => return run_compiled(args.collect()),
             TopLevelCommand::RunLifetime => return run_lifetime(args.collect()),
             #[cfg(feature = "unit-derivation")]
@@ -186,11 +226,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TopLevelCommand::RunUnitAggregation => return run_unit_aggregation(args.collect()),
             #[cfg(feature = "schema")]
             TopLevelCommand::EmitSchemas => return run_emit_schemas(args.collect()),
+            // The help lists `emit-schemas` in every build, so a build without
+            // the feature says what it lacks rather than `unknown command`.
             #[cfg(not(feature = "schema"))]
             TopLevelCommand::EmitSchemas => {
-                return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
+                return Err("`emit-schemas` needs a build with the `schema` feature: \
+                     cargo build --features schema"
+                    .into());
             }
             TopLevelCommand::Migrate => return run_migrate(args.collect()),
+        }
+    }
+
+    run_request(Vec::new())
+}
+
+fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut relation_binding = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--help" | "-h" => {
+                println!("{RUN_USAGE}");
+                return Ok(());
+            }
+            _ => return Err(format!("unknown run argument `{arg}`").into()),
         }
     }
 
@@ -205,10 +266,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let request: ExecutionRequest = serde_json::from_str(&input)?;
+    let mut request: ExecutionRequest = serde_json::from_str(&input)?;
+    if let Some(policy) = relation_binding {
+        request.relation_binding = policy;
+    }
+    warn_lenient_relation_binding(request.relation_binding);
     let response = execute_request(request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+/// Whether the next argument asks for a command's help, consuming it if so.
+fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> bool {
+    args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
 }
 
 fn version_line() -> String {
@@ -312,7 +382,12 @@ Run `axiom-rules-engine <command> --help` for the options of a specific command.
 With no command and a piped stdin, a self-contained JSON `ExecutionRequest` is read
 from stdin and its response written to stdout:
 
+  axiom-rules-engine run < request.json
   axiom-rules-engine run-compiled --artifact compiled.json < request.json
+
+Relation tuple kind mismatches are errors by default. Both requests accept
+\"relation_binding\": \"lenient\"; run and run-compiled also accept
+--relation-binding lenient. The selected policy is echoed in response metadata.
 
 Note: the released v0.1.1 binary has a different compile interface from this one —
 its `compile` takes only --program and --output, and it has no `compile-composed`.
@@ -430,6 +505,85 @@ fn run_compile(args: Vec<String>, composed: bool) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+const RUN_USAGE: &str = "\
+usage: axiom-rules-engine run [--relation-binding strict|lenient] < request.json
+
+Execute a self-contained ExecutionRequest. Relation tuple kind mismatches are
+errors by default. The flag overrides the request's relation_binding field.
+Lenient execution retains mismatched tuples and reports the policy in metadata
+and on stderr.";
+
+const RUN_COMPILED_USAGE: &str = "\
+usage: axiom-rules-engine run-compiled --artifact <compiled.json> [--relation-binding strict|lenient] [--accept-artifact-format 2] < request.json
+
+Execute a CompiledExecutionRequest. Relation tuple kind mismatches are errors by
+default. The flag overrides the request's relation_binding field. Lenient
+execution retains mismatched tuples and reports the policy in metadata and on
+stderr.
+
+The artifact must be format 3. --accept-artifact-format 2 also reads a
+format-2 artifact, unchanged, through the format-2 compatibility loader, with a
+notice on stderr.";
+
+/// Parse `--accept-artifact-format`'s value: the one older format this
+/// engine reads through a compatibility loader.
+fn parse_accept_artifact_format(value: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    match value.as_deref() {
+        Some(format) if LEGACY_ARTIFACT_FORMATS.iter().any(|legacy| legacy.to_string() == format) => {
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "`--accept-artifact-format` accepts only 2, the format this engine reads through its compatibility loader (it reads format {ARTIFACT_FORMAT_VERSION} by default); got `{other}`"
+        )
+        .into()),
+        None => Err("missing `--accept-artifact-format` value; use 2".into()),
+    }
+}
+
+fn notice_legacy_artifact(shown: &str) {
+    eprintln!(
+        "notice[legacy_artifact_format]: reading `{shown}` as artifact format 2 through the format-2 compatibility loader; recompile it with this engine for format {ARTIFACT_FORMAT_VERSION}"
+    );
+}
+
+/// Load a compiled artifact: format 3, or format 2 through the
+/// compatibility loader when the caller accepts it.
+fn load_artifact(
+    path: &std::path::Path,
+    accept_format_2: bool,
+) -> Result<CompiledProgramArtifact, Box<dyn std::error::Error>> {
+    match CompiledProgramArtifact::from_json_file(path) {
+        Err(CompileError::UnsupportedArtifactFormatVersion { found: 2, .. }) if accept_format_2 => {
+            notice_legacy_artifact(&path.display().to_string());
+            Ok(CompiledProgramArtifact::from_legacy_format_2_json_file(
+                path,
+            )?)
+        }
+        loaded => Ok(loaded?),
+    }
+}
+
+fn parse_relation_binding(
+    value: Option<String>,
+) -> Result<RelationBinding, Box<dyn std::error::Error>> {
+    match value.as_deref() {
+        Some("strict") => Ok(RelationBinding::Strict),
+        Some("lenient") => Ok(RelationBinding::Lenient),
+        Some(other) => {
+            Err(format!("invalid relation binding `{other}`; use `strict` or `lenient`").into())
+        }
+        None => Err("missing `--relation-binding` value; use `strict` or `lenient`".into()),
+    }
+}
+
+fn warn_lenient_relation_binding(policy: RelationBinding) {
+    if policy == RelationBinding::Lenient {
+        eprintln!(
+            "warning[lenient_relation_binding]: relation_binding is lenient; mismatched relation tuples are accepted without reordering"
+        );
+    }
+}
+
 fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if args == ["--help"] {
         println!(
@@ -482,10 +636,21 @@ fn read_lifetime_input(
 
 fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut artifact_path: Option<PathBuf> = None;
+    let mut relation_binding = None;
+    let mut accept_format_2 = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--relation-binding" => relation_binding = Some(parse_relation_binding(iter.next())?),
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
+            "--help" | "-h" => {
+                println!("{RUN_COMPILED_USAGE}");
+                return Ok(());
+            }
             "--artifact" => {
                 artifact_path = iter.next().map(PathBuf::from);
             }
@@ -497,11 +662,15 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let artifact_path =
         artifact_path.ok_or("missing required `--artifact /path/to/compiled.json` argument")?;
-    let artifact = CompiledProgramArtifact::from_json_file(&artifact_path)?;
+    let artifact = load_artifact(&artifact_path, accept_format_2)?;
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let request: CompiledExecutionRequest = serde_json::from_str(&input)?;
+    let mut request: CompiledExecutionRequest = serde_json::from_str(&input)?;
+    if let Some(policy) = relation_binding {
+        request.relation_binding = policy;
+    }
+    warn_lenient_relation_binding(request.relation_binding);
     let response = execute_compiled_request(artifact, request)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
@@ -509,21 +678,28 @@ fn run_compiled(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "unit-derivation")]
 const COMPILE_UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --source-artifact <compiled-program.json> --output <compiled-aggregation.json>
+usage: axiom-rules-engine compile-unit-aggregation --plan <plan.yaml> --source-artifact <compiled-program.json> --output <compiled-aggregation.json> [--accept-artifact-format 2]
 
 The authoring YAML is accepted only at this compile boundary. The output is a
 canonically digested experimental artifact containing a production-validated
 source program and phase-two program; run-unit-aggregation accepts only that
-compiled artifact.";
+compiled artifact. The source artifact must be format 3;
+--accept-artifact-format 2 also reads a format-2 source artifact, unchanged,
+through the format-2 compatibility loader, with a notice on stderr.";
 
 #[cfg(feature = "unit-derivation")]
 fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut plan_path: Option<PathBuf> = None;
     let mut source_artifact_path: Option<PathBuf> = None;
     let mut output_path: Option<PathBuf> = None;
+    let mut accept_format_2 = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
             "--plan" => {
                 plan_path = Some(PathBuf::from(
                     iter.next().ok_or("`--plan` requires a path argument")?,
@@ -558,10 +734,16 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
     let output_path = output_path
         .ok_or("missing required `--output /path/to/compiled-aggregation.json` argument")?;
     let source = std::fs::read_to_string(&plan_path)?;
-    let source_artifact = CompiledProgramArtifact::from_json_file(&source_artifact_path)?;
+    let source_artifact = load_artifact(&source_artifact_path, accept_format_2)?;
     let mut registry =
         axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
-    let artifact = registry.register_aggregation_source(&source, &source_artifact)?;
+    let artifact = registry.register_aggregation_source_with_loading(
+        &source,
+        &source_artifact,
+        axiom_rules_engine::unit_derivation::EmbeddedArtifactLoading {
+            accept_legacy_format_2: accept_format_2,
+        },
+    )?;
     std::fs::write(&output_path, artifact.to_json_pretty()?)?;
     println!("compiled_unit_aggregation: {}", output_path.display());
     println!("plan: {}", artifact.plan_id());
@@ -571,20 +753,27 @@ fn run_compile_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::er
 
 #[cfg(feature = "unit-derivation")]
 const UNIT_AGGREGATION_USAGE: &str = "\
-usage: axiom-rules-engine run-unit-aggregation --artifact <compiled-aggregation.json> --enable-experimental-unit-derivation < request.json
+usage: axiom-rules-engine run-unit-aggregation --artifact <compiled-aggregation.json> --enable-experimental-unit-derivation [--accept-artifact-format 2] < request.json
 
 This command is compiled only with the off-by-default `unit-derivation` Cargo
 feature. The explicit runtime switch is also mandatory. Raw plan sidecars are
 not executable; the artifact must pass the experimental document registry and
-the embedded production phase-two artifact loader.";
+the embedded production phase-two artifact loader. Its embedded artifacts must
+be format 3; --accept-artifact-format 2 also reads format-2 embedded artifacts
+through the format-2 compatibility loader, with a notice on stderr.";
 
 #[cfg(feature = "unit-derivation")]
 fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut artifact_path: Option<PathBuf> = None;
     let mut enabled = false;
+    let mut accept_format_2 = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--accept-artifact-format" => {
+                parse_accept_artifact_format(iter.next())?;
+                accept_format_2 = true;
+            }
             "--artifact" => {
                 artifact_path = Some(PathBuf::from(
                     iter.next().ok_or("`--artifact` requires a path argument")?,
@@ -611,11 +800,21 @@ fn run_unit_aggregation(args: Vec<String>) -> Result<(), Box<dyn std::error::Err
     }
     let artifact_path = artifact_path
         .ok_or("missing required `--artifact /path/to/compiled-aggregation.json` argument")?;
-    let artifact_source = std::fs::read_to_string(artifact_path)?;
+    let artifact_source = std::fs::read_to_string(&artifact_path)?;
     let mut registry =
         axiom_rules_engine::unit_derivation::UnitDerivationDocumentRegistry::default();
     let plan_id = {
-        let artifact = registry.register_aggregation_json(&artifact_source)?;
+        let artifact = registry.register_aggregation_json_with_loading(
+            &artifact_source,
+            axiom_rules_engine::unit_derivation::EmbeddedArtifactLoading {
+                accept_legacy_format_2: accept_format_2,
+            },
+        )?;
+        if artifact.source_artifact.artifact_format_version == 2
+            || artifact.phase_two_artifact.artifact_format_version == 2
+        {
+            notice_legacy_artifact(&artifact_path.display().to_string());
+        }
         artifact.plan_id().to_string()
     };
     let mut input = String::new();
@@ -645,6 +844,12 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
             "--out" => {
                 out_dir = iter.next().map(PathBuf::from);
             }
+            "--help" | "-h" => {
+                println!(
+                    "usage: axiom-rules-engine emit-schemas --out <dir>\n\nWrite JSON Schemas for the wire types into <dir>."
+                );
+                return Ok(());
+            }
             _ => {
                 return Err(format!("unknown emit-schemas argument `{arg}`").into());
             }
@@ -662,18 +867,24 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
 /// patterns across RuleSpec sources. Detection lowers each module through the
 /// real loader and walks the serialized spec (see `migrate`); files that do
 /// not lower standalone are reported as unscanned, never as pattern-free.
+fn migrate_usage() -> String {
+    format!(
+        "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
+    )
+}
+
 fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("scan") => {}
         Some("apply") => return run_migrate_apply(args.collect()),
-        Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
-        None => {
-            return Err(
-                "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>..."
-                    .into(),
-            );
+        Some("artifact") => return run_migrate_artifact(args.collect()),
+        Some("--help" | "-h") => {
+            println!("{}", migrate_usage());
+            return Ok(());
         }
+        Some(other) => return Err(format!("unknown migrate subcommand `{other}`").into()),
+        None => return Err(migrate_usage().into()),
     }
     let mut json = false;
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -787,6 +998,93 @@ fn collect_yaml_files(
 /// assignments plus a rescan proving the pattern is gone. Dry-run by
 /// default; `--write` saves. Sites with non-fact bases are reported for
 /// hands and left untouched.
+const MIGRATE_ARTIFACT_USAGE: &str = "migrate artifact --artifact <compiled.json> [--output <typed.json>] [--relation-entities <relation>=<Kind>,<Kind>]... [--json]";
+
+/// `migrate artifact`: type the relations of a compiled artifact that the
+/// loader refuses under mandatory relation entity typing. Without
+/// `--output` it reports what it would change and writes nothing.
+fn run_migrate_artifact(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifact_path: Option<PathBuf> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut overrides = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut json = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--artifact" => artifact_path = args.next().map(PathBuf::from),
+            "--output" => output_path = args.next().map(PathBuf::from),
+            "--json" => json = true,
+            "--relation-entities" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("usage: {MIGRATE_ARTIFACT_USAGE}"))?;
+                let (relation, kinds) = value.split_once('=').ok_or_else(|| {
+                    format!("--relation-entities expects <relation>=<Kind>,<Kind>, got `{value}`")
+                })?;
+                let kinds = kinds
+                    .split(',')
+                    .map(|kind| kind.trim().to_string())
+                    .collect::<Vec<_>>();
+                if relation.is_empty() || kinds.iter().any(String::is_empty) {
+                    return Err(format!(
+                        "--relation-entities expects <relation>=<Kind>,<Kind>, got `{value}`"
+                    )
+                    .into());
+                }
+                if overrides.insert(relation.to_string(), kinds).is_some() {
+                    return Err(format!("--relation-entities repeats relation `{relation}`").into());
+                }
+            }
+            other => {
+                return Err(format!(
+                    "unknown migrate artifact argument `{other}`\n\nusage: {MIGRATE_ARTIFACT_USAGE}"
+                )
+                .into());
+            }
+        }
+    }
+    let artifact_path = artifact_path.ok_or_else(|| format!("usage: {MIGRATE_ARTIFACT_USAGE}"))?;
+    let shown = artifact_path.display().to_string();
+    let source = std::fs::read_to_string(&artifact_path)
+        .map_err(|error| format!("failed to read `{shown}`: {error}"))?;
+    let migration =
+        axiom_rules_engine::migrate::migrate_artifact_relation_typing(&source, &shown, &overrides)?;
+    if let Some(output_path) = &output_path {
+        std::fs::write(
+            output_path,
+            format!("{}\n", serde_json::to_string_pretty(&migration.artifact)?),
+        )?;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "artifact": shown,
+                "output": output_path.as_ref().map(|path| path.display().to_string()),
+                "changes": migration.changes,
+            }))?
+        );
+    } else {
+        if migration.changes.is_empty() {
+            println!("{shown}: every executed relation is already entity-typed; nothing to change");
+        }
+        for change in &migration.changes {
+            println!(
+                "{shown}: relation `{}` slot kinds [{}] -> [{}] ({})",
+                change.relation,
+                change.previous.join(", "),
+                change.slot_entities.join(", "),
+                change.source
+            );
+        }
+        match &output_path {
+            Some(path) => println!("wrote {}", path.display()),
+            None => println!("dry run: pass --output <typed.json> to write the typed artifact"),
+        }
+    }
+    Ok(())
+}
+
 fn run_migrate_apply(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
     let mut write = false;

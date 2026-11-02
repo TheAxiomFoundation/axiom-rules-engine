@@ -355,6 +355,8 @@ fn core_refuses_float_unknown_inputs_and_relation_batches() {
         DenseRelationBatchSpec {
             offsets: vec![0, 0, 0],
             inputs: HashMap::new(),
+            related_row_count: None,
+            input_lengths: HashMap::new(),
         },
     );
     assert!(
@@ -405,7 +407,13 @@ fn v1_retains_schema_selection_and_commencement_refusals() {
     let mut program = fixture().program;
     program.derived[0].versions.remove(0);
     let artifact = CompiledProgramArtifact::compile(program).unwrap();
-    assert!(run(artifact.clone(), input).unwrap_err().contains("1990"));
+    // v1 checks a lifetime-level output's commencement at the reference
+    // (last supplied) period, as main's lifetime contract does (#270).
+    assert!(
+        run(artifact.clone(), input)
+            .unwrap_err()
+            .contains("1991-01-01")
+    );
     assert!(
         DenseCompiledProgram::from_artifact(&artifact, Some("Worker"))
             .unwrap()

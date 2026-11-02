@@ -1,0 +1,49 @@
+format: rulespec/v1
+rules:
+  - name: neighbouring_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Household, Household]
+  - name: household_eligible
+    kind: derived
+    entity: Household
+    dtype: Judgment
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: income < 1000
+  - name: eligible_neighbours
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: neighbouring_household
+      entity: Household
+      current_slot: 0
+      related_slot: 1
+    versions:
+      - effective_from: '2026-01-01'
+        formula: household_eligible
+  - name: eligible_neighbour_count
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: '2026-01-01'
+        formula: len(eligible_neighbours)
+  - name: untyped_links
+    kind: data_relation
+    data_relation:
+      arity: 2
+  - name: linked_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: untyped_links
+      entity: LinkedUnit
+      current_slot: 1
+      related_slot: 0
+    versions:
+      - effective_from: '2026-01-01'
+        formula: link_weight > 0

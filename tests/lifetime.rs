@@ -289,6 +289,33 @@ fn sum_top_n_selects_the_n_largest() {
 }
 
 #[test]
+fn sum_top_n_ranks_nan_highest_in_f64_mode_instead_of_panicking() {
+    // f64 NaN is unordered under partial_cmp. Treating it as equal to every
+    // value gave the sort an inconsistent comparator, which lets it panic.
+    // NaN now ranks above every number, so a NaN period is always selected
+    // and poisons the top-N sum, as a NaN period poisons sum_over_periods.
+    let module = single_rule_module("top2", "Money", "sum_top_n_over_periods(earnings, 2)");
+    let program = compile(&module, "Worker");
+    let periods: Vec<Period> = (1981..2021).map(year).collect();
+    let batches = (0..40)
+        .map(|period| {
+            let with_nan = if period % 7 == 3 {
+                if period % 2 == 0 { f64::NAN } else { -f64::NAN }
+            } else {
+                f64::from(period)
+            };
+            batch("earnings", vec![with_nan, f64::from(period)])
+        })
+        .collect();
+    let result = program
+        .execute_lifetime_f64(&periods, batches, &["top2".to_string()])
+        .expect("lifetime execution succeeds");
+    let totals = scalar_f64(&result, "top2");
+    assert!(totals[0].is_nan(), "{totals:?}");
+    assert_eq!(totals[1], 39.0 + 38.0);
+}
+
+#[test]
 fn sum_top_n_with_ties_sums_the_right_multiplicity() {
     // Four periods valued 50, 50, 50, 10; top 2 must be 50 + 50 = 100 even
     // though the 50s tie. Sorting is by value; ties contribute their own copies.
@@ -1078,6 +1105,42 @@ fn sum_top_n_n_exceeds_period_count_errors_in_f64_path() {
         message.contains("1 <= n <=") && message.contains("41 supplied periods"),
         "unexpected error: {message}"
     );
+}
+
+/// An n beyond the i64 range is reported as supplied in both dtype paths, never
+/// saturated. `i64::MAX as f64` rounds up to 2^63, so the f64 path's old range
+/// check let exactly 2^63 through, saturated it, and the error named n as
+/// 9223372036854775807 (`i64::MAX`) rather than the value supplied.
+#[test]
+fn sum_top_n_n_beyond_i64_is_reported_as_supplied_in_both_paths() {
+    let module = single_rule_module("top", "Money", "sum_top_n_over_periods(earnings, k)");
+    let program = compile(&module, "Worker");
+    let periods = vec![year(2001), year(2002)];
+    for n in [9_223_372_036_854_775_808.0, 1e20] {
+        let batches = || {
+            periods
+                .iter()
+                .map(|_| batch_multi(1, &[("earnings", vec![1.0]), ("k", vec![n])]))
+                .collect::<Vec<_>>()
+        };
+        let outputs = ["top".to_string()];
+        for (path, result) in [
+            (
+                "decimal",
+                program.execute_lifetime(&periods, batches(), &outputs),
+            ),
+            (
+                "f64",
+                program.execute_lifetime_f64(&periods, batches(), &outputs),
+            ),
+        ] {
+            let message = result.expect_err("an n beyond i64 must error").to_string();
+            assert!(
+                message.contains(&format!("n resolved to {n} ")),
+                "{path} path, n = {n}: {message}"
+            );
+        }
+    }
 }
 
 /// A parameter-sourced n that varies by period is a data error under the strict

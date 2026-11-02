@@ -10,9 +10,9 @@ covers operational semantics (versioning, rounding, provenance).
 `axiom-rules-engine` is engine infrastructure only. Production policy content belongs
 in exact country checkouts such as `rulespec-us`, with direct jurisdiction directories
 such as `us/` and `us-co/`; the file path supplies the legal ID. This repo keeps
-RuleSpec YAML only as test fixtures under `tests/fixtures/rulespec/`.
+RuleSpec YAML only as test fixtures under `tests/fixtures/`.
 
-## What Is Implemented
+## What is implemented
 
 - typed scalar and judgment outputs
 - temporal periods and intervals
@@ -21,11 +21,14 @@ RuleSpec YAML only as test fixtures under `tests/fixtures/rulespec/`.
 - durable repo-backed output IDs, e.g.
   `us:statutes/7/2017/a#snap_regular_month_allotment`
 - `explain` execution with traces
-- `fast` execution through the generic dense path when supported
+- `fast` execution: one columnar pass over a batch that returns exactly what
+  `explain` returns, falling back to `explain` for constructs it does not
+  implement — see [`docs/execution-semantics.md`](docs/execution-semantics.md)
 - opt-in currency output rounding per rule (`rounding: half_up|half_even|floor|ceil`),
   applied identically across the explain, fast, and dense paths — see
   [`docs/rulespec.md`](docs/rulespec.md#currency-rounding)
-- compiled artifacts for repeated execution
+- format-3 compiled artifacts with a checked entity/input/relation interface,
+  build identity and RuleSpec source-closure hashes
 - Python request/response models and subprocess wrapper
 
 Direct `ProgramSpec` YAML is an internal engine IR. Rule authors should use
@@ -54,6 +57,10 @@ rules: []
 For repo-backed RuleSpec files, public execution requests must use durable
 legal IDs for queried outputs and dataset input/relation names. Bare local names
 remain local formula symbols only.
+
+Dataset inputs must name slots in the compiled input catalog. Derived rules
+and parameters are rejected as dataset inputs. Use request `pins` to override
+a scalar derived rule; see [dataset binding and pins](docs/rulespec.md).
 
 ## Commands
 
@@ -105,9 +112,12 @@ cargo run -- compile-composed \
 
 `compile-composed` requires exact `format: rulespec/v1` and
 `module.kind: composition`, keeps the composition's synthesized root rules
-originless, and permits only canonical atomic imports resolved through the
-explicit roots. Atomic files, declarative ProgramSpecs, relative dependencies,
-and composition files inside a RuleSpec checkout are rejected.
+originless, and permits only canonical imports resolved through the explicit
+roots. Imported compositions are recursively merged on this surface and keep
+their canonical rule origins and source citations; the ordinary atomic loader
+continues to reject them. Atomic entry files, declarative ProgramSpecs,
+relative dependencies, and composition entry files inside a RuleSpec checkout
+are rejected.
 
 Every compiled artifact publishes `metadata.input_catalog`. Each entry records
 the internal runtime `slot`, one deterministic `canonical_request_name`, and all
@@ -116,15 +126,41 @@ canonical; otherwise the lexicographically first exact
 `<module>#input.<slot>` owner is canonical. All listed names feed the same slot.
 Invented module prefixes and `<target>#<slot>` aliases are rejected. Artifact
 loading recomputes the catalog, evaluation order, and fast-path metadata as a
-derived-metadata consistency check against the embedded program. This does not
-provide source-tamper evidence; that belongs to the signed-corpus-release and
-supervisor chain.
+derived-metadata consistency check against the embedded program.
+
+Format 3 also publishes `program.interface`: the entity roster, input slots
+with conservative type/default/domain information and elections, and
+relation descriptors. Loading re-derives this block and requires equality.
+`engine_build` records the compiling commit and dirty flag;
+`source_closure` hashes every RuleSpec module text read, including imports.
+These fields describe the producer and program. Source authenticity remains
+in the signed-corpus-release and supervisor chain. See the
+[artifact format reference](docs/artifact-format.md) for the complete contract.
+
+`metadata.fast_path` is advisory: it lists the compiling engine's static view
+of which rules contain a construct bulk fast mode declines, and execution never
+reads it (fast mode decides per request and reports any fallback in
+`metadata.fallback_reason`). Because it describes an engine as well as a
+program, the format-2 compatibility loader also accepts the value an earlier
+engine computed under a retired rule set, keeps it byte for byte, and reports
+a `stale_fast_path_metadata` diagnostic; recompiling refreshes it. The default
+format-3 loader requires metadata equal to this engine's current analysis.
 
 Run a compiled artifact:
 
 ```bash
 cargo run -- run-compiled --artifact /tmp/snap.compiled.json < request.json
 ```
+
+The default loader reads format 3 only. To run a stored format-2 artifact
+through the compatibility loader, opt in explicitly:
+
+```bash
+cargo run -- run-compiled --artifact old-format-2.json --accept-artifact-format 2 < request.json
+```
+
+The CLI emits a notice on stderr and preserves the artifact's format-2
+content. Recompile its RuleSpec source to produce format 3.
 
 Before downloading or running an artifact, ask the binary what it can load.
 `artifact_format_version` is matched **exactly** at load and moves
@@ -135,20 +171,43 @@ question:
 axiom-rules-engine capabilities
 ```
 
+For a build whose commit is unknown, the response has this shape:
+
 ```json
 {
-  "artifact_format_version": 2,
-  "engine_version": "0.2.2"
+  "artifact_format_version": 3,
+  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
+  "engine_version": "0.2.2",
+  "engine_build": { "commit": null, "dirty": null },
+  "legacy_artifact_formats": [2]
 }
 ```
 
 Compare that number against the publisher's
 `programs[].compat.requires_engine.artifact_format_version` in the artifact
-manifest. If they differ the artifact will not load, whatever the versions say.
+manifest. A mismatch is refused by the default loader. A format listed in
+`legacy_artifact_formats` loads only through its explicit compatibility path.
+Its `capabilities` list names contracts beyond the format version: an engine
+listing `relation_entity_typing` refuses a format-2 artifact that executes a
+relation with no declared slot kinds (`axiom-rules-engine migrate artifact`
+types one; see [docs/rulespec.md](docs/rulespec.md#migrating-compiled-artifacts)).
+An engine listing `related_min_max_only` supports artifacts that take
+`min`, `max` or `only` over related entities, through the appropriate format
+loader; an engine without it refuses those expression variants on load (see
+[docs/rulespec.md](docs/rulespec.md#minimum-maximum-and-exactly-one-over-related-entities)).
+An engine listing `relation_roles` supports predicate terms and qualified
+reads, parameters in predicates, relation atoms, term comparisons, bounded
+`exists` and path sources. Explain and fast evaluate these constructs; dense
+refuses a reachable qualified read, atom, term comparison, `exists` or path
+source by name and names #218. Parameter reads in predicates also compile in
+dense. See the [relation-role design](docs/relation-roles.md) and
+[execution semantics](docs/execution-semantics.md).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
-name. Queried atomic outputs and relations still use their legal RuleSpec IDs:
+name. Queried atomic outputs and relations still use their legal RuleSpec IDs.
+Relation tuples list entity ids in the relation's declared slot order
+(`program.relations[].slot_entities`; here `[Person, Household]`):
 
 ```json
 {
@@ -173,7 +232,7 @@ name. Queried atomic outputs and relations still use their legal RuleSpec IDs:
     "relations": [
       {
         "name": "us:statutes/7/2012/j#relation.member_of_household",
-        "tuple": ["household:1", "person:1"],
+        "tuple": ["person:1", "household:1"],
         "interval": { "start": "2026-01-01", "end": "2026-02-01" }
       }
     ]
@@ -207,7 +266,7 @@ IDs, data-relation IDs, source-relation IDs, and inferred `#input.*` leaves from
 RuleSpec formulas. This lets the Axiom app, validators, and encoding tools
 validate source-to-legal-concept alignment without importing the runtime.
 
-## JSON Schemas
+## JSON schemas
 
 The `schemas/` directory holds the authoritative JSON Schemas (draft-07) for the
 formats the engine exchanges:
@@ -215,47 +274,80 @@ formats the engine exchanges:
 - `rulespec-module.v1.schema.json` — the RuleSpec module/authoring format
   (`format: rulespec/v1`).
 - `rulespec-test.v1.schema.json` — the companion `*.test.yaml` case format.
-- `compiled-artifact.v2.schema.json` — the current `CompiledProgramArtifact`
-  contract, including executable version `effective_to` bounds.
+- `compiled-artifact.v3.schema.json` — the current `CompiledProgramArtifact`
+  contract, including `program.interface`, producer identities and executable
+  version `effective_to` bounds.
+- `compiled-artifact.v2.schema.json` — the frozen archived v2 contract,
+  accepted only through the format-2 compatibility loader.
 - `compiled-artifact.v1.schema.json` — the immutable archived v1 contract.
   Current engines reject v1 artifacts rather than guessing at missing temporal
   semantics.
+- `*.stage3.schema.json` — four explicitly experimental schemas for the
+  unit-derivation aggregation plan, compiled aggregation artifact, request, and
+  result. They are generated only when the `unit-derivation` feature is on too.
 
 These are the single source of truth for consumers that would otherwise
 re-implement the shape by hand. Current schemas mirror the engine's serde
 **deserialization** acceptance: a document that deserializes validates, and
-vice versa. The archived v1 schema remains available only to describe stored
-v1 data. A document can still validate and fail lowering for semantic reasons
+vice versa, with the loader-specific shape restrictions documented in
+[schema alignment](docs/schema-alignment.md). Archived schemas describe stored
+data. Validation does not establish interface or metadata agreement with a
+program, a source-closure digest's correctness, or semantic validity
 (unknown rule `kind`, top-level `relations:`, missing `effective_from`).
 
 Schema generation lives behind the non-default `schema` feature, so pure-runtime
 consumers do not compile `schemars`. Regenerate the checked-in files with:
 
 ```bash
-cargo run --features schema -- emit-schemas --out schemas
+cargo run --features "schema unit-derivation" -- emit-schemas --out schemas
 ```
 
-A golden-file test (`cargo test --features schema`) fails if the checked-in
-schemas drift from the types. `schema_conformance` validates every module and
-companion test under the explicit `AXIOM_RULESPEC_US_ROOT` checkout and
-self-skips when none is configured.
+Without `unit-derivation`, `emit-schemas` leaves the four stage-3 files
+untouched. A golden-file test fails if the checked-in schemas drift from the
+types: `cargo test --features schema` checks the others, and
+`cargo test --features "schema unit-derivation"` checks all of them.
+`schema_conformance` validates every module and companion test under the
+explicit `AXIOM_RULESPEC_US_ROOT` checkout and self-skips when none is
+configured.
 
-## Python Package
+## Python package
 
 The Python wrapper lives under `python/axiom_rules_engine/`. It exposes
 `Program`, `Dataset`, `AxiomRulesEngine`, atomic and composed dense execution
 bindings, and concept discovery helpers. It shells out to the compiled
 `axiom-rules-engine` binary for reference and compiled-artifact flows.
+`CompiledProgram` models format 3, with `ProgramInterface`, `EngineBuild`
+and `SourceClosure` models; `LegacyCompiledProgramV2` models format 2.
+Pass `accept_artifact_format=2` to the client or dense artifact loader to
+opt in to the legacy path.
 
 ## Tests
 
 ```bash
 cargo test
 cargo test --features schema
+cargo test --features "schema unit-derivation"
 python -m pytest -q python/tests
 ```
 
 The Rust tests cover parsing, lowering, execution, dense compilation, traces,
 and RuleSpec import/ID behavior using fixtures under `tests/fixtures/rulespec/`.
 The `--features schema` run adds the JSON Schema golden-file, fidelity, and
-`rulespec-us` conformance tests.
+`rulespec-us` conformance tests. The `unit-derivation` run adds the
+experimental unit-derivation suite in `src/unit_derivation`, the stage-3
+schemas, and `tests/unit_aggregation_cli.rs`. That test compares CLI output
+with `tests/fixtures/unit_derivation/nz_income_explorer_result.json` byte for
+byte. The fixture's `plan_digest` and `trace_root` commit to the whole compiled
+source artifact, including `engine_version`, `engine_build`, source closure
+and the seeded unit table, so recompiling with a different producer or a new
+seeded currency changes them. Stored stage-3 artifacts remain loadable across
+rebuilds: each embedded artifact passes its own loader, and regenerated
+phase-two content is compared by `program` and `metadata`. When the test
+reports that only those digests moved and the cause is intended, regenerate the fixture and
+review the diff:
+
+```bash
+AXIOM_UPDATE_UNIT_AGGREGATION_FIXTURE=1 cargo test --features "schema unit-derivation" --test unit_aggregation_cli
+```
+
+See [exactly-one related Boolean projection](docs/only-related.md) for `only_related`.

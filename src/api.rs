@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -8,13 +8,17 @@ use crate::compile::CompiledProgramArtifact;
 use crate::engine::{Engine, EvalError};
 use crate::model::{DerivedSemantics, JudgmentOutcome};
 use crate::spec::{
-    ComparisonOpSpec, DTypeSpec, DatasetSpec, DerivedSemanticsSpec, JudgmentExprSpec,
-    JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec, ScalarExprSpec,
-    ScalarValueSpec,
+    ComparisonOpSpec, DTypeSpec, DatasetBindingOptions, DatasetSpec, DerivedSemanticsSpec,
+    JudgmentExprSpec, JudgmentOutcomeSpec, PeriodSpec, ProgramSpec, RoundingModeSpec,
+    ScalarExprSpec, ScalarValueSpec,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionRequest {
+    /// How to handle known relation tuple entity-kind mismatches.
+    #[serde(default)]
+    pub relation_binding: RelationBinding,
     pub mode: ExecutionMode,
     pub program: ProgramSpec,
     pub dataset: DatasetSpec,
@@ -22,7 +26,11 @@ pub struct ExecutionRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CompiledExecutionRequest {
+    /// How to handle known relation tuple entity-kind mismatches.
+    #[serde(default)]
+    pub relation_binding: RelationBinding,
     pub mode: ExecutionMode,
     pub dataset: DatasetSpec,
     pub queries: Vec<ExecutionQuery>,
@@ -42,12 +50,25 @@ pub struct CompiledExecutionRequest {
 /// One rule pin: `rule` is the derived rule's name, `value` the literal it
 /// evaluates to for this request. Judgment rules are not pinnable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RulePin {
     pub rule: String,
     pub value: ScalarValueSpec,
 }
 
+/// Relation tuple validation at the wire-dataset boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RelationBinding {
+    #[default]
+    Strict,
+    /// Retain mismatched tuples without reordering; results may be incomplete.
+    Lenient,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Explain,
@@ -55,6 +76,7 @@ pub enum ExecutionMode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionQuery {
     pub entity_id: String,
     pub period: PeriodSpec,
@@ -73,19 +95,26 @@ pub struct ExecutionQuery {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionResponse {
     pub metadata: ExecutionMetadata,
     pub results: Vec<QueryResult>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExecutionMetadata {
+    /// Echo of the binding policy used at the wire-dataset boundary.
+    /// Absent for historical responses and lower-level execution without binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_binding: Option<RelationBinding>,
     pub requested_mode: ExecutionMode,
     pub actual_mode: ExecutionMode,
     pub fallback_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct QueryResult {
     pub entity_id: String,
     pub period: PeriodSpec,
@@ -99,6 +128,7 @@ pub struct QueryResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputValue {
     Scalar {
@@ -119,6 +149,17 @@ pub enum OutputValue {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TraceSelectedYearRead {
+    pub input: String,
+    pub entity_id: String,
+    pub selected_start: chrono::NaiveDate,
+    pub selected_end: chrono::NaiveDate,
+    pub value: ScalarValueSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DerivedTraceNode {
     Scalar {
@@ -157,6 +198,8 @@ pub enum DerivedTraceNode {
         /// Exact temporal parameter cells read while executing this node.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         /// Derived edges actually traversed. Every key resolves in this trace.
         dependencies: Vec<String>,
         /// Parent-specific edges that were present in the selected expression
@@ -181,6 +224,8 @@ pub enum DerivedTraceNode {
         executed_expression: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         dependencies: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         not_evaluated_dependencies: Vec<NotEvaluatedDependency>,
@@ -188,12 +233,14 @@ pub enum DerivedTraceNode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NotEvaluatedDependency {
     pub dependency: String,
     pub reason: NotEvaluatedReason,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NotEvaluatedReason {
     ShortCircuit,
@@ -201,6 +248,7 @@ pub enum NotEvaluatedReason {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TraceParameterRead {
     /// Public parameter identity (durable `id` when present, otherwise name).
     pub parameter: String,
@@ -226,6 +274,8 @@ pub enum ApiError {
     Eval(#[from] EvalError),
     #[error(transparent)]
     Spec(#[from] crate::spec::SpecError),
+    #[error("relation entity typing failed:\n{0}")]
+    RelationTyping(crate::relation_typing::RelationTypingReport),
     #[error(
         "assessment_date {assessment_date} is before the query period start {period_start}; a determination cannot be assessed before the period it covers begins (see docs/bitemporal.md)"
     )]
@@ -233,6 +283,12 @@ pub enum ApiError {
         assessment_date: NaiveDate,
         period_start: NaiveDate,
     },
+    /// The program's dependency graph is not executable: a cycle (including
+    /// one routed through derived relations), a reference to an undefined
+    /// rule or relation, or a duplicate rule.
+    /// Boxed so the error keeps `ApiError` small.
+    #[error(transparent)]
+    InvalidProgram(Box<crate::compile::CompileError>),
     #[error("pinned rule `{rule}` does not exist in the program")]
     UnknownPinnedRule { rule: String },
     #[error("rule `{rule}` is a judgment and cannot be pinned to a scalar value")]
@@ -259,17 +315,35 @@ fn validate_assessment_dates(queries: &[ExecutionQuery]) -> Result<(), ApiError>
 
 pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, ApiError> {
     validate_assessment_dates(&request.queries)?;
+    // Compiled artifacts are checked when loaded; a raw ProgramSpec is checked
+    // here, before any evaluator recurses through its dependency graph.
+    crate::compile::validate_dependency_graph(&request.program)
+        .map_err(|error| ApiError::InvalidProgram(Box::new(error)))?;
     let requested_mode = request.mode.clone();
     let program = request.program.to_program()?;
-    let dataset = request.dataset.to_dataset_for_program(&program)?;
+    // A request can carry a raw program that never went through the compiler
+    // or the artifact loader, so it faces the same mandatory relation typing.
+    crate::relation_typing::check_program(&program).map_err(ApiError::RelationTyping)?;
+    let query_entities = query_entity_kinds(&program, &request.queries);
+    let relation_binding = request.relation_binding;
+    let outcome = request.dataset.to_dataset_for_queries_with_options(
+        &program,
+        &query_entities,
+        DatasetBindingOptions {
+            strict_relation_entities: relation_binding == RelationBinding::Strict,
+        },
+    )?;
+    crate::spec::emit_dataset_binding_diagnostics(&outcome.diagnostics);
+    let dataset = outcome.dataset;
     crate::engine::validate_input_spells(&dataset)?;
 
-    match requested_mode {
+    let result = match requested_mode {
         ExecutionMode::Explain => execute_explain(
             &program,
             &dataset,
             request.queries,
             ExecutionMetadata {
+                relation_binding: Some(relation_binding),
                 requested_mode: ExecutionMode::Explain,
                 actual_mode: ExecutionMode::Explain,
                 fallback_reason: None,
@@ -299,6 +373,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
             match crate::bulk::try_execute(&program, fast_dataset, &request.queries)? {
                 crate::bulk::FastPathResult::Executed(response) => {
                     Ok(response.with_metadata(ExecutionMetadata {
+                        relation_binding: Some(relation_binding),
                         requested_mode: ExecutionMode::Fast,
                         actual_mode: ExecutionMode::Fast,
                         fallback_reason: None,
@@ -306,9 +381,12 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                 }
                 crate::bulk::FastPathResult::Unsupported { reason } => execute_explain(
                     &program,
-                    fast_dataset,
+                    // Explain performs its own period selection. Preserve facts
+                    // outside the bulk query period for temporal expressions.
+                    &dataset,
                     request.queries,
                     ExecutionMetadata {
+                        relation_binding: Some(relation_binding),
                         requested_mode: ExecutionMode::Fast,
                         actual_mode: ExecutionMode::Explain,
                         fallback_reason: Some(reason),
@@ -316,7 +394,63 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                 ),
             }
         }
+    };
+    result.map_err(|error| with_request_input_name(error, &program))
+}
+
+/// Name a missing input the way a dataset must spell it (#120). Evaluators
+/// report the rule-local slot (`amount`), but a program with public ids binds
+/// only the qualified request name (`us:...#input.amount`), so the bare slot
+/// pasted back into the dataset is refused. The slot becomes the input
+/// catalog's canonical request name, which the dataset binder accepts; a
+/// program without public ids keeps the bare slot, which is its request name.
+fn with_request_input_name(error: ApiError, program: &crate::model::Program) -> ApiError {
+    let ApiError::Eval(EvalError::MissingInput {
+        name,
+        entity_id,
+        period_start,
+        period_end,
+    }) = error
+    else {
+        return error;
+    };
+    let name = program
+        .input_catalog()
+        .get(&name)
+        .map(|request_names| {
+            crate::compile::canonical_request_name(&name, request_names).to_string()
+        })
+        .unwrap_or(name);
+    ApiError::Eval(EvalError::MissingInput {
+        name,
+        entity_id,
+        period_start,
+        period_end,
+    })
+}
+
+/// Each query evaluates its output rules on its `entity_id`, so that id has
+/// each rule's entity kind. Entity-free (`Scalar`) rules and parameters say
+/// nothing about the id.
+fn query_entity_kinds(
+    program: &crate::model::Program,
+    queries: &[ExecutionQuery],
+) -> Vec<(String, String)> {
+    let mut kinds = std::collections::BTreeSet::new();
+    for query in queries {
+        for output in &query.outputs {
+            let Some(derived) = program
+                .resolve_derived_name(output)
+                .and_then(|name| program.derived.get(&name))
+            else {
+                continue;
+            };
+            if derived.entity != crate::model::SCALAR_ENTITY {
+                kinds.insert((query.entity_id.clone(), derived.entity.clone()));
+            }
+        }
     }
+    kinds.into_iter().collect()
 }
 
 pub fn execute_compiled_request(
@@ -326,6 +460,7 @@ pub fn execute_compiled_request(
     let mut program = artifact.program;
     apply_pins(&mut program, &request.pins)?;
     execute_request(ExecutionRequest {
+        relation_binding: request.relation_binding,
         mode: request.mode,
         program,
         dataset: request.dataset,
@@ -350,11 +485,25 @@ pub fn execute_compiled_request(
 /// Runs on the program the engine is about to execute, so every execution
 /// mode sees the same pinned program.
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
+    if pins.is_empty() {
+        return Ok(());
+    }
+    // Each pinned name's first rule, found in one pass over the program
+    // rather than one pass per pin. Rule names are unique in a validated
+    // program; keeping the first leaves an unvalidated one pinning the rule a
+    // linear search would find.
+    let mut positions = pins
+        .iter()
+        .map(|pin| (pin.rule.as_str(), None))
+        .collect::<HashMap<&str, Option<usize>>>();
+    for (position, derived) in program.derived.iter().enumerate() {
+        if let Some(first) = positions.get_mut(derived.name.as_str()) {
+            first.get_or_insert(position);
+        }
+    }
     for pin in pins {
-        let rule = program
-            .derived
-            .iter_mut()
-            .find(|derived| derived.name == pin.rule)
+        let rule = positions[pin.rule.as_str()]
+            .map(|position| &mut program.derived[position])
             .ok_or_else(|| ApiError::UnknownPinnedRule {
                 rule: pin.rule.clone(),
             })?;
@@ -396,6 +545,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod pin_tests;
 
 fn execute_explain(
     program: &crate::model::Program,
@@ -574,6 +726,18 @@ fn collect_trace(
             })
             .collect();
 
+        let selected_year_reads = instance
+            .execution
+            .selected_year_reads
+            .iter()
+            .map(|read| TraceSelectedYearRead {
+                input: read.input.clone(),
+                entity_id: read.entity_id.clone(),
+                selected_start: read.selected_period.start,
+                selected_end: read.selected_period.end,
+                value: ScalarValueSpec::from_model(read.value.clone()),
+            })
+            .collect();
         let node = match (&instance.value, semantics) {
             (
                 crate::engine::EvaluatedTraceValue::Scalar {
@@ -596,6 +760,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_scalar_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -616,6 +781,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_judgment_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -664,9 +830,21 @@ fn format_scalar_expression(
     program: &crate::model::Program,
     expr: &crate::model::ScalarExpr,
 ) -> String {
-    use crate::model::{RelatedValueRef, ScalarExpr};
+    use crate::model::{Extreme, RelatedValueRef, ScalarExpr};
     match expr {
+        ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+        } => format!(
+            "only_related({}, {current_slot}, {related_slot}, {value:?})",
+            json_string(relation)
+        ),
         ScalarExpr::Literal(value) => format_scalar_value(value),
+        ScalarExpr::InputForYear { input, year } => {
+            format!("input_for_year({}, {year})", json_string(input))
+        }
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
         ScalarExpr::InputOrElse { name, default } => {
             format!(
@@ -676,6 +854,12 @@ fn format_scalar_expression(
             )
         }
         ScalarExpr::Derived(name) => program.public_derived_key(name),
+        ScalarExpr::RoleInput { term, name } => {
+            format!("{}.input({})", term.as_str(), json_string(name))
+        }
+        ScalarExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
         ScalarExpr::ParameterLookup { parameter, index } => format!(
             "{}[{}]",
             public_parameter_key(program, parameter),
@@ -778,8 +962,35 @@ fn format_scalar_expression(
             related_slot,
             value,
             where_clause,
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
         } => format!(
-            "sum_related({}, {current_slot}, {related_slot}, {}{})",
+            "{}({}, {current_slot}, {related_slot}, {}{})",
+            match expr {
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Min,
+                    ..
+                } => "min_related",
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Max,
+                    ..
+                } => "max_related",
+                ScalarExpr::SingleRelated { .. } => "single_related",
+                _ => "sum_related",
+            },
             json_string(relation),
             match value {
                 RelatedValueRef::Input(name) => format!("input({})", json_string(name)),
@@ -802,6 +1013,15 @@ fn format_scalar_expression(
             format_judgment_expression(program, condition),
             format_scalar_expression(program, then_expr),
             format_scalar_expression(program, else_expr)
+        ),
+        ScalarExpr::NoMatch { subject, patterns } => format!(
+            "(no match arm for {} among [{}])",
+            format_scalar_expression(program, subject),
+            patterns
+                .iter()
+                .map(|pattern| format_scalar_expression(program, pattern))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         ScalarExpr::OverPeriods { kind, value, n } => format!(
             "{}({}{})",
@@ -834,6 +1054,41 @@ fn format_judgment_expression(
             format_scalar_expression(program, right)
         ),
         JudgmentExpr::Derived(name) => program.public_derived_key(name),
+        JudgmentExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
+        JudgmentExpr::RelationAtom { relation, terms } => format!(
+            "{relation}({})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            body,
+            ..
+        } => format!(
+            "exists({relation}({}), {})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_judgment_expression(program, body)
+        ),
+        JudgmentExpr::SameEntity {
+            left,
+            right,
+            negated,
+        } => format!(
+            "({} {} {})",
+            left.as_str(),
+            if *negated { "!=" } else { "==" },
+            right.as_str()
+        ),
         JudgmentExpr::RelationMember {
             relation,
             current_slot,

@@ -35,7 +35,12 @@ observations; it requires an artifact whose public input and output IDs match.
 `integer` takes signed 64-bit integers; `bool`, `text`, and `date` take booleans,
 strings, and ISO date strings. Nulls, floating-point numbers, duplicate JSON
 keys, and unknown fields are refused. Declared optional input defaults still
-use the engine's existing `InputOrElse` semantics; missing required inputs fail.
+use the engine's existing `InputOrElse` semantics; missing required inputs fail
+for the rows that read them. Evaluation is lazy per row, as for every dense
+call: a branch, `and`/`or` operand or relation member is evaluated only for the
+rows that reach it, so an input read only by an unselected branch may be
+absent. [Execution semantics](execution-semantics.md#dense-contract) gives the
+full contract.
 
 Every batch must contain the same unique, nonempty string `entity_ids` in the
 same order. Each input column length equals `row_count`. These IDs declare row

@@ -1,0 +1,589 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Pensions Act 2008 s.3 — employer automatic-enrolment duty.\n\ns.3(1): a jobholder is in scope if (a) aged 22+, (b) below pensionable\nage, and (c) paid more than £10,000 in the relevant pay reference period\n(pro-rated per s.3(6B)).\ns.3(3)-(4): no duty if already an active qualifying-scheme member, or if\nthe jobholder recently opted out within the prescribed lookback.\n\n`current_age_years`, `pensionable_age_years`,\n`active_member_of_qualifying_scheme`, `recently_opted_out` and\n`earnings_this_prp` are caller-supplied facts. The lookback window and\nthe PA 1995 Sch 4 pensionable-age test sit outside this RuleSpec module."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [],
+    "parameters": [
+      {
+        "name": "auto_enrolment_annual_trigger",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 10000
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "earnings_trigger_for_prp",
+        "entity": "Jobholder",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(6B)",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2008/30/section/3",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "div",
+          "left": {
+            "kind": "mul",
+            "left": {
+              "kind": "parameter_lookup",
+              "parameter": "auto_enrolment_annual_trigger",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "right": {
+              "kind": "input",
+              "name": "prp_months"
+            }
+          },
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "12"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "div",
+              "left": {
+                "kind": "mul",
+                "left": {
+                  "kind": "parameter_lookup",
+                  "parameter": "auto_enrolment_annual_trigger",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "input",
+                  "name": "prp_months"
+                }
+              },
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "12"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "age_at_least_22",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(1)(a)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "current_age_years"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 22
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "current_age_years"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 22
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "below_pensionable_age",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(1)(b)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "current_age_years"
+          },
+          "op": "lt",
+          "right": {
+            "kind": "input",
+            "name": "pensionable_age_years"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "current_age_years"
+              },
+              "op": "lt",
+              "right": {
+                "kind": "input",
+                "name": "pensionable_age_years"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "earnings_above_trigger",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(1)(c)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "earnings_this_prp"
+          },
+          "op": "gt",
+          "right": {
+            "kind": "derived",
+            "name": "earnings_trigger_for_prp"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "earnings_this_prp"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "derived",
+                "name": "earnings_trigger_for_prp"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "not_already_active_member",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(3)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "not",
+          "item": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "active_member_of_qualifying_scheme"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "active_member_of_qualifying_scheme"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "not_recently_opted_out",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3(4)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "not",
+          "item": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "recently_opted_out"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "recently_opted_out"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "employer_enrolment_duty",
+        "entity": "Jobholder",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "Pensions Act 2008 s.3 combined",
+        "source_url": "https://www.legislation.gov.uk/ukpga/2008/30/section/3",
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "and",
+                      "items": [
+                        {
+                          "kind": "derived",
+                          "name": "age_at_least_22"
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "below_pensionable_age"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "earnings_above_trigger"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "not_already_active_member"
+                }
+              ]
+            },
+            {
+              "kind": "derived",
+              "name": "not_recently_opted_out"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2024-04-06",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "and",
+                  "items": [
+                    {
+                      "kind": "and",
+                      "items": [
+                        {
+                          "kind": "and",
+                          "items": [
+                            {
+                              "kind": "derived",
+                              "name": "age_at_least_22"
+                            },
+                            {
+                              "kind": "derived",
+                              "name": "below_pensionable_age"
+                            }
+                          ]
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "earnings_above_trigger"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "not_already_active_member"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "not_recently_opted_out"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "age_at_least_22",
+      "below_pensionable_age",
+      "earnings_trigger_for_prp",
+      "earnings_above_trigger",
+      "not_already_active_member",
+      "not_recently_opted_out",
+      "employer_enrolment_duty"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "active_member_of_qualifying_scheme",
+        "canonical_request_name": "active_member_of_qualifying_scheme",
+        "request_names": [
+          "active_member_of_qualifying_scheme"
+        ]
+      },
+      {
+        "slot": "current_age_years",
+        "canonical_request_name": "current_age_years",
+        "request_names": [
+          "current_age_years"
+        ]
+      },
+      {
+        "slot": "earnings_this_prp",
+        "canonical_request_name": "earnings_this_prp",
+        "request_names": [
+          "earnings_this_prp"
+        ]
+      },
+      {
+        "slot": "pensionable_age_years",
+        "canonical_request_name": "pensionable_age_years",
+        "request_names": [
+          "pensionable_age_years"
+        ]
+      },
+      {
+        "slot": "prp_months",
+        "canonical_request_name": "prp_months",
+        "request_names": [
+          "prp_months"
+        ]
+      },
+      {
+        "slot": "recently_opted_out",
+        "canonical_request_name": "recently_opted_out",
+        "request_names": [
+          "recently_opted_out"
+        ]
+      }
+    ]
+  }
+}

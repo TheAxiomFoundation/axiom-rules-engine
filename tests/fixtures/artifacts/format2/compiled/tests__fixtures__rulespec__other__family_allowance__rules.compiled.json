@@ -1,0 +1,897 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Family allowance example RuleSpec module.\n\nHousehold receives a flat per-child monthly allowance provided total\nearned income does not exceed a size-keyed limit. Size-keyed tables\naren't a parameter primitive in the deployed DSL, so we encode them as\n`match household_size` statements. The caller supplies each member's\n`earned_income` input; the household-size count comes from the\n`member_of_household` relation.\n\nSynthetic RuleSpec module — not modelled on any specific statute."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "member_of_household",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Household"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "family_allowance_per_child",
+        "unit": "USD",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 120
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "household_size",
+        "entity": "Household",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "member_of_household",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": null
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "member_of_household",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": null
+            }
+          }
+        ]
+      },
+      {
+        "name": "earned_income_total",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sum_related",
+          "relation": "member_of_household",
+          "current_slot": 1,
+          "related_slot": 0,
+          "value": {
+            "kind": "input",
+            "name": "earned_income"
+          },
+          "where": null
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sum_related",
+              "relation": "member_of_household",
+              "current_slot": 1,
+              "related_slot": 0,
+              "value": {
+                "kind": "input",
+                "name": "earned_income"
+              },
+              "where": null
+            }
+          }
+        ]
+      },
+      {
+        "name": "income_limit",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "derived",
+              "name": "household_size"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "1800"
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "household_size"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 2
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "2600"
+              }
+            },
+            "else_expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "derived",
+                  "name": "household_size"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 3
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "3400"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "household_size"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 4
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "4200"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 5
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "5000"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 6
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "5800"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "derived",
+                          "name": "household_size"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 7
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "6600"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "derived",
+                            "name": "household_size"
+                          },
+                          "op": "eq",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 8
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "decimal",
+                            "value": "7400"
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "no_match",
+                          "subject": {
+                            "kind": "derived",
+                            "name": "household_size"
+                          },
+                          "patterns": [
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 1
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 2
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 3
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 4
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 5
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 6
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 7
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 8
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "derived",
+                  "name": "household_size"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 1
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "1800"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "household_size"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 2
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "2600"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "derived",
+                      "name": "household_size"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 3
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "3400"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "derived",
+                        "name": "household_size"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 4
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "4200"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "derived",
+                          "name": "household_size"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 5
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "5000"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "derived",
+                            "name": "household_size"
+                          },
+                          "op": "eq",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 6
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "decimal",
+                            "value": "5800"
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "if",
+                          "condition": {
+                            "kind": "comparison",
+                            "left": {
+                              "kind": "derived",
+                              "name": "household_size"
+                            },
+                            "op": "eq",
+                            "right": {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 7
+                              }
+                            }
+                          },
+                          "then_expr": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "decimal",
+                              "value": "6600"
+                            }
+                          },
+                          "else_expr": {
+                            "kind": "if",
+                            "condition": {
+                              "kind": "comparison",
+                              "left": {
+                                "kind": "derived",
+                                "name": "household_size"
+                              },
+                              "op": "eq",
+                              "right": {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 8
+                                }
+                              }
+                            },
+                            "then_expr": {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "decimal",
+                                "value": "7400"
+                              }
+                            },
+                            "else_expr": {
+                              "kind": "no_match",
+                              "subject": {
+                                "kind": "derived",
+                                "name": "household_size"
+                              },
+                              "patterns": [
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 1
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 2
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 3
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 4
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 5
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 6
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 7
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 8
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "qualifies",
+        "entity": "Household",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "earned_income_total"
+          },
+          "op": "lte",
+          "right": {
+            "kind": "derived",
+            "name": "income_limit"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "earned_income_total"
+              },
+              "op": "lte",
+              "right": {
+                "kind": "derived",
+                "name": "income_limit"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "monthly_allowance",
+        "entity": "Household",
+        "dtype": "decimal",
+        "unit": "USD",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "qualifies"
+          },
+          "then_expr": {
+            "kind": "mul",
+            "left": {
+              "kind": "parameter_lookup",
+              "parameter": "family_allowance_per_child",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "right": {
+              "kind": "derived",
+              "name": "household_size"
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2025-01-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "qualifies"
+              },
+              "then_expr": {
+                "kind": "mul",
+                "left": {
+                  "kind": "parameter_lookup",
+                  "parameter": "family_allowance_per_child",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                },
+                "right": {
+                  "kind": "derived",
+                  "name": "household_size"
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "earned_income_total",
+      "household_size",
+      "income_limit",
+      "qualifies",
+      "monthly_allowance"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "earned_income",
+        "canonical_request_name": "earned_income",
+        "request_names": [
+          "earned_income"
+        ]
+      }
+    ]
+  }
+}

@@ -617,7 +617,7 @@ rules:
     kind: data_relation
     data_relation:
       arity: 2
-      slot_entities: [Child, Family]
+      arguments: [Child, Family]
   - name: parent_bonus
     kind: derived
     entity: Family
@@ -659,7 +659,12 @@ rules:
                 inputs: HashMap::from([
                     ("child_amount".into(), decimals(&["6", "8", "9", "12"])),
                     ("denominator".into(), decimals(&["2", "4", "0", "3"])),
+                    // `parent_bonus` is read from each child, so the family's
+                    // bonus travels with every member tuple.
+                    ("bonus".into(), decimals(&["10", "10", "20", "100"])),
                 ]),
+                related_row_count: None,
+                input_lengths: HashMap::new(),
             },
         );
     }
@@ -687,7 +692,7 @@ format: rulespec/v1
 rules:
   - name: membership
     kind: data_relation
-    data_relation: {arity: 2}
+    data_relation: {arity: 2, arguments: [Child, Family]}
   - name: eligible
     kind: derived
     entity: Child
@@ -757,6 +762,8 @@ rules:
                         DenseColumn::Integer(vec![30, 40, 12, 50, 21, 25]),
                     ),
                 ]),
+                related_row_count: None,
+                input_lengths: HashMap::new(),
             },
         );
     }
@@ -769,7 +776,7 @@ rules:
 }
 
 #[test]
-fn empty_batches_keep_both_branch_validation_and_type_resolution() {
+fn empty_batches_type_both_branches_and_read_no_absent_column() {
     let program = compile("if flag: amount else: missing");
     let inputs = batch(
         0,
@@ -785,17 +792,34 @@ fn empty_batches_keep_both_branch_validation_and_type_resolution() {
             .unwrap(),
         &[],
     );
+    // An absent column is missing on every row, and an error only where a
+    // live row reads it (`docs/execution-semantics.md`, dense contract). An
+    // empty batch has no live row, so leaving the column out is not an error.
     let mut missing = inputs;
     missing.inputs.remove("missing");
-    assert!(
-        matches!(program.execute(&year(2025), missing, &["result".into()]), Err(EvalError::MissingInput { name, .. }) if name == "missing")
+    assert_decimals(
+        &program
+            .execute(&year(2025), missing, &["result".into()])
+            .unwrap(),
+        &[],
     );
     let outer = compile(
         "if count_over_periods(flag) > 0: sum_over_periods(amount) else: sum_over_periods(missing)",
     );
-    assert!(
-        matches!(outer.execute_lifetime(&[year(2025)], vec![batch(0, &[("flag", DenseColumn::Bool(vec![])), ("amount", decimals(&[]))])], &["result".into()]), Err(EvalError::MissingInput { name, .. }) if name == "missing")
-    );
+    let result = outer
+        .execute_lifetime(
+            &[year(2025)],
+            vec![batch(
+                0,
+                &[
+                    ("flag", DenseColumn::Bool(vec![])),
+                    ("amount", decimals(&[])),
+                ],
+            )],
+            &["result".into()],
+        )
+        .unwrap();
+    assert_eq!(result.row_count, 0);
 }
 
 #[test]

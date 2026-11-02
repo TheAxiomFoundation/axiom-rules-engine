@@ -1,9 +1,17 @@
 #![cfg(feature = "unit-derivation")]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+/// Set to `1` to rewrite the exact result fixture from the CLI's current output
+/// instead of failing on drift. Refused under CI, where the test only compares.
+const UPDATE_FIXTURE_ENV: &str = "AXIOM_UPDATE_UNIT_AGGREGATION_FIXTURE";
+
+/// Drifted JSON paths listed before the report truncates (it says how many more).
+const MAX_REPORTED_PATHS: usize = 20;
 
 fn engine() -> Command {
     Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
@@ -23,13 +31,227 @@ fn run_with_stdin(args: &[&str], input: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn aggregation CLI");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(input)
-        .expect("write request");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    write_request(&mut stdin, input).expect("write request");
+    // Close the pipe so a child that reads the request sees EOF.
+    drop(stdin);
     child.wait_with_output().expect("wait for aggregation CLI")
+}
+
+/// Writes `input` to the child's stdin, treating a closed pipe as success.
+///
+/// Some invocations refuse before they read stdin (the runtime switch is off, or
+/// an argument is unknown). If such a child has already exited, the write fails
+/// with `BrokenPipe`, and the caller still checks the refusal through the exit
+/// status and stderr. Any other error is returned.
+fn write_request(stdin: &mut impl Write, input: &[u8]) -> std::io::Result<()> {
+    match stdin.write_all(input) {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
+/// A writer whose every write fails with one error kind.
+struct FailingWriter(std::io::ErrorKind);
+
+impl Write for FailingWriter {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(self.0.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn write_request_tolerates_only_a_broken_pipe() {
+    use std::io::ErrorKind;
+    assert!(write_request(&mut FailingWriter(ErrorKind::BrokenPipe), b"{}").is_ok());
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::WriteZero,
+        ErrorKind::Other,
+    ] {
+        let error = write_request(&mut FailingWriter(kind), b"{}").unwrap_err();
+        assert_eq!(error.kind(), kind);
+    }
+    let mut written = Vec::new();
+    write_request(&mut written, b"{}").unwrap();
+    assert_eq!(written, b"{}");
+}
+
+/// Compares CLI output with the result fixture at `path` byte for byte.
+///
+/// The fixture pins `plan_digest` and `trace_root`. Both commit to the SHA-256
+/// of the whole serialized source artifact, which records `engine_version` and
+/// the unit table seeded into this program, so a version cut or a newly seeded
+/// currency moves both digests while every family value stays the same. From
+/// format 3 the source artifact also carries its `program.interface` and
+/// `source_closure`, and `engine_build`, which differs from build to build, so
+/// the test writes it as a build that could not know its commit
+/// (`{"commit": null, "dirty": null}`) before aggregating. They
+/// also hash inputs the result never shows, such as the canonical plan
+/// (citations included), the request, and the constitution trace. On drift the
+/// failure lists the JSON paths that moved, so a digest-only change is easy to
+/// tell apart from a change to the result body.
+fn check_result_fixture(actual: &[u8], path: &Path) {
+    let expected = fs::read(path).expect("read result fixture");
+    if actual == expected {
+        return;
+    }
+    let moved = moved_json_paths(&expected, actual);
+    if std::env::var_os(UPDATE_FIXTURE_ENV).is_some_and(|value| value == "1") {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{UPDATE_FIXTURE_ENV} is refused under CI"
+        );
+        fs::write(path, actual).expect("rewrite result fixture");
+        // The harness captures `eprintln!` from passing tests; write to the real
+        // stderr so the person regenerating sees what moved.
+        writeln!(
+            std::io::stderr(),
+            "rewrote {} (moved: {moved})",
+            path.display()
+        )
+        .expect("report the rewrite");
+        return;
+    }
+    panic!(
+        "run-unit-aggregation output no longer matches {} exactly.\n\
+         Moved JSON paths: {moved}\n\
+         If only /plan_digest and/or /trace_root moved, something they hash changed \
+         without changing any family value: the compiled source artifact (for \
+         example engine_version or the seeded unit table), the plan or request \
+         fixture (citations and evidence ids included), the constitution trace, or \
+         the digest code. Confirm which one and that the change is intended, then \
+         regenerate the fixture with:\n  \
+         {UPDATE_FIXTURE_ENV}=1 cargo test --features \"schema unit-derivation\" \
+         --test unit_aggregation_cli\n\
+         Any other moved path changes the result body: investigate it first.",
+        path.display()
+    );
+}
+
+fn moved_json_paths(expected: &[u8], actual: &[u8]) -> String {
+    let (Ok(expected), Ok(actual)) = (
+        serde_json::from_slice::<serde_json::Value>(expected),
+        serde_json::from_slice::<serde_json::Value>(actual),
+    ) else {
+        return "(the output or the fixture is not JSON)".to_string();
+    };
+    let mut paths = Vec::new();
+    collect_moved_paths(&expected, &actual, String::new(), &mut paths);
+    if paths.is_empty() {
+        return "(none: same JSON value, different bytes)".to_string();
+    }
+    let total = paths.len();
+    paths.truncate(MAX_REPORTED_PATHS);
+    let mut report = paths.join(", ");
+    if total > MAX_REPORTED_PATHS {
+        report.push_str(&format!(", and {} more", total - MAX_REPORTED_PATHS));
+    }
+    report
+}
+
+/// Appends the JSON Pointer of every leaf, key, or array whose value differs.
+fn collect_moved_paths(
+    expected: &serde_json::Value,
+    actual: &serde_json::Value,
+    path: String,
+    out: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    match (expected, actual) {
+        (Value::Object(expected), Value::Object(actual)) => {
+            let keys: BTreeSet<&String> = expected.keys().chain(actual.keys()).collect();
+            for key in keys {
+                let child = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                match (expected.get(key), actual.get(key)) {
+                    (Some(expected), Some(actual)) => {
+                        collect_moved_paths(expected, actual, child, out);
+                    }
+                    _ => out.push(child),
+                }
+            }
+        }
+        (Value::Array(expected), Value::Array(actual)) if expected.len() == actual.len() => {
+            for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+                collect_moved_paths(expected, actual, format!("{path}/{index}"), out);
+            }
+        }
+        _ if expected != actual => out.push(if path.is_empty() {
+            "(root)".to_string()
+        } else {
+            path
+        }),
+        _ => {}
+    }
+}
+
+#[test]
+fn fixture_drift_report_names_every_moved_path() {
+    let expected = br#"{"plan_digest":"a","trace_root":"b","families":{"value":[{"id":"f","members":["p1"]}]}}"#;
+    let digest_only = br#"{"plan_digest":"c","trace_root":"d","families":{"value":[{"id":"f","members":["p1"]}]}}"#;
+    assert_eq!(
+        moved_json_paths(expected, digest_only),
+        "/plan_digest, /trace_root"
+    );
+    let value_moved = br#"{"plan_digest":"a","trace_root":"b","families":{"value":[{"id":"f","members":["p2"]}],"a/b~":1}}"#;
+    assert_eq!(
+        moved_json_paths(expected, value_moved),
+        "/families/a~1b~0, /families/value/0/members/0"
+    );
+    let reformatted = b"{\"trace_root\": \"b\", \"plan_digest\": \"a\", \"families\": {\"value\": [{\"id\": \"f\", \"members\": [\"p1\"]}]}}";
+    assert_eq!(
+        moved_json_paths(expected, reformatted),
+        "(none: same JSON value, different bytes)"
+    );
+    assert_eq!(
+        moved_json_paths(expected, b"not json"),
+        "(the output or the fixture is not JSON)"
+    );
+    assert_eq!(moved_json_paths(br#"{"a":1,"b":2}"#, br#"{"a":1}"#), "/b");
+    assert_eq!(moved_json_paths(br#"{"m":[1]}"#, br#"{"m":[1,2]}"#), "/m");
+    assert_eq!(moved_json_paths(br#"{"m":[1]}"#, br#"{"m":{"0":1}}"#), "/m");
+    assert_eq!(moved_json_paths(b"1", b"2"), "(root)");
+    let many_expected = serde_json::to_vec(&(0..25).collect::<Vec<_>>()).unwrap();
+    let many_actual = serde_json::to_vec(&(100..125).collect::<Vec<_>>()).unwrap();
+    let report = moved_json_paths(&many_expected, &many_actual);
+    assert!(report.starts_with("/0, /1, "), "{report}");
+    assert!(report.ends_with("/19, and 5 more"), "{report}");
+}
+
+/// Invocations that refuse before reading stdin, sent a request larger than any
+/// pipe buffer. The child never reads, so the write cannot complete: it fails
+/// with `BrokenPipe` at once if the child has already exited, or blocks on the
+/// full pipe until the child exits and then fails, every time. The gating test
+/// below sends its 8.8 KB request to these same refusals, where that failure
+/// happens only when the child exits before the write starts.
+#[test]
+fn refusals_before_reading_stdin_survive_an_unread_request() {
+    let request = vec![b' '; 4 << 20];
+    let refusals: [(&[&str], &str); 2] = [
+        (
+            &["run-unit-aggregation", "--artifact", "never-read.json"],
+            "unit derivation is disabled",
+        ),
+        (
+            &[
+                "run-unit-aggregation",
+                "--plan",
+                "never-read.yaml",
+                "--enable-experimental-unit-derivation",
+            ],
+            "unknown run-unit-aggregation argument `--plan`",
+        ),
+    ];
+    for (args, refusal) in refusals {
+        let output = run_with_stdin(args, &request);
+        assert!(!output.status.success(), "{args:?} should refuse");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(refusal), "{args:?}: {stderr}");
+    }
 }
 
 #[test]
@@ -69,9 +291,18 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
         "source compile failed: {}",
         String::from_utf8_lossy(&source_compile.stderr)
     );
+    // The digests below hash the whole source artifact, engine_build
+    // included; record it as unknown so they do not move with every build.
+    let mut compiled: serde_json::Value =
+        serde_json::from_slice(&fs::read(&source_artifact).unwrap()).unwrap();
+    compiled["engine_build"] = serde_json::json!({"commit": null, "dirty": null});
+    fs::write(
+        &source_artifact,
+        serde_json::to_string_pretty(&compiled).unwrap(),
+    )
+    .unwrap();
     let plan = fixture("nz_income_explorer_family.yaml");
     let request = fs::read(fixture("nz_income_explorer_request.json")).unwrap();
-    let expected = fs::read(fixture("nz_income_explorer_result.json")).unwrap();
 
     for artifact in [&first_artifact, &second_artifact] {
         let output = engine()
@@ -132,7 +363,7 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
         String::from_utf8_lossy(&first.stderr)
     );
     assert_eq!(first.stdout, second.stdout);
-    assert_eq!(first.stdout, expected, "fixture JSON must match exactly");
+    check_result_fixture(&first.stdout, &fixture("nz_income_explorer_result.json"));
 
     let mut malformed: serde_json::Value = serde_json::from_slice(&request).unwrap();
     malformed["unexpected_request_field"] = serde_json::json!(true);
@@ -149,6 +380,146 @@ fn compiled_aggregation_cli_is_gated_registered_deterministic_and_exact() {
     assert!(unknown.status.success());
     let unknown: serde_json::Value = serde_json::from_slice(&unknown.stdout).unwrap();
     assert_eq!(unknown["families"]["status"], "indeterminate");
+
+    fs::remove_dir_all(&temp).expect("remove test-owned directory");
+}
+
+/// The artifact the previous engine wrote, whose embedded artifacts are both
+/// format 2; see `tests/fast_path_metadata.rs`.
+fn previous_engine_stage3() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/artifacts/nz_best_start_carer_sum.pre-lazy-fast-path.stage3.json")
+}
+
+const LEGACY_NOTICE: &str = "notice[legacy_artifact_format]";
+
+/// Format-2 embedded artifacts are read only on request. Without
+/// `--accept-artifact-format 2` both unit-aggregation commands refuse a
+/// format-2 artifact and name it the older side; with it they read the
+/// artifact unchanged through the format-2 compatibility loader and say so on
+/// stderr. The source digest is what the previous engine recorded, and the
+/// families are the ones the format-3 run produces.
+#[test]
+fn format_2_embedded_artifacts_load_only_with_accept_artifact_format() {
+    let temp = std::env::temp_dir().join(format!(
+        "axiom-stage3-legacy-cli-test-{}",
+        std::process::id()
+    ));
+    if temp.exists() {
+        fs::remove_dir_all(&temp).expect("remove stale test-owned directory");
+    }
+    fs::create_dir_all(&temp).expect("create test-owned directory");
+    let request = fs::read(fixture("nz_income_explorer_request.json")).unwrap();
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(previous_engine_stage3()).unwrap()).unwrap();
+    let expected: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture("nz_income_explorer_result.json")).unwrap())
+            .unwrap();
+    let previous = previous_engine_stage3();
+    let run = |artifact: &Path, accept: bool| {
+        let mut args = vec![
+            "run-unit-aggregation",
+            "--artifact",
+            artifact.to_str().unwrap(),
+            "--enable-experimental-unit-derivation",
+        ];
+        if accept {
+            args.extend(["--accept-artifact-format", "2"]);
+        }
+        run_with_stdin(&args, &request)
+    };
+
+    let refused = run(&previous, false);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("is older than this engine: it is artifact format 2")
+            && stderr.contains("--accept-artifact-format 2"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(LEGACY_NOTICE), "{stderr}");
+
+    let ran = run(&previous, true);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ran.stderr).contains(LEGACY_NOTICE));
+    let result: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(result["plan_digest"], stored["plan_digest"]);
+    assert_eq!(result["families"], expected["families"]);
+
+    // The previous engine's format-2 source artifact, compiled against.
+    let source_artifact = temp.join("source.v2.json");
+    fs::write(
+        &source_artifact,
+        serde_json::to_string_pretty(&stored["source_artifact"]).unwrap(),
+    )
+    .unwrap();
+    let output = temp.join("stage3.json");
+    let compile = |accept: bool| {
+        let mut command = engine();
+        command
+            .args(["compile-unit-aggregation", "--plan"])
+            .arg(fixture("nz_income_explorer_family.yaml"))
+            .arg("--source-artifact")
+            .arg(&source_artifact)
+            .arg("--output")
+            .arg(&output);
+        if accept {
+            command.args(["--accept-artifact-format", "2"]);
+        }
+        command.output().expect("compile aggregation artifact")
+    };
+    let refused = compile(false);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("is older than this engine"), "{stderr}");
+    assert!(!output.exists(), "a refused compile writes nothing");
+
+    let compiled = compile(true);
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(String::from_utf8_lossy(&compiled.stderr).contains(LEGACY_NOTICE));
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(written["source_artifact"], stored["source_artifact"]);
+    assert_eq!(
+        written["source_artifact_digest"],
+        stored["source_artifact_digest"]
+    );
+    assert_eq!(
+        written["phase_two_artifact"]["artifact_format_version"],
+        serde_json::json!(axiom_rules_engine::compile::ARTIFACT_FORMAT_VERSION)
+    );
+    assert!(!run(&output, false).status.success());
+    let ran = run(&output, true);
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(result["families"], expected["families"]);
+
+    for (value, refusal) in [
+        (Some("3"), "accepts only 2"),
+        (None, "missing `--accept-artifact-format` value"),
+    ] {
+        let mut args = vec![
+            "run-unit-aggregation",
+            "--enable-experimental-unit-derivation",
+            "--accept-artifact-format",
+        ];
+        args.extend(value);
+        let output = run_with_stdin(&args, &request);
+        assert!(!output.status.success(), "{value:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(refusal), "{value:?}: {stderr}");
+    }
 
     fs::remove_dir_all(&temp).expect("remove test-owned directory");
 }

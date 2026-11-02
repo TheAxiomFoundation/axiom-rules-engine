@@ -17,6 +17,11 @@ module:
     Combined, `is_enhanced_eligible` on each Child reduces the three-way
     test to a single boolean the filtered aggregator can count.
 rules:
+  - name: child_of_claim
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Child, Claimant]
   - name: cb_enhanced_rate_weekly
     kind: parameter
     dtype: Money

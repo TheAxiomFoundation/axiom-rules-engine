@@ -9,10 +9,10 @@ feed a synthetic worker with a 40-year history through
 ``execute_lifetime_f64``, and assert the AIME equals the hand-derived value.
 
 These tests exercise the native ``axiom_rules_engine_dense`` extension and skip
-when it is not built (CI type-checks the extension crate but does not build the
-wheel). Build locally with::
+when it is not built. CI builds the extension before running them. Build
+locally with::
 
-    maturin develop --release --manifest-path python-ext/Cargo.toml
+    maturin develop --manifest-path python-ext/Cargo.toml
 """
 
 from pathlib import Path
@@ -289,6 +289,35 @@ class TestDerivedPersonVaryingN:
 
 
 class TestLifetimeErrors:
+    @pytest.mark.parametrize(
+        ("formula", "years", "unavailable_rule"),
+        [
+            ("sum_over_periods(period_amount)", [1978, 1979], "period_amount"),
+            ("sum_over_periods(earnings)", [1978], "total"),
+        ],
+        ids=["reduction-period", "reference-period"],
+    )
+    def test_rule_before_commencement_raises(
+        self, tmp_path, formula, years, unavailable_rule
+    ) -> None:
+        module = _single_rule_module("period_amount", "Money", "earnings")
+        module += _single_rule_module("total", "Money", formula).split("rules:\n", 1)[1]
+        path, root = _write_rulespec(tmp_path, "commencement.yaml", module)
+        program = CompiledDenseProgram.from_file(
+            path, rulespec_roots=[root], entity="Worker"
+        )
+        periods = [
+            ("calendar_year", f"{year}-01-01", f"{year}-12-31") for year in years
+        ]
+        batches = [{"earnings": np.array([10.0])} for _ in years]
+        with pytest.raises(
+            RuntimeError,
+            match=rf"derived `{unavailable_rule}` has no formula version at 1978-01-01",
+        ):
+            program.execute_lifetime_f64(
+                periods=periods, batches=batches, outputs=["total"]
+            )
+
     def test_period_and_batch_count_mismatch_raises(self, program) -> None:
         periods = [("calendar_year", "1990-01-01", "1990-12-31")]
         batches: list[dict[str, np.ndarray]] = []

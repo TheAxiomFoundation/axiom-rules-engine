@@ -17,7 +17,7 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -27,6 +27,12 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
+
+      # The evaluator modules deny clippy::arithmetic_side_effects, so an
+      # unchecked Decimal or chrono operator (both panic on overflow) fails
+      # this step. No other clippy lint is enforced.
+      - name: cargo clippy (evaluator arithmetic guard)
+        run: cargo clippy --lib --no-deps --verbose -- -A clippy::all
 
       - name: explicit RuleSpec root adversarial tests
         run: >-
@@ -46,6 +52,15 @@ jobs:
       # test self-skips here, where no checkout exists.
       - name: cargo test (schema feature)
         run: cargo test --features schema --verbose
+
+      # The unit-derivation prototype (stage 2, src/unit_derivation) and its
+      # stage-3 aggregation layer sit behind the non-default `unit-derivation`
+      # feature, and so do their tests: the module's unit tests, the exact NZ
+      # result fixture in tests/unit_aggregation_cli.rs, and the four
+      # experimental stage-3 schemas that `schemas_are_current` checks. Without
+      # this run, a failure in any of them reaches main unnoticed.
+      - name: cargo test (schema + unit-derivation features)
+        run: cargo test --features "schema unit-derivation" --verbose
 
       - name: cargo build --release
         run: cargo build --release --verbose
@@ -91,6 +106,9 @@ jobs:
 
       - name: cargo test (schema feature)
         run: cargo test --features schema --verbose
+
+      - name: cargo test (schema + unit-derivation features)
+        run: cargo test --features "schema unit-derivation" --verbose
 
       - name: cargo build --release
         run: cargo build --release --verbose
@@ -181,6 +199,9 @@ jobs:
       - name: Node smoke test
         run: node wasm/test/smoke.mjs
 
+      - name: Selected-year input WASM regression
+        run: node wasm/test/selected-year-input.mjs
+
   python:
     name: Python package tests
     runs-on: ubuntu-latest
@@ -207,6 +228,11 @@ jobs:
 
       - name: Verify native dense extension import
         run: .venv/bin/python -c "import axiom_rules_engine_dense"
+
+      # The end-to-end tests run target/debug/axiom-rules-engine. They skip
+      # without it locally, but under CI a missing binary fails them.
+      - name: Build the engine binary for the end-to-end tests
+        run: cargo build --bin axiom-rules-engine
 
       - name: Run Python tests
         run: .venv/bin/python -m pytest -q python/tests

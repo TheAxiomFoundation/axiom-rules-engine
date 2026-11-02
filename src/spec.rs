@@ -7,15 +7,35 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
-    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
-    Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
-    RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
-    relation_usage_orientations,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
+    IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
+    ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
+    RelationPathStep, RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr,
+    ScalarValue, Term, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error("input declaration `{input}`: {message}")]
+    InputDeclaration { input: String, message: String },
+    #[error(
+        "relation_path_source_conflict: a derived relation must declare exactly one of source_relation or source_path"
+    )]
+    RelationPathSourceConflict,
+    #[error("relation_path_empty: a source_path must contain at least one step")]
+    RelationPathEmpty,
+    #[error(
+        "relation_path_forbidden_field: a path-sourced derived relation cannot declare {field}"
+    )]
+    RelationPathForbiddenField { field: &'static str },
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
+    #[error(transparent)]
+    InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
     #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
@@ -28,19 +48,52 @@ pub enum SpecError {
     InvalidSourceSha256 { location: String, value: String },
     #[error("{location} declares non-canonical public rule id `{value}`")]
     InvalidPublicRuleId { location: String, value: String },
+    #[error("{kind}s {names} share the public id `{id}`; give each its own id")]
+    DuplicatePublicId {
+        kind: &'static str,
+        id: String,
+        names: String,
+    },
     #[error(
-        "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot, derived rule, or parameter in the compiled program"
+        "dataset input `{reference}` must use an absolute legal RuleSpec reference that resolves to an input slot in the compiled program; use a request name from the input catalog"
     )]
     InvalidDatasetInputReference { reference: String },
+    #[error(
+        "dataset input `{reference}` names derived rule `{rule}`, which the engine computes; supply the rule's inputs or, for a scalar rule, use request pins (\"pins\": [{{\"rule\": \"{rule}\", \"value\": ...}}])"
+    )]
+    DerivedRuleDatasetInput { reference: String, rule: String },
+    #[error(
+        "dataset input `{reference}` names parameter `{parameter}`; parameters are law values, not dataset inputs; change the program parameter instead"
+    )]
+    ParameterDatasetInput {
+        reference: String,
+        parameter: String,
+    },
     #[error(
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error(
+        "supplied_tuples_for_derived_relation: dataset relation `{relation}` is derived by the program; supply its source tuples instead"
+    )]
+    SuppliedTuplesForDerivedRelation { relation: String },
+    #[error(
+        "lenient_binding_with_relation_roles: a program using relation atoms or exists requires strict relation binding"
+    )]
+    LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
     InvalidRelationSlotEntityCount {
         relation: String,
         arity: usize,
         slot_count: usize,
+    },
+    #[error(
+        "dataset relation `{relation}` has arity {arity}, but a tuple lists {found} entity ids"
+    )]
+    RelationTupleArity {
+        relation: String,
+        arity: usize,
+        found: usize,
     },
     #[error("strict dataset relation entity validation failed:\n{0}")]
     StrictDatasetBindingDiagnostics(DatasetBindingDiagnosticReport),
@@ -60,13 +113,20 @@ pub enum SpecError {
         effective_from: NaiveDate,
         effective_to: NaiveDate,
     },
+    /// `max()` or `min()` with no operand, which has no value. A
+    /// `model::Program` built directly in Rust skips this check; explain, fast
+    /// and dense then each fail with a type mismatch carrying this text.
+    #[error("{function}() requires at least one operand")]
+    EmptyExtremum { function: &'static str },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
-    /// validation status) carried through RuleSpec lowering for tooling and
+    /// validation status, interpretations) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
     /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +139,57 @@ pub struct ProgramSpec {
     pub parameters: Vec<IndexedParameterSpec>,
     #[serde(default)]
     pub derived: Vec<DerivedSpec>,
+    /// What the program's modules declare about their inputs, sorted by
+    /// `input`: today, which inputs are elections. Carried for the artifact
+    /// interface (`docs/artifact-format.md`); execution never reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_declarations: Vec<InputDeclarationSpec>,
+}
+
+/// A module's declaration about one input it reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputDeclarationSpec {
+    /// The declaring module's request name for the input:
+    /// `<module>#input.<slot>`, or the bare slot for an originless
+    /// composition root.
+    pub input: String,
+    pub election: InputElection,
+}
+
+/// A choice the law gives a named actor: the input records which way the
+/// actor chose. The engine evaluates the value it is given and never
+/// defaults one; choosing among values belongs to the simulation layer. An
+/// input without an election is a fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputElection {
+    /// The entity kind that makes the choice, an UpperCamelCase label. The
+    /// program need not evaluate on it.
+    pub actor: String,
+    /// The corpus citation path of the provision that gives the choice.
+    pub provision: String,
+}
+
+impl InputElection {
+    /// Why the election is malformed, or `None`.
+    pub(crate) fn shape_error(&self) -> Option<String> {
+        if !crate::rulespec::is_relation_entity_kind_label(&self.actor) {
+            return Some(format!(
+                "election actor `{}` is not an UpperCamelCase entity kind",
+                self.actor
+            ));
+        }
+        if !crate::rulespec::is_canonical_corpus_citation_path(&self.provision) {
+            return Some(format!(
+                "election provision `{}` is not a canonical corpus citation path",
+                self.provision
+            ));
+        }
+        None
+    }
 }
 
 impl ProgramSpec {
@@ -102,6 +213,14 @@ impl ProgramSpec {
                     value: digest.to_string(),
                 });
             }
+        }
+        if let Some(module) = &self.module {
+            // The compiled IR preserves root metadata but no longer records
+            // each document's rules. Validate entry shape here; local affects
+            // resolution belongs to RuleSpec loading before imports merge.
+            module
+                .validate("program.module")
+                .map_err(|error| SpecError::InvalidModuleMetadata(Box::new(error)))?;
         }
         for parameter in &self.parameters {
             if let Some(id) = parameter.id.as_deref() {
@@ -171,7 +290,13 @@ impl ProgramSpec {
     }
 
     pub fn to_program(&self) -> Result<Program, SpecError> {
+        crate::selected_year::validate(self)?;
         let mut program = Program::default();
+        program.selected_year_inputs = self
+            .selected_year_inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.clone()))
+            .collect();
 
         for unit in &self.units {
             program.add_unit(unit.to_model())?;
@@ -196,6 +321,35 @@ impl ProgramSpec {
             program.add_derived(model)?;
         }
 
+        // References resolve by public id, so an id two rules share would
+        // resolve to whichever the program's hash map yields first.
+        reject_duplicate_public_ids(
+            "parameter",
+            self.parameters
+                .iter()
+                .map(|parameter| (parameter.id.as_deref(), parameter.name.as_str())),
+        )?;
+        reject_duplicate_public_ids(
+            "derived rule",
+            self.derived
+                .iter()
+                .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
+        )?;
+
+        if !program.selected_year_inputs.is_empty() {
+            let catalog = program.input_catalog();
+            for input in program.selected_year_inputs.values() {
+                if catalog
+                    .get(&input.slot)
+                    .is_none_or(|names| names.as_slice() != [input.id.as_str()])
+                {
+                    return Err(SpecError::SelectedYearInput(format!(
+                        "{} shares a runtime slot across module identities",
+                        input.id
+                    )));
+                }
+            }
+        }
         Ok(program)
     }
 }
@@ -230,14 +384,54 @@ fn validate_citation_path(location: &str, value: &str) -> Result<(), SpecError> 
     Ok(())
 }
 
+fn reject_duplicate_public_ids<'a>(
+    kind: &'static str,
+    rules: impl Iterator<Item = (Option<&'a str>, &'a str)>,
+) -> Result<(), SpecError> {
+    let mut names_by_id = BTreeMap::<&str, Vec<&str>>::new();
+    for (id, name) in rules {
+        if let Some(id) = id {
+            names_by_id.entry(id).or_default().push(name);
+        }
+    }
+    match names_by_id.into_iter().find(|(_, names)| names.len() > 1) {
+        Some((id, mut names)) => {
+            names.sort_unstable();
+            Err(SpecError::DuplicatePublicId {
+                kind,
+                id: id.to_string(),
+                names: names
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+        }
+        None => Ok(()),
+    }
+}
+
 /// Options for binding a wire [`DatasetSpec`] to a compiled [`Program`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DatasetBindingOptions {
-    /// Promote relation tuple entity-kind warnings to a binding error.
+    /// Reject relation tuple entity-kind mismatches (enabled by default).
     pub strict_relation_entities: bool,
 }
 
+impl Default for DatasetBindingOptions {
+    fn default() -> Self {
+        Self::strict()
+    }
+}
+
 impl DatasetBindingOptions {
+    /// Accept mismatched tuples unchanged and return their diagnostics.
+    pub const fn lenient() -> Self {
+        Self {
+            strict_relation_entities: false,
+        }
+    }
+
     pub const fn strict() -> Self {
         Self {
             strict_relation_entities: true,
@@ -273,7 +467,7 @@ impl std::fmt::Display for DatasetBindingDiagnostic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records; strict relation entity mode treats this warning as an error",
+            "dataset relation `{}` tuple slot {} contains entity id `{}`, expected `{}` but found `{}` from the dataset input records or the queries; reorder the tuple to match the program's relation slots and supply the corresponding entity kinds",
             self.relation, self.slot, self.entity_id, self.expected_entity, self.actual_entity
         )
     }
@@ -339,6 +533,37 @@ impl DatasetSpec {
         program: &Program,
         options: DatasetBindingOptions,
     ) -> Result<DatasetBindingOutcome, SpecError> {
+        self.to_dataset_for_queries_with_options(program, &[], options)
+    }
+
+    /// Bind for a request whose queries evaluate the given `(entity_id,
+    /// entity)` pairs. A query evaluates each output rule on its entity id, so
+    /// that id has the rule's entity kind: this is kind evidence even for an
+    /// id no input record labels, such as a household that has members but
+    /// no household-level inputs.
+    pub fn to_dataset_for_queries(
+        &self,
+        program: &Program,
+        query_entities: &[(String, String)],
+    ) -> Result<DataSet, SpecError> {
+        let outcome = self.to_dataset_for_queries_with_options(
+            program,
+            query_entities,
+            DatasetBindingOptions::default(),
+        )?;
+        emit_dataset_binding_diagnostics(&outcome.diagnostics);
+        Ok(outcome.dataset)
+    }
+
+    pub fn to_dataset_for_queries_with_options(
+        &self,
+        program: &Program,
+        query_entities: &[(String, String)],
+        options: DatasetBindingOptions,
+    ) -> Result<DatasetBindingOutcome, SpecError> {
+        if !options.strict_relation_entities && program.uses_relation_atoms() {
+            return Err(SpecError::LenientBindingWithRelationRoles);
+        }
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -350,7 +575,20 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
-        let diagnostics = relation_slot_entity_diagnostics(program, &inputs, &relations);
+        if program.uses_relation_roles() {
+            if let Some(record) = relations.iter().find(|record| {
+                program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            }) {
+                return Err(SpecError::SuppliedTuplesForDerivedRelation {
+                    relation: record.name.clone(),
+                });
+            }
+        }
+        let diagnostics =
+            relation_slot_entity_diagnostics(program, &inputs, query_entities, &relations);
         if options.strict_relation_entities && !diagnostics.is_empty() {
             return Err(SpecError::StrictDatasetBindingDiagnostics(
                 DatasetBindingDiagnosticReport { diagnostics },
@@ -363,7 +601,7 @@ impl DatasetSpec {
     }
 }
 
-fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
+pub(crate) fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
     for diagnostic in diagnostics {
         eprintln!("warning[{}]: {diagnostic}", diagnostic.code.as_str());
     }
@@ -372,57 +610,68 @@ fn emit_dataset_binding_diagnostics(diagnostics: &[DatasetBindingDiagnostic]) {
 fn relation_slot_entity_diagnostics(
     program: &Program,
     inputs: &[InputRecord],
+    query_entities: &[(String, String)],
     relations: &[RelationRecord],
 ) -> Vec<DatasetBindingDiagnostic> {
     // Program schemas say what each slot expects, but program metadata cannot
-    // assign opaque runtime IDs to kinds. Dataset input records are the only
-    // binding-time authority carrying both `entity_id` and `entity`. If an ID
+    // assign opaque runtime IDs to kinds. Two binding-time authorities can:
+    // input records carry both `entity_id` and `entity`, and each query
+    // evaluates its output rules' entity on its `entity_id`. A filtered
+    // entity (a derived relation's `entity`, e.g. `SnapUnit`) is queried with
+    // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
+    // Resolved once for the program: asking per tuple would follow a chain of
+    // derived relations again for every tuple naming one.
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
+    let canonical = |entity: &str| {
+        filtered_kinds
+            .get(entity)
+            .cloned()
+            .unwrap_or_else(|| entity.to_string())
+    };
     let mut entity_by_id = BTreeMap::<String, Option<String>>::new();
-    for input in inputs {
+    let evidence = inputs
+        .iter()
+        .map(|input| (input.entity_id.as_str(), input.entity.as_str()))
+        .chain(
+            query_entities
+                .iter()
+                .map(|(entity_id, entity)| (entity_id.as_str(), entity.as_str())),
+        );
+    for (entity_id, entity) in evidence {
+        let entity = canonical(entity);
         entity_by_id
-            .entry(input.entity_id.clone())
+            .entry(entity_id.to_string())
             .and_modify(|known| {
-                if known.as_deref() != Some(input.entity.as_str()) {
+                if known.as_deref() != Some(entity.as_str()) {
                     *known = None;
                 }
             })
-            .or_insert_with(|| Some(input.entity.clone()));
+            .or_insert_with(|| Some(entity));
     }
 
-    let usage_orientations = relation_usage_orientations(program);
     let mut diagnostics = Vec::new();
     for record in relations {
-        let schema = program
-            .relations
-            .get(&record.name)
-            .expect("bound relation names resolve to a program schema");
-        if schema.slot_entities.is_empty() {
+        // Executed relations are entity-typed (`relation_typing`), and
+        // execution reads each slot by its declared kind, so the declaration
+        // is the expected tuple order. An untyped relation no rule executes
+        // has no expectation to check.
+        let Some(expected_entities) = slot_kinds.get(&record.name) else {
             continue;
-        }
-        // Used relations follow the orientation encoded in executable
-        // count/sum/membership nodes. Raw declaration order is positional
-        // authority only for a relation with no program use.
-        let expected_entities = usage_orientations.get(&record.name).map_or_else(
-            || {
-                schema
-                    .slot_entities
-                    .iter()
-                    .cloned()
-                    .map(Some)
-                    .collect::<Vec<_>>()
-            },
-            |orientation| orientation.slot_entities.clone(),
-        );
+        };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
-            let Some(expected_entity) = expected_entities.get(slot).and_then(Option::as_ref) else {
+            // A slot declared with a filtered entity holds that entity's
+            // source ids, the same canonical kind the evidence uses.
+            let Some(expected_entity) = expected_entities.get(slot).map(|entity| canonical(entity))
+            else {
                 continue;
             };
             let Some(Some(actual_entity)) = entity_by_id.get(entity_id) else {
                 continue;
             };
-            if actual_entity != expected_entity {
+            if *actual_entity != expected_entity {
                 diagnostics.push(DatasetBindingDiagnostic {
                     code: DatasetBindingDiagnosticCode::RelationSlotEntityMismatch,
                     relation: record.name.clone(),
@@ -515,7 +764,10 @@ impl RelationSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationDerivationSpec {
-    pub source_relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     pub current_slot: usize,
     pub related_slot: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,10 +779,54 @@ pub struct RelationDerivationSpec {
     pub predicate: JudgmentExprSpec,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RelationPathStepSpec {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
 impl RelationDerivationSpec {
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
+
     fn to_model(&self) -> Result<RelationDerivation, SpecError> {
+        if self.source_relation.is_some() == self.source_path.is_some() {
+            return Err(SpecError::RelationPathSourceConflict);
+        }
+        if let Some(path) = &self.source_path {
+            if path.is_empty() {
+                return Err(SpecError::RelationPathEmpty);
+            }
+            for (field, value) in [
+                ("entity", &self.entity),
+                ("member_relation", &self.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(SpecError::RelationPathForbiddenField { field });
+                }
+            }
+        }
         Ok(RelationDerivation {
             source_relation: self.source_relation.clone(),
+            source_path: self.source_path.as_ref().map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| RelationPathStep {
+                        relation: step.relation.clone(),
+                        from_slot: step.from_slot,
+                        to_slot: step.to_slot,
+                    })
+                    .collect()
+            }),
             current_slot: self.current_slot,
             related_slot: self.related_slot,
             entity: self.entity.clone(),
@@ -950,6 +1246,10 @@ pub enum ScalarExprSpec {
     Input {
         name: String,
     },
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     InputOrElse {
         name: String,
         default: ScalarValueSpec,
@@ -977,9 +1277,12 @@ pub enum ScalarExprSpec {
         right: Box<ScalarExprSpec>,
     },
     Max {
+        // `to_program` refuses an empty list, so the schema does too.
+        #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
         items: Vec<ScalarExprSpec>,
     },
     Min {
+        #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
         items: Vec<ScalarExprSpec>,
     },
     Ceil {
@@ -1010,6 +1313,12 @@ pub enum ScalarExprSpec {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -1025,10 +1334,41 @@ pub enum ScalarExprSpec {
         #[serde(default, rename = "where")]
         where_clause: Option<Box<JudgmentExprSpec>>,
     },
+    /// `min`/`max` (and `min_where`/`max_where`) over related entities. A
+    /// new variant: an engine without it refuses the artifact on load, and a
+    /// program that does not use it serializes exactly as before.
+    ExtremeRelated {
+        extreme: ExtremeSpec,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `only(relation.field)`: the value of the single related entity. Zero
+    /// or several members fail the evaluation.
+    SingleRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
     If {
         condition: Box<JudgmentExprSpec>,
         then_expr: Box<ScalarExprSpec>,
         else_expr: Box<ScalarExprSpec>,
+    },
+    /// The fallback of a `match` without a `_ =>` arm, reached only when the
+    /// subject equals none of `patterns`; evaluating it is an error, never a
+    /// value. It carries the subject and every listed pattern so evaluators
+    /// that compute both branches of a conditional can tell which rows reach
+    /// it.
+    NoMatch {
+        subject: Box<ScalarExprSpec>,
+        patterns: Vec<ScalarExprSpec>,
     },
     /// Reduction over an entity's own period axis (lifetime execution only).
     /// `n` is present only for the `sum_top_n` reduction. Expression-level,
@@ -1039,6 +1379,58 @@ pub enum ScalarExprSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         n: Option<Box<ScalarExprSpec>>,
     },
+    /// `t.name` for an input in a derived relation's predicate: the input
+    /// read at the term's id. An engine without relation roles refuses the
+    /// unknown `kind` on load.
+    RoleInput {
+        term: TermSpec,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule in a derived relation's predicate:
+    /// the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
+}
+
+/// An entity id in a derived relation's predicate, mirroring
+/// [`crate::model::Term`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum TermSpec {
+    /// The id the relation is read from: its current slot.
+    Anchor,
+    /// The id being tested: its related slot.
+    Candidate,
+    /// Index counted from the innermost enclosing `exists`.
+    Var(usize),
+}
+
+impl TermSpec {
+    pub fn to_model(self) -> Term {
+        match self {
+            Self::Anchor => Term::Anchor,
+            Self::Candidate => Term::Candidate,
+            Self::Var(index) => Term::Var(index),
+        }
+    }
+
+    pub fn from_model(term: Term) -> Self {
+        match term {
+            Term::Anchor => Self::Anchor,
+            Term::Candidate => Self::Candidate,
+            Term::Var(index) => Self::Var(index),
+            #[cfg(test)]
+            Term::Id(_) => panic!("test-only literal id terms cannot be serialized"),
+        }
+    }
+
+    /// The name a predicate spells this term with.
+    pub fn as_str(self) -> &'static str {
+        self.to_model().as_str()
+    }
 }
 
 /// The over-periods reduction vocabulary, mirroring
@@ -1073,10 +1465,53 @@ impl OverPeriodsKindSpec {
     }
 }
 
+/// Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring
+/// [`crate::model::Extreme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExtremeSpec {
+    Min,
+    Max,
+}
+
+impl ExtremeSpec {
+    fn to_model(self) -> Extreme {
+        match self {
+            Self::Min => Extreme::Min,
+            Self::Max => Extreme::Max,
+        }
+    }
+
+    pub fn from_model(extreme: Extreme) -> Self {
+        match extreme {
+            Extreme::Min => Self::Min,
+            Extreme::Max => Self::Max,
+        }
+    }
+}
+
+/// Convert the operands of `max()` or `min()`, refusing an empty list. With
+/// no operand there is no value; refusing it on load keeps a program that
+/// could only fail at evaluation from compiling at all.
+fn extremum_operands(
+    function: &'static str,
+    items: &[ScalarExprSpec],
+) -> Result<Vec<ScalarExpr>, SpecError> {
+    if items.is_empty() {
+        return Err(SpecError::EmptyExtremum { function });
+    }
+    items.iter().map(ScalarExprSpec::to_model).collect()
+}
+
 impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
+            Self::InputForYear { input, year } => Ok(ScalarExpr::InputForYear {
+                input: input.clone(),
+                year: *year,
+            }),
             Self::Input { name } => Ok(ScalarExpr::Input(name.clone())),
             Self::InputOrElse { name, default } => Ok(ScalarExpr::InputOrElse {
                 name: name.clone(),
@@ -1105,18 +1540,8 @@ impl ScalarExprSpec {
                 Box::new(left.to_model()?),
                 Box::new(right.to_model()?),
             )),
-            Self::Max { items } => Ok(ScalarExpr::Max(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
-            Self::Min { items } => Ok(ScalarExpr::Min(
-                items
-                    .iter()
-                    .map(ScalarExprSpec::to_model)
-                    .collect::<Result<Vec<ScalarExpr>, SpecError>>()?,
-            )),
+            Self::Max { items } => Ok(ScalarExpr::Max(extremum_operands("max", items)?)),
+            Self::Min { items } => Ok(ScalarExpr::Min(extremum_operands("min", items)?)),
             Self::Ceil { value } => Ok(ScalarExpr::Ceil(Box::new(value.to_model()?))),
             Self::Floor { value } => Ok(ScalarExpr::Floor(Box::new(value.to_model()?))),
             Self::CalendarYearsToMonths { years } => Ok(ScalarExpr::CalendarYearsToMonths {
@@ -1140,6 +1565,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,
@@ -1170,6 +1614,40 @@ impl ScalarExprSpec {
                     .map(|inner| inner.to_model().map(Box::new))
                     .transpose()?,
             }),
+            Self::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::ExtremeRelated {
+                extreme: extreme.to_model(),
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::SingleRelated {
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
             Self::If {
                 condition,
                 then_expr,
@@ -1179,12 +1657,27 @@ impl ScalarExprSpec {
                 then_expr: Box::new(then_expr.to_model()?),
                 else_expr: Box::new(else_expr.to_model()?),
             }),
+            Self::NoMatch { subject, patterns } => Ok(ScalarExpr::NoMatch {
+                subject: Box::new(subject.to_model()?),
+                patterns: patterns
+                    .iter()
+                    .map(ScalarExprSpec::to_model)
+                    .collect::<Result<_, _>>()?,
+            }),
             Self::OverPeriods { over, value, n } => Ok(ScalarExpr::OverPeriods {
                 kind: over.to_model(),
                 value: Box::new(value.to_model()?),
                 n: n.as_ref()
                     .map(|inner| inner.to_model().map(Box::new))
                     .transpose()?,
+            }),
+            Self::RoleInput { term, name } => Ok(ScalarExpr::RoleInput {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
+            Self::RoleDerived { term, name } => Ok(ScalarExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
             }),
         }
     }
@@ -1224,6 +1717,23 @@ pub enum JudgmentExprSpec {
         current_slot: usize,
         related_slot: usize,
     },
+    /// Test a declared relation's tuple in its slot order, inside a predicate.
+    RelationAtom {
+        relation: String,
+        terms: Vec<TermSpec>,
+    },
+    Exists {
+        relation: String,
+        terms: Vec<TermSpec>,
+        variable_slot: usize,
+        body: Box<JudgmentExprSpec>,
+    },
+    /// Compare term ids; both terms must have the same entity kind.
+    SameEntity {
+        left: TermSpec,
+        right: TermSpec,
+        negated: bool,
+    },
     And {
         items: Vec<JudgmentExprSpec>,
     },
@@ -1246,6 +1756,12 @@ pub enum JudgmentExprSpec {
     ExactlyOne {
         items: Vec<JudgmentExprSpec>,
     },
+    /// `t.name` for a judgment derived rule in a derived relation's
+    /// predicate: the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
 }
 
 impl JudgmentExprSpec {
@@ -1257,6 +1773,30 @@ impl JudgmentExprSpec {
                 right: right.to_model()?,
             }),
             Self::Derived { name } => Ok(JudgmentExpr::Derived(name.clone())),
+            Self::RelationAtom { relation, terms } => Ok(JudgmentExpr::RelationAtom {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+            }),
+            Self::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => Ok(JudgmentExpr::Exists {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+                variable_slot: *variable_slot,
+                body: Box::new(body.to_model()?),
+            }),
+            Self::SameEntity {
+                left,
+                right,
+                negated,
+            } => Ok(JudgmentExpr::SameEntity {
+                left: left.to_model(),
+                right: right.to_model(),
+                negated: *negated,
+            }),
             Self::RelationMember {
                 relation,
                 current_slot,
@@ -1279,6 +1819,10 @@ impl JudgmentExprSpec {
                     .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?,
             )),
             Self::Not { item } => Ok(JudgmentExpr::Not(Box::new(item.to_model()?))),
+            Self::RoleDerived { term, name } => Ok(JudgmentExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
             Self::ExactlyOne { items } => {
                 let lowered = items
                     .iter()
@@ -1411,6 +1955,9 @@ impl IntervalSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InputRecordSpec {
+    /// A request name from the program's input catalog. Derived rules and
+    /// parameters cannot be supplied as dataset inputs; scalar rule overrides
+    /// belong in the compiled request's `pins`.
     pub name: String,
     pub entity: String,
     pub entity_id: String,
@@ -1436,8 +1983,32 @@ impl InputRecordSpec {
     ) -> Result<InputRecord, SpecError> {
         let name = program
             .resolve_input_name_with_catalog(&self.name, input_catalog)
-            .ok_or_else(|| SpecError::InvalidDatasetInputReference {
-                reference: self.name.clone(),
+            .ok_or_else(|| {
+                if let Some(rule) = program.derived.get(&self.name).or_else(|| {
+                    program
+                        .derived
+                        .values()
+                        .find(|rule| rule.id.as_deref() == Some(&self.name))
+                }) {
+                    return SpecError::DerivedRuleDatasetInput {
+                        reference: self.name.clone(),
+                        rule: rule.name.clone(),
+                    };
+                }
+                if let Some(parameter) = program.parameters.get(&self.name).or_else(|| {
+                    program
+                        .parameters
+                        .values()
+                        .find(|parameter| parameter.id.as_deref() == Some(&self.name))
+                }) {
+                    return SpecError::ParameterDatasetInput {
+                        reference: self.name.clone(),
+                        parameter: parameter.name.clone(),
+                    };
+                }
+                SpecError::InvalidDatasetInputReference {
+                    reference: self.name.clone(),
+                }
             })?;
         Ok(InputRecord {
             name,
@@ -1472,6 +2043,17 @@ impl RelationRecordSpec {
                 reference: self.name.clone(),
             }
         })?;
+        // A short tuple has no id at the slot a lookup reads, so it would be
+        // dropped without a trace; a long one carries ids nothing reads.
+        if let Some(schema) = program.relations.get(&name)
+            && self.tuple.len() != schema.arity
+        {
+            return Err(SpecError::RelationTupleArity {
+                relation: self.name.clone(),
+                arity: schema.arity,
+                found: self.tuple.len(),
+            });
+        }
         Ok(RelationRecord {
             name,
             tuple: self.tuple.clone(),
@@ -1549,5 +2131,14 @@ mod namespace_tests {
         let spec = program_with("derived", json!([derived.clone(), derived]));
 
         assert_collision(spec, "derived rule", "benefit");
+    }
+}
+
+#[cfg(test)]
+mod literal_id_term_tests {
+    #[test]
+    #[should_panic(expected = "test-only literal id terms cannot be serialized")]
+    fn literal_ids_have_no_spec_or_artifact_representation() {
+        super::TermSpec::from_model(crate::model::Term::Id("oracle-only"));
     }
 }

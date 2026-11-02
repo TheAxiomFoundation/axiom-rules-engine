@@ -13,6 +13,11 @@ module:
     Counting over the `cb_receipt` relation shows an absence condition
     (count == 0 → no existing recipient).
 rules:
+  - name: cb_receipt
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Child]
   - name: cb_recipient_count
     kind: derived
     entity: Child
