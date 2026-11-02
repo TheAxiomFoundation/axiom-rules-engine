@@ -1,0 +1,329 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Scottish Statutory Instrument 2021/249 regulation 71 — notional capital\nfor Scottish Council Tax Reduction.\n\nWhere an applicant has disposed of capital for the purpose of securing or\nincreasing entitlement to a reduction, the amount disposed of is treated\nas notional capital, except to the extent the disposal was for paying\ndebts or reasonable purchases. This RuleSpec module sums qualifying disposals\nusing the `sum_where` / `count_where` filtered-aggregation extension;\neach Disposal record carries an input flag `is_qualifying_disposal`\npre-computed by the caller from the statutory purpose and reason tests."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "applicant_disposal",
+        "arity": 2,
+        "slot_entities": [
+          "Disposal",
+          "Applicant"
+        ]
+      }
+    ],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "notional_capital",
+        "entity": "Applicant",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 71",
+        "source_url": "https://www.legislation.gov.uk/ssi/2021/249/regulation/71",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sum_related",
+          "relation": "applicant_disposal",
+          "current_slot": 1,
+          "related_slot": 0,
+          "value": {
+            "kind": "input",
+            "name": "disposal_amount"
+          },
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_qualifying_disposal"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sum_related",
+              "relation": "applicant_disposal",
+              "current_slot": 1,
+              "related_slot": 0,
+              "value": {
+                "kind": "input",
+                "name": "disposal_amount"
+              },
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_qualifying_disposal"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "counted_disposals",
+        "entity": "Applicant",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 71",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "applicant_disposal",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "disposal_counts_for_ctr"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "applicant_disposal",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "disposal_counts_for_ctr"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "capital_for_ctr",
+        "entity": "Applicant",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 71 taken with reg 67 actual capital",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "input",
+              "name": "actual_capital"
+            },
+            {
+              "kind": "derived",
+              "name": "notional_capital"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "input",
+                  "name": "actual_capital"
+                },
+                {
+                  "kind": "derived",
+                  "name": "notional_capital"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "counted_disposals",
+      "notional_capital",
+      "capital_for_ctr"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "actual_capital",
+        "canonical_request_name": "actual_capital",
+        "request_names": [
+          "actual_capital"
+        ]
+      },
+      {
+        "slot": "disposal_amount",
+        "canonical_request_name": "disposal_amount",
+        "request_names": [
+          "disposal_amount"
+        ]
+      },
+      {
+        "slot": "disposal_counts_for_ctr",
+        "canonical_request_name": "disposal_counts_for_ctr",
+        "request_names": [
+          "disposal_counts_for_ctr"
+        ]
+      },
+      {
+        "slot": "is_qualifying_disposal",
+        "canonical_request_name": "is_qualifying_disposal",
+        "request_names": [
+          "is_qualifying_disposal"
+        ]
+      }
+    ]
+  }
+}

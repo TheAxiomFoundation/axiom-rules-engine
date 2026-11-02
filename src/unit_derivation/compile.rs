@@ -165,7 +165,7 @@ pub fn compile(plan: ConstitutionPlan) -> Result<CompiledConstitution, UnitDeriv
     validate_precedence(&edges, &cuts)?;
     validate_attachment_confluence(&attachments)?;
 
-    let semantics_digest = super::evaluate::sha256(&canonical_plan_encoding(&plan));
+    let semantics_digest = crate::digest::sha256(&canonical_plan_encoding(&plan));
 
     Ok(CompiledConstitution {
         plan,

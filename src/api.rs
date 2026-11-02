@@ -159,6 +159,16 @@ pub enum OutputValue {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TraceSelectedYearRead {
+    pub input: String,
+    pub entity_id: String,
+    pub selected_start: chrono::NaiveDate,
+    pub selected_end: chrono::NaiveDate,
+    pub value: ScalarValueSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DerivedTraceNode {
     Scalar {
@@ -197,6 +207,8 @@ pub enum DerivedTraceNode {
         /// Exact temporal parameter cells read while executing this node.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         /// Derived edges actually traversed. Every key resolves in this trace.
         dependencies: Vec<String>,
         /// Parent-specific edges that were present in the selected expression
@@ -221,6 +233,8 @@ pub enum DerivedTraceNode {
         executed_expression: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         parameter_reads: Vec<TraceParameterRead>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_year_reads: Vec<TraceSelectedYearRead>,
         dependencies: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         not_evaluated_dependencies: Vec<NotEvaluatedDependency>,
@@ -396,7 +410,9 @@ fn execute_program(
                 }
                 crate::bulk::FastPathResult::Unsupported { reason } => execute_explain(
                     &program,
-                    fast_dataset,
+                    // Explain performs its own period selection. Preserve facts
+                    // outside the bulk query period for temporal expressions.
+                    &dataset,
                     request.queries,
                     ExecutionMetadata {
                         relation_binding: Some(relation_binding),
@@ -480,16 +496,31 @@ pub fn execute_compiled_request(
 /// and every pin's literal is still checked, where the program is converted
 /// (see [`execute_program`]).
 fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiError> {
+    if pins.is_empty() {
+        return Ok(());
+    }
+    // Each pinned name's first rule, found in one pass over the program
+    // rather than one pass per pin. Rule names are unique in a validated
+    // program; keeping the first leaves an unvalidated one pinning the rule a
+    // linear search would find.
+    let mut positions = pins
+        .iter()
+        .map(|pin| (pin.rule.as_str(), None))
+        .collect::<HashMap<&str, Option<usize>>>();
+    for (position, derived) in program.derived.iter().enumerate() {
+        if let Some(first) = positions.get_mut(derived.name.as_str()) {
+            first.get_or_insert(position);
+        }
+    }
+    // Each pinned name's last pin: the only one applied.
     let last_pin: HashMap<&str, usize> = pins
         .iter()
         .enumerate()
         .map(|(index, pin)| (pin.rule.as_str(), index))
         .collect();
     for (index, pin) in pins.iter().enumerate() {
-        let rule = program
-            .derived
-            .iter_mut()
-            .find(|derived| derived.name == pin.rule)
+        let rule = positions[pin.rule.as_str()]
+            .map(|position| &mut program.derived[position])
             .ok_or_else(|| ApiError::UnknownPinnedRule {
                 rule: pin.rule.clone(),
             })?;
@@ -534,6 +565,9 @@ fn apply_pins(program: &mut ProgramSpec, pins: &[RulePin]) -> Result<(), ApiErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod pin_tests;
 
 fn execute_explain(
     program: &crate::model::Program,
@@ -712,6 +746,18 @@ fn collect_trace(
             })
             .collect();
 
+        let selected_year_reads = instance
+            .execution
+            .selected_year_reads
+            .iter()
+            .map(|read| TraceSelectedYearRead {
+                input: read.input.clone(),
+                entity_id: read.entity_id.clone(),
+                selected_start: read.selected_period.start,
+                selected_end: read.selected_period.end,
+                value: ScalarValueSpec::from_model(read.value.clone()),
+            })
+            .collect();
         let node = match (&instance.value, semantics) {
             (
                 crate::engine::EvaluatedTraceValue::Scalar {
@@ -734,6 +780,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_scalar_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -754,6 +801,7 @@ fn collect_trace(
                 source_url: derived.source_url.clone(),
                 executed_expression: format_judgment_expression(program, expr),
                 parameter_reads,
+                selected_year_reads,
                 dependencies,
                 not_evaluated_dependencies,
             },
@@ -802,9 +850,21 @@ fn format_scalar_expression(
     program: &crate::model::Program,
     expr: &crate::model::ScalarExpr,
 ) -> String {
-    use crate::model::{RelatedValueRef, ScalarExpr};
+    use crate::model::{Extreme, RelatedValueRef, ScalarExpr};
     match expr {
+        ScalarExpr::OnlyRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+        } => format!(
+            "only_related({}, {current_slot}, {related_slot}, {value:?})",
+            json_string(relation)
+        ),
         ScalarExpr::Literal(value) => format_scalar_value(value),
+        ScalarExpr::InputForYear { input, year } => {
+            format!("input_for_year({}, {year})", json_string(input))
+        }
         ScalarExpr::Input(name) => format!("input({})", json_string(name)),
         ScalarExpr::InputOrElse { name, default } => {
             format!(
@@ -814,6 +874,12 @@ fn format_scalar_expression(
             )
         }
         ScalarExpr::Derived(name) => program.public_derived_key(name),
+        ScalarExpr::RoleInput { term, name } => {
+            format!("{}.input({})", term.as_str(), json_string(name))
+        }
+        ScalarExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
         ScalarExpr::ParameterLookup { parameter, index } => format!(
             "{}[{}]",
             public_parameter_key(program, parameter),
@@ -912,8 +978,35 @@ fn format_scalar_expression(
             related_slot,
             value,
             where_clause,
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
+            relation,
+            current_slot,
+            related_slot,
+            value,
+            where_clause,
         } => format!(
-            "sum_related({}, {current_slot}, {related_slot}, {}{})",
+            "{}({}, {current_slot}, {related_slot}, {}{})",
+            match expr {
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Min,
+                    ..
+                } => "min_related",
+                ScalarExpr::ExtremeRelated {
+                    extreme: Extreme::Max,
+                    ..
+                } => "max_related",
+                ScalarExpr::SingleRelated { .. } => "single_related",
+                _ => "sum_related",
+            },
             json_string(relation),
             match value {
                 RelatedValueRef::Input(name) => format!("input({})", json_string(name)),
@@ -977,6 +1070,41 @@ fn format_judgment_expression(
             format_scalar_expression(program, right)
         ),
         JudgmentExpr::Derived(name) => program.public_derived_key(name),
+        JudgmentExpr::RoleDerived { term, name } => {
+            format!("{}.{}", term.as_str(), program.public_derived_key(name))
+        }
+        JudgmentExpr::RelationAtom { relation, terms } => format!(
+            "{relation}({})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            body,
+            ..
+        } => format!(
+            "exists({relation}({}), {})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_judgment_expression(program, body)
+        ),
+        JudgmentExpr::SameEntity {
+            left,
+            right,
+            negated,
+        } => format!(
+            "({} {} {})",
+            left.as_str(),
+            if *negated { "!=" } else { "==" },
+            right.as_str()
+        ),
         JudgmentExpr::RelationMember {
             relation,
             current_slot,

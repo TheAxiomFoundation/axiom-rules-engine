@@ -497,6 +497,7 @@ fn dense_match_fallbacks_in_last_arms() {
             DenseRelationBatchSpec {
                 offsets: vec![0, 2, 3],
                 inputs: HashMap::from([("x".to_string(), DenseColumn::Integer(member_x.to_vec()))]),
+                ..Default::default()
             },
         )]),
     };

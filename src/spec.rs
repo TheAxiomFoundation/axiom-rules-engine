@@ -7,14 +7,35 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
-    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, IndexedParameter,
-    InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind, ParameterVersion,
-    Period, PeriodKind, Program, RelatedValueRef, RelationDerivation, RelationRecord,
-    RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, UnitDef, UnitKind,
+    ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
+    IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
+    ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
+    RelationPathStep, RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr,
+    ScalarValue, Term, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
 pub enum SpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error("input declaration `{input}`: {message}")]
+    InputDeclaration { input: String, message: String },
+    #[error(
+        "relation_path_source_conflict: a derived relation must declare exactly one of source_relation or source_path"
+    )]
+    RelationPathSourceConflict,
+    #[error("relation_path_empty: a source_path must contain at least one step")]
+    RelationPathEmpty,
+    #[error(
+        "relation_path_forbidden_field: a path-sourced derived relation cannot declare {field}"
+    )]
+    RelationPathForbiddenField { field: &'static str },
+    #[error("only_related requires a Boolean input reference")]
+    InvalidOnlyRelatedValue,
+    #[error("only_related requires distinct binary relation slots 0 and 1")]
+    InvalidOnlyRelatedSlots,
+    #[error(transparent)]
+    InvalidModuleMetadata(Box<crate::rulespec::RuleSpecError>),
     #[error(transparent)]
     NamespaceCollision(#[from] crate::model::NamespaceCollisionError),
     #[error("invalid decimal literal `{literal}`")]
@@ -56,6 +77,14 @@ pub enum SpecError {
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error(
+        "supplied_tuples_for_derived_relation: dataset relation `{relation}` is derived by the program; supply its source tuples instead"
+    )]
+    SuppliedTuplesForDerivedRelation { relation: String },
+    #[error(
+        "lenient_binding_with_relation_roles: a program using relation atoms or exists requires strict relation binding"
+    )]
+    LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
     InvalidRelationSlotEntityCount {
         relation: String,
@@ -98,8 +127,10 @@ pub enum SpecError {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProgramSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_year_inputs: Vec<crate::selected_year::SelectedYearInput>,
     /// Module-level metadata (source pinning, encoding provenance,
-    /// validation status) carried through RuleSpec lowering for tooling and
+    /// validation status, interpretations) carried through RuleSpec lowering for tooling and
     /// artifact pass-through. Load/compile boundaries validate it; execution
     /// semantics do not depend on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +143,57 @@ pub struct ProgramSpec {
     pub parameters: Vec<IndexedParameterSpec>,
     #[serde(default)]
     pub derived: Vec<DerivedSpec>,
+    /// What the program's modules declare about their inputs, sorted by
+    /// `input`: today, which inputs are elections. Carried for the artifact
+    /// interface (`docs/artifact-format.md`); execution never reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_declarations: Vec<InputDeclarationSpec>,
+}
+
+/// A module's declaration about one input it reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputDeclarationSpec {
+    /// The declaring module's request name for the input:
+    /// `<module>#input.<slot>`, or the bare slot for an originless
+    /// composition root.
+    pub input: String,
+    pub election: InputElection,
+}
+
+/// A choice the law gives a named actor: the input records which way the
+/// actor chose. The engine evaluates the value it is given and never
+/// defaults one; choosing among values belongs to the simulation layer. An
+/// input without an election is a fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InputElection {
+    /// The entity kind that makes the choice, an UpperCamelCase label. The
+    /// program need not evaluate on it.
+    pub actor: String,
+    /// The corpus citation path of the provision that gives the choice.
+    pub provision: String,
+}
+
+impl InputElection {
+    /// Why the election is malformed, or `None`.
+    pub(crate) fn shape_error(&self) -> Option<String> {
+        if !crate::rulespec::is_relation_entity_kind_label(&self.actor) {
+            return Some(format!(
+                "election actor `{}` is not an UpperCamelCase entity kind",
+                self.actor
+            ));
+        }
+        if !crate::rulespec::is_canonical_corpus_citation_path(&self.provision) {
+            return Some(format!(
+                "election provision `{}` is not a canonical corpus citation path",
+                self.provision
+            ));
+        }
+        None
+    }
 }
 
 /// The deepest a program's expressions may nest, counting each expression
@@ -216,6 +298,14 @@ impl ProgramSpec {
                 });
             }
         }
+        if let Some(module) = &self.module {
+            // The compiled IR preserves root metadata but no longer records
+            // each document's rules. Validate entry shape here; local affects
+            // resolution belongs to RuleSpec loading before imports merge.
+            module
+                .validate("program.module")
+                .map_err(|error| SpecError::InvalidModuleMetadata(Box::new(error)))?;
+        }
         for parameter in &self.parameters {
             if let Some(id) = parameter.id.as_deref() {
                 validate_public_rule_id(
@@ -294,7 +384,14 @@ impl ProgramSpec {
         mut check_rule: impl FnMut(&str) -> Result<(), SpecError>,
     ) -> Result<Program, SpecError> {
         self.check_expressions()?;
+        // After the depth and size checks: this serializes every expression.
+        crate::selected_year::validate(self)?;
         let mut program = Program::default();
+        program.selected_year_inputs = self
+            .selected_year_inputs
+            .iter()
+            .map(|input| (input.id.clone(), input.clone()))
+            .collect();
 
         for unit in &self.units {
             program.add_unit(unit.to_model())?;
@@ -334,6 +431,20 @@ impl ProgramSpec {
                 .map(|derived| (derived.id.as_deref(), derived.name.as_str())),
         )?;
 
+        if !program.selected_year_inputs.is_empty() {
+            let catalog = program.input_catalog();
+            for input in program.selected_year_inputs.values() {
+                if catalog
+                    .get(&input.slot)
+                    .is_none_or(|names| names.as_slice() != [input.id.as_str()])
+                {
+                    return Err(SpecError::SelectedYearInput(format!(
+                        "{} shares a runtime slot across module identities",
+                        input.id
+                    )));
+                }
+            }
+        }
         Ok(program)
     }
 }
@@ -545,6 +656,9 @@ impl DatasetSpec {
         query_entities: &[(String, String)],
         options: DatasetBindingOptions,
     ) -> Result<DatasetBindingOutcome, SpecError> {
+        if !options.strict_relation_entities && program.uses_relation_atoms() {
+            return Err(SpecError::LenientBindingWithRelationRoles);
+        }
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -556,6 +670,18 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
+        if program.uses_relation_roles() {
+            if let Some(record) = relations.iter().find(|record| {
+                program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            }) {
+                return Err(SpecError::SuppliedTuplesForDerivedRelation {
+                    relation: record.name.clone(),
+                });
+            }
+        }
         let diagnostics =
             relation_slot_entity_diagnostics(program, &inputs, query_entities, &relations);
         if options.strict_relation_entities && !diagnostics.is_empty() {
@@ -590,7 +716,10 @@ fn relation_slot_entity_diagnostics(
     // its source's ids, so its evidence counts as that source kind. If an ID
     // appears under multiple kinds, leave it unknown so validation is
     // independent of input order and cannot report a false mismatch.
-    let filtered_kinds = crate::relation_typing::filtered_entity_kinds(program);
+    // Resolved once for the program: asking per tuple would follow a chain of
+    // derived relations again for every tuple naming one.
+    let slot_kinds = crate::relation_typing::EffectiveSlotEntities::new(program);
+    let filtered_kinds = crate::relation_typing::filtered_entity_kinds_with(program, &slot_kinds);
     let canonical = |entity: &str| {
         filtered_kinds
             .get(entity)
@@ -624,9 +753,7 @@ fn relation_slot_entity_diagnostics(
         // execution reads each slot by its declared kind, so the declaration
         // is the expected tuple order. An untyped relation no rule executes
         // has no expectation to check.
-        let Some(expected_entities) =
-            crate::relation_typing::effective_slot_entities(program, &record.name)
-        else {
+        let Some(expected_entities) = slot_kinds.get(&record.name) else {
             continue;
         };
         for (slot, entity_id) in record.tuple.iter().enumerate() {
@@ -732,7 +859,10 @@ impl RelationSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationDerivationSpec {
-    pub source_relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     pub current_slot: usize,
     pub related_slot: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -744,10 +874,54 @@ pub struct RelationDerivationSpec {
     pub predicate: JudgmentExprSpec,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RelationPathStepSpec {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
 impl RelationDerivationSpec {
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
+
     fn to_model(&self) -> Result<RelationDerivation, SpecError> {
+        if self.source_relation.is_some() == self.source_path.is_some() {
+            return Err(SpecError::RelationPathSourceConflict);
+        }
+        if let Some(path) = &self.source_path {
+            if path.is_empty() {
+                return Err(SpecError::RelationPathEmpty);
+            }
+            for (field, value) in [
+                ("entity", &self.entity),
+                ("member_relation", &self.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(SpecError::RelationPathForbiddenField { field });
+                }
+            }
+        }
         Ok(RelationDerivation {
             source_relation: self.source_relation.clone(),
+            source_path: self.source_path.as_ref().map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| RelationPathStep {
+                        relation: step.relation.clone(),
+                        from_slot: step.from_slot,
+                        to_slot: step.to_slot,
+                    })
+                    .collect()
+            }),
             current_slot: self.current_slot,
             related_slot: self.related_slot,
             entity: self.entity.clone(),
@@ -1200,6 +1374,10 @@ pub enum ScalarExprSpec {
     Input {
         name: String,
     },
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     InputOrElse {
         name: String,
         default: ScalarValueSpec,
@@ -1259,6 +1437,12 @@ pub enum ScalarExprSpec {
         from: Box<ScalarExprSpec>,
         to: Box<ScalarExprSpec>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -1267,6 +1451,28 @@ pub enum ScalarExprSpec {
         where_clause: Option<Box<JudgmentExprSpec>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `min`/`max` (and `min_where`/`max_where`) over related entities. A
+    /// new variant: an engine without it refuses the artifact on load, and a
+    /// program that does not use it serializes exactly as before.
+    ExtremeRelated {
+        extreme: ExtremeSpec,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRefSpec,
+        #[serde(default, rename = "where")]
+        where_clause: Option<Box<JudgmentExprSpec>>,
+    },
+    /// `only(relation.field)`: the value of the single related entity. Zero
+    /// or several members fail the evaluation.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -1297,6 +1503,58 @@ pub enum ScalarExprSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         n: Option<Box<ScalarExprSpec>>,
     },
+    /// `t.name` for an input in a derived relation's predicate: the input
+    /// read at the term's id. An engine without relation roles refuses the
+    /// unknown `kind` on load.
+    RoleInput {
+        term: TermSpec,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule in a derived relation's predicate:
+    /// the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
+}
+
+/// An entity id in a derived relation's predicate, mirroring
+/// [`crate::model::Term`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum TermSpec {
+    /// The id the relation is read from: its current slot.
+    Anchor,
+    /// The id being tested: its related slot.
+    Candidate,
+    /// Index counted from the innermost enclosing `exists`.
+    Var(usize),
+}
+
+impl TermSpec {
+    pub fn to_model(self) -> Term {
+        match self {
+            Self::Anchor => Term::Anchor,
+            Self::Candidate => Term::Candidate,
+            Self::Var(index) => Term::Var(index),
+        }
+    }
+
+    pub fn from_model(term: Term) -> Self {
+        match term {
+            Term::Anchor => Self::Anchor,
+            Term::Candidate => Self::Candidate,
+            Term::Var(index) => Self::Var(index),
+            #[cfg(test)]
+            Term::Id(_) => panic!("test-only literal id terms cannot be serialized"),
+        }
+    }
+
+    /// The name a predicate spells this term with.
+    pub fn as_str(self) -> &'static str {
+        self.to_model().as_str()
+    }
 }
 
 /// The over-periods reduction vocabulary, mirroring
@@ -1327,6 +1585,32 @@ impl OverPeriodsKindSpec {
             OverPeriodsKind::Max => Self::Max,
             OverPeriodsKind::Count => Self::Count,
             OverPeriodsKind::SumTopN => Self::SumTopN,
+        }
+    }
+}
+
+/// Which end an [`ScalarExprSpec::ExtremeRelated`] takes, mirroring
+/// [`crate::model::Extreme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ExtremeSpec {
+    Min,
+    Max,
+}
+
+impl ExtremeSpec {
+    fn to_model(self) -> Extreme {
+        match self {
+            Self::Min => Extreme::Min,
+            Self::Max => Extreme::Max,
+        }
+    }
+
+    pub fn from_model(extreme: Extreme) -> Self {
+        match extreme {
+            Extreme::Min => Self::Min,
+            Extreme::Max => Self::Max,
         }
     }
 }
@@ -1370,8 +1654,12 @@ impl ScalarExprSpec {
         1u64.saturating_add(match self {
             Self::Literal { .. }
             | Self::Input { .. }
+            | Self::InputForYear { .. }
             | Self::InputOrElse { .. }
             | Self::Derived { .. }
+            | Self::OnlyRelated { .. }
+            | Self::RoleInput { .. }
+            | Self::RoleDerived { .. }
             | Self::PeriodStart
             | Self::PeriodEnd => 0,
             Self::ParameterLookup { index, .. } => index.runtime_size(),
@@ -1384,11 +1672,12 @@ impl ScalarExprSpec {
             | Self::DateAddMonths { date, months: by }
             | Self::DateAddYears { date, years: by } => two(date, by),
             Self::DaysBetween { from, to } => two(from, to),
-            Self::CountRelated { where_clause, .. } | Self::SumRelated { where_clause, .. } => {
-                where_clause
-                    .as_deref()
-                    .map_or(0, JudgmentExprSpec::runtime_size)
-            }
+            Self::CountRelated { where_clause, .. }
+            | Self::SumRelated { where_clause, .. }
+            | Self::ExtremeRelated { where_clause, .. }
+            | Self::SingleRelated { where_clause, .. } => where_clause
+                .as_deref()
+                .map_or(0, JudgmentExprSpec::runtime_size),
             Self::If {
                 condition,
                 then_expr,
@@ -1414,8 +1703,12 @@ impl ScalarExprSpec {
         match self {
             Self::Literal { .. }
             | Self::Input { .. }
+            | Self::InputForYear { .. }
             | Self::InputOrElse { .. }
             | Self::Derived { .. }
+            | Self::OnlyRelated { .. }
+            | Self::RoleInput { .. }
+            | Self::RoleDerived { .. }
             | Self::PeriodStart
             | Self::PeriodEnd => false,
             Self::ParameterLookup { index, .. } => index.deeper_than(below),
@@ -1432,11 +1725,12 @@ impl ScalarExprSpec {
                 date.deeper_than(below) || by.deeper_than(below)
             }
             Self::DaysBetween { from, to } => from.deeper_than(below) || to.deeper_than(below),
-            Self::CountRelated { where_clause, .. } | Self::SumRelated { where_clause, .. } => {
-                where_clause
-                    .as_deref()
-                    .is_some_and(|clause| clause.deeper_than(below))
-            }
+            Self::CountRelated { where_clause, .. }
+            | Self::SumRelated { where_clause, .. }
+            | Self::ExtremeRelated { where_clause, .. }
+            | Self::SingleRelated { where_clause, .. } => where_clause
+                .as_deref()
+                .is_some_and(|clause| clause.deeper_than(below)),
             Self::If {
                 condition,
                 then_expr,
@@ -1459,6 +1753,10 @@ impl ScalarExprSpec {
     fn to_model(&self) -> Result<ScalarExpr, SpecError> {
         match self {
             Self::Literal { value } => Ok(ScalarExpr::Literal(value.to_model()?)),
+            Self::InputForYear { input, year } => Ok(ScalarExpr::InputForYear {
+                input: input.clone(),
+                year: *year,
+            }),
             Self::Input { name } => Ok(ScalarExpr::Input(name.clone())),
             Self::InputOrElse { name, default } => Ok(ScalarExpr::InputOrElse {
                 name: name.clone(),
@@ -1509,6 +1807,25 @@ impl ScalarExprSpec {
                 from: Box::new(from.to_model()?),
                 to: Box::new(to.to_model()?),
             }),
+            Self::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if !matches!(value, RelatedValueRefSpec::Input { .. }) {
+                    return Err(SpecError::InvalidOnlyRelatedValue);
+                }
+                if current_slot == related_slot || *current_slot > 1 || *related_slot > 1 {
+                    return Err(SpecError::InvalidOnlyRelatedSlots);
+                }
+                Ok(ScalarExpr::OnlyRelated {
+                    relation: relation.clone(),
+                    current_slot: *current_slot,
+                    related_slot: *related_slot,
+                    value: value.to_model(),
+                })
+            }
             Self::CountRelated {
                 relation,
                 current_slot,
@@ -1530,6 +1847,40 @@ impl ScalarExprSpec {
                 value,
                 where_clause,
             } => Ok(ScalarExpr::SumRelated {
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::ExtremeRelated {
+                extreme,
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::ExtremeRelated {
+                extreme: extreme.to_model(),
+                relation: relation.clone(),
+                current_slot: *current_slot,
+                related_slot: *related_slot,
+                value: value.to_model(),
+                where_clause: where_clause
+                    .as_ref()
+                    .map(|inner| inner.to_model().map(Box::new))
+                    .transpose()?,
+            }),
+            Self::SingleRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            } => Ok(ScalarExpr::SingleRelated {
                 relation: relation.clone(),
                 current_slot: *current_slot,
                 related_slot: *related_slot,
@@ -1561,6 +1912,14 @@ impl ScalarExprSpec {
                 n: n.as_ref()
                     .map(|inner| inner.to_model().map(Box::new))
                     .transpose()?,
+            }),
+            Self::RoleInput { term, name } => Ok(ScalarExpr::RoleInput {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
+            Self::RoleDerived { term, name } => Ok(ScalarExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
             }),
         }
     }
@@ -1600,6 +1959,23 @@ pub enum JudgmentExprSpec {
         current_slot: usize,
         related_slot: usize,
     },
+    /// Test a declared relation's tuple in its slot order, inside a predicate.
+    RelationAtom {
+        relation: String,
+        terms: Vec<TermSpec>,
+    },
+    Exists {
+        relation: String,
+        terms: Vec<TermSpec>,
+        variable_slot: usize,
+        body: Box<JudgmentExprSpec>,
+    },
+    /// Compare term ids; both terms must have the same entity kind.
+    SameEntity {
+        left: TermSpec,
+        right: TermSpec,
+        negated: bool,
+    },
     And {
         items: Vec<JudgmentExprSpec>,
     },
@@ -1622,6 +1998,12 @@ pub enum JudgmentExprSpec {
     ExactlyOne {
         items: Vec<JudgmentExprSpec>,
     },
+    /// `t.name` for a judgment derived rule in a derived relation's
+    /// predicate: the rule evaluated at the term's id.
+    RoleDerived {
+        term: TermSpec,
+        name: String,
+    },
 }
 
 impl JudgmentExprSpec {
@@ -1634,7 +2016,12 @@ impl JudgmentExprSpec {
             })
         };
         match self {
-            Self::Derived { .. } | Self::RelationMember { .. } => 1,
+            Self::Derived { .. }
+            | Self::RelationMember { .. }
+            | Self::RelationAtom { .. }
+            | Self::SameEntity { .. }
+            | Self::RoleDerived { .. } => 1,
+            Self::Exists { body, .. } => 1u64.saturating_add(body.runtime_size()),
             Self::Comparison { left, right, .. } => 1u64
                 .saturating_add(left.runtime_size())
                 .saturating_add(right.runtime_size()),
@@ -1653,7 +2040,12 @@ impl JudgmentExprSpec {
             return true;
         };
         match self {
-            Self::Derived { .. } | Self::RelationMember { .. } => false,
+            Self::Derived { .. }
+            | Self::RelationMember { .. }
+            | Self::RelationAtom { .. }
+            | Self::SameEntity { .. }
+            | Self::RoleDerived { .. } => false,
+            Self::Exists { body, .. } => body.deeper_than(below),
             Self::Comparison { left, right, .. } => {
                 left.deeper_than(below) || right.deeper_than(below)
             }
@@ -1672,6 +2064,30 @@ impl JudgmentExprSpec {
                 right: right.to_model()?,
             }),
             Self::Derived { name } => Ok(JudgmentExpr::Derived(name.clone())),
+            Self::RelationAtom { relation, terms } => Ok(JudgmentExpr::RelationAtom {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+            }),
+            Self::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => Ok(JudgmentExpr::Exists {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+                variable_slot: *variable_slot,
+                body: Box::new(body.to_model()?),
+            }),
+            Self::SameEntity {
+                left,
+                right,
+                negated,
+            } => Ok(JudgmentExpr::SameEntity {
+                left: left.to_model(),
+                right: right.to_model(),
+                negated: *negated,
+            }),
             Self::RelationMember {
                 relation,
                 current_slot,
@@ -1694,6 +2110,10 @@ impl JudgmentExprSpec {
                     .collect::<Result<Vec<JudgmentExpr>, SpecError>>()?,
             )),
             Self::Not { item } => Ok(JudgmentExpr::Not(Box::new(item.to_model()?))),
+            Self::RoleDerived { term, name } => Ok(JudgmentExpr::RoleDerived {
+                term: term.to_model(),
+                name: name.clone(),
+            }),
             Self::ExactlyOne { items } => {
                 let lowered = items
                     .iter()
@@ -2042,7 +2462,7 @@ mod expression_depth_tests {
     /// Any scalar expression about `size` levels deep, every kind reachable.
     fn scalar(rng: &mut Rng, size: usize) -> ScalarExprSpec {
         if size == 0 {
-            return match rng.below(6) {
+            return match rng.below(10) {
                 0 => lit(1),
                 1 => ScalarExprSpec::Input { name: "x".into() },
                 2 => ScalarExprSpec::InputOrElse {
@@ -2051,6 +2471,24 @@ mod expression_depth_tests {
                 },
                 3 => ScalarExprSpec::Derived { name: "d".into() },
                 4 => ScalarExprSpec::PeriodStart,
+                5 => ScalarExprSpec::InputForYear {
+                    input: "m#input.x".into(),
+                    year: 2026,
+                },
+                6 => ScalarExprSpec::OnlyRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                },
+                7 => ScalarExprSpec::RoleInput {
+                    term: TermSpec::Candidate,
+                    name: "x".into(),
+                },
+                8 => ScalarExprSpec::RoleDerived {
+                    term: TermSpec::Anchor,
+                    name: "d".into(),
+                },
                 _ => ScalarExprSpec::PeriodEnd,
             };
         }
@@ -2071,7 +2509,7 @@ mod expression_depth_tests {
             vec![*first, *second]
         };
         let clause = |rng: &mut Rng| (rng.below(3) > 0).then(|| Box::new(judgment(rng, size - 1)));
-        match rng.below(19) {
+        match rng.below(21) {
             0 => ScalarExprSpec::ParameterLookup {
                 parameter: "p".into(),
                 index: deep(rng),
@@ -2139,6 +2577,21 @@ mod expression_depth_tests {
                 value: any(rng),
                 n: Some(deep(rng)),
             },
+            18 => ScalarExprSpec::ExtremeRelated {
+                extreme: ExtremeSpec::Max,
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                value: RelatedValueRefSpec::Input { name: "x".into() },
+                where_clause: clause(rng),
+            },
+            19 => ScalarExprSpec::SingleRelated {
+                relation: "r".into(),
+                current_slot: 1,
+                related_slot: 0,
+                value: RelatedValueRefSpec::Derived { name: "d".into() },
+                where_clause: clause(rng),
+            },
             _ => scalar(rng, 0),
         }
     }
@@ -2146,8 +2599,21 @@ mod expression_depth_tests {
     /// Any judgment about `size` levels deep, every kind reachable.
     fn judgment(rng: &mut Rng, size: usize) -> JudgmentExprSpec {
         if size == 0 {
-            return match rng.below(2) {
+            return match rng.below(5) {
                 0 => JudgmentExprSpec::Derived { name: "j".into() },
+                1 => JudgmentExprSpec::RelationAtom {
+                    relation: "r".into(),
+                    terms: vec![TermSpec::Candidate, TermSpec::Anchor],
+                },
+                2 => JudgmentExprSpec::SameEntity {
+                    left: TermSpec::Anchor,
+                    right: TermSpec::Var(0),
+                    negated: true,
+                },
+                3 => JudgmentExprSpec::RoleDerived {
+                    term: TermSpec::Candidate,
+                    name: "j".into(),
+                },
                 _ => JudgmentExprSpec::RelationMember {
                     relation: "r".into(),
                     current_slot: 1,
@@ -2163,7 +2629,7 @@ mod expression_depth_tests {
             }
             items
         };
-        match rng.below(5) {
+        match rng.below(6) {
             0 => {
                 let right_size = rng.below(size);
                 JudgmentExprSpec::Comparison {
@@ -2175,6 +2641,12 @@ mod expression_depth_tests {
             1 => JudgmentExprSpec::And { items: items(rng) },
             2 => JudgmentExprSpec::Or { items: items(rng) },
             3 => JudgmentExprSpec::ExactlyOne { items: items(rng) },
+            4 => JudgmentExprSpec::Exists {
+                relation: "r".into(),
+                terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                variable_slot: 0,
+                body: Box::new(judgment(rng, size - 1)),
+            },
             _ => JudgmentExprSpec::Not {
                 item: Box::new(judgment(rng, size - 1)),
             },
@@ -2194,8 +2666,12 @@ mod expression_depth_tests {
         1 + match expr {
             ScalarExprSpec::Literal { .. }
             | ScalarExprSpec::Input { .. }
+            | ScalarExprSpec::InputForYear { .. }
             | ScalarExprSpec::InputOrElse { .. }
             | ScalarExprSpec::Derived { .. }
+            | ScalarExprSpec::OnlyRelated { .. }
+            | ScalarExprSpec::RoleInput { .. }
+            | ScalarExprSpec::RoleDerived { .. }
             | ScalarExprSpec::PeriodStart
             | ScalarExprSpec::PeriodEnd => 0,
             ScalarExprSpec::ParameterLookup { index, .. } => scalar_depth(index),
@@ -2211,7 +2687,9 @@ mod expression_depth_tests {
             ScalarExprSpec::DateAddYears { date, years } => deepest(&[date, years]),
             ScalarExprSpec::DaysBetween { from, to } => deepest(&[from, to]),
             ScalarExprSpec::CountRelated { where_clause, .. }
-            | ScalarExprSpec::SumRelated { where_clause, .. } => {
+            | ScalarExprSpec::SumRelated { where_clause, .. }
+            | ScalarExprSpec::ExtremeRelated { where_clause, .. }
+            | ScalarExprSpec::SingleRelated { where_clause, .. } => {
                 where_clause.as_deref().map_or(0, judgment_depth)
             }
             ScalarExprSpec::If {
@@ -2230,7 +2708,12 @@ mod expression_depth_tests {
 
     fn judgment_depth(expr: &JudgmentExprSpec) -> usize {
         1 + match expr {
-            JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RelationMember { .. } => 0,
+            JudgmentExprSpec::Derived { .. }
+            | JudgmentExprSpec::RelationMember { .. }
+            | JudgmentExprSpec::RelationAtom { .. }
+            | JudgmentExprSpec::SameEntity { .. }
+            | JudgmentExprSpec::RoleDerived { .. } => 0,
+            JudgmentExprSpec::Exists { body, .. } => judgment_depth(body),
             JudgmentExprSpec::Comparison { left, right, .. } => {
                 scalar_depth(left).max(scalar_depth(right))
             }
@@ -2366,6 +2849,100 @@ mod expression_depth_tests {
             Err(message("the predicate of derived relation `r`"))
         );
     }
+    /// The kinds main added after the bound was set, each with a judgment
+    /// below it (`max_where`/`min_where`, `only` with a filter, and `exists`):
+    /// a chain through one of them exactly at the bound passes, and one node
+    /// deeper is refused.
+    #[test]
+    fn each_recursive_relation_kind_is_bounded() {
+        let below = |depth: usize| {
+            let mut expr = holds();
+            for _ in 2..depth {
+                expr = JudgmentExprSpec::Not {
+                    item: Box::new(expr),
+                };
+            }
+            expr
+        };
+        let kinds: [(&str, fn(JudgmentExprSpec) -> DerivedSemanticsSpec); 3] = [
+            ("extreme_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::ExtremeRelated {
+                    extreme: ExtremeSpec::Min,
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("single_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::SingleRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("exists", |body| DerivedSemanticsSpec::Judgment {
+                expr: JudgmentExprSpec::Exists {
+                    relation: "r".into(),
+                    terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                    variable_slot: 0,
+                    body: Box::new(body),
+                },
+            }),
+        ];
+        let at = MAX_EXPRESSION_DEPTH;
+        for (kind, wrap) in kinds {
+            let check = |depth: usize| {
+                let semantics = wrap(below(depth - 1));
+                let expr = match &semantics {
+                    DerivedSemanticsSpec::Scalar { expr } => {
+                        assert_eq!(scalar_depth(expr), depth, "{kind}");
+                        expr.deeper_than(at)
+                    }
+                    DerivedSemanticsSpec::Judgment { expr } => {
+                        assert_eq!(judgment_depth(expr), depth, "{kind}");
+                        expr.deeper_than(at)
+                    }
+                };
+                let mut rule = serde_json::json!({
+                    "name": "d", "entity": "Household", "dtype": "decimal", "unit": null,
+                });
+                let serde_json::Value::Object(fields) =
+                    serde_json::to_value(&semantics).expect("semantics serialize")
+                else {
+                    panic!("semantics serialize to an object");
+                };
+                rule.as_object_mut().expect("object").extend(fields);
+                let spec: ProgramSpec =
+                    serde_json::from_value(serde_json::json!({ "derived": [rule] }))
+                        .expect("program deserializes");
+                (expr, spec.check_expressions().map_err(|e| e.to_string()))
+            };
+            assert_eq!(check(at), (false, Ok(())), "{kind} at the bound");
+            assert_eq!(
+                check(at + 1),
+                (
+                    true,
+                    Err(format!(
+                        "the expression of derived rule `d` nests more than {at} levels deep"
+                    ))
+                ),
+                "{kind} one past the bound"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod literal_id_term_tests {
+    #[test]
+    #[should_panic(expected = "test-only literal id terms cannot be serialized")]
+    fn literal_ids_have_no_spec_or_artifact_representation() {
+        super::TermSpec::from_model(crate::model::Term::Id("oracle-only"));
+    }
 }
 
 #[cfg(test)]
@@ -2379,8 +2956,12 @@ mod expression_size_tests {
         1 + match expr {
             ScalarExpr::Literal(_)
             | ScalarExpr::Input(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
+            | ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::RoleInput { .. }
+            | ScalarExpr::RoleDerived { .. }
             | ScalarExpr::PeriodStart
             | ScalarExpr::PeriodEnd => 0,
             ScalarExpr::ParameterLookup { index, .. } => scalar_nodes(index),
@@ -2396,7 +2977,9 @@ mod expression_size_tests {
             | ScalarExpr::DateAddYears { date, years: by } => scalar_nodes(date) + scalar_nodes(by),
             ScalarExpr::DaysBetween { from, to } => scalar_nodes(from) + scalar_nodes(to),
             ScalarExpr::CountRelated { where_clause, .. }
-            | ScalarExpr::SumRelated { where_clause, .. } => {
+            | ScalarExpr::SumRelated { where_clause, .. }
+            | ScalarExpr::ExtremeRelated { where_clause, .. }
+            | ScalarExpr::SingleRelated { where_clause, .. } => {
                 where_clause.as_deref().map_or(0, judgment_nodes)
             }
             ScalarExpr::If {
@@ -2418,7 +3001,12 @@ mod expression_size_tests {
             JudgmentExpr::Comparison { left, right, .. } => {
                 scalar_nodes(left) + scalar_nodes(right)
             }
-            JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => 0,
+            JudgmentExpr::Derived(_)
+            | JudgmentExpr::RelationMember { .. }
+            | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::SameEntity { .. }
+            | JudgmentExpr::RoleDerived { .. } => 0,
+            JudgmentExpr::Exists { body, .. } => judgment_nodes(body),
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 items.iter().map(judgment_nodes).sum()
             }
@@ -2449,7 +3037,39 @@ mod expression_size_tests {
     /// A judgment about `size` levels deep that `to_model` converts, with
     /// `exactly_one` of two to four operands anywhere.
     fn judgment(rng: &mut Rng, size: usize) -> JudgmentExprSpec {
+        judgment_of(rng, size, false)
+    }
+
+    fn scalar(rng: &mut Rng, size: usize) -> ScalarExprSpec {
+        scalar_of(rng, size, false)
+    }
+
+    /// [`judgment`], or with `wide` also the kinds main added for relations
+    /// (relation atoms, term comparisons, reads through a term, `exists`,
+    /// `min`/`max`/`only` over related entities and selected-year inputs).
+    /// Without `wide` it draws exactly what it drew before they existed, so
+    /// the pinned figures below still hold.
+    fn judgment_of(rng: &mut Rng, size: usize, wide: bool) -> JudgmentExprSpec {
+        let judgment = |rng: &mut Rng, size: usize| judgment_of(rng, size, wide);
+        let scalar = |rng: &mut Rng, size: usize| scalar_of(rng, size, wide);
         if size == 0 {
+            if wide && rng.below(2) == 0 {
+                return match rng.below(3) {
+                    0 => JudgmentExprSpec::RelationAtom {
+                        relation: "r".into(),
+                        terms: vec![TermSpec::Candidate, TermSpec::Anchor],
+                    },
+                    1 => JudgmentExprSpec::SameEntity {
+                        left: TermSpec::Anchor,
+                        right: TermSpec::Candidate,
+                        negated: false,
+                    },
+                    _ => JudgmentExprSpec::RoleDerived {
+                        term: TermSpec::Candidate,
+                        name: "j".into(),
+                    },
+                };
+            }
             return match rng.below(3) {
                 0 => JudgmentExprSpec::Derived { name: "j".into() },
                 1 => JudgmentExprSpec::RelationMember {
@@ -2472,6 +3092,14 @@ mod expression_size_tests {
                 })
                 .collect()
         };
+        if wide && rng.below(4) == 0 {
+            return JudgmentExprSpec::Exists {
+                relation: "r".into(),
+                terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                variable_slot: 0,
+                body: Box::new(judgment(rng, size - 1)),
+            };
+        }
         match rng.below(6) {
             0 => JudgmentExprSpec::Comparison {
                 left: Box::new(scalar(rng, size - 1)),
@@ -2496,9 +3124,34 @@ mod expression_size_tests {
         }
     }
 
-    /// A scalar expression about `size` levels deep that `to_model` converts.
-    fn scalar(rng: &mut Rng, size: usize) -> ScalarExprSpec {
+    /// A scalar expression about `size` levels deep that `to_model` converts
+    /// (see [`judgment_of`] for `wide`).
+    fn scalar_of(rng: &mut Rng, size: usize, wide: bool) -> ScalarExprSpec {
+        let judgment = |rng: &mut Rng, size: usize| judgment_of(rng, size, wide);
+        let scalar = |rng: &mut Rng, size: usize| scalar_of(rng, size, wide);
         if size == 0 {
+            if wide && rng.below(2) == 0 {
+                return match rng.below(4) {
+                    0 => ScalarExprSpec::InputForYear {
+                        input: "m#input.x".into(),
+                        year: 2026,
+                    },
+                    1 => ScalarExprSpec::OnlyRelated {
+                        relation: "r".into(),
+                        current_slot: 1,
+                        related_slot: 0,
+                        value: RelatedValueRefSpec::Input { name: "b".into() },
+                    },
+                    2 => ScalarExprSpec::RoleInput {
+                        term: TermSpec::Candidate,
+                        name: "x".into(),
+                    },
+                    _ => ScalarExprSpec::RoleDerived {
+                        term: TermSpec::Anchor,
+                        name: "d".into(),
+                    },
+                };
+            }
             return match rng.below(3) {
                 0 => lit(1),
                 1 => ScalarExprSpec::Input { name: "x".into() },
@@ -2509,6 +3162,27 @@ mod expression_size_tests {
             let size = rng.below(size);
             Box::new(scalar(rng, size))
         };
+        if wide && rng.below(4) == 0 {
+            let where_clause = (rng.below(3) > 0).then(|| Box::new(judgment(rng, size - 1)));
+            return if rng.below(2) == 0 {
+                ScalarExprSpec::ExtremeRelated {
+                    extreme: ExtremeSpec::Max,
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause,
+                }
+            } else {
+                ScalarExprSpec::SingleRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Derived { name: "d".into() },
+                    where_clause,
+                }
+            };
+        }
         match rng.below(7) {
             0 => ScalarExprSpec::Add {
                 items: vec![scalar(rng, size - 1), *smaller(rng)],
@@ -2573,6 +3247,123 @@ mod expression_size_tests {
         }
         assert_eq!(checked, 4_000);
         assert_eq!(largest, 815_713, "the generator changed");
+    }
+
+    /// The same, on generated expressions that also hold every kind main
+    /// added for relations: each converts to the nodes the count says. The
+    /// recursive ones (`exists`, and the `where` of `min`/`max`/`only` over
+    /// related entities) each sit above a generated subtree.
+    #[test]
+    fn the_count_covers_the_relation_kinds() {
+        let (mut largest, mut kinds) = (0, std::collections::BTreeSet::new());
+        for seed in 0..4_000_u64 {
+            let mut rng = Rng(seed.wrapping_add(0x5851_f42d_4c95_7f2d));
+            let size = 1 + usize::try_from(seed % 9).expect("small size");
+            let (counted, built, json) = if seed % 2 == 0 {
+                let expr = judgment_of(&mut rng, size, true);
+                (
+                    expr.runtime_size(),
+                    judgment_nodes(&expr.to_model().expect("converts")),
+                    serde_json::to_string(&expr).expect("serializes"),
+                )
+            } else {
+                let expr = scalar_of(&mut rng, size, true);
+                (
+                    expr.runtime_size(),
+                    scalar_nodes(&expr.to_model().expect("converts")),
+                    serde_json::to_string(&expr).expect("serializes"),
+                )
+            };
+            assert_eq!(counted, built, "seed {seed}");
+            largest = largest.max(built);
+            for kind in [
+                "\"exists\"",
+                "\"extreme_related\"",
+                "\"single_related\"",
+                "\"relation_atom\"",
+                "\"same_entity\"",
+                "\"role_derived\"",
+                "\"role_input\"",
+                "\"input_for_year\"",
+                "\"only_related\"",
+            ] {
+                if json.contains(kind) {
+                    kinds.insert(kind);
+                }
+            }
+        }
+        assert_eq!(kinds.len(), 9, "only {kinds:?} were generated");
+        assert!(largest > 1_000, "the largest was {largest} nodes");
+    }
+
+    /// Each kind main added that holds an expression, wrapped around a
+    /// subtree: a program at exactly the size bound passes, and one with a
+    /// subtree a node larger is refused. Built so the total is `n` nodes.
+    #[test]
+    fn each_recursive_relation_kind_counts_toward_the_size_bound() {
+        // `or` of `items` derived judgments: `items + 1` nodes, depth 2.
+        let or_of = |items: u64| JudgmentExprSpec::Or {
+            items: (0..items)
+                .map(|_| JudgmentExprSpec::Derived { name: "j".into() })
+                .collect(),
+        };
+        let kinds: [(&str, fn(JudgmentExprSpec) -> DerivedSemanticsSpec); 3] = [
+            ("extreme_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::ExtremeRelated {
+                    extreme: ExtremeSpec::Max,
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("single_related", |clause| DerivedSemanticsSpec::Scalar {
+                expr: ScalarExprSpec::SingleRelated {
+                    relation: "r".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                    value: RelatedValueRefSpec::Input { name: "x".into() },
+                    where_clause: Some(Box::new(clause)),
+                },
+            }),
+            ("exists", |body| DerivedSemanticsSpec::Judgment {
+                expr: JudgmentExprSpec::Exists {
+                    relation: "r".into(),
+                    terms: vec![TermSpec::Var(0), TermSpec::Anchor],
+                    variable_slot: 0,
+                    body: Box::new(body),
+                },
+            }),
+        ];
+        let max = MAX_EXPRESSION_SIZE;
+        for (kind, wrap) in kinds {
+            let check = |nodes: u64| {
+                // The wrapper, the `or`, and `nodes - 2` operands.
+                let semantics = wrap(or_of(nodes - 2));
+                let mut rule = serde_json::json!({
+                    "name": "d", "entity": "Household", "dtype": "decimal", "unit": null,
+                });
+                let serde_json::Value::Object(fields) =
+                    serde_json::to_value(&semantics).expect("semantics serialize")
+                else {
+                    panic!("semantics serialize to an object");
+                };
+                rule.as_object_mut().expect("object").extend(fields);
+                let spec: ProgramSpec =
+                    serde_json::from_value(serde_json::json!({ "derived": [rule] }))
+                        .expect("program deserializes");
+                spec.check_expressions().map_err(|error| error.to_string())
+            };
+            assert_eq!(check(max), Ok(()), "{kind} at the bound");
+            assert_eq!(
+                check(max + 1),
+                Err(format!(
+                    "the expression of derived rule `d` expands to more than {max} expression nodes"
+                )),
+                "{kind} one node past the bound"
+            );
+        }
     }
 
     /// The count saturates instead of overflowing, so an expression that

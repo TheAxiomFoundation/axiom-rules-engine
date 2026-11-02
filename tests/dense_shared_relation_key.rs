@@ -199,6 +199,7 @@ fn relation_batch(households: &Households) -> DenseRelationBatchSpec {
             .zip(columns)
             .map(|(name, values)| (name.to_string(), DenseColumn::Integer(values)))
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -402,6 +403,8 @@ fn single_relation_binding_peak(
             .map(|row| related_count * row / row_count)
             .collect(),
         inputs,
+        related_row_count: Some(related_count),
+        ..Default::default()
     };
     let (result, peak) = peak_allocation(|| execute(compiled, row_count, batch, &["one"]));
     assert_eq!(result, Ok(vec![vec![1]; row_count]));
@@ -602,6 +605,7 @@ fn malformed_related_count_returns_type_mismatch_before_allocating_owners() {
                     DenseRelationBatchSpec {
                         offsets: vec![0, usize::MAX],
                         inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
+                        ..Default::default()
                     },
                 )]),
             },
@@ -638,6 +642,7 @@ fn malformed_related_counts_allocate_bounded_memory() {
             let batch = DenseRelationBatchSpec {
                 offsets: vec![0, related_count],
                 inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
+                ..Default::default()
             };
             let (result, peak) = peak_allocation(|| execute(&compiled, 1, batch, &["one"]));
             prop_assert_eq!(
@@ -728,4 +733,38 @@ fn every_schema_checks_its_own_columns_in_schema_order() {
     assert!(error.contains(&message(only_second)), "{error}");
     let error = short(&[only_second, &first[0]]);
     assert!(error.contains(&message(&first[0])), "{error}");
+}
+
+/// The checks binding adds after the schema walk (a confirmed related count,
+/// columns no schema reads) never pre-empt an error the walk reports. Here the
+/// first schema's column is absent, nothing confirms the two related rows, and
+/// an unread column sorts first; the second schema's short column is still the
+/// one reported, as a per-schema binding reports it.
+#[test]
+fn a_later_schemas_column_is_reported_before_the_added_checks() {
+    let _serial = serial();
+    let compiled = two_links();
+    let schemas = compiled.relations();
+    let first = &schemas[0].related_inputs;
+    let only_second = schemas[1]
+        .related_inputs
+        .iter()
+        .find(|name| !first.contains(name))
+        .expect("the second schema reads a column the first does not");
+    let batch = DenseRelationBatchSpec {
+        offsets: vec![0, 2],
+        inputs: HashMap::from([
+            ("aaa".to_string(), DenseColumn::Integer(vec![1])),
+            (only_second.clone(), DenseColumn::Integer(vec![1])),
+        ]),
+        ..Default::default()
+    };
+    let error = execute(&compiled, 1, batch, &["head_count", "head_income"])
+        .expect_err("the second schema's column is short");
+    assert!(
+        error.contains(&format!(
+            "dense relation input `{only_second}` for `member` has length 1 but related row count is 2"
+        )),
+        "{error}"
+    );
 }
