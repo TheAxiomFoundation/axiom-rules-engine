@@ -152,25 +152,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         };
         match command {
             TopLevelCommand::Version => {
-                if wants_help(&mut args) {
+                if wants_only_help(&mut args, "version")? {
                     println!("usage: axiom-rules-engine version\n\nPrint the engine version.");
                     return Ok(());
-                }
-                if args.next().is_some() {
-                    return Err("`version` takes no arguments".into());
                 }
                 println!("{}", version_line());
                 return Ok(());
             }
             TopLevelCommand::Capabilities => {
-                if wants_help(&mut args) {
+                if wants_only_help(&mut args, "capabilities")? {
                     println!(
                         "usage: axiom-rules-engine capabilities\n\nPrint, as JSON, the engine version and build and the artifact formats it reads."
                     );
                     return Ok(());
-                }
-                if args.next().is_some() {
-                    return Err("`capabilities` takes no arguments".into());
                 }
                 println!(
                     "{}",
@@ -264,9 +258,18 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Whether the next argument asks for a command's help, consuming it if so.
-fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> bool {
-    args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
+/// For a command that takes no arguments: whether its arguments are a lone
+/// `--help` or `-h`. Any other argument, before the flag or after it, is
+/// refused rather than ignored.
+fn wants_only_help(
+    args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>,
+    command: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let help = args.next_if(|arg| arg == "--help" || arg == "-h").is_some();
+    if args.next().is_some() {
+        return Err(format!("`{command}` takes no arguments").into());
+    }
+    Ok(help)
 }
 
 fn version_line() -> String {
@@ -801,16 +804,16 @@ fn run_emit_schemas(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// `migrate scan <file-or-dir>...`: inventory hand-expanded exactly-one
-/// patterns across RuleSpec sources. Detection lowers each module through the
-/// real loader and walks the serialized spec (see `migrate`); files that do
-/// not lower standalone are reported as unscanned, never as pattern-free.
 fn migrate_usage() -> String {
     format!(
         "usage: migrate scan [--json] <file-or-dir>... | migrate apply [--json] [--write] <file-or-dir>... | {MIGRATE_ARTIFACT_USAGE}"
     )
 }
 
+/// `migrate scan <file-or-dir>...`: inventory hand-expanded exactly-one
+/// patterns across RuleSpec sources. Detection lowers each module through the
+/// real loader and walks the serialized spec (see `migrate`); files that do
+/// not lower standalone are reported as unscanned, never as pattern-free.
 fn run_migrate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut args = args.into_iter();
     match args.next().as_deref() {

@@ -95,6 +95,46 @@ fn every_listed_command_answers_its_own_help() {
 }
 
 #[test]
+fn no_argument_commands_refuse_arguments_around_their_help_flag() {
+    // `version` and `capabilities` take no arguments. `--help` or `-h` alone
+    // prints usage; any other argument, before the flag or after it, gets the
+    // error an argument gets without the flag, and no usage.
+    for command in ["version", "--version", "capabilities"] {
+        let refused = Command::new(ENGINE)
+            .args([command, "extra"])
+            .output()
+            .expect("run engine");
+        assert!(!refused.status.success(), "`{command} extra` exits 1");
+        let refusal = String::from_utf8_lossy(&refused.stderr).into_owned();
+        assert!(refusal.contains("takes no arguments"), "{refusal}");
+        for flag in ["--help", "-h"] {
+            for args in [
+                [command, flag, "extra"],
+                [command, "extra", flag],
+                [command, flag, "-h"],
+            ] {
+                let out = Command::new(ENGINE)
+                    .args(args)
+                    .output()
+                    .expect("run engine");
+                let shown = args.join(" ");
+                assert!(!out.status.success(), "`{shown}` exits 1");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stderr),
+                    refusal,
+                    "`{shown}` is refused like `{command} extra`"
+                );
+                assert!(
+                    out.stdout.is_empty(),
+                    "`{shown}` prints no usage: {}",
+                    String::from_utf8_lossy(&out.stdout)
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn unknown_command_names_the_help_command() {
     let out = Command::new(ENGINE)
         .arg("definitely-not-a-command")
