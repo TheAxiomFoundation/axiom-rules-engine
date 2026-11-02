@@ -1076,12 +1076,13 @@ def test_the_parser_accepts_what_the_engine_parses(tmp_path: Path, seed: int) ->
 
 
 # A formula the parser refuses has no reads to follow, and no program to check
-# them against: every undeclared name in it counts.
+# them against: every undeclared name it does not call counts.
 @pytest.mark.parametrize(
     ("formula", "inputs", "refusal"),
     [
         ("x = 1", {"x"}, "let-bindings are not supported"),
-        ("f(x)(y)", {"f", "x", "y"}, "can only call named functions"),
+        ("f(x)(y)", {"x", "y"}, "can only call named functions"),
+        ("max(x) y", {"x", "y"}, "unexpected trailing token"),
         ("x.from", {"x"}, "expected Ident, got From"),
         ("match x: a/b => 1", {"a/b", "x"}, "unexpected trailing token"),
         ("match x: _ => 1 2 => 3", {"_", "x"}, "wildcard arm must be final"),
@@ -1092,7 +1093,7 @@ def test_the_parser_accepts_what_the_engine_parses(tmp_path: Path, seed: int) ->
         ("x y", {"x", "y"}, "unexpected trailing token"),
     ],
 )
-def test_a_refused_formula_counts_every_undeclared_name(
+def test_a_refused_formula_counts_every_undeclared_name_it_does_not_call(
     tmp_path: Path, formula: str, inputs: set[str], refusal: str
 ) -> None:
     root = canonical_root(tmp_path)
@@ -1138,11 +1139,15 @@ def test_long_and_deep_formulas_keep_their_names(formula: str, inputs: set[str])
 
 def test_a_formula_nested_past_the_recursion_limit_counts_every_undeclared_name() -> None:
     # The parser gives up where Python's stack ends, not where the engine's does,
-    # so this counts `len` and `s` where a shallower formula counts neither.
-    formula = "(" * 4_000 + "len(s)" + ")" * 4_000
-    rules = [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+    # so this counts `s` where a shallower formula counts nothing.
+    def inputs(depth: int) -> set[str]:
+        formula = "(" * depth + "len(s)" + ")" * depth
+        return _infer_input_names(
+            [{"name": "r", "kind": "derived", "versions": [{"formula": formula}]}]
+        )
 
-    assert _infer_input_names(rules) == {"len", "s"}
+    assert inputs(50) == set()
+    assert inputs(4_000) == {"s"}
 
 
 @needs_dense
@@ -1187,6 +1192,25 @@ def test_top_level_formula_reads_like_a_version() -> None:
     ]
 
     assert _infer_input_names(rules) == {"wages"}
+
+
+@needs_dense
+def test_an_import_may_name_one_rule_of_its_module(tmp_path: Path) -> None:
+    # `resolve_import_target` in src/rulespec.rs takes one `#fragment` with no `/`.
+    root = canonical_root(tmp_path)
+    write_rate_table_module(root)
+    formulas = {"called": "rate_table[2] * 2"}
+
+    path = write_formula_module(root, formulas, imports=[f"{RATE_TABLE_MODULE}#rate_table"])
+    program = CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+    assert inferred_input_names(root) == set()
+    assert dense_inputs(program) == set()
+
+    path = write_formula_module(root, formulas, imports=[f"{RATE_TABLE_MODULE}#a/b"])
+    with pytest.raises(ValueError, match="import"):
+        CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+    with pytest.raises(ValueError, match="exact absolute canonical atomic targets"):
+        discover_concepts([root])
 
 
 def test_every_discovered_concept_id_validates(tmp_path: Path) -> None:
@@ -1383,7 +1407,11 @@ def test_concepts_reject_yml_wrong_country_and_missing_explicit_root(
             "exact absolute canonical atomic targets",
         ),
         (
-            "format: rulespec/v1\nimports: ['us:policies/base#rate']\nrules: []",
+            "format: rulespec/v1\nimports: ['us:policies/base#rate/year']\nrules: []",
+            "exact absolute canonical atomic targets",
+        ),
+        (
+            "format: rulespec/v1\nimports: ['us:policies/base#a#b']\nrules: []",
             "exact absolute canonical atomic targets",
         ),
         (

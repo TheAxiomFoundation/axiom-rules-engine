@@ -579,7 +579,7 @@ def _infer_input_names(rules: Any) -> set[str]:
 
     This module's own rules are all it knows, so a name only an imported module
     declares counts as an input. A formula the parser refuses has no reads to
-    follow, so every undeclared name in it counts.
+    follow, so every undeclared name it does not call counts.
     """
     if not isinstance(rules, list):
         return set()
@@ -675,8 +675,11 @@ def _formula_inputs(
             pass
     return {
         token
-        for token in formula.tokens
-        if _is_name(token) and token not in declared and token not in scope.terms
+        for token, following in zip(formula.tokens, [*formula.tokens[1:], ""])
+        if following != "("
+        and _is_name(token)
+        and token not in declared
+        and token not in scope.terms
     }
 
 
@@ -1168,9 +1171,11 @@ def _has_executable_formula(rule: dict[str, Any]) -> bool:
 
 def _is_canonical_import(target: str) -> bool:
     match = CONCEPT_ID_RE.fullmatch(target)
+    # `resolve_import_target` in src/rulespec.rs takes one `#fragment`, with no
+    # `/` in it, though a concept ID's fragment may hold one.
     if (
         match is None
-        or match["fragment"] is not None
+        or "/" in (match["fragment"] or "")
         or any(character.isspace() for character in target)
     ):
         return False
