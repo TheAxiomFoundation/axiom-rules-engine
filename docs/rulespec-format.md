@@ -532,8 +532,8 @@ The bound exists because every stage walks a formula's tree recursively.
 Before it, a formula nested a few thousand levels deep overflowed the stack,
 which aborts the process instead of returning an error. At the bound a
 release build compiles and evaluates a formula in every mode on a 1 MiB
-thread; CI's release stack tests check that on every change. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
-levels.
+thread; CI's release stack tests check that on every change. The deepest
+formula in the RuleSpec corpora on 2026-10-10 needs 76 levels.
 
 A program can also arrive as JSON: a compiled artifact, or a request with an
 inline program. Its expressions never pass the parser, so they are checked
