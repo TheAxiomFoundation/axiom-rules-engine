@@ -35,35 +35,7 @@ observations; it requires an artifact whose public input and output IDs match.
 `integer` takes signed 64-bit integers; `bool`, `text`, and `date` take booleans,
 strings, and ISO date strings. Nulls, floating-point numbers, duplicate JSON
 keys, and unknown fields are refused. Declared optional input defaults still
-use the engine's existing `InputOrElse` semantics; missing root inputs fail when
-an evaluated expression reads them.
-
-Dense and lifetime root scalar conditionals evaluate each branch only for the
-rows selecting it. An input used only by a wholly unselected branch can be
-absent in that observation. For example, a history formula
-can index earlier amounts with a denominator while carrying later amounts
-unchanged, without supplying a denominator for those later observations.
-The condition still evaluates normally; `holds` selects the then branch and
-all other judgment outcomes select the else branch, as before. `InputOrElse`
-retains its default at that reference; a selected ordinary input reference to
-the same absent column still fails. Supplied columns must have valid lengths
-even when no expression reads them.
-
-Mixed-row conditions use separate selected-row batches and caches, then restore
-the original row order. An outer lifetime condition preserves every observation
-of its selected entities, including the invariance checks for reduced top-N
-counts. Arithmetic errors in unselected rows do not reject the selected results;
-a missing column or an arithmetic error needed by any selected row still fails.
-Empty batches keep their existing two-branch evaluation and type resolution.
-Related-input and relation binding is unchanged. Root branch selection retains
-each selected parent's complete related ranges, but conditionals *inside* a
-related-row expression and logical And/Or expressions retain their existing
-eager evaluation. Input parsing and binding validation still apply to supplied
-columns; inactive rows do not make malformed or type-invalid wire values valid.
-A uniform conditional returns the selected branch's native column type without inspecting
-the other branch's dtype; mixed and empty batches retain existing type promotion
-and compatibility checks. The lifetime wire contract still widens Integer
-results declared Decimal exactly and rejects other output dtype mismatches.
+use the engine's existing `InputOrElse` semantics; missing required inputs fail.
 
 Every batch must contain the same unique, nonempty string `entity_ids` in the
 same order. Each input column length equals `row_count`. These IDs declare row
