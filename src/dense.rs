@@ -2,8 +2,9 @@
 // uses the checked helpers in engine.rs instead (see clippy.toml).
 #![deny(clippy::arithmetic_side_effects)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -15,7 +16,10 @@ use crate::engine::{
     ArithmeticError, EvalError, checked_add, checked_div, checked_mul, checked_sub,
     decimal_tie_prefers, extreme_value_type_error, relation_member_outside_derived_relation,
 };
-use crate::lazy::{RowErrors, RowMask, copied_rows, filled_rows, row_buffer};
+use crate::lazy::{
+    Quoted, QuotedError, QuotedValue, RowError, RowErrors, RowMask, copied_rows, filled_rows,
+    row_buffer,
+};
 use crate::model::{
     ComparisonOp, DType, Derived, DerivedSemantics, Extreme, IndexedParameter, JudgmentExpr,
     JudgmentOutcome, OverPeriodsKind, Period, Program, RelatedValueRef, Rounding, RoundingMode,
@@ -34,7 +38,11 @@ pub enum DenseColumn {
     /// f64 column for the fast (`execute_f64`) execution mode. Decimal mode
     /// also accepts these as inputs, converting losslessly where possible.
     Float(Vec<f64>),
-    Text(Vec<String>),
+    /// One shared text per row. Rows holding the same value share one
+    /// allocation: dense fills a text column by cloning the `Arc`, never the
+    /// text, so a broadcast, projection, lookup or read costs a pointer a row
+    /// however long the text is.
+    Text(Vec<Arc<str>>),
     Date(Vec<chrono::NaiveDate>),
 }
 
@@ -59,7 +67,7 @@ impl DenseColumn {
             (Self::Float(values), _) => {
                 ScalarValue::Decimal(Decimal::from_f64(values[index]).unwrap_or_default())
             }
-            (Self::Text(values), _) => ScalarValue::Text(values[index].clone()),
+            (Self::Text(values), _) => ScalarValue::Text(values[index].to_string()),
             (Self::Date(values), _) => ScalarValue::Date(values[index]),
         }
     }
@@ -365,6 +373,7 @@ const WIDEST_DENSE_ELEMENT: usize = {
         size_of::<usize>(),
         size_of::<Decimal>(),
         size_of::<String>(),
+        size_of::<Arc<str>>(),
         size_of::<NaiveDate>(),
         size_of::<JudgmentOutcome>(),
         size_of::<ScalarValue>(),
@@ -463,13 +472,36 @@ pub enum DenseCompileError {
     },
 }
 
+/// A literal as dense holds it: a text is shared, built once at compile time,
+/// so broadcasting it to every row clones a pointer, not the text.
+#[derive(Clone, Debug)]
+enum DenseLiteral {
+    Bool(bool),
+    Integer(i64),
+    Decimal(Decimal),
+    Text(Arc<str>),
+    Date(NaiveDate),
+}
+
+impl From<&ScalarValue> for DenseLiteral {
+    fn from(value: &ScalarValue) -> Self {
+        match value {
+            ScalarValue::Bool(value) => Self::Bool(*value),
+            ScalarValue::Integer(value) => Self::Integer(*value),
+            ScalarValue::Decimal(value) => Self::Decimal(*value),
+            ScalarValue::Text(value) => Self::Text(Arc::from(value.as_str())),
+            ScalarValue::Date(value) => Self::Date(*value),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum CompiledScalarExpr {
-    Literal(ScalarValue),
+    Literal(DenseLiteral),
     Input(usize),
     InputOrElse {
         input: usize,
-        default: ScalarValue,
+        default: DenseLiteral,
     },
     Derived(usize),
     /// Commencement of a rule inlined on the current-record axis.
@@ -572,11 +604,11 @@ enum CompiledScalarExpr {
 
 #[derive(Clone, Debug)]
 enum CompiledRelatedScalarExpr {
-    Literal(ScalarValue),
+    Literal(DenseLiteral),
     Input(usize),
     InputOrElse {
         input: usize,
-        default: ScalarValue,
+        default: DenseLiteral,
     },
     RootScalar(Box<CompiledScalarExpr>),
     /// An inlined dependency has its own commencement, independently of the
@@ -651,19 +683,45 @@ struct MatchLabels {
     /// aggregation that reads them, so the name is fixed here. It is empty for
     /// a `match` directly in a derived relation's membership predicate, which
     /// the rule that evaluates the relation names.
-    rule: String,
-    subject: String,
-    patterns: String,
+    ///
+    /// Each label is shared: a subject or pattern can quote a long text
+    /// literal, and a failing row's error refers to the labels rather than
+    /// copying them.
+    rule: Arc<str>,
+    subject: Arc<str>,
+    patterns: Arc<str>,
 }
 
 impl MatchLabels {
-    /// Explain's error for the row whose subject value is at `row` of `subject`.
-    fn failure(&self, subject: &DenseColumn, row: usize) -> EvalError {
-        EvalError::NoMatchingArm {
-            rule: self.rule.clone(),
-            subject: self.subject.clone(),
-            value: dense_value_label(subject, row),
-            patterns: self.patterns.clone(),
+    /// Record explain's error on each row of `rows`, whose subject value is
+    /// at that row of `subject`. The error quotes the value without copying
+    /// it, and consecutive rows failing on the same value share one error.
+    fn record_failures(&self, subject: &DenseColumn, rows: &RowMask, errors: &mut RowErrors) {
+        let mut last: Option<Rc<Quoted>> = None;
+        for row in rows.rows() {
+            let value = quoted_value(subject, row);
+            let shared = match &last {
+                Some(quoted)
+                    if matches!(&quoted.error, QuotedError::NoMatchingArm { value: previous, .. }
+                        if previous.same(&value)) =>
+                {
+                    Rc::clone(quoted)
+                }
+                _ => {
+                    let quoted = Rc::new(Quoted {
+                        rows: subject.len(),
+                        error: QuotedError::NoMatchingArm {
+                            rule: Arc::clone(&self.rule),
+                            subject: Arc::clone(&self.subject),
+                            value,
+                            patterns: Arc::clone(&self.patterns),
+                        },
+                    });
+                    last = Some(Rc::clone(&quoted));
+                    quoted
+                }
+            };
+            errors.record_error(row, RowError::Quoted(shared));
         }
     }
 }
@@ -848,6 +906,32 @@ struct CompiledDerived {
 #[derive(Clone, Debug)]
 struct CompiledParameter {
     parameter: IndexedParameter,
+    /// Each version's text values by key, in `parameter.versions` order,
+    /// shared at compile time so a lookup clones a pointer, not the text.
+    texts: Vec<BTreeMap<i64, Arc<str>>>,
+}
+
+impl CompiledParameter {
+    fn new(parameter: &IndexedParameter) -> Self {
+        let texts = parameter
+            .versions
+            .iter()
+            .map(|version| {
+                version
+                    .values
+                    .iter()
+                    .filter_map(|(key, value)| match value {
+                        ScalarValue::Text(text) => Some((*key, Arc::from(text.as_str()))),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            parameter: parameter.clone(),
+            texts,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1861,13 +1945,15 @@ impl<'a> DenseCompiler<'a> {
         patterns: &[ScalarExpr],
     ) -> MatchLabels {
         MatchLabels {
-            rule: self.rule_label(rule),
-            subject: crate::engine::describe_match_operand(subject),
-            patterns: patterns
-                .iter()
-                .map(crate::engine::describe_match_operand)
-                .collect::<Vec<_>>()
-                .join(", "),
+            rule: Arc::from(self.rule_label(rule)),
+            subject: Arc::from(crate::engine::describe_match_operand(subject)),
+            patterns: Arc::from(
+                patterns
+                    .iter()
+                    .map(crate::engine::describe_match_operand)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
         }
     }
 
@@ -2032,7 +2118,7 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
                 Err(relation_role_unsupported(*term, name).into())
             }
-            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.into())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
             )
@@ -2040,7 +2126,7 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),
-                default: default.clone(),
+                default: default.into(),
             }),
             ScalarExpr::Derived(name) => {
                 let dependency = self.program.derived.get(name).ok_or_else(|| {
@@ -2498,7 +2584,7 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
                 Err(relation_role_unsupported(*term, name))
             }
-            ScalarExpr::Literal(value) => Ok(CompiledRelatedScalarExpr::Literal(value.clone())),
+            ScalarExpr::Literal(value) => Ok(CompiledRelatedScalarExpr::Literal(value.into())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
             )
@@ -2511,7 +2597,7 @@ impl<'a> DenseCompiler<'a> {
                 let input_index = self.related_input(relation_index, name);
                 Ok(CompiledRelatedScalarExpr::InputOrElse {
                     input: input_index,
-                    default: default.clone(),
+                    default: default.into(),
                 })
             }
             ScalarExpr::Derived(name) => {
@@ -2717,7 +2803,7 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
                 Err(relation_role_unsupported(*term, name))
             }
-            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.into())),
             ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
                 "selected-year input requires period-aware Explain execution".into(),
             )
@@ -2725,7 +2811,7 @@ impl<'a> DenseCompiler<'a> {
             ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
             ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
                 input: self.root_input(name),
-                default: default.clone(),
+                default: default.into(),
             }),
             ScalarExpr::Derived(name) => {
                 let dependency = self.program.derived.get(name).ok_or_else(|| {
@@ -3212,9 +3298,7 @@ impl<'a> DenseCompiler<'a> {
                 DenseCompileError::Unsupported(format!("unknown parameter `{name}`"))
             })?;
         let index = self.parameters.len();
-        self.parameters.push(CompiledParameter {
-            parameter: parameter.clone(),
-        });
+        self.parameters.push(CompiledParameter::new(parameter));
         self.parameter_index.insert(name.to_string(), index);
         Ok(index)
     }
@@ -3392,11 +3476,11 @@ fn merge_dense_rows<N: DenseNum>(
 ) -> Result<DenseColumn, EvalError> {
     Ok(match (existing, added) {
         (DenseColumn::Decimal(mut target), DenseColumn::Decimal(source)) => {
-            assign_rows(&mut target, &source, added_rows);
+            assign_rows(&mut target, source, added_rows);
             DenseColumn::Decimal(target)
         }
         (DenseColumn::Float(mut target), DenseColumn::Float(source)) => {
-            assign_rows(&mut target, &source, added_rows);
+            assign_rows(&mut target, source, added_rows);
             DenseColumn::Float(target)
         }
         (existing, added) => {
@@ -3478,7 +3562,7 @@ fn not_commenced_errors(mask: &RowMask, not_commenced: Option<&EvalError>) -> Ro
 /// The request's error: the lowest failing row, and for that row the first
 /// failing output in request order, as the explain path reports it.
 fn first_row_error<'e>(outputs: impl Iterator<Item = &'e RowErrors>) -> Result<(), EvalError> {
-    let mut first: Option<(usize, &EvalError)> = None;
+    let mut first: Option<(usize, &RowError)> = None;
     for errors in outputs {
         if let Some((row, error)) = errors.first()
             && first.is_none_or(|(best, _)| row < best)
@@ -3487,7 +3571,9 @@ fn first_row_error<'e>(outputs: impl Iterator<Item = &'e RowErrors>) -> Result<(
         }
     }
     match first {
-        Some((_, error)) => Err(error.clone()),
+        // A quoted error's message is built only here, for the one error
+        // reported, and fallibly.
+        Some((_, error)) => Err(error.to_eval()),
         None => Ok(()),
     }
 }
@@ -4133,7 +4219,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let (keys, mut errors) = self.eval_scalar_expr(index, mask)?;
                 let live = mask.without(&errors)?;
                 let column = lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
+                    &self.program.parameters[*parameter],
                     &keys,
                     &live,
                     self.period,
@@ -4251,9 +4337,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let (placeholder, _) =
                     self.eval_scalar_expr(placeholder, &RowMask::none(mask.len()))?;
                 let (subject, mut errors) = self.eval_scalar_expr(subject, mask)?;
-                for row in mask.without(&errors)?.rows() {
-                    errors.record(row, labels.failure(&subject, row));
-                }
+                labels.record_failures(&subject, &mask.without(&errors)?, &mut errors);
                 Ok((placeholder, errors))
             }
             CompiledScalarExpr::If {
@@ -4326,7 +4410,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let owners = &self.batch.relations[relation].owners;
         let mut errors = RowErrors::new();
         for (related, error) in related_errors.iter() {
-            errors.record(owners[related], error.clone());
+            errors.record_error(owners[related], error.clone());
         }
         errors
     }
@@ -4345,7 +4429,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let owners = &self.batch.relations[relation].owners;
         for related in related.rows() {
             if let Some(error) = root_errors.get(owners[related]) {
-                errors.record(related, error.clone());
+                errors.record_error(related, error.clone());
             }
         }
         errors
@@ -4556,7 +4640,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         let mut failures = related_errors.iter().peekable();
         for related in live.rows() {
             while let Some((failed, error)) = failures.next_if(|(failed, _)| *failed < related) {
-                stopped.record(owners[failed], error.clone());
+                stopped.record_error(owners[failed], error.clone());
             }
             let owner = owners[related];
             if errors.contains(owner) || stopped.contains(owner) {
@@ -4568,7 +4652,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
             }
         }
         for (failed, error) in failures {
-            stopped.record(owners[failed], error.clone());
+            stopped.record_error(owners[failed], error.clone());
         }
         errors.absorb(stopped);
         Ok((N::into_column(totals), errors))
@@ -4627,7 +4711,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
         // No member's value can fail the comparison itself, so that order is
         // the whole of explain's.
         for (failed, error) in related_errors.iter() {
-            errors.record(owners[failed], error.clone());
+            errors.record_error(owners[failed], error.clone());
         }
         let live = live.without(&related_errors)?;
         for related in live.rows() {
@@ -4876,7 +4960,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let (keys, mut errors) = self.resolve_related_scalar(relation, index, mask)?;
                 let live = mask.without(&errors)?;
                 let column = lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
+                    &self.program.parameters[*parameter],
                     &keys,
                     &live,
                     self.period,
@@ -5023,9 +5107,7 @@ impl<'a, N: DenseNum> DenseExecutor<'a, N> {
                 let (placeholder, _) =
                     self.resolve_related_scalar(relation, placeholder, &RowMask::none(mask.len()))?;
                 let (subject, mut errors) = self.resolve_related_scalar(relation, subject, mask)?;
-                for related in mask.without(&errors)?.rows() {
-                    errors.record(related, labels.failure(&subject, related));
-                }
+                labels.record_failures(&subject, &mask.without(&errors)?, &mut errors);
                 Ok((placeholder, errors))
             }
             CompiledRelatedScalarExpr::If {
@@ -5359,7 +5441,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let (keys, mut errors) = self.eval_scalar(index, mask)?;
                 let live = mask.without(&errors)?;
                 let column = lookup_parameter_dense::<N>(
-                    &self.program.parameters[*parameter].parameter,
+                    &self.program.parameters[*parameter],
                     &keys,
                     &live,
                     self.period_executors[self.reference_period].period,
@@ -5400,9 +5482,7 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             } => {
                 let (placeholder, _) = self.eval_scalar(placeholder, &RowMask::none(mask.len()))?;
                 let (subject, mut errors) = self.eval_scalar(subject, mask)?;
-                for row in mask.without(&errors)?.rows() {
-                    errors.record(row, labels.failure(&subject, row));
-                }
+                labels.record_failures(&subject, &mask.without(&errors)?, &mut errors);
                 Ok((placeholder, errors))
             }
             CompiledScalarExpr::If {
@@ -5753,20 +5833,36 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         let (first, rest) = per_period
             .split_first()
             .expect("lifetime execution guarantees at least one period");
+        let input: Arc<str> = Arc::from(input_name);
+        let first_period: Arc<str> = Arc::from(period_label(self.period_executors[0].period));
         for (offset, column) in rest.iter().enumerate() {
+            // `offset` indexes `rest`, so the diverging period is `offset + 1`.
+            let second_period: Arc<str> =
+                Arc::from(period_label(self.period_executors[offset + 1].period));
+            let mut last: Option<Rc<Quoted>> = None;
             for row in live.rows() {
                 if !errors.contains(row) && values_differ(first, column, row) {
-                    // `offset` indexes `rest`, so the diverging period is `offset + 1`.
-                    errors.record(
-                        row,
-                        EvalError::LifetimePeriodVaryingInput {
-                            input: input_name.to_string(),
-                            first_period: period_label(self.period_executors[0].period),
-                            first_value: dense_value_label(first, row),
-                            second_period: period_label(self.period_executors[offset + 1].period),
-                            second_value: dense_value_label(column, row),
+                    // The error quotes both values without copying them;
+                    // consecutive rows with the same pair share it.
+                    let quoted = Quoted {
+                        rows: self.row_count,
+                        error: QuotedError::LifetimePeriodVaryingInput {
+                            input: Arc::clone(&input),
+                            first_period: Arc::clone(&first_period),
+                            first_value: quoted_value(first, row),
+                            second_period: Arc::clone(&second_period),
+                            second_value: quoted_value(column, row),
                         },
-                    );
+                    };
+                    let shared = match &last {
+                        Some(previous) if previous.same(&quoted) => Rc::clone(previous),
+                        _ => {
+                            let shared = Rc::new(quoted);
+                            last = Some(Rc::clone(&shared));
+                            shared
+                        }
+                    };
+                    errors.record_error(row, RowError::Quoted(shared));
                 }
             }
         }
@@ -5821,6 +5917,17 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
 /// match how periods are otherwise surfaced to callers.
 fn period_label(period: &Period) -> String {
     format!("in {}..{}", period.start, period.end)
+}
+
+/// The value at `row` of a dense column as an error quotes it: a text shared,
+/// anything else as its label.
+fn quoted_value(column: &DenseColumn, row: usize) -> QuotedValue {
+    match column {
+        DenseColumn::Text(values) if row < values.len() => {
+            QuotedValue::Text(Arc::clone(&values[row]))
+        }
+        _ => QuotedValue::Label(dense_value_label(column, row)),
+    }
 }
 
 /// Format the value at `row` of a dense column for an error message, in the
@@ -6151,15 +6258,18 @@ fn f64_as_index(value: f64) -> Option<i64> {
 }
 
 fn broadcast_scalar_literal<N: DenseNum>(
-    value: &ScalarValue,
+    value: &DenseLiteral,
     length: usize,
 ) -> Result<DenseColumn, EvalError> {
     Ok(match value {
-        ScalarValue::Bool(value) => DenseColumn::Bool(filled_rows(length, *value)?),
-        ScalarValue::Integer(value) => DenseColumn::Integer(filled_rows(length, *value)?),
-        ScalarValue::Decimal(value) => N::into_column(filled_rows(length, N::from_decimal(value))?),
-        ScalarValue::Text(value) => DenseColumn::Text(filled_rows(length, value.clone())?),
-        ScalarValue::Date(value) => DenseColumn::Date(filled_rows(length, *value)?),
+        DenseLiteral::Bool(value) => DenseColumn::Bool(filled_rows(length, *value)?),
+        DenseLiteral::Integer(value) => DenseColumn::Integer(filled_rows(length, *value)?),
+        DenseLiteral::Decimal(value) => {
+            N::into_column(filled_rows(length, N::from_decimal(value))?)
+        }
+        // Each row shares the compiled literal's text.
+        DenseLiteral::Text(value) => DenseColumn::Text(filled_rows(length, Arc::clone(value))?),
+        DenseLiteral::Date(value) => DenseColumn::Date(filled_rows(length, *value)?),
     })
 }
 
@@ -6174,6 +6284,12 @@ fn copy_column(column: &DenseColumn) -> Result<DenseColumn, EvalError> {
         DenseColumn::Text(values) => DenseColumn::Text(copied_rows(values)?),
         DenseColumn::Date(values) => DenseColumn::Date(copied_rows(values)?),
     })
+}
+
+/// The text a row holds before it is filled: one shared empty text, so a
+/// placeholder column costs a pointer a row.
+fn empty_text() -> Arc<str> {
+    Arc::from("")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -6208,18 +6324,22 @@ fn table_kind(values: &std::collections::BTreeMap<i64, ScalarValue>) -> TableKin
 /// Look up `parameter` at `period` for the live rows' keys. A non-integral
 /// key and a missing cell fail their row, as on the explain path.
 fn lookup_parameter_dense<N: DenseNum>(
-    parameter: &IndexedParameter,
+    compiled: &CompiledParameter,
     keys: &DenseColumn,
     live: &RowMask,
     period: &Period,
     errors: &mut RowErrors,
 ) -> Result<DenseColumn, EvalError> {
+    let parameter = &compiled.parameter;
     let len = keys.len();
-    let version = parameter
+    let selected = parameter
         .versions
         .iter()
-        .filter(|version| version.applies_at(period.start))
-        .max_by_key(|version| version.effective_from);
+        .enumerate()
+        .filter(|(_, version)| version.applies_at(period.start))
+        .max_by_key(|(_, version)| version.effective_from);
+    let version = selected.map(|(_, version)| version);
+    let texts = selected.map(|(index, _)| &compiled.texts[index]);
     let lookup = |row: usize| -> Result<&ScalarValue, EvalError> {
         let Some(key) = index_at(keys, row) else {
             return Err(EvalError::TypeMismatch(format!(
@@ -6262,10 +6382,17 @@ fn lookup_parameter_dense<N: DenseNum>(
                 DenseColumn::Bool(values)
             }
             TableKind::Text => {
-                let mut values = filled_rows(len, String::new())?;
+                let mut values = filled_rows(len, empty_text())?;
                 for row in live.rows() {
                     match lookup(row) {
-                        Ok(ScalarValue::Text(value)) => values[row] = value.clone(),
+                        // The compiled table's shared text for the same key.
+                        Ok(ScalarValue::Text(_)) => {
+                            if let Some(text) = index_at(keys, row)
+                                .and_then(|key| texts.and_then(|texts| texts.get(&key)))
+                            {
+                                values[row] = Arc::clone(text);
+                            }
+                        }
                         Ok(_) => {}
                         Err(error) => errors.record(row, error),
                     }
@@ -6380,7 +6507,7 @@ fn gather_to_owners(
             DenseColumn::Float(gather(values, 0.0, owners, rows, row_count)?)
         }
         DenseColumn::Text(values) => {
-            DenseColumn::Text(gather(values, String::new(), owners, rows, row_count)?)
+            DenseColumn::Text(gather(values, empty_text(), owners, rows, row_count)?)
         }
         DenseColumn::Date(values) => DenseColumn::Date(gather(
             values,
@@ -6392,9 +6519,12 @@ fn gather_to_owners(
     })
 }
 
-fn assign_rows<T: Clone>(target: &mut [T], source: &[T], rows: &RowMask) {
+/// Move `source`'s values on `rows` into `target`. Each value moves rather
+/// than being cloned, so a text row hands over its `Arc` without touching the
+/// count, and no value is copied.
+fn assign_rows<T>(target: &mut [T], mut source: Vec<T>, rows: &RowMask) {
     for row in rows.rows() {
-        target[row] = source[row].clone();
+        std::mem::swap(&mut target[row], &mut source[row]);
     }
 }
 
@@ -6414,25 +6544,25 @@ fn select_dense<N: DenseNum>(
 ) -> Result<DenseColumn, EvalError> {
     Ok(match (then_values, else_values) {
         (DenseColumn::Bool(mut target), DenseColumn::Bool(source)) => {
-            assign_rows(&mut target, &source, else_rows);
+            assign_rows(&mut target, source, else_rows);
             DenseColumn::Bool(target)
         }
         (DenseColumn::Integer(mut target), DenseColumn::Integer(source)) => {
-            assign_rows(&mut target, &source, else_rows);
+            assign_rows(&mut target, source, else_rows);
             DenseColumn::Integer(target)
         }
         (DenseColumn::Text(mut target), DenseColumn::Text(source)) => {
-            assign_rows(&mut target, &source, else_rows);
+            assign_rows(&mut target, source, else_rows);
             DenseColumn::Text(target)
         }
         (DenseColumn::Date(mut target), DenseColumn::Date(source)) => {
-            assign_rows(&mut target, &source, else_rows);
+            assign_rows(&mut target, source, else_rows);
             DenseColumn::Date(target)
         }
         (then_values, else_values) if is_numeric(&then_values) && is_numeric(&else_values) => {
             let mut numbers = numeric_values::<N>(&then_values, then_rows, errors)?;
             let others = numeric_values::<N>(&else_values, else_rows, errors)?;
-            assign_rows(&mut numbers, &others, else_rows);
+            assign_rows(&mut numbers, others, else_rows);
             N::into_column(numbers)
         }
         (then_values, else_values) => {

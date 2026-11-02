@@ -3255,9 +3255,9 @@ fn child_benefit_dense_batch(cases: &[ChildBenefitCase]) -> DenseBatchSpec {
         cursor += case.cb_recipients.len();
         offsets.push(cursor);
         cb_claim_count.push(case.cb_claim_count);
-        cb_recipient_id.push(case.cb_recipient_id.clone());
-        sole_claimant_id.push(case.sole_claimant_id.clone());
-        usual_resident_id.push(case.usual_resident_id.clone());
+        cb_recipient_id.push(case.cb_recipient_id.as_str().into());
+        sole_claimant_id.push(case.sole_claimant_id.as_str().into());
+        usual_resident_id.push(case.usual_resident_id.as_str().into());
     }
 
     DenseBatchSpec {
