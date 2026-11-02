@@ -1108,5 +1108,61 @@ fn compile_deferral_leaves_each_body_with_the_reads_of_the_program() {
         };
         assert_eq!(counts(usize::MAX), vec![1]);
         assert_eq!(counts(1), vec![1]);
+
+        // A nested diamond read before a rule that defers: `total` reads
+        // `p{depth}`'s body, whose compile reads the bodies below it, and then
+        // `offset`, which defers. The retry shares `p{depth}`'s body; the
+        // bodies nested in it keep the reads its compile made. (Taking those
+        // back too left them below 2, so evaluation walked the diamond once
+        // per path again.)
+        let nested = |depth: usize| {
+            let mut rules = scalar_diamond("p", "Person", input("income"), depth);
+            rules.push(scalar_rule("offset", "Scalar", integer(1)));
+            rules.push(scalar_rule(
+                "total",
+                "Household",
+                add(vec![
+                    sum("member", &format!("p{depth}"), None),
+                    derived("offset"),
+                ]),
+            ));
+            self::program(vec![member()], rules)
+        };
+        let counts = |program: &Value, levels| {
+            axiom_rules_engine::depth::with_suspend_depth(levels, || {
+                read_counts(&compile_dense(program).expect("dense compiles"))
+            })
+        };
+        let small = nested(2);
+        assert_eq!(counts(&small, usize::MAX), vec![1, 3, 3]);
+        assert_eq!(counts(&small, 1), vec![1, 3, 3]);
+        let deep = nested(18);
+        let recursive = counts(&deep, usize::MAX);
+        assert_eq!(counts(&deep, 1), recursive);
+        assert_eq!(recursive.iter().filter(|count| **count >= 2).count(), 18);
+
+        // The same at the default deferral threshold, with no test hook:
+        // `total` reads a depth-16 diamond and then `h0`, the head of a chain
+        // of 200 scalar-entity rules, which nests past the threshold, so
+        // compiling `total` defers.
+        let mut rules = vec![scalar_rule(
+            "total",
+            "Household",
+            add(vec![sum("member", "p16", None), derived("h0")]),
+        )];
+        rules.extend(scalar_diamond("p", "Person", input("income"), 16));
+        for link in 0..200 {
+            rules.push(scalar_rule(
+                &format!("h{link}"),
+                "Scalar",
+                add(vec![derived(&format!("h{}", link + 1)), integer(1)]),
+            ));
+        }
+        rules.push(scalar_rule("h200", "Scalar", integer(2)));
+        let chained = read_counts(
+            &compile_dense(&self::program(vec![member()], rules)).expect("dense compiles"),
+        );
+        assert_eq!(chained.len(), 17);
+        assert_eq!(chained.iter().filter(|count| **count >= 2).count(), 16);
     });
 }

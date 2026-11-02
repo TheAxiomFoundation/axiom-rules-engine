@@ -1848,9 +1848,11 @@ struct DenseCompiler<'a> {
     /// Each inlined body's index in the table its site and kind select.
     inline_index: HashMap<InlineSite, usize>,
     /// The reads of inlined bodies (each a `references` increment) made by
-    /// rules still compiling. A rule that finishes keeps its reads; when a
-    /// task defers, the reads of the rules it unwinds are taken back, since
-    /// the retry reads them again (see [`Self::compile_tasks`]).
+    /// rules and bodies still compiling. A rule that finishes keeps its
+    /// reads, and so does a body once it is recorded, since the retry shares
+    /// it rather than compiling it again. When a task defers, the reads still
+    /// here, those the unwound rules made themselves, are taken back, since
+    /// the retry makes them again (see [`Self::compile_tasks`]).
     inline_reads: Vec<(InlineTable, usize)>,
     /// Expression levels evaluated since compiling last reported them (see
     /// [`crate::depth::count_visits`]).
@@ -2004,9 +2006,10 @@ impl<'a> DenseCompiler<'a> {
             let target = tasks.last().cloned().unwrap_or_else(|| name.to_string());
             let compiled = self.compile_rule(&target);
             if let Err(CompileStop::Defer(_)) = compiled {
-                // The retry reads each body the unwound rules read again, and
-                // shares the bodies they compiled: take their reads back, so a
-                // body counts the reads of the compiled program.
+                // The retry makes again each read the unwound rules made
+                // themselves, and shares the bodies they compiled, whose own
+                // reads were kept when each was recorded: take back the
+                // former, so a body counts the reads of the compiled program.
                 for (table, index) in std::mem::take(&mut self.inline_reads) {
                     *self.inline_references(table, index) -= 1;
                 }
@@ -2182,10 +2185,16 @@ impl<'a> DenseCompiler<'a> {
         }
         let start = self.inline_depth;
         let outer_peak = std::mem::replace(&mut self.inline_peak, start);
+        let reads = self.inline_reads.len();
         let body = self.inline_rule(rule, compile);
         let height = self.inline_peak - start;
         self.inline_peak = outer_peak.max(self.inline_peak);
         let body = body?;
+        // The body is recorded for good, and its nodes are final: it keeps
+        // the reads its compile made, as a finished rule does (see
+        // `compile_rule`). A deferral that unwinds its reader takes back only
+        // the reader's own read of it, which the retry makes again.
+        self.inline_reads.truncate(reads);
         let table_entries = bodies(self);
         let index = table_entries.len();
         table_entries.push(InlineBody {
