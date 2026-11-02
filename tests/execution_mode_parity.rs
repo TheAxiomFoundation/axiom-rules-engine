@@ -8,7 +8,11 @@
 //! explain returns, value kinds and errors included, or decline and fall back to
 //! explain. Dense (`src/dense.rs`) must hold explain's value on every row and
 //! fail exactly when explain fails for some row, within its documented
-//! representation limits.
+//! representation limits. Dense compiled for a case's requested outputs alone
+//! (#266) must give the whole-root program's exact outcome wherever the whole
+//! root compiles, explain's wherever it compiles itself, and the same outcome
+//! when the program also holds a rule the outputs do not reach that reads
+//! another entity's rule directly.
 //!
 //! The file has two halves.
 //!
@@ -3344,6 +3348,15 @@ fn spec_decimal(value: &ScalarValueSpec) -> Option<Decimal> {
 /// reaches (#197); `DenseCompiledProgram::from_program` takes a lowered
 /// program as given, as `Engine::new` does.
 fn compile_dense(program: &ProgramSpec) -> Result<(DenseCompiledProgram, Program), DenseOutcome> {
+    compile_dense_for(program, None)
+}
+
+/// [`compile_dense`] for every household rule, or, given `requested`, for
+/// those outputs and the rules they reach alone (#266).
+fn compile_dense_for(
+    program: &ProgramSpec,
+    requested: Option<&[String]>,
+) -> Result<(DenseCompiledProgram, Program), DenseOutcome> {
     let artifact = CompiledProgramArtifact::compile(program.clone()).map_err(|error| {
         DenseOutcome::Refused {
             key: compile_error_key(&error),
@@ -3355,13 +3368,28 @@ fn compile_dense(program: &ProgramSpec) -> Result<(DenseCompiledProgram, Program
         .program
         .to_program()
         .map_err(|error| unsupported(error.into()))?;
-    let dense =
-        DenseCompiledProgram::from_artifact(&artifact, Some(HOUSEHOLD)).map_err(unsupported)?;
+    let dense = match requested {
+        None => DenseCompiledProgram::from_artifact(&artifact, Some(HOUSEHOLD)),
+        Some(outputs) => {
+            DenseCompiledProgram::from_artifact_for_outputs(&artifact, Some(HOUSEHOLD), outputs)
+        }
+    }
+    .map_err(unsupported)?;
     Ok((dense, model))
 }
 
 fn run_dense(program: &ProgramSpec, batch: DenseBatchSpec, outputs: &[String]) -> DenseOutcome {
-    let (dense, model) = match compile_dense(program) {
+    run_dense_for(program, batch, outputs, None)
+}
+
+/// [`run_dense`] on the program [`compile_dense_for`] compiles.
+fn run_dense_for(
+    program: &ProgramSpec,
+    batch: DenseBatchSpec,
+    outputs: &[String],
+    requested: Option<&[String]>,
+) -> DenseOutcome {
+    let (dense, model) = match compile_dense_for(program, requested) {
         Ok(compiled) => compiled,
         Err(outcome) => return outcome,
     };
@@ -3439,6 +3467,107 @@ fn check_dense_order_independence(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// A household rule that reads a person rule directly, with no relation, and
+/// that no generated rule or query reaches: the shape that refused the 26 USC
+/// 32 program in #266. Dense refuses it wherever it compiles it.
+const UNREACHED_CROSSING: &str = "unreached_crossing";
+/// The person rule [`UNREACHED_CROSSING`] reads.
+const UNREACHED_PERSON_RULE: &str = "unreached_person_rule";
+
+/// `program` with [`UNREACHED_CROSSING`] and the person rule it reads.
+fn with_unreached_crossing(program: &ProgramSpec) -> ProgramSpec {
+    let mut program = program.clone();
+    program.derived.push(derived_spec(
+        UNREACHED_PERSON_RULE,
+        PERSON,
+        DTypeSpec::Decimal,
+        DerivedSemanticsSpec::Scalar { expr: dec_lit("1") },
+    ));
+    program.derived.push(derived_spec(
+        UNREACHED_CROSSING,
+        HOUSEHOLD,
+        DTypeSpec::Decimal,
+        DerivedSemanticsSpec::Scalar {
+            expr: derived(UNREACHED_PERSON_RULE),
+        },
+    ));
+    program
+}
+
+/// The dense program compiled for the requested outputs alone (#266),
+/// against the whole root and explain:
+///
+/// * wherever the whole root compiles, or the artifact compiler refuses the
+///   program, it gives exactly the whole root's outcome, messages included;
+/// * wherever it compiles, it holds explain's values and fails with explain's
+///   error variants, whatever the whole root does;
+/// * adding [`UNREACHED_CROSSING`] leaves its outcome unchanged, while the
+///   whole root refuses that program, naming the crossing when nothing else
+///   refuses it.
+fn check_requested_closure(
+    program: &ProgramSpec,
+    batch: &DenseBatchSpec,
+    outputs: &[String],
+    explain: &Outcome,
+    whole_root: &DenseOutcome,
+    stats: &mut Stats,
+) -> Result<(), String> {
+    if outputs.is_empty() {
+        // A request for nothing is refused before compiling anything.
+        return Ok(());
+    }
+    let requested = run_dense_for(program, batch.clone(), outputs, Some(outputs));
+    let ran = !matches!(
+        requested,
+        DenseOutcome::Unsupported(_) | DenseOutcome::Refused { .. }
+    );
+    if matches!(whole_root, DenseOutcome::Unsupported(_)) {
+        if ran {
+            stats.closure_compiled_where_whole_root_declined += 1;
+        }
+    } else {
+        let (whole, closure) = (render_dense(whole_root), render_dense(&requested));
+        if whole != closure {
+            return Err(format!(
+                "the requested closure's outcome differs from the whole root's:\n  whole root: {whole}\n  requested closure: {closure}"
+            ));
+        }
+        stats.closure_matched_whole_root += 1;
+    }
+    compare_dense(explain, &requested, outputs)
+        .map_err(|problem| format!("requested closure against explain: {problem}"))?;
+
+    let crossing = with_unreached_crossing(program);
+    let whole_with_crossing = run_dense_for(&crossing, batch.clone(), outputs, None);
+    let names_crossing =
+        format!("`{UNREACHED_PERSON_RULE}` from `{UNREACHED_CROSSING}` crosses into `{PERSON}`");
+    match (whole_root, &whole_with_crossing) {
+        (DenseOutcome::Refused { .. }, DenseOutcome::Refused { .. })
+        | (DenseOutcome::Unsupported(_), DenseOutcome::Unsupported(_)) => {}
+        (_, DenseOutcome::Unsupported(message)) if message.contains(&names_crossing) => {}
+        (_, other) => {
+            return Err(format!(
+                "the whole root holding {UNREACHED_CROSSING} must refuse it, got: {}",
+                render_dense(other)
+            ));
+        }
+    }
+    let requested_with_crossing = run_dense_for(&crossing, batch.clone(), outputs, Some(outputs));
+    let (closure, with_crossing) = (
+        render_dense(&requested),
+        render_dense(&requested_with_crossing),
+    );
+    if closure != with_crossing {
+        return Err(format!(
+            "{UNREACHED_CROSSING}, which no requested output reaches, changed the requested closure's outcome:\n  without it: {closure}\n  with it: {with_crossing}"
+        ));
+    }
+    if ran {
+        stats.closure_unchanged_by_unreached_crossing += 1;
     }
     Ok(())
 }
@@ -3912,6 +4041,17 @@ struct Stats {
     decisive_links: u32,
     /// Dense ran on a case with decisive links.
     dense_decisive_links: u32,
+    /// The whole root compiled (or the artifact compiler refused it), and the
+    /// program compiled for the requested outputs alone gave the same outcome
+    /// (see [`check_requested_closure`]).
+    closure_matched_whole_root: u32,
+    /// The dense compiler declined the whole root, but the program compiled
+    /// for the requested outputs alone compiled and ran.
+    closure_compiled_where_whole_root_declined: u32,
+    /// The program compiled for the requested outputs ran, and adding a rule
+    /// they do not reach that reads another entity's rule directly, which
+    /// refuses the whole root, left its outcome unchanged.
+    closure_unchanged_by_unreached_crossing: u32,
     /// Explain succeeded, and fixing every membership test in the derived
     /// relation's predicate to hold, or not to, changes its answer: a
     /// `relation_member` was evaluated where explain allows it, and decided an
@@ -3929,7 +4069,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {} / decisive links {}; relation_member errors {} / decisive memberships {} / decisive links {}; kind crossings {}; reference panics {}; divergences {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {} / decisive links {}; relation_member errors {} / decisive memberships {} / decisive links {}; kind crossings {}; reference panics {}; divergences {}; requested closures matching the whole root {} / compiled where it declined {} / unchanged by an unreached crossing {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -3950,7 +4090,10 @@ impl Stats {
             self.decisive_links,
             self.kind_crossings,
             self.reference_panics,
-            self.divergences
+            self.divergences,
+            self.closure_matched_whole_root,
+            self.closure_compiled_where_whole_root_declined,
+            self.closure_unchanged_by_unreached_crossing
         )
     }
 }
@@ -4655,6 +4798,9 @@ fn check_dense(case: &CaseG, profile: Profile, stats: &mut Stats) -> Result<(), 
     }
     compare_dense(&explain, &dense, &outputs)
         .and_then(|()| check_dense_order_independence(&lowered.program, &batch, &outputs))
+        .and_then(|()| {
+            check_requested_closure(&lowered.program, &batch, &outputs, &explain, &dense, stats)
+        })
         .map_err(|problem| {
             render_case(
                 profile,
@@ -4711,6 +4857,13 @@ fn random_programs_dense_matches_explain() {
                 0.0,
                 "refuse a relation-routed cycle as explain does",
             ),
+            // Issue #266: a rule the requested outputs do not reach must not
+            // refuse the program compiled for them.
+            (
+                stats.closure_compiled_where_whole_root_declined,
+                0.01,
+                "compile for the requested outputs alone where the whole root declined",
+            ),
         ] {
             assert!(
                 count > 0 && f64::from(count) >= share * cases,
@@ -4718,7 +4871,19 @@ fn random_programs_dense_matches_explain() {
                 stats.summary("dense")
             );
         }
+        assert_closure_exercised("dense", &stats);
     }
+}
+
+/// Every case dense ran was also run compiled for its requested outputs
+/// alone, and again with [`UNREACHED_CROSSING`] added.
+fn assert_closure_exercised(name: &str, stats: &Stats) {
+    assert!(
+        stats.closure_matched_whole_root >= stats.dense_ran
+            && stats.closure_unchanged_by_unreached_crossing >= stats.dense_ran,
+        "{name}: the requested closure was not checked on every case dense ran: {}",
+        stats.summary(name)
+    );
 }
 
 /// Dense must match explain on counts and sums over [`LINKED`], whose `where`
@@ -4745,6 +4910,7 @@ fn random_programs_dense_matches_explain_over_linked_households() {
             "linked-dense: too few cases run where household rules read for a linked household decide an output: {}",
             stats.summary("linked-dense")
         );
+        assert_closure_exercised("linked-dense", &stats);
     }
 }
 
@@ -4822,6 +4988,7 @@ fn random_programs_dense_matches_explain_on_related_extremes() {
             "the dense compiler declined too many generated programs: {}",
             stats.summary("dense-extremes")
         );
+        assert_closure_exercised("dense-extremes", &stats);
     }
 }
 
