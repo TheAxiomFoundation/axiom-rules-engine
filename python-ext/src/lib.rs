@@ -808,28 +808,6 @@ fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
             _ => {}
         }
     }
-    // A column is one-dimensional. The list fallbacks below would read a
-    // `(0, 2)` array, which iterates as no rows, as an empty column.
-    if let Ok(array) = value.cast::<PyUntypedArray>() {
-        if array.ndim() != 1 {
-            return Err(PyValueError::new_err(format!(
-                "dense columns must be one-dimensional, but this array has shape {:?}",
-                array.shape()
-            )));
-        }
-    }
-    // An empty array of any dtype converts as an empty list of anything, so
-    // the list fallbacks below would call it bool. Keep its numpy dtype.
-    if let Ok(array) = value.cast::<PyUntypedArray>()
-        && array.len() == 0
-    {
-        match array.dtype().kind() {
-            b'i' | b'u' => return Ok(DenseColumn::Integer(Vec::new())),
-            b'f' => return Ok(DenseColumn::Decimal(Vec::new())),
-            b'U' | b'S' => return Ok(DenseColumn::Text(Vec::new())),
-            _ => {}
-        }
-    }
     if let Ok(values) = value.extract::<Vec<bool>>() {
         return Ok(DenseColumn::Bool(values));
     }
