@@ -29,6 +29,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// A direction lowering cannot read from declared kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DirectionError {
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
     /// A same-kind relation read from an entity occupying more than one slot.
     Aggregate {
         relation: String,
@@ -61,8 +66,24 @@ struct Relations {
 
 /// `defaulted_slots` names the derived relations whose `current_slot` or
 /// `related_slot` the source left to the legacy default.
-pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<String>) -> Result<()> {
+pub(crate) fn resolve(
+    program: &mut ProgramSpec,
+    defaulted_slots: &HashSet<String>,
+    inputs: &serde_yaml::Value,
+    input_origin: Option<&str>,
+    imported_inputs: &[(Option<String>, serde_yaml::Value)],
+) -> Result<()> {
     let relations = relations(program);
+    let mut declaration_blocks: HashMap<Option<&str>, Vec<&serde_yaml::Value>> = HashMap::new();
+    for (origin, block) in std::iter::once((input_origin, inputs)).chain(
+        imported_inputs
+            .iter()
+            .map(|(origin, value)| (origin.as_deref(), value)),
+    ) {
+        if !block.is_null() {
+            declaration_blocks.entry(origin).or_default().push(block);
+        }
+    }
     let mut names = defaulted_slots.iter().collect::<Vec<_>>();
     names.sort();
     for name in names {
@@ -80,11 +101,22 @@ pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<Strin
             });
         }
     }
+    // Resolve predicates before stamping, recording the new constructs that
+    // require an original declaration. Legacy qualified reads alone retain
+    // their existing distinct-kind source stamping.
+    let mut atom_targets = HashSet::new();
+    let mut role_owners = HashSet::new();
     for rule in &mut program.derived {
         let citing = rule.id.clone().unwrap_or_else(|| rule.name.clone());
         let mut resolver = Resolver {
             relations: &relations,
+            atom_targets: &mut atom_targets,
+            uses_role_judgment: false,
             citing: &citing,
+            inputs: declaration_blocks
+                .get(&citing.split_once('#').map(|(origin, _)| origin))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         };
         resolver.semantics(&mut rule.semantics, &rule.entity)?;
         for version in &mut rule.versions {
@@ -107,6 +139,42 @@ pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<Strin
         };
         let current = kind(slots.current_slot);
         let related = kind(slots.related_slot);
+        let citing = relation.name.clone();
+        let mut resolver = Resolver {
+            relations: &relations,
+            atom_targets: &mut atom_targets,
+            uses_role_judgment: false,
+            citing: &citing,
+            inputs: declaration_blocks
+                .get(&citing.split_once('#').map(|(origin, _)| origin))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        };
+        resolver.judgment(
+            &mut derivation.predicate,
+            related.as_deref().unwrap_or(""),
+            Some((current.as_deref(), related.as_deref())),
+        )?;
+        if resolver.uses_role_judgment {
+            role_owners.insert(relation.name.clone());
+        }
+    }
+    for relation in &mut program.relations {
+        let Some(slots) = relations.derived.get(&relation.name) else {
+            continue;
+        };
+        let Some(derivation) = relation.derivation.as_mut() else {
+            continue;
+        };
+        // An atom target and an owner of an atom/comparison require declared
+        // kinds. Leave originally-untyped ones unstamped so mandatory typing
+        // can report their named refusal using the source declaration.
+        if relation.slot_entities.is_empty()
+            && derivation.slot_entities.is_empty()
+            && (atom_targets.contains(&relation.name) || role_owners.contains(&relation.name))
+        {
+            continue;
+        }
         // Runtimes route each rule a predicate reads by the derivation's own
         // kinds; with none, every rule runs on the related id. Stamp the
         // source's kinds so a rule of the current entity reads the current
@@ -114,24 +182,14 @@ pub(crate) fn resolve(program: &mut ProgramSpec, defaulted_slots: &HashSet<Strin
         // rule of that kind onto the current id.
         if derivation.slot_entities.is_empty()
             && let Some(kinds) = &slots.kinds
-            && current.is_some()
-            && current != related
+            && kinds.get(slots.current_slot).is_some()
+            && kinds.get(slots.current_slot) != kinds.get(slots.related_slot)
         {
             derivation.slot_entities = kinds.clone();
             if relation.slot_entities.is_empty() {
                 relation.slot_entities = kinds.clone();
             }
         }
-        let citing = relation.name.clone();
-        let mut resolver = Resolver {
-            relations: &relations,
-            citing: &citing,
-        };
-        resolver.judgment(
-            &mut derivation.predicate,
-            related.as_deref().unwrap_or(""),
-            Some((current.as_deref(), related.as_deref())),
-        )?;
     }
     Ok(())
 }
@@ -156,7 +214,12 @@ fn relations(program: &ProgramSpec) -> Relations {
                         ChainStep::End(Some(derivation.slot_entities.as_slice()))
                     }
                     Some(derivation) if relation.slot_entities.is_empty() => {
-                        ChainStep::Next(&derivation.source_relation)
+                        match derivation.source_relation.as_deref() {
+                            Some(source) if derivation.source_path.is_none() => {
+                                ChainStep::Next(source)
+                            }
+                            _ => ChainStep::End(None),
+                        }
                     }
                     _ => ChainStep::End(
                         (!relation.slot_entities.is_empty())
@@ -213,7 +276,10 @@ fn relations(program: &ProgramSpec) -> Relations {
 
 struct Resolver<'a> {
     relations: &'a Relations,
+    atom_targets: &'a mut HashSet<String>,
+    uses_role_judgment: bool,
     citing: &'a str,
+    inputs: &'a [&'a serde_yaml::Value],
 }
 
 type Result<T> = std::result::Result<T, DirectionError>;
@@ -226,6 +292,48 @@ type Result<T> = std::result::Result<T, DirectionError>;
 type Membership<'a> = Option<(Option<&'a str>, Option<&'a str>)>;
 
 impl Resolver<'_> {
+    fn only_related_input(&self, name: &str, owner: &str) -> Result<()> {
+        let fail = |message: &str| DirectionError::OnlyRelatedInput {
+            citing: self.citing.into(),
+            input: name.into(),
+            message: message.into(),
+        };
+        let mut matches = Vec::new();
+        for block in self.inputs {
+            if block.is_null() {
+                continue;
+            }
+            let Some(items) = block.as_sequence() else {
+                return Err(fail("inputs must be a sequence"));
+            };
+            for item in items {
+                if item.get("name").and_then(serde_yaml::Value::as_str) == Some(name) {
+                    matches.push(item);
+                }
+            }
+        }
+        let [declaration] = matches.as_slice() else {
+            return Err(fail("input declaration is missing or ambiguous"));
+        };
+        if !matches!(
+            declaration.get("dtype").and_then(serde_yaml::Value::as_str),
+            Some("Boolean" | "boolean" | "Bool" | "bool")
+        ) {
+            return Err(fail("input dtype must be Boolean"));
+        }
+        if owner.is_empty()
+            || declaration
+                .get("entity")
+                .and_then(serde_yaml::Value::as_str)
+                != Some(owner)
+        {
+            return Err(fail(
+                "input entity must equal the declared related-slot entity",
+            ));
+        }
+        Ok(())
+    }
+
     fn semantics(&mut self, expr: &mut DerivedSemanticsSpec, entity: &str) -> Result<()> {
         match expr {
             DerivedSemanticsSpec::Scalar { expr } => self.scalar(expr, entity, None),
@@ -295,6 +403,22 @@ impl Resolver<'_> {
         membership: Membership<'_>,
     ) -> Result<()> {
         match expr {
+            ScalarExprSpec::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                let owner = self.aggregate(relation, current_slot, related_slot, entity)?;
+                let crate::spec::RelatedValueRefSpec::Input { name } = value else {
+                    return Err(DirectionError::OnlyRelatedInput {
+                        citing: self.citing.into(),
+                        input: format!("{value:?}"),
+                        message: "derived values are not supported".into(),
+                    });
+                };
+                self.only_related_input(name, &owner)?;
+            }
             ScalarExprSpec::CountRelated {
                 relation,
                 current_slot,
@@ -302,6 +426,20 @@ impl Resolver<'_> {
                 where_clause,
             }
             | ScalarExprSpec::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExprSpec::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                where_clause,
+                ..
+            }
+            | ScalarExprSpec::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -361,10 +499,15 @@ impl Resolver<'_> {
                     self.scalar(n, entity, None)?;
                 }
             }
+            // A qualified read names its term, so it has no direction to
+            // resolve: it reads the term's id whatever the slot kinds are.
             ScalarExprSpec::Literal { .. }
+            | ScalarExprSpec::InputForYear { .. }
             | ScalarExprSpec::Input { .. }
             | ScalarExprSpec::InputOrElse { .. }
             | ScalarExprSpec::Derived { .. }
+            | ScalarExprSpec::RoleInput { .. }
+            | ScalarExprSpec::RoleDerived { .. }
             | ScalarExprSpec::PeriodStart
             | ScalarExprSpec::PeriodEnd => {}
         }
@@ -437,7 +580,19 @@ impl Resolver<'_> {
                     *related_slot = related_index;
                 }
             }
-            JudgmentExprSpec::Derived { .. } => {}
+            // An atom writes the relation's slot order explicitly. Record its
+            // target and owner before source kinds can be stamped onto them.
+            JudgmentExprSpec::RelationAtom { relation, .. } => {
+                self.atom_targets.insert(relation.clone());
+                self.uses_role_judgment = true;
+            }
+            JudgmentExprSpec::Exists { relation, body, .. } => {
+                self.atom_targets.insert(relation.clone());
+                self.uses_role_judgment = true;
+                self.judgment(body, entity, membership)?;
+            }
+            JudgmentExprSpec::SameEntity { .. } => self.uses_role_judgment = true,
+            JudgmentExprSpec::Derived { .. } | JudgmentExprSpec::RoleDerived { .. } => {}
         }
         Ok(())
     }
@@ -512,11 +667,45 @@ mod chain_tests {
                 if !relation.slot_entities.is_empty() {
                     return Some(relation.slot_entities.clone());
                 }
-                name = derivation.source_relation.clone();
+                name = derivation.source_relation.clone()?;
                 continue;
             }
             return (!relation.slot_entities.is_empty()).then(|| relation.slot_entities.clone());
         }
+    }
+
+    #[test]
+    fn a_path_declares_its_endpoints_and_a_filter_inherits_them() {
+        let spec: ProgramSpec = serde_json::from_value(json!({"relations": [
+            {"name": "out", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "back", "arity": 2, "slot_entities": ["Household", "Person"]},
+            {"name": "path", "arity": 2, "derivation": {
+                "source_path": [{"relation": "out", "from_slot": 0, "to_slot": 1},
+                                {"relation": "back", "from_slot": 0, "to_slot": 1}],
+                "slot_entities": ["Person", "Person"], "current_slot": 0, "related_slot": 1,
+                "predicate": always()}},
+            {"name": "filter", "arity": 2, "derivation": {
+                "source_relation": "path", "current_slot": 0, "related_slot": 1,
+                "predicate": always()}}
+        ]}))
+        .unwrap();
+        let resolved = relations(&spec);
+        for name in ["path", "filter"] {
+            assert_eq!(
+                resolved.derived[name].kinds.as_deref(),
+                Some(["Person".to_string(), "Person".to_string()].as_slice())
+            );
+        }
+        // An invalid path declaring nothing cannot inherit the household
+        // kind in its first step. Mandatory typing reports that declaration.
+        let mut invalid = spec;
+        invalid.relations[2]
+            .derivation
+            .as_mut()
+            .unwrap()
+            .slot_entities
+            .clear();
+        assert!(relations(&invalid).derived["path"].kinds.is_none());
     }
 
     #[test]

@@ -10,11 +10,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    JudgmentExpr, Program, RelatedValueRef, RelationSchema, SCALAR_ENTITY, ScalarExpr,
+    JudgmentExpr, Program, RelatedValueRef, RelationDerivation, RelationSchema, SCALAR_ENTITY,
+    ScalarExpr, Term,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelationTypingCode {
+    OnlyRelatedShape,
     /// An executed relation declares no slot entity kinds.
     UntypedRelation,
     /// A declared slot entity list does not have one kind per slot.
@@ -43,11 +45,33 @@ pub enum RelationTypingCode {
     /// A relation slot declares a filtered entity (a derived relation's
     /// `entity`) instead of the kind of the ids that entity is queried with.
     FilteredEntitySlotKind,
+    /// A derived relation's predicate reads through a term (`anchor.x`), but
+    /// the derivation declares no slot kind for that term.
+    RelationRolesNeedSlotKinds,
+    /// A rule read through a term has an entity other than the term's kind.
+    RelationRoleEntityMismatch,
+    /// A read through a term sits outside a derived relation's predicate, or
+    /// inside an aggregation's `where` clause, where no term is bound.
+    RelationRoleOutsideScope,
+    RelationAtomNeedsTypedRelation,
+    RelationAtomKindMismatch,
+    RelationAtomArityMismatch,
+    DerivedRelationAtomArityUnsupported,
+    RelationNameShadowsBuiltin,
+    RelationTermKindMismatch,
+    RelationVariableOutOfScope,
+    RelationExistsVariableCount,
+    InverseDerivedTraversalUnsupported,
+    RelationPathRequiresBinaryDeclaration,
+    RelationPathStepArity,
+    RelationPathStepSlots,
+    RelationPathKindMismatch,
 }
 
 impl RelationTypingCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::OnlyRelatedShape => "only_related_shape",
             Self::UntypedRelation => "untyped_relation",
             Self::SlotEntityCount => "relation_slot_entity_count",
             Self::SlotOutOfRange => "relation_slot_out_of_range",
@@ -60,6 +84,24 @@ impl RelationTypingCode {
             Self::FilteredEntityKindConflict => "filtered_entity_kind_conflict",
             Self::UnknownRelation => "unknown_relation",
             Self::FilteredEntitySlotKind => "relation_slot_kind_is_filtered_entity",
+            Self::RelationRolesNeedSlotKinds => "relation_roles_need_slot_kinds",
+            Self::RelationRoleEntityMismatch => "relation_role_entity_mismatch",
+            Self::RelationRoleOutsideScope => "relation_role_outside_scope",
+            Self::RelationAtomNeedsTypedRelation => "relation_atom_needs_typed_relation",
+            Self::RelationAtomKindMismatch => "relation_atom_kind_mismatch",
+            Self::RelationAtomArityMismatch => "relation_atom_arity_mismatch",
+            Self::DerivedRelationAtomArityUnsupported => "derived_relation_atom_arity_unsupported",
+            Self::RelationNameShadowsBuiltin => "relation_name_shadows_builtin",
+            Self::RelationTermKindMismatch => "relation_term_kind_mismatch",
+            Self::RelationVariableOutOfScope => "relation_variable_out_of_scope",
+            Self::RelationExistsVariableCount => "relation_exists_variable_count",
+            Self::InverseDerivedTraversalUnsupported => "inverse_derived_traversal_unsupported",
+            Self::RelationPathRequiresBinaryDeclaration => {
+                "relation_path_requires_binary_declaration"
+            }
+            Self::RelationPathStepArity => "relation_path_step_arity",
+            Self::RelationPathStepSlots => "relation_path_step_slots",
+            Self::RelationPathKindMismatch => "relation_path_kind_mismatch",
         }
     }
 }
@@ -116,6 +158,7 @@ pub fn check_program(program: &Program) -> Result<(), RelationTypingReport> {
     let mut checker = Checker::for_typing(program);
     checker.filtered_entity_conflicts();
     checker.walk();
+    checker.relation_roles();
     if checker.violations.is_empty() {
         Ok(())
     } else {
@@ -137,9 +180,10 @@ pub fn executed_relations(program: &Program) -> BTreeSet<String> {
 }
 
 /// The entity kind of each tuple slot of `relation`, or `None` when the
-/// relation (or, for a derived relation, every relation it filters) declares
-/// none. A derived relation's tuples are its source's tuples, so it inherits
-/// the source's kinds when it declares none of its own.
+/// relation (or, for a single-source derivation, every relation it filters)
+/// declares none. A single-source derivation inherits the source's kinds when
+/// it declares none of its own. A path declares its endpoint kinds directly;
+/// its intermediate relations never supply inherited kinds.
 ///
 /// This follows one chain of sources. To ask about many relations of one
 /// program, build [`EffectiveSlotEntities`] once: asking this per relation
@@ -173,7 +217,14 @@ fn own_slot_entities(schema: &RelationSchema) -> OwnSlotEntities<'_> {
             OwnSlotEntities::Settled(Some(&derivation.slot_entities))
         }
         Some(derivation) if schema.slot_entities.is_empty() => {
-            OwnSlotEntities::Inherited(&derivation.source_relation)
+            // A path joins new pairs rather than filtering one source's
+            // tuples. Its kinds must be declared, never inherited from a step.
+            match derivation.source_relation.as_deref() {
+                Some(source) if derivation.source_path.is_none() => {
+                    OwnSlotEntities::Inherited(source)
+                }
+                _ => OwnSlotEntities::Settled(None),
+            }
         }
         _ => OwnSlotEntities::Settled(
             (!schema.slot_entities.is_empty()).then_some(schema.slot_entities.as_slice()),
@@ -209,6 +260,49 @@ impl<'p> EffectiveSlotEntities<'p> {
     pub fn get(&self, relation: &str) -> Option<&'p [String]> {
         self.kinds.get(relation).copied().flatten()
     }
+}
+
+/// The slots an aggregation over `relation` traverses: a derived relation's
+/// own slots, whichever slots the node names, else the node's.
+pub(crate) fn traversed_slots(
+    program: &Program,
+    relation: &str,
+    current_slot: usize,
+    related_slot: usize,
+) -> (usize, usize) {
+    match program
+        .relations
+        .get(relation)
+        .and_then(|schema| schema.derivation.as_ref())
+    {
+        Some(derivation) => (derivation.current_slot, derivation.related_slot),
+        None => (current_slot, related_slot),
+    }
+}
+
+/// The kinds of the current and related ids a derived relation's predicate
+/// is evaluated with: its effective slot kinds at the derivation's slots.
+/// `slot_kinds` is shared across calls, so a chain of n derived relations
+/// costs n steps rather than one walk per link.
+pub(crate) fn predicate_slot_kinds(
+    slot_kinds: &EffectiveSlotEntities<'_>,
+    name: &str,
+    derivation: &RelationDerivation,
+) -> (Option<String>, Option<String>) {
+    let kinds = slot_kinds.get(name);
+    let slot = |slot: usize| kinds.and_then(|kinds| kinds.get(slot)).cloned();
+    (slot(derivation.current_slot), slot(derivation.related_slot))
+}
+
+/// Whether `derivation`'s predicate evaluates a rule of `entity` on the
+/// current id: its entity is the derivation's declared current kind
+/// (`RelationEvalContext::entity_id_for` in the explain evaluator). Every
+/// other rule the predicate reads runs on the related id.
+pub(crate) fn predicate_routes_to_current(derivation: &RelationDerivation, entity: &str) -> bool {
+    derivation
+        .slot_entities
+        .get(derivation.current_slot)
+        .is_some_and(|kind| kind == entity)
 }
 
 /// The known current-slot kinds of every derived relation filtering to each
@@ -358,6 +452,87 @@ pub(crate) fn follow_chains<'k, R: Copy>(
             resolved.insert(node, result);
         }
         on_path.clear();
+    }
+    resolved
+}
+
+#[cfg(test)]
+thread_local! {
+    // Leaves, branching nodes, nodes with three or more edges, and back
+    // edges, counted only after the graph resolver performs the work.
+    static SOURCE_GRAPH_WORK: std::cell::Cell<[usize; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+/// Whether every reachable relation meets a local condition and the source
+/// graph is acyclic. Unlike `follow_chains`, this visits every step of a path.
+/// A node and each of its source edges are examined once, with an explicit
+/// stack so shared tails and long chains do not repeat work or grow the stack.
+/// `None` means the local condition fails; an empty successor list is a leaf.
+pub(crate) fn all_source_edges<'k>(
+    starts: impl IntoIterator<Item = &'k str>,
+    mut successors: impl FnMut(&'k str) -> Option<Vec<&'k str>>,
+) -> BTreeMap<&'k str, bool> {
+    struct Frame<'k> {
+        name: &'k str,
+        next: usize,
+        edges: Vec<&'k str>,
+        valid: bool,
+    }
+    let mut resolved = BTreeMap::new();
+    let mut on_path = BTreeSet::new();
+    let mut stack = Vec::<Frame<'k>>::new();
+    for start in starts {
+        if resolved.contains_key(start) {
+            continue;
+        }
+        let edges = successors(start);
+        on_path.insert(start);
+        stack.push(Frame {
+            name: start,
+            next: 0,
+            valid: edges.is_some(),
+            edges: edges.unwrap_or_default(),
+        });
+        while let Some(frame) = stack.last_mut() {
+            if let Some(&next) = frame.edges.get(frame.next) {
+                frame.next += 1;
+                if let Some(&known) = resolved.get(next) {
+                    frame.valid &= known;
+                } else if on_path.contains(next) {
+                    #[cfg(test)]
+                    SOURCE_GRAPH_WORK.with(|work| {
+                        let mut counts = work.get();
+                        counts[3] += 1;
+                        work.set(counts);
+                    });
+                    frame.valid = false;
+                } else {
+                    let edges = successors(next);
+                    on_path.insert(next);
+                    stack.push(Frame {
+                        name: next,
+                        next: 0,
+                        valid: edges.is_some(),
+                        edges: edges.unwrap_or_default(),
+                    });
+                }
+            } else {
+                let frame = stack.pop().expect("a source frame");
+                #[cfg(test)]
+                SOURCE_GRAPH_WORK.with(|work| {
+                    let mut counts = work.get();
+                    counts[0] += usize::from(frame.next == 0);
+                    counts[1] += usize::from(frame.next > 1);
+                    counts[2] += usize::from(frame.next >= 3);
+                    work.set(counts);
+                });
+                on_path.remove(frame.name);
+                resolved.insert(frame.name, frame.valid);
+                if let Some(parent) = stack.last_mut() {
+                    parent.valid &= frame.valid;
+                }
+            }
+        }
     }
     resolved
 }
@@ -698,25 +873,21 @@ impl<'a> Checker<'a> {
         // derivation's slots; only tuples supplied under the derived
         // relation's own name use the aggregate's. The two must agree or
         // explain and the bulk path read different positions.
-        let (current, related) = match derivation {
-            Some(derivation) => {
-                if (current_slot, related_slot)
-                    != (derivation.current_slot, derivation.related_slot)
-                {
-                    self.push(
-                        RelationTypingCode::DerivedRelationSlotsDiverge,
-                        relation,
-                        citing,
-                        format!(
-                            "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
-                            derivation.current_slot, derivation.related_slot
-                        ),
-                    );
-                }
-                (derivation.current_slot, derivation.related_slot)
-            }
-            None => (current_slot, related_slot),
-        };
+        let (current, related) =
+            traversed_slots(self.program, relation, current_slot, related_slot);
+        if let Some(derivation) = derivation
+            && (current_slot, related_slot) != (current, related)
+        {
+            self.push(
+                RelationTypingCode::DerivedRelationSlotsDiverge,
+                relation,
+                citing,
+                format!(
+                    "`{citing}` aggregates derived relation `{relation}` with slots ({current_slot}, {related_slot}), but the derivation traverses its source with slots ({}, {}); recompile so the aggregate uses the derivation's slots",
+                    derivation.current_slot, derivation.related_slot
+                ),
+            );
+        }
 
         let mut related_entity = None;
         if let Some(kinds) = kinds.as_ref() {
@@ -885,49 +1056,53 @@ impl<'a> Checker<'a> {
             return;
         };
         let schema_kinds = schema.slot_entities.clone();
-        self.use_relation(&derivation.source_relation);
-        let source_kinds = self.typed_slots(&derivation.source_relation, &name);
-        if let Some(source_kinds) = source_kinds.as_ref() {
-            for declared in [&derivation.slot_entities, &schema_kinds] {
-                if declared.is_empty() || declared == source_kinds {
-                    continue;
-                }
-                self.push(
+        if derivation.source_path.is_some() {
+            self.path_source(&name, schema.arity, &schema_kinds, &derivation);
+        } else if let Some(source_relation) = derivation.source_relation.as_deref() {
+            self.use_relation(source_relation);
+            let source_kinds = self.typed_slots(source_relation, &name);
+            if let Some(source_kinds) = source_kinds.as_ref() {
+                for declared in [&derivation.slot_entities, &schema_kinds] {
+                    if declared.is_empty() || declared == source_kinds {
+                        continue;
+                    }
+                    self.push(
                     RelationTypingCode::DerivedRelationSourceConflict,
                     &name,
                     &name,
                     format!(
                         "derived relation `{name}` declares slot kinds {} but its source `{}` declares {}; a derived relation filters its source's tuples, so the kinds must agree",
                         format_kinds(declared),
-                        derivation.source_relation,
+                        source_relation,
                         format_kinds(source_kinds)
                     ),
                 );
+                }
             }
-        }
-        // A derived source traverses its own source with its own
-        // slots, whatever slots reach it.
-        if let Some(source) = self
-            .program
-            .relations
-            .get(&derivation.source_relation)
-            .and_then(|schema| schema.derivation.as_ref())
-            && (source.current_slot, source.related_slot)
-                != (derivation.current_slot, derivation.related_slot)
-        {
-            self.push(
+            // A derived source traverses its own source with its own
+            // slots, whatever slots reach it.
+            if let Some(source) = self
+                .program
+                .relations
+                .get(source_relation)
+                .and_then(|schema| schema.derivation.as_ref())
+                && (source.current_slot, source.related_slot)
+                    != (derivation.current_slot, derivation.related_slot)
+            {
+                self.push(
                 RelationTypingCode::DerivedRelationSlotsDiverge,
                 &name,
                 &name,
                 format!(
                     "derived relation `{name}` reads its derived source `{}` with slots ({}, {}), but that source traverses its own source with slots ({}, {}); a chain of derived relations must keep one direction",
-                    derivation.source_relation,
+                    source_relation,
                     derivation.current_slot,
                     derivation.related_slot,
                     source.current_slot,
                     source.related_slot
                 ),
             );
+            }
         }
         self.predicate_rules(&name, &derivation);
         let kinds = self.slot_kinds.get(&name);
@@ -944,6 +1119,84 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// A path reads every step relation, but only its first and last kinds
+    /// describe the new pairs. No intermediate slot is inherited by the
+    /// derived relation's declaration.
+    fn path_source(
+        &mut self,
+        name: &str,
+        arity: usize,
+        schema_kinds: &[String],
+        derivation: &RelationDerivation,
+    ) {
+        let Some(path) = derivation.source_path.as_ref() else {
+            return;
+        };
+        let valid_declaration = arity == 2
+            && derivation.current_slot < 2
+            && derivation.related_slot < 2
+            && derivation.current_slot != derivation.related_slot
+            && derivation.slot_entities.len() == 2
+            && (schema_kinds.is_empty() || schema_kinds == derivation.slot_entities);
+        if !valid_declaration {
+            self.push(
+                RelationTypingCode::RelationPathRequiresBinaryDeclaration, name, name,
+                format!("path-sourced derived relation `{name}` requires arity 2, two declared slot kinds and distinct current_slot and related_slot in 0..2"),
+            );
+        }
+        let declared_kind = |slot: usize| derivation.slot_entities.get(slot).cloned();
+        let mut previous_kind = declared_kind(derivation.current_slot);
+        for (index, step) in path.iter().enumerate() {
+            self.use_relation(&step.relation);
+            let schema = self.program.relations.get(&step.relation);
+            let step_arity = schema.map(|schema| schema.arity);
+            let source_slots = schema
+                .and_then(|schema| schema.derivation.as_ref())
+                .map(|source| (source.current_slot, source.related_slot));
+            if step_arity.is_some_and(|arity| arity != 2) {
+                self.push(
+                    RelationTypingCode::RelationPathStepArity, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` reads non-binary relation `{}`", step.relation),
+                );
+            }
+            let kinds = self.typed_slots(&step.relation, name);
+            if step.from_slot >= 2 || step.to_slot >= 2 || step.from_slot == step.to_slot {
+                self.push(
+                    RelationTypingCode::RelationPathStepSlots, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` requires distinct binary slots 0 and 1; found ({}, {})", step.from_slot, step.to_slot),
+                );
+            }
+            if let Some((current_slot, related_slot)) = source_slots
+                && (step.from_slot, step.to_slot) != (current_slot, related_slot)
+            {
+                self.push(
+                    RelationTypingCode::InverseDerivedTraversalUnsupported, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` must traverse derived relation `{}` forward from slot {} to slot {}", step.relation, current_slot, related_slot),
+                );
+            }
+            let kind = |slot: usize| kinds.as_ref().and_then(|kinds| kinds.get(slot)).cloned();
+            let from_kind = kind(step.from_slot);
+            if let (Some(expected), Some(actual)) = (previous_kind.as_ref(), from_kind.as_ref())
+                && expected != actual
+            {
+                self.push(
+                    RelationTypingCode::RelationPathKindMismatch, &step.relation, name,
+                    format!("path step {index} of derived relation `{name}` starts at kind `{actual}`, but the preceding endpoint has kind `{expected}`"),
+                );
+            }
+            previous_kind = kind(step.to_slot);
+        }
+        if let (Some(actual), Some(expected)) =
+            (previous_kind, declared_kind(derivation.related_slot))
+            && actual != expected
+        {
+            self.push(
+                RelationTypingCode::RelationPathKindMismatch, name, name,
+                format!("path of derived relation `{name}` ends at kind `{actual}`, but its candidate kind is `{expected}`"),
+            );
+        }
+    }
+
     /// A derived relation's predicate runs each rule it reads on the current
     /// id when the rule's entity is the derivation's declared current kind,
     /// and on the related id otherwise. Report rules that would run on an id
@@ -957,7 +1210,6 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        let routed_current = derivation.slot_entities.get(derivation.current_slot);
         let routed_related = derivation.slot_entities.get(derivation.related_slot);
         let mut referenced = BTreeSet::new();
         collect_judgment_derived(&derivation.predicate, &mut referenced);
@@ -967,7 +1219,7 @@ impl<'a> Checker<'a> {
             };
             let entity = rule.entity.as_str();
             if entity == SCALAR_ENTITY
-                || routed_current.is_some_and(|kind| kind == entity)
+                || predicate_routes_to_current(derivation, entity)
                 || routed_related.is_some_and(|kind| kind == entity)
                 || entity == effective_related
                 || self.id_kind(entity) == effective_related
@@ -975,7 +1227,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let hint = if derivation.slot_entities.is_empty() {
-                " Declare the derived relation's `slot_entities` so the predicate can read the current id"
+                " Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec) so the predicate can read the current id"
             } else {
                 ""
             };
@@ -992,6 +1244,34 @@ impl<'a> Checker<'a> {
 
     fn scalar(&mut self, expr: &ScalarExpr, context: Context<'_>) {
         match expr {
+            ScalarExpr::OnlyRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+            } => {
+                if current_slot == related_slot
+                    || *current_slot > 1
+                    || *related_slot > 1
+                    || !matches!(value, RelatedValueRef::Input(_))
+                    || self
+                        .program
+                        .relations
+                        .get(relation)
+                        .is_some_and(|schema| schema.arity != 2)
+                {
+                    self.push(RelationTypingCode::OnlyRelatedShape, relation, context.citing,
+                        "only_related requires an input reference and distinct slots of a binary relation".into());
+                }
+                self.aggregation(
+                    relation,
+                    *current_slot,
+                    *related_slot,
+                    Some(value),
+                    None,
+                    context,
+                );
+            }
             ScalarExpr::CountRelated {
                 relation,
                 current_slot,
@@ -1006,6 +1286,21 @@ impl<'a> Checker<'a> {
                 context,
             ),
             ScalarExpr::SumRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+            }
+            | ScalarExpr::ExtremeRelated {
+                relation,
+                current_slot,
+                related_slot,
+                value,
+                where_clause,
+                ..
+            }
+            | ScalarExpr::SingleRelated {
                 relation,
                 current_slot,
                 related_slot,
@@ -1082,11 +1377,15 @@ impl<'a> Checker<'a> {
                 }
             }
             ScalarExpr::Literal(_)
+            | ScalarExpr::InputForYear { .. }
             | ScalarExpr::Input(_)
             | ScalarExpr::InputOrElse { .. }
             | ScalarExpr::Derived(_)
             | ScalarExpr::PeriodStart
             | ScalarExpr::PeriodEnd => {}
+            // Reads through a term are checked by `relation_roles`, over every
+            // rule and derived relation, used or not.
+            ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {}
         }
     }
 
@@ -1101,14 +1400,622 @@ impl<'a> Checker<'a> {
                 current_slot,
                 related_slot,
             } => self.membership(relation, *current_slot, *related_slot, context),
+            JudgmentExpr::RelationAtom { relation, .. } => self.use_relation(relation),
+            JudgmentExpr::Exists { relation, body, .. } => {
+                self.use_relation(relation);
+                self.judgment(body, context);
+            }
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, context);
                 }
             }
             JudgmentExpr::Not(item) => self.judgment(item, context),
-            JudgmentExpr::Derived(_) => {}
+            JudgmentExpr::Derived(_)
+            | JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::SameEntity { .. } => {}
         }
+    }
+
+    /// Check every use of a term in every rule and derived relation, used
+    /// or not, so a program is refused the same way whatever it executes.
+    /// A qualified read, atom or term comparison must sit in a
+    /// derived relation's predicate, outside any aggregation's `where`
+    /// clause; that derivation must declare the term's slot kind; and a rule
+    /// read through a term must have the term's kind.
+    fn relation_roles(&mut self) {
+        let mut names = self.program.derived.keys().collect::<Vec<_>>();
+        names.sort();
+        for name in names {
+            let derived = &self.program.derived[name];
+            let citing = derived.id.as_deref().unwrap_or(&derived.name);
+            let mut reads = Vec::new();
+            for semantics in std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics))
+            {
+                match semantics {
+                    crate::model::DerivedSemantics::Scalar(expr) => {
+                        collect_scalar_role_reads(expr, None, &mut reads)
+                    }
+                    crate::model::DerivedSemantics::Judgment(expr) => {
+                        collect_judgment_role_reads(expr, None, &mut reads)
+                    }
+                }
+            }
+            for read in reads {
+                let place = match read.aggregated {
+                    Some(relation) => format!(
+                        "inside the `where` clause of an aggregation over `{relation}`, where no term is bound"
+                    ),
+                    None => "outside any derived relation's predicate".to_string(),
+                };
+                let description = read.construct.description();
+                self.push(
+                    RelationTypingCode::RelationRoleOutsideScope,
+                    read.aggregated.unwrap_or_default(),
+                    citing,
+                    format!(
+                        "`{citing}` uses {description} {place}; relation terms may appear only in a derived relation's predicate, outside any aggregation's `where` clause"
+                    ),
+                );
+            }
+        }
+        let program = self.program;
+        for (name, schema) in &program.relations {
+            let Some(derivation) = &schema.derivation else {
+                continue;
+            };
+            if derivation.source_path.is_some() {
+                self.path_source(name, schema.arity, &schema.slot_entities, derivation);
+            }
+            let mut reads = Vec::new();
+            collect_judgment_role_reads(&derivation.predicate, None, &mut reads);
+            for read in reads {
+                if let Some(relation) = read.aggregated {
+                    let description = read.construct.description();
+                    self.push(
+                        RelationTypingCode::RelationRoleOutsideScope,
+                        relation,
+                        name,
+                        format!(
+                            "the predicate of derived relation `{name}` uses {description} inside the `where` clause of an aggregation over `{relation}`, where no term is bound; use it outside the aggregation"
+                        ),
+                    );
+                    continue;
+                }
+                self.role_construct(name, derivation, read.construct, &read.bindings);
+            }
+        }
+    }
+
+    /// A variable's kind comes from its generator slot; anchor and candidate
+    /// always use the containing derivation's explicit slot declarations.
+    fn term_kind(
+        &mut self,
+        citing: &str,
+        derivation: &RelationDerivation,
+        term: Term,
+        bindings: &[(&str, usize)],
+    ) -> Option<String> {
+        let slot = match term {
+            Term::Anchor => derivation.current_slot,
+            Term::Candidate => derivation.related_slot,
+            Term::Var(index) => {
+                let Some((relation, slot)) = bindings.iter().rev().nth(index) else {
+                    self.push(
+                        RelationTypingCode::RelationVariableOutOfScope,
+                        citing,
+                        citing,
+                        format!(
+                            "variable index {index} in `{citing}` has no enclosing exists binding"
+                        ),
+                    );
+                    return None;
+                };
+                return self.program.relations.get(*relation).and_then(|schema| {
+                    schema
+                        .derivation
+                        .as_ref()
+                        .filter(|derived| !derived.slot_entities.is_empty())
+                        .map(|derived| &derived.slot_entities)
+                        .unwrap_or(&schema.slot_entities)
+                        .get(*slot)
+                        .cloned()
+                });
+            }
+            #[cfg(test)]
+            Term::Id(_) => return None,
+        };
+        match derivation.slot_entities.get(slot) {
+            Some(kind) => Some(kind.clone()),
+            None => {
+                self.push(
+                    RelationTypingCode::RelationRolesNeedSlotKinds,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` uses `{}`, but its derivation declares no kind for slot {slot}; declare `derived_relation.slot_entities`",
+                        term.as_str()
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    fn role_construct(
+        &mut self,
+        citing: &str,
+        derivation: &RelationDerivation,
+        construct: RoleConstruct<'_>,
+        bindings: &[(&str, usize)],
+    ) {
+        match construct {
+            RoleConstruct::Atom { relation, terms } => {
+                self.role_atom(citing, derivation, relation, terms, None, bindings);
+            }
+            RoleConstruct::Exists {
+                relation,
+                terms,
+                variable_slot,
+            } => {
+                if terms.get(variable_slot) != Some(&Term::Var(0)) {
+                    self.push(
+                        RelationTypingCode::RelationExistsVariableCount,
+                        relation,
+                        citing,
+                        format!(
+                            "exists generator `{relation}` must bind exactly one variable slot"
+                        ),
+                    );
+                }
+                if derivation.slot_entities.is_empty() {
+                    self.push(
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        citing,
+                        citing,
+                        format!(
+                            "exists in `{citing}` requires declared derived_relation.slot_entities"
+                        ),
+                    );
+                }
+                if self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                    .is_some_and(|generator| variable_slot != generator.related_slot)
+                {
+                    self.push(
+                        RelationTypingCode::InverseDerivedTraversalUnsupported,
+                        relation,
+                        citing,
+                        format!(
+                            "exists cannot traverse derived relation `{relation}` backwards; bind its related slot"
+                        ),
+                    );
+                }
+                self.role_atom(
+                    citing,
+                    derivation,
+                    relation,
+                    terms,
+                    Some(variable_slot),
+                    bindings,
+                );
+            }
+            RoleConstruct::SameEntity { left, right } => {
+                let left_kind = self.term_kind(citing, derivation, left, bindings);
+                let right_kind = self.term_kind(citing, derivation, right, bindings);
+                if let (Some(left_kind), Some(right_kind)) = (left_kind, right_kind)
+                    && left_kind != right_kind
+                {
+                    self.push(
+                        RelationTypingCode::RelationTermKindMismatch,
+                        citing,
+                        citing,
+                        format!(
+                            "term comparison in `{citing}` compares `{}` of kind `{left_kind}` with `{}` of kind `{right_kind}`; both terms must have the same kind",
+                            left.as_str(),
+                            right.as_str()
+                        ),
+                    );
+                }
+            }
+            RoleConstruct::Read { term, name, rule } => {
+                let t = term.as_str();
+                let slot = term_slot(derivation, term);
+                if let Some(slot) = slot
+                    && derivation.slot_entities.get(slot).is_none()
+                {
+                    self.push(
+                        RelationTypingCode::RelationRolesNeedSlotKinds,
+                        citing,
+                        citing,
+                        format!(
+                            "the predicate of derived relation `{citing}` reads `{t}.{name}`, but the derivation declares no kind for slot {slot}, so `{t}` has none. Declare `slot_entities` on the derivation (`derived_relation.slot_entities` in RuleSpec); kinds declared on the relation or taken from its source are not stamped onto a derivation whose slots share one kind"
+                        ),
+                    );
+                    return;
+                }
+                let Some(kind) = self.term_kind(citing, derivation, term, bindings) else {
+                    return;
+                };
+                if !rule {
+                    return;
+                }
+                let Some(derived) = self.program.derived.get(name) else {
+                    return;
+                };
+                let entity = derived.entity.as_str();
+                if entity == kind || self.id_kind(entity) == kind {
+                    return;
+                }
+                let detail = if entity == SCALAR_ENTITY {
+                    format!(
+                        "`{name}` has no entity (`{SCALAR_ENTITY}`), so it reads no id; read it unqualified"
+                    )
+                } else {
+                    "a rule read through a term must have that term's kind".to_string()
+                };
+                let at_slot = slot.map_or(String::new(), |slot| format!(" (slot {slot})"));
+                self.push(
+                    RelationTypingCode::RelationRoleEntityMismatch,
+                    citing,
+                    citing,
+                    format!(
+                        "the predicate of derived relation `{citing}` reads `{t}.{name}`: `{name}` has entity `{entity}`, but `{t}` is a `{kind}` id{at_slot}; {detail}"
+                    ),
+                );
+            }
+        }
+    }
+
+    fn role_atom(
+        &mut self,
+        citing: &str,
+        derivation: &RelationDerivation,
+        relation: &str,
+        terms: &[Term],
+        variable_slot: Option<usize>,
+        bindings: &[(&str, usize)],
+    ) {
+        let program = self.program;
+        let Some(schema) = program.relations.get(relation) else {
+            self.push(
+                RelationTypingCode::UnknownRelation,
+                relation,
+                citing,
+                format!("`{citing}` uses an atom on undeclared relation `{relation}`"),
+            );
+            return;
+        };
+        let short_name = relation
+            .rsplit_once("#relation.")
+            .map_or(relation, |(_, short)| short);
+        if crate::formula::is_builtin_function(short_name) {
+            self.push(
+                RelationTypingCode::RelationNameShadowsBuiltin,
+                relation,
+                citing,
+                format!(
+                    "relation `{relation}` has a built-in function name and cannot be used as an atom"
+                ),
+            );
+        }
+        if schema.derivation.is_some() && schema.arity != 2 {
+            self.push(
+                RelationTypingCode::DerivedRelationAtomArityUnsupported,
+                relation,
+                citing,
+                format!(
+                    "an atom on derived relation `{relation}` requires arity 2, but it declares {}",
+                    schema.arity
+                ),
+            );
+        }
+        if terms.len() != schema.arity {
+            self.push(
+                RelationTypingCode::RelationAtomArityMismatch,
+                relation,
+                citing,
+                format!(
+                    "atom `{relation}` has {} arguments but the relation has arity {}",
+                    terms.len(),
+                    schema.arity
+                ),
+            );
+        }
+        // Atoms require an explicit kind declaration on the named relation;
+        // inheriting its source's kinds is insufficient.
+        let kinds = schema
+            .derivation
+            .as_ref()
+            .filter(|derived| !derived.slot_entities.is_empty())
+            .map(|derived| &derived.slot_entities)
+            .unwrap_or(&schema.slot_entities);
+        if kinds.is_empty() {
+            self.push(
+                RelationTypingCode::RelationAtomNeedsTypedRelation,
+                relation,
+                citing,
+                format!("atom `{relation}` requires declared slot entity kinds"),
+            );
+        } else {
+            // Preserve the general checks for malformed/aliased slot kinds as
+            // well as the atom's term-to-slot kind checks.
+            self.typed_slots(relation, citing);
+        }
+        for (slot, term) in terms.iter().enumerate() {
+            if variable_slot == Some(slot) {
+                continue;
+            }
+            if let (Some(actual), Some(expected)) = (
+                self.term_kind(citing, derivation, *term, bindings),
+                kinds.get(slot),
+            ) && actual != *expected
+            {
+                self.push(
+                    RelationTypingCode::RelationAtomKindMismatch,
+                    relation,
+                    citing,
+                    format!(
+                        "atom `{relation}` argument {slot} is `{}` of kind `{actual}`, but the slot declares `{expected}`",
+                        term.as_str()
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// The derivation slot `term` names; a variable names none.
+fn term_slot(derivation: &RelationDerivation, term: Term) -> Option<usize> {
+    match term {
+        Term::Anchor => Some(derivation.current_slot),
+        Term::Candidate => Some(derivation.related_slot),
+        Term::Var(_) => None,
+        #[cfg(test)]
+        Term::Id(_) => None,
+    }
+}
+
+/// A construct using terms, found by [`collect_judgment_role_reads`].
+struct RoleRead<'p> {
+    construct: RoleConstruct<'p>,
+    /// The relation of the innermost aggregation whose `where` clause holds
+    /// the read, or `None` when no aggregation encloses it.
+    aggregated: Option<&'p str>,
+    bindings: Vec<(&'p str, usize)>,
+}
+
+#[derive(Clone, Copy)]
+enum RoleConstruct<'p> {
+    Read {
+        term: Term,
+        name: &'p str,
+        rule: bool,
+    },
+    Atom {
+        relation: &'p str,
+        terms: &'p [Term],
+    },
+    SameEntity {
+        left: Term,
+        right: Term,
+    },
+    Exists {
+        relation: &'p str,
+        terms: &'p [Term],
+        variable_slot: usize,
+    },
+}
+
+impl RoleConstruct<'_> {
+    fn description(self) -> String {
+        match self {
+            Self::Read { term, name, .. } => format!("`{}.{name}`", term.as_str()),
+            Self::Atom { relation, .. } => format!("relation atom `{relation}`"),
+            Self::Exists { relation, .. } => format!("exists over relation `{relation}`"),
+            Self::SameEntity { .. } => "a term comparison".to_string(),
+        }
+    }
+}
+
+/// Every construct using terms in `expr`, with the relation of the innermost
+/// aggregation whose `where` clause holds it. `aggregated` is that relation
+/// for the expression itself.
+fn collect_judgment_role_reads<'p>(
+    expr: &'p JudgmentExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+) {
+    collect_judgment_role_reads_in(expr, aggregated, out, &[]);
+}
+
+fn collect_scalar_role_reads<'p>(
+    expr: &'p ScalarExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+) {
+    collect_scalar_role_reads_in(expr, aggregated, out, &[]);
+}
+
+fn collect_judgment_role_reads_in<'p>(
+    expr: &'p JudgmentExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+    bindings: &[(&'p str, usize)],
+) {
+    match expr {
+        JudgmentExpr::Comparison { left, right, .. } => {
+            collect_scalar_role_reads_in(left, aggregated, out, bindings);
+            collect_scalar_role_reads_in(right, aggregated, out, bindings);
+        }
+        JudgmentExpr::RoleDerived { term, name } => out.push(RoleRead {
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: true,
+            },
+            aggregated,
+            bindings: bindings.to_vec(),
+        }),
+        JudgmentExpr::RelationAtom { relation, terms } => out.push(RoleRead {
+            construct: RoleConstruct::Atom { relation, terms },
+            aggregated,
+            bindings: bindings.to_vec(),
+        }),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            variable_slot,
+            body,
+        } => {
+            out.push(RoleRead {
+                construct: RoleConstruct::Exists {
+                    relation,
+                    terms,
+                    variable_slot: *variable_slot,
+                },
+                aggregated,
+                bindings: bindings.to_vec(),
+            });
+            let mut nested = bindings.to_vec();
+            nested.push((relation, *variable_slot));
+            collect_judgment_role_reads_in(body, aggregated, out, &nested);
+        }
+        JudgmentExpr::SameEntity { left, right, .. } => out.push(RoleRead {
+            construct: RoleConstruct::SameEntity {
+                left: *left,
+                right: *right,
+            },
+            aggregated,
+            bindings: bindings.to_vec(),
+        }),
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
+            for item in items {
+                collect_judgment_role_reads_in(item, aggregated, out, bindings);
+            }
+        }
+        JudgmentExpr::Not(item) => collect_judgment_role_reads_in(item, aggregated, out, bindings),
+        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+    }
+}
+
+fn collect_scalar_role_reads_in<'p>(
+    expr: &'p ScalarExpr,
+    aggregated: Option<&'p str>,
+    out: &mut Vec<RoleRead<'p>>,
+    bindings: &[(&'p str, usize)],
+) {
+    match expr {
+        ScalarExpr::RoleInput { term, name } => out.push(RoleRead {
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: false,
+            },
+            aggregated,
+            bindings: bindings.to_vec(),
+        }),
+        ScalarExpr::RoleDerived { term, name } => out.push(RoleRead {
+            construct: RoleConstruct::Read {
+                term: *term,
+                name,
+                rule: true,
+            },
+            aggregated,
+            bindings: bindings.to_vec(),
+        }),
+        ScalarExpr::CountRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
+            relation,
+            where_clause,
+            ..
+        } => {
+            if let Some(where_clause) = where_clause {
+                collect_judgment_role_reads_in(where_clause, Some(relation), out, bindings);
+            }
+        }
+        ScalarExpr::ParameterLookup { index, .. }
+        | ScalarExpr::Ceil(index)
+        | ScalarExpr::Floor(index) => {
+            collect_scalar_role_reads_in(index, aggregated, out, bindings)
+        }
+        ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
+            for item in items {
+                collect_scalar_role_reads_in(item, aggregated, out, bindings);
+            }
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right)
+        | ScalarExpr::DateAddDays {
+            date: left,
+            days: right,
+        }
+        | ScalarExpr::DateAddMonths {
+            date: left,
+            months: right,
+        }
+        | ScalarExpr::DateAddYears {
+            date: left,
+            years: right,
+        }
+        | ScalarExpr::DaysBetween {
+            from: left,
+            to: right,
+        } => {
+            collect_scalar_role_reads_in(left, aggregated, out, bindings);
+            collect_scalar_role_reads_in(right, aggregated, out, bindings);
+        }
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_judgment_role_reads_in(condition, aggregated, out, bindings);
+            collect_scalar_role_reads_in(then_expr, aggregated, out, bindings);
+            collect_scalar_role_reads_in(else_expr, aggregated, out, bindings);
+        }
+        ScalarExpr::NoMatch { subject, patterns } => {
+            collect_scalar_role_reads_in(subject, aggregated, out, bindings);
+            for pattern in patterns {
+                collect_scalar_role_reads_in(pattern, aggregated, out, bindings);
+            }
+        }
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            collect_scalar_role_reads_in(value, aggregated, out, bindings);
+            if let Some(n) = n {
+                collect_scalar_role_reads_in(n, aggregated, out, bindings);
+            }
+        }
+        // `only_related` reads a named input at the related id, and an
+        // aggregated value is a name, not an expression, so neither holds a
+        // term.
+        ScalarExpr::OnlyRelated { .. }
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
+        | ScalarExpr::Input(_)
+        | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::Derived(_)
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd => {}
     }
 }
 
@@ -1150,13 +2057,20 @@ fn collect_judgment_derived(expr: &JudgmentExpr, out: &mut BTreeSet<String>) {
         JudgmentExpr::Derived(name) => {
             out.insert(name.clone());
         }
-        JudgmentExpr::RelationMember { .. } => {}
+        // A rule read through a term runs on that term's id, not a routed
+        // one; `Checker::relation_roles` checks its kind.
+        JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_derived(item, out);
             }
         }
-        JudgmentExpr::Not(item) => collect_judgment_derived(item, out),
+        JudgmentExpr::Not(item) | JudgmentExpr::Exists { body: item, .. } => {
+            collect_judgment_derived(item, out)
+        }
     }
 }
 
@@ -1216,9 +2130,16 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
                 collect_scalar_derived(n, out);
             }
         }
+        ScalarExpr::OnlyRelated { .. } => {}
+        // As in `collect_judgment_derived`, a read through a term is not
+        // routed.
+        ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => {}
         ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
+        | ScalarExpr::ExtremeRelated { .. }
+        | ScalarExpr::SingleRelated { .. }
         | ScalarExpr::Literal(_)
+        | ScalarExpr::InputForYear { .. }
         | ScalarExpr::Input(_)
         | ScalarExpr::InputOrElse { .. }
         | ScalarExpr::PeriodStart
@@ -1623,7 +2544,8 @@ pub(crate) mod chain_test_programs {
         let derivation = (source, 0_usize..3, 0_usize..3, entity, kinds()).prop_map(
             |(source_relation, current_slot, related_slot, entity, slot_entities)| {
                 RelationDerivation {
-                    source_relation,
+                    source_relation: Some(source_relation),
+                    source_path: None,
                     current_slot,
                     related_slot,
                     entity: entity.map(str::to_string),
@@ -1816,7 +2738,7 @@ pub(crate) mod chain_test_programs {
                 if !schema.slot_entities.is_empty() {
                     return Some(schema.slot_entities.clone());
                 }
-                return inner(program, &derivation.source_relation, visited);
+                return inner(program, derivation.source_relation.as_deref()?, visited);
             }
             (!schema.slot_entities.is_empty()).then(|| schema.slot_entities.clone())
         }
@@ -2218,6 +3140,129 @@ mod chain_resolution_tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn source_graph_visits_long_chains_and_shared_tails_once() {
+        let names = (0..50_000)
+            .map(|index| format!("r{index:07}"))
+            .collect::<Vec<_>>();
+        for branching in [false, true] {
+            let mut calls = 0;
+            let resolved = all_source_edges(names.iter().map(String::as_str), |name| {
+                calls += 1;
+                let index = name[1..].parse::<usize>().unwrap();
+                let Some(next) = names.get(index + 1) else {
+                    return Some(Vec::new());
+                };
+                Some(if branching {
+                    vec![next.as_str(), names.last().unwrap().as_str(), next.as_str()]
+                } else {
+                    vec![next.as_str()]
+                })
+            });
+            assert_eq!(calls, names.len());
+            assert_eq!(resolved.len(), names.len());
+            assert!(resolved.values().all(|valid| *valid));
+        }
+    }
+
+    #[test]
+    fn source_graph_matches_independent_reachability_and_cycle_oracle() {
+        let names = || prop::sample::select(vec!["a", "b", "c", "d", "e", "f"]);
+        let graph = prop::collection::btree_map(
+            names(),
+            (any::<bool>(), prop::collection::vec(names(), 0..=4)),
+            0..=6,
+        );
+        let (branched, long_paths, cyclic, settled, leaves) = (
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+            Cell::new(0_usize),
+        );
+        runner(2000)
+            .run(&graph, |graph| {
+                let starts = ["a", "b", "c", "d", "e", "f", "g"];
+                let mut visits = BTreeMap::new();
+                SOURCE_GRAPH_WORK.with(|work| work.set([0; 4]));
+                let actual = all_source_edges(starts, |node| {
+                    *visits.entry(node).or_insert(0_usize) += 1;
+                    let Some((valid, edges)) = graph.get(node) else {
+                        return Some(Vec::new());
+                    };
+                    if *valid { Some(edges.clone()) } else { None }
+                });
+                SOURCE_GRAPH_WORK.with(|work| {
+                    let counts = work.get();
+                    leaves.set(leaves.get() + counts[0]);
+                    branched.set(branched.get() + counts[1]);
+                    long_paths.set(long_paths.get() + counts[2]);
+                    cyclic.set(cyclic.get() + counts[3]);
+                });
+                assert!(visits.values().all(|visits| *visits == 1));
+                for start in starts {
+                    // Independent oracle: collect the reachable subgraph, then
+                    // remove its leaves. A remaining node belongs to, or reaches,
+                    // a cycle. This does no recursive or memoized source walk.
+                    let mut reachable = BTreeSet::new();
+                    let mut pending = vec![start];
+                    let mut locally_valid = true;
+                    while let Some(node) = pending.pop() {
+                        if !reachable.insert(node) {
+                            continue;
+                        }
+                        if let Some((valid, edges)) = graph.get(node) {
+                            locally_valid &= *valid;
+                            if *valid {
+                                pending.extend(edges.iter().copied());
+                            }
+                        }
+                    }
+                    let mut remaining = reachable.clone();
+                    loop {
+                        let leaves = remaining
+                            .iter()
+                            .copied()
+                            .filter(|node| {
+                                graph.get(node).is_none_or(|(valid, edges)| {
+                                    !valid || edges.iter().all(|edge| !remaining.contains(edge))
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        if leaves.is_empty() {
+                            break;
+                        }
+                        for node in leaves {
+                            remaining.remove(node);
+                        }
+                    }
+                    let expected = locally_valid && remaining.is_empty();
+                    settled.set(settled.get() + usize::from(expected));
+                    prop_assert_eq!(actual[start], expected, "{} in {:?}", start, graph);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let counts = (
+            branched.get(),
+            long_paths.get(),
+            cyclic.get(),
+            settled.get(),
+            leaves.get(),
+        );
+        eprintln!(
+            "source graph work counts (branching, 3+ edges, cycles, settled, leaves): {counts:?}"
+        );
+        assert!(
+            counts.0 > 1000
+                && counts.1 > 700
+                && counts.2 > 500
+                && counts.3 > 2000
+                && counts.4 > 3000,
+            "graph coverage {counts:?}"
+        );
     }
 
     #[test]

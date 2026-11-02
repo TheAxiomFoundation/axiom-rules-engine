@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import numpy as np
 
@@ -121,6 +122,46 @@ class CompiledDenseProgram:
                 str(Path(path)), roots, entity
             )
         )
+
+    @classmethod
+    def from_artifact_file(
+        cls,
+        path: str | Path,
+        *,
+        entity: str | None = None,
+        accept_artifact_format: Literal[2] | None = None,
+    ) -> "CompiledDenseProgram":
+        """Load a compiled artifact (``compile``'s output) for dense execution.
+
+        The artifact must be format 3. ``accept_artifact_format=2`` also loads
+        a format-2 artifact, unchanged, through the engine's format-2
+        compatibility loader, with a warning.
+        """
+        if NativeCompiledDenseProgram is None:
+            raise RuntimeError(
+                "axiom_rules_engine_dense is not installed. Build it with "
+                "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
+            )
+        if accept_artifact_format not in (None, 2):
+            raise ValueError(
+                "accept_artifact_format accepts only 2, the format the engine "
+                "reads through its compatibility loader"
+            )
+        native = NativeCompiledDenseProgram.from_artifact_file(
+            str(Path(path)), entity, accept_artifact_format
+        )
+        if native.artifact_format_version == 2:
+            warnings.warn(
+                f"read {path} as artifact format 2 through the format-2 "
+                "compatibility loader; recompile it with this engine for format 3",
+                stacklevel=2,
+            )
+        return cls(native)
+
+    @property
+    def artifact_format_version(self) -> int:
+        """The format of the artifact this program was loaded or compiled as."""
+        return self._native.artifact_format_version
 
     @property
     def root_entity(self) -> str:

@@ -1,0 +1,490 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Child Benefit (General) Regulations 1987 reg 15 — who is responsible for\na child.\n\nPriority cascade:\n  1. Any person already receiving child benefit for the child — they are\n     the responsible person.\n  2. Otherwise, if exactly one claim has been made, the sole claimant.\n  3. Otherwise, the person with whom the child is usually residing.\n\nCounting over the `cb_receipt` relation shows an absence condition\n(count == 0 → no existing recipient)."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "cb_receipt",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Child"
+        ]
+      }
+    ],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "cb_recipient_count",
+        "entity": "Child",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15(1)",
+        "source_url": "https://www.legislation.gov.uk/uksi/1987/1967/regulation/15",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "cb_receipt",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": null
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "cb_receipt",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": null
+            }
+          }
+        ]
+      },
+      {
+        "name": "has_cb_recipient",
+        "entity": "Child",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15(1)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "cb_recipient_count"
+          },
+          "op": "gt",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "cb_recipient_count"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "needs_fallback",
+        "entity": "Child",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15(2) — no existing recipient",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "cb_recipient_count"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "cb_recipient_count"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "sole_claim_fallback",
+        "entity": "Child",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15(2)(a)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "needs_fallback"
+            },
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "cb_claim_count"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "needs_fallback"
+                },
+                {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "cb_claim_count"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "usual_residence_fallback",
+        "entity": "Child",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15(2)(b)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "and",
+          "items": [
+            {
+              "kind": "derived",
+              "name": "needs_fallback"
+            },
+            {
+              "kind": "not",
+              "item": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "cb_claim_count"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 1
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "and",
+              "items": [
+                {
+                  "kind": "derived",
+                  "name": "needs_fallback"
+                },
+                {
+                  "kind": "not",
+                  "item": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "cb_claim_count"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "responsible_person",
+        "entity": "Child",
+        "dtype": "text",
+        "unit": null,
+        "period": "Day",
+        "source": "SI 1987/1967 reg 15",
+        "source_url": "https://www.legislation.gov.uk/uksi/1987/1967/regulation/15",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "has_cb_recipient"
+          },
+          "then_expr": {
+            "kind": "input",
+            "name": "cb_recipient_id"
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "derived",
+              "name": "sole_claim_fallback"
+            },
+            "then_expr": {
+              "kind": "input",
+              "name": "sole_claimant_id"
+            },
+            "else_expr": {
+              "kind": "input",
+              "name": "usual_resident_id"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "1987-10-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "has_cb_recipient"
+              },
+              "then_expr": {
+                "kind": "input",
+                "name": "cb_recipient_id"
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "derived",
+                  "name": "sole_claim_fallback"
+                },
+                "then_expr": {
+                  "kind": "input",
+                  "name": "sole_claimant_id"
+                },
+                "else_expr": {
+                  "kind": "input",
+                  "name": "usual_resident_id"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "cb_recipient_count",
+      "has_cb_recipient",
+      "needs_fallback",
+      "sole_claim_fallback",
+      "responsible_person",
+      "usual_residence_fallback"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "cb_claim_count",
+        "canonical_request_name": "cb_claim_count",
+        "request_names": [
+          "cb_claim_count"
+        ]
+      },
+      {
+        "slot": "cb_recipient_id",
+        "canonical_request_name": "cb_recipient_id",
+        "request_names": [
+          "cb_recipient_id"
+        ]
+      },
+      {
+        "slot": "sole_claimant_id",
+        "canonical_request_name": "sole_claimant_id",
+        "request_names": [
+          "sole_claimant_id"
+        ]
+      },
+      {
+        "slot": "usual_resident_id",
+        "canonical_request_name": "usual_resident_id",
+        "request_names": [
+          "usual_resident_id"
+        ]
+      }
+    ]
+  }
+}

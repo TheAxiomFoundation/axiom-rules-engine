@@ -2,8 +2,8 @@
 //!
 //! This module is compiled only with the off-by-default `unit-derivation`
 //! Cargo feature. Its runtime configuration is also disabled by default. It
-//! deliberately does not change RuleSpec, artifact v2, the ordinary engine,
-//! or any release/launch surface.
+//! deliberately does not change RuleSpec, the compiled artifact format, the
+//! ordinary engine, or any release/launch surface.
 
 mod aggregation;
 mod compile;
@@ -18,8 +18,8 @@ pub use aggregation::{
     AggregationFamilyKnowledge, AggregationKnowledge, AggregationObservation, AggregationPerson,
     AggregationPersonRole, AggregationPlan, AggregationRelationFact, AggregationRelationFamily,
     AggregationRequest, AggregationResult, AggregationValue, COMPILED_AGGREGATION_ARTIFACT_FORMAT,
-    CompiledAggregationArtifact, EngineComputationBinding, EngineComputationRequest,
-    EngineComputationStage, UnitDerivationDocumentRegistry,
+    CompiledAggregationArtifact, EmbeddedArtifactLoading, EngineComputationBinding,
+    EngineComputationRequest, EngineComputationStage, UnitDerivationDocumentRegistry,
 };
 #[cfg(test)]
 pub(crate) use aggregation::{compile_aggregation_plan, execute_aggregation_plan};

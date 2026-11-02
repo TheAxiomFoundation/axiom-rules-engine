@@ -507,7 +507,7 @@ fn structural_relation_names_entities_and_references_stay_typed_data() {
             .find(|relation| relation.name == "filtered")
             .unwrap();
         let derivation = filtered.derivation.as_ref().unwrap();
-        assert_eq!(derivation.source_relation, marker);
+        assert_eq!(derivation.source_relation.as_deref(), Some(marker));
         assert_eq!(derivation.entity.as_deref(), Some(marker));
         assert_eq!(derivation.member_relation.as_deref(), Some(marker));
         assert_eq!(derivation.slot_entities, [marker, "Other"]);

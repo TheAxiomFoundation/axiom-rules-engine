@@ -1,0 +1,91 @@
+{
+  "entities": [
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Household"
+    },
+    {
+      "id_template": "Person:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Person"
+    },
+    {
+      "id_template": null,
+      "instances": {
+        "source": "unscoped"
+      },
+      "kind": "Scalar"
+    },
+    {
+      "id_template": "TaxUnit:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "TaxUnit"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person",
+        "TaxUnit"
+      ],
+      "legal_id": "base_allowance",
+      "name": "base_allowance",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household"
+      ],
+      "legal_id": "rent",
+      "name": "rent",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "TaxUnit"
+      ],
+      "legal_id": "spouse_allowance",
+      "name": "spouse_allowance",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Household",
+        "Person",
+        "Scalar",
+        "TaxUnit"
+      ],
+      "legal_id": "uprating_rate",
+      "name": "uprating_rate",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": []
+}

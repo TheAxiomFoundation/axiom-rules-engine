@@ -4,6 +4,42 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-31 — Relation roles express guarded household membership
+
+**Decision.** Add terms and qualified reads, parameters in predicates,
+relation atoms, term comparisons, bounded `exists` and path sources to
+derived relations. Advertise the completed series as `relation_roles`.
+Keep recursion (#231, #253) and the three-valued option (#215, #251) outside
+this series.
+
+**Why.** A household predicate needs facts about both ends of a pair,
+required combinations between people in scope, and co-residents reached
+through a residence roster. The synthetic 7 CFR 273.1 fixture demonstrates
+those operations without inventing a bounded substitute for a transitive
+household closure:
+
+- It computes the exact household when no residence exception applies and
+  the applicant's two-tie set is closed under ties.
+- Otherwise it reads supplied household ids. With every supplied fact true,
+  one full-period residence record for each co-resident, complete pair facts
+  and correct ids wherever read, it never silently returns a wrong household.
+
+**Consequences.** Explain and fast evaluate the constructs; dense refuses a
+reachable qualified read, atom, term comparison, `exists` or path source by
+name and names #218. Dense also compiles parameter reads in predicates.
+The series extends artifact format 3 and its checked interface block (#250).
+Programs using qualified reads, atoms, term comparisons, `exists` or path
+sources refuse tuples supplied under any derived relation's name; programs
+using none keep their existing union of supplied and derived tuples.
+An atom, `exists` or path source also refuses lenient request binding.
+
+The fixture declares every input with no default. Missing household ids
+fail evaluation naming `snap_household_unit` when a guard selects the
+supplied case. The tests cover eleven hand-worked households, compare an
+independent union-find oracle over generated residences, and check symmetry,
+partitioning, participation, order, modes and deferral. The pilot module in
+rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
+
 ## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
 
 **Decision.** Every buffer the dense executor sizes by a row count, the
@@ -74,17 +110,20 @@ therefore still abort the process, the Python interpreter included:
 
 ## 2026-10-14 — Dense batches justify every row count they claim
 
-**Decision.** Dense binding refuses a batch whose row counts nothing
-confirms, before it allocates anything from them. `row_count` is the caller's
-stated root row count: every supplied root column must have that length, and
-it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest per-row
-buffer element). A relation's related row count is its last offset. A nonzero
-one must be confirmed by a supplied related column of that length or by an
-explicit `DenseRelationBatchSpec::related_row_count`; a stated count must equal
-the last offset, and so must every supplied related column, whether or not the
-program reads it. Counts above `MAX_DENSE_ROWS` are refused, and the owners
-buffer is reserved fallibly, so a stated count larger than memory is an error.
-Violations are `EvalError::TypeMismatch`.
+**Decision.** Dense binding refuses a batch whose row counts nothing confirms,
+before it makes any allocation sized by them. (Diagnostics and schema metadata
+still allocate; no buffer sized by an unconfirmed count does.) `row_count` is
+the caller's stated root row count: every supplied root column must have that
+length, and it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest
+per-row buffer element). A relation's related row count is its last offset. A
+nonzero one must be confirmed by a supplied related column of that length or
+by an explicit `DenseRelationBatchSpec::related_row_count`; a stated count
+must equal the last offset, and so must every supplied related column, whether
+or not the program reads it. Counts above `MAX_DENSE_ROWS` are refused, and
+the owners buffer is reserved with `try_reserve_exact`, so a reservation the
+allocator reports as failed is an error rather than an abort. A reservation
+that succeeds guarantees nothing about later allocations. Violations are
+`EvalError::TypeMismatch`.
 
 **Why.** Binding allocates one owner per related row, and the offsets were the
 only statement of how many there are. A relation with no related column (a
@@ -114,11 +153,29 @@ already did for root columns.
   Python extension does not convert unread columns; it passes their lengths
   in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
   alone, checked like `inputs` but never readable), so the engine orders
-  every error and nothing is allocated from a claimed length.
+  the length and confirmation errors, and the extension makes no allocation
+  sized by a claimed length. Unread entries get none of the checks converted
+  columns get: their `len()` is taken as is, with no rank or dtype check.
+  The `DenseRelationBatch` wrapper passes each entry through `np.asarray`,
+  so there a `(3, 2)` array has length 3; the native extension called
+  directly takes any sized object. An unread length that matches is
+  trusted like a stated count, so it can authorize an owners reservation up
+  to the bound. The extension
+  raises its own errors before the engine checks anything, including a
+  root column's length: an unread entry with no `len()` (`ValueError`), a
+  non-string key (`TypeError`), and every error converting a read column.
+- The extension's conversion of read columns checks rank and keeps the dtype
+  of an empty array only for the cases it names: a numpy array that is not
+  one-dimensional is refused, and an empty integer, float or string array
+  keeps that dtype. Other empty arrays (complex, object, datetime, among
+  others) still fall through to the list fallbacks and read as bool. A
+  `related_row_count` outside `i64` raises `OverflowError`, and a negative
+  one raises `ValueError`.
 - A stated count is trusted up to the bound. Binding's owners reservation fails
-  cleanly for a count no host can hold. Execution then reserves each per-row
-  buffer fallibly too (the entry above), so a count that fits the owners buffer
-  but not a later, wider buffer is refused there.
+  cleanly only when the allocator reports the failure. Execution then reserves
+  each per-row buffer fallibly too (the entry above), so a count that fits the
+  owners buffer but not a later, wider buffer is refused there, when the
+  allocator reports that failure.
 - `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
   `input_lengths`), which breaks struct literals outside this crate; it now
   derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
@@ -126,6 +183,162 @@ already did for root columns.
 - Root columns, and the columns no schema reads within a key, are reported
   smallest name first; read columns keep schema order. So a malformed batch
   reports the same error on every run.
+
+## 2026-10-10 — Format 3 carries the program interface and separate producer identities
+
+**Decision.** `ARTIFACT_FORMAT_VERSION` is 3. Compiled artifacts carry
+`program.interface`: an entity roster, input slots and relation
+descriptors derived from the embedded program. The loader re-derives the
+block and requires equality. Four identities have separate fields:
+`artifact_format_version`, `engine_version`, `engine_build` (commit and dirty
+flag), and `source_closure` (the hashes of every RuleSpec module text read,
+with an aggregate digest). Only the format identity gates loading; the
+other identities record the producer and source. An IR compile omits
+`source_closure`.
+
+The default loader accepts format 3 only. Format 2 requires the named
+`from_legacy_format_2_*` loader or the corresponding CLI, Python or wasm
+opt-in, and remains format 2 in memory with no interface. Its normalizations
+and retired fast-path metadata tolerance are preserved. `migrate artifact`
+continues to read and write format 2. The v2 schema is archived; the current
+schema describes format 3.
+
+RuleSpec's `inputs:` block declares an election with strict
+`election: {actor, provision}` metadata. Lowering stores sorted
+`ProgramSpec.input_declarations`, omitted when empty, so the interface is
+derived from the program alone. `interface.inputs[].election` is null for a
+fact. An election must name an input read by its declaring module; actor
+and provision must be well formed; declarations sharing a slot must agree.
+An unused parameter `indexed_by` label in the catalog is insufficient evidence
+of a read.
+Malformed, unsorted, duplicate or unknown IR declarations are refused. The
+engine never defaults an election: any `input_or_else` read of its slot
+is a compile error. Evaluation uses the supplied value; the simulation
+layer chooses whether to branch over an election and must not optimize a fact.
+
+**Why.** Hosts need a dependable description of the inputs and entities
+required to execute a program, and separate identities for wire compatibility,
+producer provenance and RuleSpec source. Format 2 does not require that
+description or those identities. It also tolerates missing fields and older
+emission shapes that format 3 deliberately closes. An old engine could ignore
+the new fields while a host relied on them, so a capability string alone
+cannot establish this contract.
+
+The 2026-10-04 decision kept format 2 because advisory `fast_path` metadata
+could remain valid under a retired analysis. The 2026-09-25 decision kept it
+because existing safely typed artifacts already met the tightened relation
+contract. Here every artifact gains required content and a loader-checked
+interface; neither reason preserves the new contract at format 2. The
+explicit compatibility loader retains safe existing artifacts without
+claiming they carry the format-3 interface.
+
+**Consequences.**
+
+- For source without elections, `program` with the interface removed and
+  `metadata` retain format 2's executable content. Elections add inert
+  declarations. No evaluator reads the interface or election declarations.
+- The derivation is frozen for every program a format-3 engine can already
+  load. Changing one of those programs' interfaces requires a format bump
+  and a compatibility derivation. A construct older engines refuse to
+  deserialize can extend the derivation and `RelationProvenance` for programs
+  using it without changing published artifacts; a derived relation without
+  `source_relation` (#214) is one such planned extension.
+- Stage-3 aggregation validates each embedded artifact through its own
+  loader and compares regenerated phase-two `program` and `metadata`.
+  Producer builds, versions and formats may differ. The source digest still
+  hashes the loaded source artifact's serialization, preserving legacy
+  digests across an engine rebuild.
+- `engine_build` uses a dependency-free build script that tolerates missing
+  git information. Artifacts are byte deterministic for a fixed build,
+  source and compile options. The identities and consistency checks do not
+  certify source authenticity; that remains in the signed release and
+  supervisor chain.
+
+**Alternatives.** Keeping format 2 or adding a 2-to-3 restamping command
+would assert identities that only recompilation can establish. Comparing
+whole phase-two artifacts would tie stage-3 loading to the running build;
+comparing executable content preserves its validity across rebuilds. An
+unfrozen derivation would let a later engine refuse previously published
+artifacts when its inferred interface changed.
+
+The independent review narrowed the interface's claims. Every potential
+read site contributes, including sites without type evidence; dtype claims
+are one way, integer includes whole decimals, and a null default means no
+uniform fallback. Entity flow retains direct `Scalar` queries alongside
+cross-entity references. An unresolved filtered alias has a null target,
+and filtering a kind to itself leaves supplied instances. Lookup slots
+record traversal direction without asserting cardinality; derived relations
+still accept supplied tuples. Slot kinds stay positional, nullable keys
+remain required, and id templates preserve kind spelling. Legacy byte
+preservation distinguishes canonical round trips from normalized dialects.
+
+The interface lives beside `ProgramSpec` in memory and is appended through
+an artifact wire struct, avoiding serde flattening's integer-key buffering.
+The later election requirement adds the one necessary program field:
+`input_declarations`, because the loader must derive elections from program
+content. Programs without elections still serialize that IR as before.
+General input dtype, default and domain declarations remain deferred;
+`only_related` and `input_for_year` retain their existing declaration checks.
+
+## 2026-10-13 — An empty `min`/`max` and a non-singleton `only` over related entities fail rather than default
+
+**Decision.** `min(r.f)` and `max(r.f)` (and `min_where` / `max_where`) over
+related entities fail with `EmptyRelatedAggregate` when no member is
+selected. `only(r.f)` fails with `MissingRelation` when none is and with
+`AmbiguousRelation`, which reports the count, when several are: the errors
+`only_related` (#261) raises for the same cases. Each error names the
+relation, the entity and the period. None of them returns 0, a
+sentinel, or the first member. A rule whose law gives the empty case a value
+writes it as a guard, `if len(r) > 0: min(r.f) else: <value>`; conditionals
+are lazy, so the guarded form never fails. The aggregates are new expression
+kinds (`extreme_related`, `single_related`); `ARTIFACT_FORMAT_VERSION` stays 2
+(#232, step 1).
+
+`only(r.f)` is a kind of its own, `single_related`, not an extension of
+`only_related`, which projects a Boolean input only. `ScalarExprSpec` does not
+deny unknown fields, so an engine that knows only `only_related` would load an
+`only_related` carrying a `where` clause, ignore the clause and answer over
+every member, with no error for the dropped clause. It refuses the other
+extensions: a derived value or any slot pair other than 0 and 1 at load, and a
+non-Boolean input at evaluation.
+Under a new kind that engine refuses the artifact instead. Where both
+apply (a Boolean input, no `where` clause) they are the same function in every
+mode, which `tests/single_related_vs_only_related.rs` checks on generated
+data; `only_related` alone refuses a non-Boolean value.
+
+**Why.**
+
+- A default would invent a value the law does not give. A family with no
+  children has no youngest child, and 0 would read as the age of a newborn. A
+  child in no family has no family income, and 0 would read as a family that
+  earns nothing. Where the law does say what the empty case is, the guard
+  states it in the rule, next to the citation, instead of the engine choosing.
+- Taking one member of an ambiguous `only` would make the answer depend on
+  dataset or id order, and would hide a data error (a person recorded in two
+  families) that the caller needs to see.
+- A failure names its cause at the rule that needs the value. A default would
+  flow silently into every rule that depends on it.
+
+**Consequences.**
+
+- Old to new: every artifact still loads, and a program that uses none of the
+  new aggregates compiles to the same bytes (checked against `origin/main` on
+  the repository's fixtures and on rulespec-nz and rulespec-us modules, PR #254).
+- New to old: an engine without the variants refuses an artifact that uses
+  them when it loads it, as for any new expression variant (#186).
+  `capabilities` lists `related_min_max_only` on engines that load them.
+- `min`/`max` compare numbers numerically and yield a decimal, as `sum`
+  does, and compare dates chronologically. Equal decimals of different scale
+  keep the larger scale, then the non-negative zero, so dense's batch order
+  and explain's id order give the same value.
+- Dense rows carry no entity ids. `EmptyRelatedAggregate` names the root
+  entity kind where explain names the id, as a missing root input does;
+  `MissingRelation` and `AmbiguousRelation` name the row index, as
+  `only_related` does, so each error means one thing in dense whichever
+  expression raised it. Every one of them names the relation as the formula
+  does. A derived relation's dense schema is keyed to the base relation of its
+  chain, and `only_related`'s dense errors had named that base relation where
+  explain names the derived one; they now name the derived one too.
 
 ## 2026-10-04 — Artifact `fast_path` metadata may be stale; loading accepts retired rule sets
 
