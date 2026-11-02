@@ -177,10 +177,13 @@ impl<'a> Lexer<'a> {
             }
             let c = self.src[self.pos];
             self.pos += 1;
+            // Columns count characters (Unicode scalar values): a UTF-8
+            // continuation byte (0b10xx_xxxx) belongs to the character
+            // already counted (#239).
             if c == b'\n' {
                 self.line += 1;
                 self.col = 1;
-            } else {
+            } else if c & 0xC0 != 0x80 {
                 self.col += 1;
             }
         }

@@ -70,13 +70,16 @@ fn segment() -> impl Strategy<Value = String> {
 
 /// A line of clean tokens, separated by spaces or tabs.
 fn clean_line() -> impl Strategy<Value = String> {
-    prop::collection::vec((segment(), prop::sample::select(vec![" ", "\t", "  "])), 0..6)
-        .prop_map(|parts| {
-            parts
-                .into_iter()
-                .map(|(segment, gap)| format!("{segment}{gap}"))
-                .collect()
-        })
+    prop::collection::vec(
+        (segment(), prop::sample::select(vec![" ", "\t", "  "])),
+        0..6,
+    )
+    .prop_map(|parts| {
+        parts
+            .into_iter()
+            .map(|(segment, gap)| format!("{segment}{gap}"))
+            .collect()
+    })
 }
 
 /// Characters outside the formula grammar, in every UTF-8 width.
