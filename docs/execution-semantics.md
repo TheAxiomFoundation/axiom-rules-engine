@@ -269,6 +269,19 @@ that row, and a dense call fails exactly when explain would fail for some row.
 When several rows fail, the error is the first failing row's, then the first
 failing output's in the requested order.
 
+Each compile-time refusal below applies to the rules a compile reaches.
+`DenseCompiledProgram::from_program` and `from_artifact` compile every rule
+of the root entity, so one the compiler declines refuses the program, even
+a rule that arrives only through imports and that no requested output
+reaches. `from_program_for_outputs` and `from_artifact_for_outputs` (the
+Python loaders' `outputs=`) compile only the requested outputs and the rules
+they reach (#266). A rule outside that closure is never compiled and cannot
+refuse the program; a rule inside it compiles as the whole root compiles it,
+so it refuses with the same error. Wherever the whole root compiles, the two
+programs give the same values and errors for every output both hold, given
+a batch the whole-root program binds. The closure's program reads only the
+root columns and relations its own rules read, so its batch needs no others.
+
 Four representation limits apply. They are properties of typed columns and
 positional relation batches, not of evaluation order. A column's dtype never
 depends on which rows are live: dense still types a branch no row selects, and

@@ -483,6 +483,42 @@ but leniency does not reorder the tuple and may still produce a zero count.
 See [dataset binding in RuleSpec](rulespec.md#semantics) for the CLI override,
 response metadata, and limits for unknown ids and older compiled artifacts.
 
+## Reading a rule of another entity
+
+A formula reads another entity's rules and inputs through a relation, with
+one of the related aggregates above: `sum(member_of_tax_unit.income)`,
+`only(member_of_household.rent)`, `count_where(...)`. A formula can also name
+a rule of another entity directly, with no relation, as a `TaxUnit` rule
+that adds a `Person` rule does. The engine's modes treat that read
+differently.
+
+- Explain evaluates the named rule on the reading rule's own entity id, and
+  fast returns what explain returns. A `TaxUnit` query reads the `Person`
+  rule for the tax unit's id, so it finds only facts filed under that id.
+  With well-kinded data, where a person's facts are keyed by person ids, an
+  input the person rule reads is missing.
+- Dense refuses the read, by design. A dense batch holds the rows of one
+  entity, and dense reaches another entity's rows only through a relation
+  batch, so a direct read has no rows to evaluate. Compilation fails with
+  `DenseCompileError::CrossEntityDependency`. Its message says the
+  restriction is deliberate, names the rule that reads and the rule it
+  reads, and names by legal id the relations the program declares between
+  the two entities, or says it declares none.
+
+A `Scalar` rule belongs to no entity: any rule reads it directly, in every
+mode.
+
+Dense refuses only a read that the rules it compiles reach. Compiled for its
+whole root entity (`DenseCompiledProgram::from_program` or `from_artifact`,
+or the Python loaders without `outputs`), a program is refused when any of
+its rules of that entity makes such a read, including a rule that arrives
+only through imports and that no wanted output reaches. Compiled for
+requested outputs (`from_program_for_outputs`, `from_artifact_for_outputs`,
+or the Python loaders' `outputs=[...]`), it is refused only when one of those
+outputs reaches such a read. To compute the rule in dense, read it through a
+relation between the two entities. See
+[dense execution semantics](execution-semantics.md#dense-contract).
+
 ## Judgment position
 
 A `dtype: Judgment` formula composes:

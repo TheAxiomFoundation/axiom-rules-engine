@@ -4,6 +4,64 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-02 — Dense can compile only the outputs a caller requests; a direct cross-entity read stays refused
+
+**Decision.** `DenseCompiledProgram::from_program_for_outputs` and
+`from_artifact_for_outputs` compile the requested outputs and the rules they
+reach, and no other rule. The Python loaders `CompiledDenseProgram.from_file`,
+`from_composed_file` and `from_artifact_file` take the same request as
+`outputs=`. Without a request, `from_program`, `from_artifact` and the Python
+loaders still compile every rule of the root entity. Dense keeps refusing a
+rule that reads a rule of another entity directly, with no relation; the
+refusal now says that this is deliberate and names the relations the program
+declares between the two entities.
+
+**Why.** A module names every rule its import closure reaches, so a whole-root
+compile judges rules that no wanted output reaches. 26 USC 32 for `TaxUnit`
+and 42 USC 1382 for `Person` both failed that way in `rulespec-us`, on an
+unrelated rule that reads a rule of another entity (#266). A compile of the
+requested closure judges only the program the caller asked for, and its
+contents follow from the request alone.
+
+The direct read stays refused. Explain evaluates it on the reading rule's own
+entity id, so with well-kinded data, where a person's facts are keyed by
+person ids, a `TaxUnit` rule's direct read of a `Person` rule finds none. A
+dense batch holds the rows of one entity and reaches another entity's rows
+only through a relation batch, and the artifact interface relies on dense
+never reading a slot it does not list. A one-to-one or broadcast read would
+need a contract of its own.
+
+**Consequences.**
+
+- New public Rust API: the two constructors above, and `DenseCompileError`
+  variants `NoRequestedOutputs`, `UnknownOutput { output, rule }`,
+  `OutputOfOtherEntity { output, entity, root_entity }` and
+  `OutputsSpanEntities(Vec<String>)`. `CrossEntityDependency` gains
+  `reader_entity` and `relations`, and its message keeps its first clause and
+  adds the advice. A `match` on `DenseCompileError` without a wildcard, or a
+  `CrossEntityDependency` pattern that lists its fields without `..`, needs
+  updating.
+- New Python API: `outputs=` on the three loaders and on the native
+  extension's. A single string raises `TypeError`. A closure program's
+  `output_names`, `root_inputs` and `relations` list only what its rules
+  read; `derived_metadata` still lists every rule of the module.
+- Requested outputs are rule names, as `execute` takes them. Each must be a
+  rule of the root entity or a `Scalar` rule. With no entity named, the
+  outputs name it. An empty request, an unknown name (with a hint when it is
+  a rule's legal id), another entity's rule, and outputs of several entities
+  each fail with their own error.
+- For every output both compile, the closure and whole-root programs give the
+  same values and errors on any batch the whole-root program binds. A closure
+  batch needs only the columns and relations the closure reads, so a batch
+  that omits a relation only another rule reads binds for the closure alone.
+- Relation entity typing still covers the whole program, as artifact
+  compilation does.
+- Tests: synthetic fixtures with the 26 USC 32 and 42 USC 1382 shapes; the
+  parity suite compares the closure with the whole root and explain over its
+  three dense profiles, and again with an unreached crossing added; a property
+  over the artifact-interface generator compares each rule's closure with the
+  whole root.
+
 ## 2026-10-31 — Relation roles express guarded household membership
 
 **Decision.** Add terms and qualified reads, parameters in predicates,
