@@ -145,7 +145,7 @@ fn recognize_top_level_command(name: &str) -> Option<TopLevelCommand> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1).peekable();
+    let mut args = utf8_args()?.into_iter().peekable();
     if let Some(command_name) = args.next() {
         let Some(command) = recognize_top_level_command(&command_name) else {
             return Err(format!("unknown command `{command_name}`\n\n{}", top_usage()).into());
@@ -262,7 +262,7 @@ fn run_request(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 /// `--help` or `-h`. It refuses any other argument, before the flag or after
 /// it, rather than ignoring it.
 fn wants_only_help(
-    args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>,
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
     command: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let help = args.next_if(|arg| arg == "--help" || arg == "-h").is_some();
@@ -270,6 +270,18 @@ fn wants_only_help(
         return Err(format!("`{command}` takes no arguments").into());
     }
     Ok(help)
+}
+
+/// The arguments after the program name. `env::args` panics on an argument
+/// that is not valid UTF-8; this refuses it with an error instead.
+fn utf8_args() -> Result<Vec<String>, String> {
+    env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| format!("argument {arg:?} is not valid UTF-8"))
+        })
+        .collect()
 }
 
 fn version_line() -> String {
