@@ -40,47 +40,51 @@ independent union-find oracle over generated residences, and check symmetry,
 partitioning, participation, order, modes and deferral. The pilot module in
 rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
 
-## 2026-10-14 — Python callers can state a dense batch's row count; it is never defaulted
+## 2026-10-14 — Python callers can state a dense batch's row count, and the extension never defaults it
 
 **Decision.** The Python dense surface takes an optional stated row count.
 `CompiledDenseProgram.execute` and `execute_f64` take a keyword `row_count`
-(keyword-only in the extension), and an `execute_lifetime_f64` batch may be an
-`(inputs, relations, row_count)` tuple. A stated count becomes
+(keyword-only in the extension), and an `execute_lifetime_f64` batch can take
+the form `(inputs, relations, row_count)`. A stated count becomes
 `DenseBatchSpec::row_count`, so the engine checks it as it checks a Rust
 caller's: every supplied root column and every relation's offsets must agree
-with it, and a count above `MAX_DENSE_ROWS` is refused. With no stated count,
-the extension takes the count as before: from the first supplied root input
-column, in the program's order, else from the first relation's offsets. When
-neither gives one, it raises `ValueError` naming the program's root inputs and
-any supplied inputs that are not root inputs, and saying how to state the
+with it, and the engine refuses a count above `MAX_DENSE_ROWS`. With no stated
+count, the extension takes the count as before: from the first supplied root
+input column, in the program's order, else from the first relation's offsets.
+When neither gives one, it raises `ValueError` naming the program's root
+inputs and any supplied inputs outside them, and saying how to state the
 count. It never defaults to zero rows.
 
 **Why.** Rust callers set `row_count` directly; Python callers could not. An
 input-free program (a constant or a parameter lookup) could never run from
-Python. A program called without its root input, or with the key misspelt, got
-"dense compilation produced neither root inputs nor relations", which was
-false. Since #201 an absent input is a missing input on the rows that read it,
-so with a stated count the engine reports that. Defaulting to zero rows would
-instead turn a misspelt key into an empty result with no error, because no row
-would read the input.
+Python. A call that left out the program's root input, or misspelt its key,
+got the false error "dense compilation produced neither root inputs nor
+relations". Since #201 the engine treats an absent input as missing on the
+rows that read it, so with a stated count it reports that. Defaulting to zero
+rows would instead turn a misspelt key into an empty result with no error,
+because no row would read the input.
 
 **Consequences.**
 
-- The extension checks only that a stated count is a non-negative integer that
-  fits `usize`: a Python or numpy integer, not a bool. Every such count reaches
-  the engine, so `MAX_DENSE_ROWS` alone decides which counts are too large.
+- The extension accepts any non-negative Python or numpy integer that fits
+  `usize` as a stated count, and refuses a bool. Every such count reaches the
+  engine, so `MAX_DENSE_ROWS` alone decides which counts the engine refuses as
+  too large.
 - One Python integer now reaches the executor's per-row buffers, as a Rust
-  caller's `row_count` already could. A count under the bound but larger than
-  memory is refused there, because the executor reserves those buffers
-  fallibly (the entry below): `row_count=2**50` on a constant program raises
-  `RuntimeError` naming the count.
-- `related_row_count` is read the same way: a bool is refused, and a count
-  above `i64::MAX` reaches the engine instead of raising `OverflowError`.
-- A program that reads a relation, called with no root column, no stated count
-  and no relations, now gets "missing dense relation batch `<key>`", naming the
-  key, instead of "dense execution requires relation data".
-- Supplied inputs that are not root inputs are still ignored when a row count
-  is found. They are named only in the error for a batch with no row count.
+  caller's `row_count` already could. The executor reserves those buffers
+  fallibly (the entry below), so it refuses a count under the bound but larger
+  than memory: `row_count=2**50` on a constant program raises `RuntimeError`
+  naming the count.
+- The extension reads `related_row_count` the same way: it refuses a bool, and
+  a count above `i64::MAX` reaches the engine instead of raising
+  `OverflowError`.
+- A call to a program that reads a relation, with no root column, no stated
+  count and no relations, now gets "missing dense relation batch `<key>`",
+  naming the key, instead of "dense execution requires relation data".
+- The extension still ignores supplied inputs outside the root inputs when it
+  finds a row count, and names them only in the error for a batch with no row
+  count.
+
 ## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
 
 **Decision.** Every buffer the dense executor sizes by a row count, the
@@ -211,8 +215,8 @@ already did for root columns.
   keeps that dtype. Other empty arrays (complex, object, datetime, among
   others) still fall through to the list fallbacks and read as bool. A
   negative `related_row_count` raises `ValueError`. (The entry on Python
-  callers stating a row count changes how a count is read: one that fits
-  `usize` now reaches the engine.)
+  callers stating a row count changes how the extension reads a count: one
+  that fits `usize` now reaches the engine.)
 - A stated count is trusted up to the bound. Binding's owners reservation fails
   cleanly only when the allocator reports the failure. Execution then reserves
   each per-row buffer fallibly too (the entry above), so a count that fits the
