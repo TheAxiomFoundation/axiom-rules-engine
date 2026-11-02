@@ -15,8 +15,8 @@
 //!
 //! - **The host.** A batch of 2^50 or more rows asks for at least a pebibyte,
 //!   which no host grants.
-//! - **This binary's allocator.** It refuses any single allocation above a
-//!   cap that a test sets. A relation's 8-byte owners can fit under the cap
+//! - **This binary's allocator** (`tests/support/guarded_alloc.rs`). It
+//!   refuses any single allocation above a cap that a test sets. A relation's 8-byte owners can fit under the cap
 //!   while a wider buffer for the same rows does not. Binding never sees that
 //!   case, and here it is reachable with small, real batches.
 //!
@@ -43,10 +43,7 @@
 //!    one already granted, such as a row mask or a copy of a column; this can.
 //!    On a host short of memory, any of them may be the one refused.
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
@@ -63,160 +60,25 @@ use proptest::test_runner::{Config, TestRunner};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
-// ---------------------------------------------------------------------------
-// The allocator. Every test takes `SERIAL`, so a cap one test sets never
-// refuses another test's allocations.
-// ---------------------------------------------------------------------------
+#[path = "support/guarded_alloc.rs"]
+mod guarded_alloc;
 
-struct Guarded;
+use guarded_alloc::{Guarded, capped, serial};
 
-/// The largest single allocation granted; `usize::MAX` grants everything.
-static CAP: AtomicUsize = AtomicUsize::new(usize::MAX);
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-/// More live bytes than any case here needs by two orders of magnitude.
-const LIVE_CEILING: usize = 1 << 30;
-static SERIAL: Mutex<()> = Mutex::new(());
+#[global_allocator]
+static ALLOCATOR: Guarded = Guarded;
 
 /// Allocations of at least this many bytes are numbered while a test counts
 /// them. In a batch of at least this many rows, every count-sized buffer is
 /// one of them. Nothing else execution allocates is this large: the largest
 /// is a `RowErrors` map node, about 1.5 KiB (eleven 128-byte entries).
 const LARGE: usize = 2 << 10;
-/// Whether large allocations are being numbered.
-static NUMBERING: AtomicBool = AtomicBool::new(false);
-static LARGE_SEEN: AtomicUsize = AtomicUsize::new(0);
-/// The number of the large allocation to refuse; 0 refuses none.
-static REFUSE_LARGE: AtomicUsize = AtomicUsize::new(0);
-
-impl Guarded {
-    /// Whether to refuse a request for `size` bytes before asking the host:
-    /// it is over the cap, or it is the large allocation a test chose to
-    /// refuse.
-    fn over_cap(size: usize) -> bool {
-        if size > CAP.load(Ordering::SeqCst) {
-            return true;
-        }
-        if size >= LARGE && NUMBERING.load(Ordering::SeqCst) {
-            let number = LARGE_SEEN.fetch_add(1, Ordering::SeqCst) + 1;
-            return number == REFUSE_LARGE.load(Ordering::SeqCst);
-        }
-        false
-    }
-
-    /// Count `size` more live bytes, unless that passes the ceiling.
-    fn admit(size: usize) -> bool {
-        let before = LIVE.fetch_add(size, Ordering::SeqCst);
-        if before.saturating_add(size) > LIVE_CEILING {
-            LIVE.fetch_sub(size, Ordering::SeqCst);
-            return false;
-        }
-        true
-    }
-}
-
-unsafe impl GlobalAlloc for Guarded {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if Self::over_cap(layout.size()) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: forwarded unchanged to the system allocator, which decides
-        // first, so a request no host can grant is the host's refusal.
-        let pointer = unsafe { System.alloc(layout) };
-        if pointer.is_null() || Self::admit(layout.size()) {
-            return pointer;
-        }
-        // SAFETY: `pointer` was just allocated by `System` with `layout`.
-        unsafe { System.dealloc(pointer, layout) };
-        std::ptr::null_mut()
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if Self::over_cap(layout.size()) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: as in `alloc`.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if pointer.is_null() || Self::admit(layout.size()) {
-            return pointer;
-        }
-        // SAFETY: `pointer` was just allocated by `System` with `layout`.
-        unsafe { System.dealloc(pointer, layout) };
-        std::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        // SAFETY: forwarded unchanged to the system allocator.
-        unsafe { System.dealloc(pointer, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::SeqCst);
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if Self::over_cap(new_size) {
-            return std::ptr::null_mut();
-        }
-        let old_size = layout.size();
-        if new_size > old_size && !Self::admit(new_size - old_size) {
-            return std::ptr::null_mut();
-        }
-        // SAFETY: forwarded unchanged to the system allocator.
-        let moved = unsafe { System.realloc(pointer, layout, new_size) };
-        if new_size > old_size {
-            if moved.is_null() {
-                LIVE.fetch_sub(new_size - old_size, Ordering::SeqCst);
-            }
-        } else if !moved.is_null() {
-            LIVE.fetch_sub(old_size - new_size, Ordering::SeqCst);
-        }
-        moved
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Guarded = Guarded;
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Lifts the cap when dropped, so a failing assertion never leaves it set.
-struct CapGuard;
-
-impl Drop for CapGuard {
-    fn drop(&mut self) {
-        CAP.store(usize::MAX, Ordering::SeqCst);
-    }
-}
-
-/// Run `run` with every single allocation above `cap` bytes refused.
-fn capped<T>(cap: usize, run: impl FnOnce() -> T) -> T {
-    let _lift = CapGuard;
-    CAP.store(cap, Ordering::SeqCst);
-    run()
-}
-
-/// Stops numbering large allocations when dropped.
-struct NumberingGuard;
-
-impl Drop for NumberingGuard {
-    fn drop(&mut self) {
-        NUMBERING.store(false, Ordering::SeqCst);
-        REFUSE_LARGE.store(0, Ordering::SeqCst);
-    }
-}
 
 /// Run `run`, refusing its `refuse`-th allocation of at least `LARGE` bytes
 /// (none when 0). Returns its result and how many large allocations it asked
 /// for, the refused one included.
 fn refusing_large<T>(refuse: usize, run: impl FnOnce() -> T) -> (T, usize) {
-    let _stop = NumberingGuard;
-    LARGE_SEEN.store(0, Ordering::SeqCst);
-    REFUSE_LARGE.store(refuse, Ordering::SeqCst);
-    NUMBERING.store(true, Ordering::SeqCst);
-    let value = run();
-    NUMBERING.store(false, Ordering::SeqCst);
-    (value, LARGE_SEEN.load(Ordering::SeqCst))
+    guarded_alloc::refusing_large(LARGE, refuse, run)
 }
 
 // ---------------------------------------------------------------------------

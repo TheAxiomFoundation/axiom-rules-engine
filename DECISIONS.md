@@ -46,6 +46,64 @@ the top-N count could not express.
   `tests/lifetime_law_properties.rs` and the cross-path differential
   `tests/lifetime_differential.rs`.
 
+## 2026-11-02 — Dense text columns share their values
+
+**Decision.** `DenseColumn::Text` holds `Vec<Arc<str>>` instead of
+`Vec<String>`. Rows that hold the same text share one allocation. Dense fills
+a text column by cloning the `Arc`, never the text: a broadcast literal, a
+projection to each related row, a parameter lookup, each read of an input or
+cached rule, and each row an `if` or a cached stretch merges. Text literals and
+parameter tables become `Arc<str>` once, at dense compile time, and
+`assign_rows` moves each value instead of cloning it.
+
+An error that quotes a column's value is not formatted when a row fails.
+Three errors do this:
+
+- `NoMatchingArm`: a `match` with no arm for its subject
+- `LifetimePeriodVaryingInput`: a lifetime input that varies across periods
+- `OverPeriodsTopNPeriodVarying`: a `sum_top_n` whose `n` varies across
+  periods. A text `n` compiles, so its values can be texts.
+
+The row records a quoted error that shares the text, and the compile-time
+labels of the `match`. Consecutive rows failing on the same value
+share one. Its message is built only for the error a call reports, with
+strings reserved fallibly. If the allocator refuses one, the call fails with
+the refusal of a buffer of the rows the error was raised on. Every other
+`RowErrors` entry is unchanged.
+
+**Why.** After "Dense execution reserves every row-count buffer fallibly"
+(2026-10-14), every row buffer was reserved fallibly, but a text column
+copied its value's heap data once per row with ordinary allocation. A stated
+related count of N over a root text of L bytes asked for
+about N × L bytes in small allocations. On wasm32 or under an address-space
+limit the first refused one aborted the process; on a host that overcommits
+memory the rest could exhaust it. An error naming the text copied it once per
+failing row in the same way.
+
+**Consequences.**
+
+- `DenseColumn::Text` is a public type, so this breaks callers that build or
+  match text columns outside the crate. `DenseColumn::Text(vec!["a".into()])`
+  builds one, and `&*value` or `value.to_string()` reads one. The Python
+  extension converts at its boundary, so Python callers see no change.
+- A quoted error is built lazily, not eagerly. Building it when recorded
+  would allocate the text's rendering for errors no call reports, such as a
+  later row's failure when an earlier row fails first. The plan for this
+  change named `Rc<EvalError>` entries; those would still build each message
+  when recorded.
+- Ready errors (everything but the three above) are stored and cloned as
+  before. None of them quotes a text from a column.
+  `OverPeriodsTopNOutOfRange` quotes `n`, but only after `n` converted to a
+  number, so its label is a number; a text `n` fails that conversion first.
+- Text comparison compares contents, as before. Sharing changes no result:
+  `tests/dense_text_explain.rs` checks dense against explain on generated
+  text programs, in both numeric modes.
+- `tests/dense_text_alloc.rs` runs under the shared guard allocator
+  (`tests/support/guarded_alloc.rs`), with texts four times a 16 KiB cap. A
+  run whose result names no long text makes no allocation as large as the
+  cap. Refusing any one large allocation of a run that does changes its
+  result only to the refusal naming one of the batch's counts.
+
 ## 2026-10-31 — Relation roles express guarded household membership
 
 **Decision.** Add terms and qualified reads, parameters in predicates,
@@ -179,6 +237,7 @@ therefore still abort the process, the Python interpreter included:
   - allocations sized by something other than a row count (one per rule,
     period, output or relation key)
   - the heap data of each text value, cloned per row with ordinary allocation
+    (dense text columns now share their values; see the 2026-11-02 entry)
   - the entries `RowErrors` records, one per failing row; dense records them
     only after a buffer for the same rows was granted
 - A reservation fails only when the allocator refuses it. On a host that

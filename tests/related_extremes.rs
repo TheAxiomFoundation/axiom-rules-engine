@@ -533,7 +533,7 @@ fn dense_raw_value(column: &DenseColumn, row: usize) -> ScalarValueSpec {
         DenseColumn::Date(values) => ScalarValueSpec::Date { value: values[row] },
         DenseColumn::Bool(values) => ScalarValueSpec::Bool { value: values[row] },
         DenseColumn::Text(values) => ScalarValueSpec::Text {
-            value: values[row].clone(),
+            value: values[row].to_string(),
         },
         DenseColumn::Float(values) => ScalarValueSpec::Decimal {
             value: Decimal::from_str(&values[row].to_string())

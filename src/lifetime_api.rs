@@ -137,7 +137,7 @@ impl LifetimeColumn {
                 for value in &values {
                     check_string(value, field)?;
                 }
-                DenseColumn::Text(values)
+                DenseColumn::Text(values.into_iter().map(std::sync::Arc::from).collect())
             }
             Self::Date { values } => DenseColumn::Date(values),
         })
@@ -178,7 +178,9 @@ impl LifetimeColumn {
                     .map(|value| value.normalize().to_string())
                     .collect(),
             },
-            DenseColumn::Text(values) => Self::Text { values },
+            DenseColumn::Text(values) => Self::Text {
+                values: values.iter().map(|value| value.to_string()).collect(),
+            },
             DenseColumn::Date(values) => Self::Date { values },
             DenseColumn::Float(_) => unreachable!("float column was refused above"),
         })
