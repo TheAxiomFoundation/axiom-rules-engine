@@ -30,12 +30,24 @@ use crate::spec::{
 
 #[derive(Debug, Error)]
 pub enum FormulaError {
+    /// The lexer or parser rejected the source. `line` and `col` point into
+    /// the source text given to the [`Lexer`]. RuleSpec lowering parses each
+    /// rule's formula on its own, trimmed, before it parses the module it
+    /// generates, so a syntax error in a formula points into that formula
+    /// (`docs/rulespec-format.md`, "Formula parse errors").
     #[error("formula parse error at line {line}, col {col}: {message}")]
     Parse {
+        /// 1-based line. Only a line feed (`\n`) starts a new line.
         line: usize,
+        /// 1-based column, counted in Unicode scalar values (`char`s), not
+        /// UTF-8 bytes or grapheme clusters: a combining mark is a column of
+        /// its own. It names the offending character or the first character
+        /// of the offending token, or falls one past the last character
+        /// when the source ends too early.
         col: usize,
         message: String,
     },
+    /// Lowering rejected a parsed formula. It carries no position.
     #[error("formula lower error: {0}")]
     Lower(String),
 }
@@ -107,11 +119,13 @@ pub enum TokType {
 pub struct Token {
     pub ty: TokType,
     pub value: String,
+    /// The line the token starts on, counted as in [`FormulaError::Parse`].
     pub line: usize,
+    /// The column the token starts at, counted as in [`FormulaError::Parse`].
     pub col: usize,
 }
 
-fn keyword(s: &str) -> Option<TokType> {
+pub(crate) fn keyword(s: &str) -> Option<TokType> {
     match s {
         "entity" => Some(TokType::Entity),
         "amend" => Some(TokType::Amend),
@@ -177,10 +191,13 @@ impl<'a> Lexer<'a> {
             }
             let c = self.src[self.pos];
             self.pos += 1;
+            // Columns count characters (Unicode scalar values): a UTF-8
+            // continuation byte (0b10xx_xxxx) belongs to the character
+            // already counted (#239).
             if c == b'\n' {
                 self.line += 1;
                 self.col = 1;
-            } else {
+            } else if c & 0xC0 != 0x80 {
                 self.col += 1;
             }
         }
@@ -1259,6 +1276,8 @@ pub fn lower_module(module: &Module) -> Result<ProgramSpec, FormulaError> {
         derived: derived_names,
         relation_predicates: HashSet::new(),
         terms: false,
+        reserved_variables: HashSet::new(),
+        variables: std::cell::RefCell::new(Vec::new()),
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     for v in &module.variables {
@@ -1416,6 +1435,11 @@ struct LowerCtx {
     /// Lowering a derived relation's predicate, where `anchor` and
     /// `candidate` are reserved terms. Elsewhere they stay ordinary names.
     terms: bool,
+    /// Every name bound anywhere in this predicate is reserved, including
+    /// outside the body that binds it. The active stack is separate so a
+    /// reserved name never silently becomes an input read outside its scope.
+    reserved_variables: HashSet<String>,
+    variables: std::cell::RefCell<Vec<String>>,
     // Relations discovered while lowering expressions (len / sum /
     // count_where / sum_where) so we can emit matching RelationSpec
     // declarations without requiring an explicit entity-declaration
@@ -1432,10 +1456,80 @@ fn term_named(name: &str) -> Option<TermSpec> {
     }
 }
 
+/// Function names cannot also be used for relation atoms. `builtin_tests`
+/// keeps this list equal to the scalar and judgment call lowering below.
+const BUILTIN_FUNCTIONS: [&str; 23] = [
+    "max",
+    "min",
+    "ceil",
+    "floor",
+    "days_between",
+    "date_add_days",
+    "date_add_months",
+    "date_add_years",
+    "sum_over_periods",
+    "max_over_periods",
+    "count_over_periods",
+    "sum_top_n_over_periods",
+    "len",
+    "sum",
+    "only",
+    "input_for_year",
+    "only_related",
+    "count_where",
+    "sum_where",
+    "min_where",
+    "max_where",
+    "exactly_one",
+    "exists",
+];
+
+pub(crate) fn is_builtin_function(name: &str) -> bool {
+    BUILTIN_FUNCTIONS.contains(&name)
+}
+
+/// Whether `func(args)` is a relation atom. A call to a built-in function name
+/// stays the built-in, even when a relation has that name, unless it passes a
+/// bare term, which only an atom takes: that call shadows the built-in.
+fn is_relation_call(relations: &HashSet<String>, func: &str, args: &[Expr]) -> bool {
+    relations.contains(func)
+        && (!is_builtin_function(func)
+            || args
+                .iter()
+                .any(|arg| matches!(arg, Expr::Var(name) if term_named(name).is_some())))
+}
+
 impl LowerCtx {
     /// The term `name` stands for, when this is a predicate.
     fn term(&self, name: &str) -> Option<TermSpec> {
-        self.terms.then(|| term_named(name)).flatten()
+        if !self.terms {
+            return None;
+        }
+        term_named(name).or_else(|| {
+            self.variables
+                .borrow()
+                .iter()
+                .rev()
+                .position(|variable| variable == name)
+                .map(TermSpec::Var)
+        })
+    }
+
+    /// How this predicate spells `term`: a variable's bound name, not its index.
+    fn spelling(&self, term: TermSpec) -> String {
+        match term {
+            TermSpec::Var(index) => self.variables.borrow().iter().rev().nth(index).cloned(),
+            TermSpec::Anchor | TermSpec::Candidate => None,
+        }
+        .unwrap_or_else(|| term.as_str().to_string())
+    }
+
+    fn is_relation_call(&self, func: &str, args: &[Expr]) -> bool {
+        is_relation_call(&self.relation_predicates, func, args)
+            || (self.relation_predicates.contains(func)
+                && args
+                    .iter()
+                    .any(|arg| matches!(arg, Expr::Var(name) if self.term(name).is_some())))
     }
 
     /// The term `expr` reads through, when it is `t.name` in a predicate.
@@ -1451,19 +1545,49 @@ impl LowerCtx {
 
     /// Refuse a reserved term written where a name is read (`what`).
     fn reject_term_name(&self, name: &str, what: &str) -> Result<(), FormulaError> {
+        self.reject_out_of_scope_name(name)?;
         match self.term(name) {
-            Some(term) => Err(term_used_as_value(term, what)),
+            Some(_) => Err(term_used_as_value(name, what)),
             None => Ok(()),
+        }
+    }
+
+    fn reject_out_of_scope_name(&self, name: &str) -> Result<(), FormulaError> {
+        if self.terms && self.reserved_variables.contains(name) && self.term(name).is_none() {
+            return Err(FormulaError::lower(format!(
+                "[relation_variable_out_of_scope] `{name}` is bound by an `exists` elsewhere in this predicate and is only available in that `exists` body"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Check the object of a qualified read before deciding whether it is a
+    /// role read or an aggregation field. Neither interpretation may turn a
+    /// variable outside its body into an ordinary input or relation name.
+    fn reject_out_of_scope_read(&self, expr: &Expr) -> Result<(), FormulaError> {
+        match expr {
+            Expr::Var(name) => self.reject_out_of_scope_name(name),
+            Expr::FieldAccess { obj, .. } => match obj.as_ref() {
+                Expr::Var(name) => self.reject_out_of_scope_name(name),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
         }
     }
 
     /// Refuse a reserved term, or a read through one, as an argument of an
     /// aggregation (`what`): no term is bound there.
     fn reject_in_aggregation(&self, arg: &Expr, what: &str) -> Result<(), FormulaError> {
+        self.reject_out_of_scope_read(arg)?;
+        if self.scoped_construct(arg) {
+            return Err(FormulaError::lower(format!(
+                "[relation_role_outside_scope] {what} has no term bindings; qualified reads, atoms, term comparisons and `exists` require the derived relation's predicate scope"
+            )));
+        }
         if let Some((term, name)) = self.role_read(arg) {
             return Err(FormulaError::lower(format!(
                 "[relation_role_outside_scope] `{}.{name}` is read as {what}, which is evaluated on the aggregated relation's ids, where no term is bound; a read through a term may appear in a derived relation's predicate only outside any aggregation's `where` clause or aggregated value",
-                term.as_str()
+                self.spelling(term)
             )));
         }
         if let Expr::Var(name) = arg {
@@ -1472,19 +1596,161 @@ impl LowerCtx {
         Ok(())
     }
 
+    fn scoped_construct(&self, expr: &Expr) -> bool {
+        if self.role_read(expr).is_some() {
+            return true;
+        }
+        match expr {
+            Expr::Call { func, args } => {
+                func == "exists"
+                    || self.is_relation_call(func, args)
+                    || args.iter().any(|arg| self.scoped_construct(arg))
+            }
+            Expr::BinOp { left, right, .. } => {
+                let term =
+                    |expr: &Expr| matches!(expr, Expr::Var(name) if self.term(name).is_some());
+                term(left)
+                    || term(right)
+                    || self.scoped_construct(left)
+                    || self.scoped_construct(right)
+            }
+            Expr::UnaryOp { operand, .. } => self.scoped_construct(operand),
+            Expr::FieldAccess { obj, .. } => self.scoped_construct(obj),
+            Expr::Index { target, index } => {
+                self.scoped_construct(target) || self.scoped_construct(index)
+            }
+            Expr::Cond {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.scoped_construct(condition)
+                    || self.scoped_construct(then_expr)
+                    || self.scoped_construct(else_expr)
+            }
+            Expr::Match {
+                subject,
+                cases,
+                default,
+            } => {
+                self.scoped_construct(subject)
+                    || cases.iter().any(|(pattern, value)| {
+                        self.scoped_construct(pattern) || self.scoped_construct(value)
+                    })
+                    || default
+                        .as_deref()
+                        .is_some_and(|value| self.scoped_construct(value))
+            }
+            Expr::LitInt(_)
+            | Expr::LitFloat(_)
+            | Expr::LitStr(_)
+            | Expr::LitBool(_)
+            | Expr::Var(_) => false,
+        }
+    }
+
+    fn lower_exists(&self, args: &[Expr]) -> Result<JudgmentExprSpec, FormulaError> {
+        if !self.terms {
+            return Err(FormulaError::lower(
+                "[relation_role_outside_scope] `exists` requires a derived relation predicate",
+            ));
+        }
+        if args.len() != 2 {
+            return Err(FormulaError::lower(format!(
+                "[relation_exists_arity_mismatch] `exists` takes a generator atom and a body, got {} arguments",
+                args.len()
+            )));
+        }
+        let Expr::Call {
+            func,
+            args: generator_args,
+        } = &args[0]
+        else {
+            return Err(FormulaError::lower(
+                "[relation_exists_generator_not_atom] the first `exists` argument must be an atom over a declared relation",
+            ));
+        };
+        if !self.relation_predicates.contains(func) {
+            return Err(FormulaError::lower(format!(
+                "[relation_exists_generator_not_atom] `{func}` is not a declared relation"
+            )));
+        }
+        if is_builtin_function(func) {
+            return Err(FormulaError::lower(format!(
+                "[relation_name_shadows_builtin] relation `{func}` also names a built-in function"
+            )));
+        }
+        let mut terms = Vec::with_capacity(generator_args.len());
+        let mut variable = None;
+        let mut existing_names = HashSet::new();
+        let mut rebinding = None;
+        for (slot, arg) in generator_args.iter().enumerate() {
+            let Expr::Var(name) = arg else {
+                return Err(FormulaError::lower(
+                    "[relation_atom_argument_not_term] a generator argument must be a term in scope or its new variable name",
+                ));
+            };
+            if let Some(term) = self.term(name) {
+                if (!existing_names.insert(name) || matches!(term, TermSpec::Var(_)))
+                    && rebinding.is_none()
+                {
+                    rebinding = Some(name);
+                }
+                terms.push(term);
+                continue;
+            }
+            if self.scalars.contains(name)
+                || self.derived.contains(name)
+                || self.relation_predicates.contains(name)
+            {
+                return Err(FormulaError::lower(format!(
+                    "[relation_variable_name_conflict] `{name}` already names a rule, parameter or relation visible to this module"
+                )));
+            }
+            if !lowercase_identifier(name) {
+                return Err(FormulaError::lower(format!(
+                    "[relation_variable_invalid_name] `{name}` is not a lowercase identifier"
+                )));
+            }
+            if variable.is_some() {
+                return Err(FormulaError::lower(
+                    "[relation_exists_variable_count] a generator must contain exactly one new variable argument, but has more than one",
+                ));
+            }
+            variable = Some((slot, name.clone()));
+            // The generator is evaluated in its enclosing environment. This
+            // slot alone is a placeholder; the new frame exists in the body.
+            terms.push(TermSpec::Var(0));
+        }
+        let Some((variable_slot, name)) = variable else {
+            if let Some(name) = rebinding {
+                return Err(FormulaError::lower(format!(
+                    "[relation_variable_name_conflict] generator has no new variable and would rebind `{name}`, which is already a term in scope"
+                )));
+            }
+            return Err(FormulaError::lower(
+                "[relation_exists_variable_count] a generator must contain exactly one new variable argument; every argument is already a term in scope",
+            ));
+        };
+        self.variables.borrow_mut().push(name);
+        let body = lower_to_judgment(&args[1], self);
+        self.variables.borrow_mut().pop();
+        Ok(JudgmentExprSpec::Exists {
+            relation: func.clone(),
+            terms,
+            variable_slot,
+            body: Box::new(body?),
+        })
+    }
+
     /// Lower `term.name`, a read of a derived rule or an input at the term's
     /// id (relation roles, section 3.2).
     fn lower_role_read(&self, term: TermSpec, name: &str) -> Result<ScalarExprSpec, FormulaError> {
-        let t = term.as_str();
-        if let Some(inner) = term_named(name) {
-            return Err(term_used_as_value(
-                inner,
-                &format!("the name read through `{t}`"),
-            ));
-        }
+        let t = self.spelling(term);
+        self.reject_term_name(name, &format!("the name read through `{t}`"))?;
         if self.relation_predicates.contains(name) {
             return Err(FormulaError::lower(format!(
-                "`{t}.{name}` reads relation `{name}`; a read through a term names a rule or an input, and relation atoms are not supported yet (#214)"
+                "`{t}.{name}` reads relation `{name}`; a read through a term names a rule or an input; test the relation with an atom"
             )));
         }
         if self.scalars.contains(name) || matches!(name, "period_start" | "period_end") {
@@ -1507,12 +1773,16 @@ impl LowerCtx {
 }
 
 /// The refusal of a reserved term written as a value (`what`).
-fn term_used_as_value(term: TermSpec, what: &str) -> FormulaError {
+fn term_used_as_value(name: &str, what: &str) -> FormulaError {
     FormulaError::lower(format!(
-        "[relation_term_used_as_value] `{}` names a term of this derived relation's predicate, so it cannot be {what}; read a value at it with `{}.name`",
-        term.as_str(),
-        term.as_str()
+        "[relation_term_used_as_value] `{name}` names a term of this derived relation's predicate, so it cannot be {what}; read a value at it with `{name}.name`"
     ))
+}
+
+fn lowercase_identifier(name: &str) -> bool {
+    let mut chars = name.bytes();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
 }
 
 fn lit_int_spec(i: i64) -> ScalarExprSpec {
@@ -1528,6 +1798,25 @@ fn lit_bool_spec(b: bool) -> ScalarExprSpec {
 }
 
 fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaError> {
+    ctx.reject_out_of_scope_read(e)?;
+    if let Expr::Call { func, args } = e {
+        if ctx.is_relation_call(func, args) {
+            let (code, detail) = if is_builtin_function(func) {
+                (
+                    "relation_name_shadows_builtin",
+                    "also names a built-in function",
+                )
+            } else {
+                (
+                    "relation_atom_used_as_value",
+                    "is a judgment, so it cannot be used as a scalar value",
+                )
+            };
+            return Err(FormulaError::lower(format!(
+                "[{code}] relation `{func}` {detail}"
+            )));
+        }
+    }
     Ok(match e {
         Expr::LitInt(i) => lit_int_spec(*i),
         Expr::LitFloat(d) => ScalarExprSpec::Literal {
@@ -1626,6 +1915,7 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     .is_some_and(|(relation, _)| ctx.term(relation).is_none()) =>
         {
             let (relation, field) = relation_field_access(&args[0]).expect("checked by the guard");
+            ctx.reject_out_of_scope_name(relation)?;
             ctx.reject_term_name(field, "the aggregated value")?;
             let extreme = if func == "min" {
                 ExtremeSpec::Min
@@ -1644,6 +1934,16 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
             }
         }
         Expr::Call { func, args } => match func.as_str() {
+            "exists" => {
+                if !ctx.terms {
+                    return Err(FormulaError::lower(
+                        "[relation_role_outside_scope] `exists` requires a derived relation predicate",
+                    ));
+                }
+                return Err(FormulaError::lower(
+                    "[relation_exists_used_as_value] `exists` is a judgment and cannot be used as a scalar value",
+                ));
+            }
             "max" => ScalarExprSpec::Max {
                 items: args
                     .iter()
@@ -2161,6 +2461,94 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
 }
 
 fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, FormulaError> {
+    ctx.reject_out_of_scope_read(e)?;
+    // A relation call is a judgment, with arguments in declared tuple order.
+    if let Expr::Call { func, args } = e {
+        if ctx.is_relation_call(func, args) {
+            if !ctx.terms {
+                return Err(FormulaError::lower(
+                    "[relation_role_outside_scope] relation atoms require a derived relation predicate",
+                ));
+            }
+            if is_builtin_function(func) {
+                return Err(FormulaError::lower(format!(
+                    "[relation_name_shadows_builtin] relation `{func}` also names a built-in function"
+                )));
+            }
+            let terms = args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Var(name) => {
+                        ctx.reject_out_of_scope_name(name)?;
+                        ctx.term(name).ok_or_else(|| {
+                            FormulaError::lower(format!(
+                                "[relation_atom_argument_not_term] `{name}` is not a term in scope"
+                            ))
+                        })
+                    }
+                    _ => Err(FormulaError::lower(
+                        "[relation_atom_argument_not_term] every atom argument must be a term",
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(JudgmentExprSpec::RelationAtom {
+                relation: func.clone(),
+                terms,
+            });
+        }
+        // Ordinary rule lowering has no declared-relation namespace. A call
+        // with term arguments was already invalid there; give it the scope
+        // refusal instead of an unknown-function diagnostic.
+        if !ctx.terms
+            && !is_builtin_function(func)
+            && args
+                .iter()
+                .any(|arg| matches!(arg, Expr::Var(name) if term_named(name).is_some()))
+        {
+            return Err(FormulaError::lower(
+                "[relation_role_outside_scope] relation atoms require a derived relation predicate",
+            ));
+        }
+    }
+    // Only a comparison compares terms. Under `and`, `or` or arithmetic a bare
+    // term is refused where it is lowered, as a judgment or as a value, rather
+    // than as a comparison it is not.
+    if let Expr::BinOp { op, left, right } = e
+        && matches!(
+            op,
+            BinOpKind::Lt
+                | BinOpKind::Gt
+                | BinOpKind::Le
+                | BinOpKind::Ge
+                | BinOpKind::Eq
+                | BinOpKind::Ne
+        )
+    {
+        ctx.reject_out_of_scope_read(left)?;
+        ctx.reject_out_of_scope_read(right)?;
+        let term = |expr: &Expr| match expr {
+            Expr::Var(name) => ctx.term(name),
+            _ => None,
+        };
+        let pair = (term(left), term(right));
+        if pair.0.is_some() || pair.1.is_some() {
+            let (Some(left), Some(right)) = pair else {
+                return Err(FormulaError::lower(
+                    "[relation_term_compared_with_value] an entity term can only be compared with another term",
+                ));
+            };
+            if !matches!(op, BinOpKind::Eq | BinOpKind::Ne) {
+                return Err(FormulaError::lower(
+                    "[relation_term_comparison_operator] entity terms support only == and !=",
+                ));
+            }
+            return Ok(JudgmentExprSpec::SameEntity {
+                left,
+                right,
+                negated: matches!(op, BinOpKind::Ne),
+            });
+        }
+    }
     // As with a bare name, a rule read through a term is a judgment and an
     // input read through one holds when it is true.
     if let Some((term, name)) = ctx.role_read(e) {
@@ -2282,6 +2670,7 @@ fn lower_to_judgment(e: &Expr, ctx: &LowerCtx) -> Result<JudgmentExprSpec, Formu
         // not match the manual form byte-for-byte, because hand-chained
         // and/or nest binary while this lowering is flat n-ary.
         Expr::Call { func, args } => match func.as_str() {
+            "exists" => ctx.lower_exists(args)?,
             "exactly_one" => {
                 if args.len() < 2 {
                     return Err(FormulaError::lower(format!(
@@ -2383,6 +2772,76 @@ fn count_non_exhaustive_matches(expr: &Expr) -> usize {
     }
 }
 
+/// Reserve variable spellings across the whole predicate before lowering
+/// either side of a short-circuit operator or a conditional. Validation of
+/// the generator itself remains in `lower_exists`.
+fn reserved_variable_names(expr: &Expr) -> HashSet<String> {
+    fn collect(expr: &Expr, names: &mut HashSet<String>) {
+        match expr {
+            Expr::Call { func, args } => {
+                if func == "exists"
+                    && let Some(Expr::Call {
+                        args: generator_args,
+                        ..
+                    }) = args.first()
+                {
+                    for arg in generator_args {
+                        if let Expr::Var(name) = arg
+                            && term_named(name).is_none()
+                        {
+                            names.insert(name.clone());
+                        }
+                    }
+                }
+                for arg in args {
+                    collect(arg, names);
+                }
+            }
+            Expr::BinOp { left, right, .. } => {
+                collect(left, names);
+                collect(right, names);
+            }
+            Expr::UnaryOp { operand, .. } => collect(operand, names),
+            Expr::FieldAccess { obj, .. } => collect(obj, names),
+            Expr::Index { target, index } => {
+                collect(target, names);
+                collect(index, names);
+            }
+            Expr::Cond {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                collect(condition, names);
+                collect(then_expr, names);
+                collect(else_expr, names);
+            }
+            Expr::Match {
+                subject,
+                cases,
+                default,
+            } => {
+                collect(subject, names);
+                for (pattern, value) in cases {
+                    collect(pattern, names);
+                    collect(value, names);
+                }
+                if let Some(default) = default {
+                    collect(default, names);
+                }
+            }
+            Expr::LitInt(_)
+            | Expr::LitFloat(_)
+            | Expr::LitStr(_)
+            | Expr::LitBool(_)
+            | Expr::Var(_) => {}
+        }
+    }
+    let mut names = HashSet::new();
+    collect(expr, &mut names);
+    names
+}
+
 /// Lower a derived relation's predicate. `parameter_names` are the names
 /// rule lowering reads as parameters in the same module
 /// ([`parameter_names`]); they take precedence over `derived_names`, as in
@@ -2413,10 +2872,16 @@ pub(crate) fn lower_judgment_formula(
         derived,
         relation_predicates,
         terms: true,
+        reserved_variables: reserved_variable_names(&expr),
+        variables: std::cell::RefCell::new(Vec::new()),
         relations: std::cell::RefCell::new(HashSet::new()),
     };
     lower_to_judgment(&expr, &ctx)
 }
+
+#[cfg(test)]
+#[path = "formula_column_tests.rs"]
+mod column_tests;
 
 #[cfg(test)]
 mod lexer_tests {
@@ -2539,5 +3004,56 @@ mod lexer_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use std::collections::BTreeSet;
+
+    use super::BUILTIN_FUNCTIONS;
+
+    /// The names each `match func.as_str()` call lowering dispatches on: its
+    /// arms at the match's own indentation, up to the catch-all arm.
+    fn lowered_call_names() -> BTreeSet<String> {
+        let source = include_str!("formula.rs");
+        let mut names = BTreeSet::new();
+        let mut matches = 0;
+        let mut lines = source.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "Expr::Call { func, args } => match func.as_str() {" {
+                continue;
+            }
+            matches += 1;
+            let arm_indent = line.len() - line.trim_start().len() + 4;
+            for arm in lines.by_ref() {
+                let indent = arm.len() - arm.trim_start().len();
+                let arm = arm.trim();
+                if indent != arm_indent || arm.is_empty() || arm.starts_with("//") {
+                    continue;
+                }
+                let Some((pattern, _)) = arm.split_once("=>") else {
+                    continue;
+                };
+                if !pattern.trim_start().starts_with('"') {
+                    break;
+                }
+                for name in pattern.split('|') {
+                    names.insert(name.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        assert_eq!(matches, 2, "scalar and judgment call lowering");
+        names
+    }
+
+    #[test]
+    fn builtin_function_names_are_the_lowered_call_names() {
+        let listed = BUILTIN_FUNCTIONS
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(listed.len(), BUILTIN_FUNCTIONS.len(), "no duplicates");
+        assert_eq!(listed, lowered_call_names());
     }
 }

@@ -10,8 +10,8 @@ use crate::model::{
     ComparisonOp, DType, DataSet, Derived, DerivedSemantics, DerivedVersion, Extreme,
     IndexedParameter, InputRecord, Interval, JudgmentExpr, JudgmentOutcome, OverPeriodsKind,
     ParameterVersion, Period, PeriodKind, Program, RelatedValueRef, RelationDerivation,
-    RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr, ScalarValue, Term, UnitDef,
-    UnitKind,
+    RelationPathStep, RelationRecord, RelationSchema, Rounding, RoundingMode, ScalarExpr,
+    ScalarValue, Term, UnitDef, UnitKind,
 };
 
 #[derive(Debug, Error)]
@@ -20,6 +20,16 @@ pub enum SpecError {
     SelectedYearInput(String),
     #[error("input declaration `{input}`: {message}")]
     InputDeclaration { input: String, message: String },
+    #[error(
+        "relation_path_source_conflict: a derived relation must declare exactly one of source_relation or source_path"
+    )]
+    RelationPathSourceConflict,
+    #[error("relation_path_empty: a source_path must contain at least one step")]
+    RelationPathEmpty,
+    #[error(
+        "relation_path_forbidden_field: a path-sourced derived relation cannot declare {field}"
+    )]
+    RelationPathForbiddenField { field: &'static str },
     #[error("only_related requires a Boolean input reference")]
     InvalidOnlyRelatedValue,
     #[error("only_related requires distinct binary relation slots 0 and 1")]
@@ -63,6 +73,14 @@ pub enum SpecError {
         "dataset relation `{reference}` must use an absolute legal RuleSpec reference that resolves to a declared relation in the compiled program"
     )]
     InvalidDatasetRelationReference { reference: String },
+    #[error(
+        "supplied_tuples_for_derived_relation: dataset relation `{relation}` is derived by the program; supply its source tuples instead"
+    )]
+    SuppliedTuplesForDerivedRelation { relation: String },
+    #[error(
+        "lenient_binding_with_relation_roles: a program using relation atoms or exists requires strict relation binding"
+    )]
+    LenientBindingWithRelationRoles,
     #[error("relation `{relation}` declares {slot_count} slot entity kinds, but has arity {arity}")]
     InvalidRelationSlotEntityCount {
         relation: String,
@@ -543,6 +561,9 @@ impl DatasetSpec {
         query_entities: &[(String, String)],
         options: DatasetBindingOptions,
     ) -> Result<DatasetBindingOutcome, SpecError> {
+        if !options.strict_relation_entities && program.uses_relation_atoms() {
+            return Err(SpecError::LenientBindingWithRelationRoles);
+        }
         let input_catalog = program.input_catalog();
         let inputs = self
             .inputs
@@ -554,6 +575,18 @@ impl DatasetSpec {
             .iter()
             .map(|relation| relation.to_model_for_program(program))
             .collect::<Result<Vec<RelationRecord>, SpecError>>()?;
+        if program.uses_relation_roles() {
+            if let Some(record) = relations.iter().find(|record| {
+                program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            }) {
+                return Err(SpecError::SuppliedTuplesForDerivedRelation {
+                    relation: record.name.clone(),
+                });
+            }
+        }
         let diagnostics =
             relation_slot_entity_diagnostics(program, &inputs, query_entities, &relations);
         if options.strict_relation_entities && !diagnostics.is_empty() {
@@ -731,7 +764,10 @@ impl RelationSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RelationDerivationSpec {
-    pub source_relation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_relation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     pub current_slot: usize,
     pub related_slot: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -743,10 +779,54 @@ pub struct RelationDerivationSpec {
     pub predicate: JudgmentExprSpec,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RelationPathStepSpec {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
 impl RelationDerivationSpec {
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
+
     fn to_model(&self) -> Result<RelationDerivation, SpecError> {
+        if self.source_relation.is_some() == self.source_path.is_some() {
+            return Err(SpecError::RelationPathSourceConflict);
+        }
+        if let Some(path) = &self.source_path {
+            if path.is_empty() {
+                return Err(SpecError::RelationPathEmpty);
+            }
+            for (field, value) in [
+                ("entity", &self.entity),
+                ("member_relation", &self.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(SpecError::RelationPathForbiddenField { field });
+                }
+            }
+        }
         Ok(RelationDerivation {
             source_relation: self.source_relation.clone(),
+            source_path: self.source_path.as_ref().map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| RelationPathStep {
+                        relation: step.relation.clone(),
+                        from_slot: step.from_slot,
+                        to_slot: step.to_slot,
+                    })
+                    .collect()
+            }),
             current_slot: self.current_slot,
             related_slot: self.related_slot,
             entity: self.entity.clone(),
@@ -1310,7 +1390,7 @@ pub enum ScalarExprSpec {
     },
 }
 
-/// An end of the pair a derived relation's predicate tests, mirroring
+/// An entity id in a derived relation's predicate, mirroring
 /// [`crate::model::Term`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1320,6 +1400,8 @@ pub enum TermSpec {
     Anchor,
     /// The id being tested: its related slot.
     Candidate,
+    /// Index counted from the innermost enclosing `exists`.
+    Var(usize),
 }
 
 impl TermSpec {
@@ -1327,6 +1409,7 @@ impl TermSpec {
         match self {
             Self::Anchor => Term::Anchor,
             Self::Candidate => Term::Candidate,
+            Self::Var(index) => Term::Var(index),
         }
     }
 
@@ -1334,6 +1417,9 @@ impl TermSpec {
         match term {
             Term::Anchor => Self::Anchor,
             Term::Candidate => Self::Candidate,
+            Term::Var(index) => Self::Var(index),
+            #[cfg(test)]
+            Term::Id(_) => panic!("test-only literal id terms cannot be serialized"),
         }
     }
 
@@ -1624,6 +1710,23 @@ pub enum JudgmentExprSpec {
         current_slot: usize,
         related_slot: usize,
     },
+    /// Test a declared relation's tuple in its slot order, inside a predicate.
+    RelationAtom {
+        relation: String,
+        terms: Vec<TermSpec>,
+    },
+    Exists {
+        relation: String,
+        terms: Vec<TermSpec>,
+        variable_slot: usize,
+        body: Box<JudgmentExprSpec>,
+    },
+    /// Compare term ids; both terms must have the same entity kind.
+    SameEntity {
+        left: TermSpec,
+        right: TermSpec,
+        negated: bool,
+    },
     And {
         items: Vec<JudgmentExprSpec>,
     },
@@ -1663,6 +1766,30 @@ impl JudgmentExprSpec {
                 right: right.to_model()?,
             }),
             Self::Derived { name } => Ok(JudgmentExpr::Derived(name.clone())),
+            Self::RelationAtom { relation, terms } => Ok(JudgmentExpr::RelationAtom {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+            }),
+            Self::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => Ok(JudgmentExpr::Exists {
+                relation: relation.clone(),
+                terms: terms.iter().map(|term| term.to_model()).collect(),
+                variable_slot: *variable_slot,
+                body: Box::new(body.to_model()?),
+            }),
+            Self::SameEntity {
+                left,
+                right,
+                negated,
+            } => Ok(JudgmentExpr::SameEntity {
+                left: left.to_model(),
+                right: right.to_model(),
+                negated: *negated,
+            }),
             Self::RelationMember {
                 relation,
                 current_slot,
@@ -1997,5 +2124,14 @@ mod namespace_tests {
         let spec = program_with("derived", json!([derived.clone(), derived]));
 
         assert_collision(spec, "derived rule", "benefit");
+    }
+}
+
+#[cfg(test)]
+mod literal_id_term_tests {
+    #[test]
+    #[should_panic(expected = "test-only literal id terms cannot be serialized")]
+    fn literal_ids_have_no_spec_or_artifact_representation() {
+        super::TermSpec::from_model(crate::model::Term::Id("oracle-only"));
     }
 }

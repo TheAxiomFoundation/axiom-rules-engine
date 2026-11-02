@@ -30,6 +30,14 @@ fn derived_ref(name: &str) -> Value {
     json!({"kind": "derived", "name": name})
 }
 
+fn role_input(term: &str, name: &str) -> Value {
+    json!({"kind": "role_input", "term": term, "name": name})
+}
+
+fn role_derived(term: &str, name: &str) -> Value {
+    json!({"kind": "role_derived", "term": term, "name": name})
+}
+
 fn int(value: i64) -> Value {
     json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
 }
@@ -741,10 +749,6 @@ fn an_aggregates_where_clause_is_read_at_each_member() {
 /// reads. An unqualified read beside them keeps the predicate's routing.
 #[test]
 fn reads_through_a_term_run_on_the_terms_kind() {
-    let role_input =
-        |term: &str, name: &str| json!({"kind": "role_input", "term": term, "name": name});
-    let role_derived =
-        |term: &str, name: &str| json!({"kind": "role_derived", "term": term, "name": name});
     let interface = derive(json!({
         "relations": [
             {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
@@ -799,4 +803,146 @@ fn reads_through_a_term_run_on_the_terms_kind() {
             },
         }
     );
+}
+
+/// A read through a term at a parameter's index takes the parameter's keys as
+/// its closed domain, as an unqualified read at an index does.
+#[test]
+fn a_read_through_a_term_at_a_parameter_index_lists_its_keys() {
+    let interface = derive(json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "banded_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": cmp(json!({
+                    "kind": "parameter_lookup", "parameter": "band_of_age",
+                    "index": role_input("candidate", "band_age")
+                }), "eq", int(2))
+            }}
+        ],
+        "parameters": [{
+            "name": "band_of_age", "unit": null,
+            "versions": [{"effective_from": "2020-01-01", "values": {
+                "12": {"kind": "integer", "value": 1},
+                "30": {"kind": "integer", "value": 2},
+                "45": {"kind": "integer", "value": 3}
+            }}]
+        }],
+        "derived": [scalar_rule("banded_count", "Household", json!({
+            "kind": "count_related", "relation": "banded_members",
+            "current_slot": 1, "related_slot": 0
+        }))]
+    }));
+    let band_age = find(&interface, "band_age");
+    assert_eq!(band_age.entities, kinds(&["Person"]));
+    assert_eq!(band_age.dtype, Some(InputDType::Integer));
+    assert_eq!(band_age.values, Some(vec![12, 30, 45]));
+    assert_eq!(band_age.values_basis, Some(ValuesBasis::ParameterIndex));
+}
+
+/// A rule read through `anchor` runs on the anchor's id even when its entity
+/// is a filtered entity of the current kind, which an unqualified read of the
+/// same rule would run on the related id. Both positions are covered: a
+/// judgment and a scalar.
+#[test]
+fn a_filtered_entity_rule_read_through_anchor_runs_on_the_anchors_id() {
+    let interface = derive(json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "adults_of", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": {"kind": "and", "items": [
+                    cmp(role_input("candidate", "age"), "gte", int(18)),
+                    role_derived("anchor", "unit_opted_in"),
+                    cmp(role_derived("anchor", "unit_score"), "gt", int(0))
+                ]}
+            }},
+            {"name": "unit_members", "arity": 2, "derivation": {
+                "source_relation": "adults_of",
+                "current_slot": 1, "related_slot": 0,
+                "entity": "Unit",
+                "slot_entities": ["Person", "Household"],
+                "predicate": cmp(role_input("anchor", "head_age"), "gte", int(30))
+            }}
+        ],
+        "derived": [
+            judgment_rule("unit_opted_in", "Unit", cmp(input("opt_in"), "eq", boolean(true))),
+            scalar_rule("unit_score", "Unit", add(vec![input("unit_points"), int(0)])),
+            scalar_rule("adult_count", "Household", json!({
+                "kind": "count_related", "relation": "adults_of",
+                "current_slot": 1, "related_slot": 0
+            }))
+        ]
+    }));
+    // Each Unit rule runs on household ids, as its own entity and as the
+    // anchor's; neither runs on a person id.
+    for slot in ["opt_in", "unit_points"] {
+        assert_eq!(
+            find(&interface, slot).entities,
+            kinds(&["Household"]),
+            "{slot}"
+        );
+    }
+    assert_eq!(find(&interface, "age").entities, kinds(&["Person"]));
+    assert_eq!(find(&interface, "head_age").entities, kinds(&["Household"]));
+    // The Unit rules' own entity also yields household ids, so only the
+    // relation's reads show that the predicate references them.
+    let adults_of = interface
+        .relations
+        .iter()
+        .find(|relation| relation.name == "adults_of")
+        .unwrap();
+    assert_eq!(
+        adults_of.provenance,
+        RelationProvenance::Derived {
+            rule: "adults_of".to_string(),
+            source_relation: "member_of_household".to_string(),
+            reads: RelationReads {
+                inputs: kinds(&["age"]),
+                rules: kinds(&["unit_opted_in", "unit_score"]),
+                relations: vec![],
+            },
+        }
+    );
+}
+
+/// An unqualified read of a filtered-entity rule in a predicate runs on the
+/// related id unless the rule's entity is the derivation's declared current
+/// kind. Here `CareUnit` filters `Person`, the related kind, so its rule runs
+/// on person ids only, never on the current household's.
+#[test]
+fn an_unqualified_filtered_entity_rule_in_a_predicate_runs_on_the_related_id() {
+    let interface = derive(json!({
+        "relations": [
+            {"name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "guardian_of", "arity": 2, "slot_entities": ["Person", "Person"]},
+            {"name": "care_unit", "arity": 2, "derivation": {
+                "source_relation": "guardian_of",
+                "current_slot": 0, "related_slot": 1,
+                "entity": "CareUnit",
+                "slot_entities": ["Person", "Person"],
+                "predicate": cmp(input("cares"), "eq", boolean(true))
+            }},
+            {"name": "covered_members", "arity": 2, "derivation": {
+                "source_relation": "member_of_household",
+                "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": derived_ref("care_unit_covered")
+            }}
+        ],
+        "derived": [
+            judgment_rule("care_unit_covered", "CareUnit",
+                cmp(input("covered"), "eq", boolean(true))),
+            scalar_rule("covered_count", "Household", json!({
+                "kind": "count_related", "relation": "covered_members",
+                "current_slot": 1, "related_slot": 0
+            }))
+        ]
+    }));
+    assert_eq!(find(&interface, "covered").entities, kinds(&["Person"]));
+    assert_eq!(find(&interface, "cares").entities, kinds(&["Person"]));
 }

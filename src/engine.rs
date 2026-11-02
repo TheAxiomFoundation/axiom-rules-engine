@@ -342,7 +342,7 @@ fn term_id<'c>(
     relation_context: Option<RelationEvalContext<'c>>,
 ) -> Result<&'c str, EvalError> {
     relation_context
-        .map(|context| context.id_of(term))
+        .and_then(|context| context.id_of(term))
         .ok_or_else(|| relation_role_outside_derived_relation(term, name))
 }
 
@@ -354,6 +354,14 @@ pub(crate) fn relation_role_outside_derived_relation(term: Term, name: &str) -> 
     EvalError::TypeMismatch(format!(
         "`{}.{name}` reads a term of a derived relation's predicate, so it can only be evaluated inside one, outside any aggregation's `where` clause or aggregated value",
         term.as_str()
+    ))
+}
+
+/// Guard role-only judgments in hand-built programs, whose constructors do
+/// not run the compiler's `relation_role_outside_scope` check.
+pub(crate) fn relation_construct_outside_derived_relation(construct: &str) -> EvalError {
+    EvalError::TypeMismatch(format!(
+        "relation_role_outside_scope: {construct} can only be evaluated inside a derived relation's predicate, outside any aggregation's `where` clause or aggregated value"
     ))
 }
 
@@ -601,12 +609,81 @@ struct PendingMembers {
     effects: Vec<TraceEffect>,
 }
 
+/// Progress through a path's candidate generation. A completed lookup advances
+/// `next`; a suspended lookup retains that id and every completed step.
+#[derive(Debug)]
+struct PathResume {
+    step: usize,
+    frontier: Vec<String>,
+    next: usize,
+    reached: Vec<String>,
+    effects: Vec<TraceEffect>,
+}
+
+/// Counts increment only after a lookup or a complete candidate generation.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct PathCoverage {
+    resumed: usize,
+    empty: usize,
+    nonempty: usize,
+    long: usize,
+    derived_positions: [usize; 4],
+}
+
+#[cfg(test)]
+mod actual_path_work {
+    use std::cell::Cell;
+    type Counts = (usize, usize, usize, usize, [usize; 4]);
+    thread_local! { static COUNTS: Cell<Counts> = const { Cell::new((0, 0, 0, 0, [0; 4])) }; }
+
+    pub(super) fn lookup(resumed: bool, derived_position: Option<usize>) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.0 += usize::from(resumed);
+            if let Some(position) = derived_position {
+                value.4[position.min(3)] += 1;
+            }
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn completed(frontier: &[String], length: usize) {
+        assert!(
+            frontier.windows(2).all(|pair| pair[0] < pair[1]),
+            "path candidates must be distinct and sorted: {frontier:?}"
+        );
+        let empty = frontier.is_empty();
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.1 += usize::from(empty);
+            value.2 += usize::from(!empty);
+            value.3 += usize::from(length >= 3);
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn take() -> Option<Counts> {
+        Some(COUNTS.with(|counts| counts.replace((0, 0, 0, 0, [0; 4]))))
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/relation_paths.rs"]
+mod relation_path_properties;
+
 /// How many derived-relation resolutions may nest on the native stack. A
 /// relation's predicate can read another derived relation, whose predicate
 /// reads the next, so nesting natively would grow the stack with the length
 /// of such a chain. Past this depth a resolution stops where it needs the
 /// next relation, the driver below it resolves that relation, and the
 /// stopped resolution then runs again; see [`Engine::resolve_members`].
+/// Debug frames are much larger: a count-related predicate chain needed
+/// 2048 KiB at depth 32, but 576 KiB at depth 8 (aarch64-apple-darwin,
+/// rustc 1.94.1, 16 KiB resolution), so debug builds stop earlier.
+#[cfg(debug_assertions)]
+const RELATION_NESTING_LIMIT: usize = 8;
+#[cfg(not(debug_assertions))]
 const RELATION_NESTING_LIMIT: usize = 32;
 
 #[derive(Clone, Debug)]
@@ -636,11 +713,18 @@ pub(crate) struct EvaluatedTraceInstance {
 /// extend this environment with a borrowed chain of frames; unqualified
 /// routing never reads them.
 #[derive(Clone, Copy)]
+struct VariableFrame<'a> {
+    id: &'a str,
+    parent: Option<&'a VariableFrame<'a>>,
+}
+
+#[derive(Clone, Copy)]
 struct RelationEvalContext<'a> {
     current_id: &'a str,
     related_id: &'a str,
-    current_entity: Option<&'a str>,
-    related_entity: Option<&'a str>,
+    current_entity: Option<&'a String>,
+    related_entity: Option<&'a String>,
+    variables: Option<&'a VariableFrame<'a>>,
 }
 
 impl<'a> RelationEvalContext<'a> {
@@ -649,20 +733,30 @@ impl<'a> RelationEvalContext<'a> {
     /// related slot has it, else none (the caller falls back to the id the
     /// predicate is evaluated on, the candidate).
     fn entity_id_for(self, entity: &str) -> Option<&'a str> {
-        if self.current_entity == Some(entity) {
+        if self.current_entity.is_some_and(|kind| kind == entity) {
             return Some(self.current_id);
         }
-        if self.related_entity == Some(entity) {
+        if self.related_entity.is_some_and(|kind| kind == entity) {
             return Some(self.related_id);
         }
         None
     }
 
     /// The id `term` names.
-    fn id_of(self, term: Term) -> &'a str {
+    fn id_of(self, term: Term) -> Option<&'a str> {
         match term {
-            Term::Anchor => self.current_id,
-            Term::Candidate => self.related_id,
+            Term::Anchor => Some(self.current_id),
+            Term::Candidate => Some(self.related_id),
+            Term::Var(mut index) => {
+                let mut frame = self.variables?;
+                while index > 0 {
+                    frame = frame.parent?;
+                    index -= 1;
+                }
+                Some(frame.id)
+            }
+            #[cfg(test)]
+            Term::Id(id) => Some(id),
         }
     }
 }
@@ -671,6 +765,7 @@ pub struct Engine<'a> {
     program: &'a Program,
     input_index: HashMap<(String, String), Vec<&'a crate::model::InputRecord>>,
     relation_index: HashMap<(String, usize, String), Vec<&'a crate::model::RelationRecord>>,
+    relation_records: HashMap<String, Vec<&'a crate::model::RelationRecord>>,
     scalar_cache: HashMap<CacheKey, ScalarValue>,
     /// Pre-rounding value of a currency rule whose declared rounding changed it,
     /// keyed like `scalar_cache`. Only populated when rounding actually moved
@@ -685,11 +780,16 @@ pub struct Engine<'a> {
     tracing: bool,
     derived_members: HashMap<DerivedMembersKey, DerivedMembers>,
     pending_members: HashMap<DerivedMembersKey, PendingMembers>,
+    pending_paths: HashMap<DerivedMembersKey, PathResume>,
+    #[cfg(test)]
+    path_coverage: PathCoverage,
     /// Validated source prefixes that a predicate interruption has not yet
     /// finished. Retaining them prevents a retry from walking the prefix again.
     member_chains: HashMap<DerivedMembersKey, Vec<&'a crate::model::RelationSchema>>,
     #[cfg(test)]
     source_walks: usize,
+    #[cfg(test)]
+    relation_suspensions: usize,
     /// Effects of the relation predicates under evaluation, innermost last,
     /// each with the number of active evaluations when it began: only records
     /// made at that depth belong to the relation rather than to a rule its
@@ -712,6 +812,9 @@ pub struct Engine<'a> {
     /// How far each aggregation over related entities has got in the
     /// current drive (see [`Step`]).
     folds: HashMap<Step, Progress<FoldResume, Fold>>,
+    exists: HashMap<ExistsKey, Progress<ExistsResume, JudgmentOutcome>>,
+    #[cfg(test)]
+    exists_coverage: ExistsCoverage,
     /// How far each resolution of a relation's members has got in the current
     /// drive (see [`Step`]).
     #[cfg(test)]
@@ -722,6 +825,8 @@ pub struct Engine<'a> {
     /// relation tuples read since the driver last reported them (see
     /// [`crate::depth::count_visits`]).
     visits: usize,
+    #[cfg(test)]
+    maximum_depth: usize,
 }
 
 /// A loop over data that a deferral can interrupt: an aggregation (`count`,
@@ -768,6 +873,37 @@ enum Site {
         current_slot: usize,
         related_slot: usize,
     },
+}
+
+/// Each binding environment gets its own resumable disjunction. The owner
+/// separates relation-effect captures even when they share a parent rule.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExistsKey {
+    node: usize,
+    anchor: String,
+    candidate: String,
+    variables: Vec<String>,
+    period: Period,
+    parent: Option<CacheKey>,
+    owner: Option<DerivedMembersKey>,
+}
+
+#[derive(Debug)]
+struct ExistsResume {
+    domain: Vec<String>,
+    next: usize,
+    saw_undetermined: bool,
+}
+
+/// Incremented after the claimed work occurs, not on entry to an arm.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ExistsCoverage {
+    resumed: usize,
+    early_stop: usize,
+    empty: usize,
+    nonempty: usize,
+    nested: usize,
 }
 
 /// A loop's progress in the current drive.
@@ -938,7 +1074,31 @@ impl<'a> Engine<'a> {
             (String, usize, String),
             Vec<&'a crate::model::RelationRecord>,
         > = HashMap::new();
+        let mut relation_records: HashMap<String, Vec<&'a crate::model::RelationRecord>> =
+            HashMap::new();
+        let uses_relation_roles = program.uses_relation_roles();
         for record in &data.relations {
+            // Binding refuses these records. Low-level Rust callers skip
+            // binding, so exclude them from every lookup as well: programs
+            // using relation roles derive their members exclusively.
+            if uses_relation_roles
+                && program
+                    .relations
+                    .get(&record.name)
+                    .is_some_and(|schema| schema.derivation.is_some())
+            {
+                continue;
+            }
+            if program
+                .relations
+                .get(&record.name)
+                .is_some_and(|schema| schema.arity == 1)
+            {
+                relation_records
+                    .entry(record.name.clone())
+                    .or_default()
+                    .push(record);
+            }
             for (slot, value) in record.tuple.iter().enumerate() {
                 relation_index
                     .entry((record.name.clone(), slot, value.clone()))
@@ -951,6 +1111,7 @@ impl<'a> Engine<'a> {
             program,
             input_index,
             relation_index,
+            relation_records,
             scalar_cache: HashMap::new(),
             pre_rounding_cache: HashMap::new(),
             judgment_cache: HashMap::new(),
@@ -960,9 +1121,14 @@ impl<'a> Engine<'a> {
             tracing,
             derived_members: HashMap::new(),
             pending_members: HashMap::new(),
+            pending_paths: HashMap::new(),
+            #[cfg(test)]
+            path_coverage: PathCoverage::default(),
             member_chains: HashMap::new(),
             #[cfg(test)]
             source_walks: 0,
+            #[cfg(test)]
+            relation_suspensions: 0,
             member_captures: Vec::new(),
             relation_depth: 0,
             relation_nesting_limit: RELATION_NESTING_LIMIT,
@@ -970,11 +1136,16 @@ impl<'a> Engine<'a> {
             depth: 0,
             suspend_depth: crate::depth::suspend_depth(),
             folds: HashMap::new(),
+            exists: HashMap::new(),
+            #[cfg(test)]
+            exists_coverage: ExistsCoverage::default(),
             #[cfg(test)]
             members: HashMap::new(),
             #[cfg(test)]
             recursive_relation_oracle: false,
             visits: 0,
+            #[cfg(test)]
+            maximum_depth: 0,
         }
     }
 
@@ -1022,9 +1193,18 @@ impl<'a> Engine<'a> {
                     .values()
                     .all(|progress| matches!(progress, Progress::Done(_)))
         );
+        debug_assert!(
+            result.is_err()
+                || self
+                    .exists
+                    .values()
+                    .all(|progress| matches!(progress, Progress::Done(_)))
+        );
         debug_assert!(self.member_captures.is_empty());
         self.folds.clear();
+        self.exists.clear();
         self.pending_members.clear();
+        self.pending_paths.clear();
         self.member_chains.clear();
         #[cfg(test)]
         self.members.clear();
@@ -1080,6 +1260,10 @@ impl<'a> Engine<'a> {
     fn nested<T>(&mut self, evaluate: impl FnOnce(&mut Self) -> Eval<T>) -> Eval<T> {
         self.visits += 1;
         self.depth += 1;
+        #[cfg(test)]
+        {
+            self.maximum_depth = self.maximum_depth.max(self.depth);
+        }
         let result = evaluate(self);
         self.depth -= 1;
         result
@@ -1347,6 +1531,292 @@ impl<'a> Engine<'a> {
         self.judgment_rule(name, target_entity_id, period)
     }
 
+    /// The judgments only a relation role can evaluate, behind one call site
+    /// in `judgment_node`. Debug builds reserve every call's arguments and
+    /// result in the caller's frame, so a call site per construct grows every
+    /// judgment frame, including the frames of deeply nested legacy relation
+    /// predicates: a separate site for atoms and term comparisons pushed a
+    /// 20,000-link counted chain (`tests/relation_chains.rs`) past a 2 MiB
+    /// thread.
+    fn relation_role_judgment(
+        &mut self,
+        expr: &'a JudgmentExpr,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        match expr {
+            JudgmentExpr::RoleDerived { term, name } => {
+                self.role_judgment_rule(*term, name, period, relation_context)
+            }
+            JudgmentExpr::RelationAtom { relation, terms } => {
+                self.atom_judgment(relation, terms, period, relation_context)
+            }
+            JudgmentExpr::Exists { .. } => self.exists_judgment(expr, period, relation_context),
+            JudgmentExpr::SameEntity {
+                left,
+                right,
+                negated,
+            } => self.same_entity_judgment(*left, *right, *negated, relation_context),
+            _ => unreachable!("only relation-role judgments"),
+        }
+    }
+
+    // Keep these arms' binding and allocation locals outside `judgment_node`:
+    // debug builds otherwise reserve them in every judgment frame, including
+    // the frames of deeply nested legacy relation predicates.
+    fn atom_judgment(
+        &mut self,
+        relation: &str,
+        terms: &[Term],
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("relation atom"))?;
+        let ids = terms
+            .iter()
+            .map(|term| term_id(*term, relation, Some(context)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(if self.relation_atom_contains(relation, &ids, period)? {
+            JudgmentOutcome::Holds
+        } else {
+            JudgmentOutcome::NotHolds
+        })
+    }
+
+    /// Evaluate the finite, sorted disjunction represented by an `exists`.
+    /// Keep this frame outside `judgment_node`, whose stack size affects every
+    /// legacy relation predicate as well.
+    #[inline(never)]
+    fn exists_judgment(
+        &mut self,
+        node: &'a JudgmentExpr,
+        period: &Period,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let JudgmentExpr::Exists {
+            relation,
+            terms,
+            variable_slot,
+            body,
+        } = node
+        else {
+            unreachable!("only exists nodes reach this helper");
+        };
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("exists"))?;
+        let mut variables = Vec::new();
+        let mut frame = context.variables;
+        while let Some(bound) = frame {
+            variables.push(bound.id.to_string());
+            frame = bound.parent;
+        }
+        let key = ExistsKey {
+            node: std::ptr::from_ref(node) as usize,
+            anchor: context.current_id.to_string(),
+            candidate: context.related_id.to_string(),
+            variables,
+            period: period.clone(),
+            parent: self.active_evaluations.last().cloned(),
+            owner: self.member_captures.last().and_then(|(owner, depth, _)| {
+                (*depth == self.active_evaluations.len()).then(|| owner.clone())
+            }),
+        };
+        #[cfg(test)]
+        let mut resumed = false;
+        let ExistsResume {
+            domain,
+            mut next,
+            mut saw_undetermined,
+        } = match self.exists.remove(&key) {
+            Some(Progress::Done(outcome)) => {
+                self.exists.insert(key, Progress::Done(outcome));
+                return Ok(outcome);
+            }
+            Some(Progress::Pending(resume)) => {
+                #[cfg(test)]
+                {
+                    resumed = true;
+                }
+                resume
+            }
+            None => {
+                let domain =
+                    self.exists_domain(relation, terms, *variable_slot, period, context)?;
+                #[cfg(test)]
+                if domain.is_empty() {
+                    self.exists_coverage.empty += 1;
+                } else {
+                    self.exists_coverage.nonempty += 1;
+                }
+                ExistsResume {
+                    domain,
+                    next: 0,
+                    saw_undetermined: false,
+                }
+            }
+        };
+        while let Some(id) = domain.get(next) {
+            self.visits += 1;
+            let bound = VariableFrame {
+                id,
+                parent: context.variables,
+            };
+            let bound_context = RelationEvalContext {
+                variables: Some(&bound),
+                ..context
+            };
+            let evaluated = self.eval_judgment_expr_inner(
+                body,
+                context.related_id,
+                period,
+                Some(bound_context),
+            );
+            #[cfg(test)]
+            {
+                // Count a resumed site only after its bound body actually ran.
+                self.exists_coverage.resumed += usize::from(resumed);
+                resumed = false;
+                self.exists_coverage.nested += usize::from(context.variables.is_some());
+            }
+            match evaluated {
+                Ok(JudgmentOutcome::Holds) => {
+                    for skipped in &domain[next + 1..] {
+                        let bound = VariableFrame {
+                            id: skipped,
+                            parent: context.variables,
+                        };
+                        self.record_skipped_judgment_dependencies(
+                            body,
+                            context.related_id,
+                            period,
+                            Some(RelationEvalContext {
+                                variables: Some(&bound),
+                                ..context
+                            }),
+                            TraceSkipReason::ShortCircuit,
+                        );
+                    }
+                    #[cfg(test)]
+                    {
+                        self.exists_coverage.early_stop += usize::from(next + 1 < domain.len());
+                    }
+                    self.exists
+                        .insert(key, Progress::Done(JudgmentOutcome::Holds));
+                    return Ok(JudgmentOutcome::Holds);
+                }
+                Ok(JudgmentOutcome::NotHolds) => {}
+                Ok(JudgmentOutcome::Undetermined) => saw_undetermined = true,
+                Err(interrupt)
+                    if self.suspended_on.is_some() || matches!(interrupt, Interrupt::Defer(_)) =>
+                {
+                    self.exists.insert(
+                        key,
+                        Progress::Pending(ExistsResume {
+                            domain,
+                            next,
+                            saw_undetermined,
+                        }),
+                    );
+                    return Err(interrupt);
+                }
+                Err(error) => return Err(error),
+            }
+            next += 1;
+        }
+        let outcome = if saw_undetermined {
+            JudgmentOutcome::Undetermined
+        } else {
+            JudgmentOutcome::NotHolds
+        };
+        self.exists.insert(key, Progress::Done(outcome));
+        Ok(outcome)
+    }
+
+    /// A data domain uses its lowest bound slot's existing tuple index; a
+    /// unary generator, which has no bound slots, reads its relation's tuples.
+    /// Derived domains read forward members, never supplied derived tuples.
+    fn exists_domain(
+        &mut self,
+        relation: &str,
+        terms: &[Term],
+        variable_slot: usize,
+        period: &Period,
+        context: RelationEvalContext<'_>,
+    ) -> Eval<Vec<String>> {
+        let schema = self
+            .program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        if terms.len() != schema.arity || variable_slot >= schema.arity {
+            return Err(EvalError::TypeMismatch(format!(
+                "exists generator `{relation}` has invalid arity or variable slot"
+            ))
+            .into());
+        }
+        if let Some(derivation) = &schema.derivation {
+            if schema.arity != 2 || variable_slot != derivation.related_slot {
+                return Err(EvalError::TypeMismatch(format!("inverse_derived_traversal_unsupported: exists generator `{relation}` must bind its binary derived relation's related slot")).into());
+            }
+            let anchor = term_id(terms[derivation.current_slot], relation, Some(context))?;
+            return self.related_entity_ids(
+                relation,
+                derivation.current_slot,
+                derivation.related_slot,
+                anchor,
+                period,
+            );
+        }
+        let bound = terms
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != variable_slot)
+            .map(|(slot, term)| Ok((slot, term_id(*term, relation, Some(context))?)))
+            .collect::<Result<Vec<_>, EvalError>>()?;
+        let records = if let Some((slot, id)) = bound.first() {
+            self.relation_index
+                .get(&(relation.to_string(), *slot, (*id).to_string()))
+        } else {
+            self.relation_records.get(relation)
+        }
+        .map_or(&[][..], Vec::as_slice);
+        self.visits += records.len();
+        let mut domain = records
+            .iter()
+            .filter(|record| {
+                record.tuple.len() == terms.len()
+                    && record.interval.contains_period(period)
+                    && bound.iter().all(|(slot, id)| record.tuple[*slot] == *id)
+            })
+            .map(|record| record.tuple[variable_slot].clone())
+            .collect::<Vec<_>>();
+        domain.sort();
+        domain.dedup();
+        Ok(domain)
+    }
+
+    fn same_entity_judgment(
+        &self,
+        left: Term,
+        right: Term,
+        negated: bool,
+        relation_context: Option<RelationEvalContext<'_>>,
+    ) -> Eval<JudgmentOutcome> {
+        let context = relation_context
+            .ok_or_else(|| relation_construct_outside_derived_relation("term comparison"))?;
+        Ok(
+            if (term_id(left, "term comparison", Some(context))?
+                == term_id(right, "term comparison", Some(context))?)
+                != negated
+            {
+                JudgmentOutcome::Holds
+            } else {
+                JudgmentOutcome::NotHolds
+            },
+        )
+    }
+
     /// The id a rule read through `term` is evaluated on, recorded as a
     /// dependency there. This and the reads above live outside
     /// `scalar_node` and `judgment_node`: every nesting level pays for those
@@ -1569,7 +2039,10 @@ impl<'a> Engine<'a> {
                     let Some(context) = relation_context else {
                         continue;
                     };
-                    (name, context.id_of(term).to_string())
+                    let Some(id) = context.id_of(term) else {
+                        continue;
+                    };
+                    (name, id.to_string())
                 }
             };
             self.record_skipped_dependency(SkippedTraceDependency::Derived {
@@ -2128,8 +2601,11 @@ impl<'a> Engine<'a> {
                 });
                 self.judgment_rule(name, target_entity_id, period)
             }
-            JudgmentExpr::RoleDerived { term, name } => {
-                self.role_judgment_rule(*term, name, period, relation_context)
+            JudgmentExpr::RoleDerived { .. }
+            | JudgmentExpr::RelationAtom { .. }
+            | JudgmentExpr::SameEntity { .. }
+            | JudgmentExpr::Exists { .. } => {
+                self.relation_role_judgment(expr, period, relation_context)
             }
             JudgmentExpr::RelationMember {
                 relation,
@@ -2575,13 +3051,39 @@ impl<'a> Engine<'a> {
                 // not read this relation's own tuples again, so they are read
                 // once the resolution finishes.
                 let candidates = match &schema.derivation {
-                    Some(derivation) => self.related_entity_ids(
-                        &derivation.source_relation,
-                        derivation.current_slot,
-                        derivation.related_slot,
-                        entity_id,
-                        period,
-                    )?,
+                    Some(derivation) => {
+                        if let Some(path) = &derivation.source_path {
+                            let mut frontier =
+                                std::collections::BTreeSet::from([entity_id.to_string()]);
+                            for step in path {
+                                let mut reached = std::collections::BTreeSet::new();
+                                for id in frontier {
+                                    for next in self.related_entity_ids(
+                                        &step.relation,
+                                        step.from_slot,
+                                        step.to_slot,
+                                        &id,
+                                        period,
+                                    )? {
+                                        reached.insert(next);
+                                    }
+                                }
+                                frontier = reached;
+                            }
+                            frontier.into_iter().collect()
+                        } else {
+                            self.related_entity_ids(
+                                derivation
+                                    .source_relation
+                                    .as_deref()
+                                    .expect("a single source"),
+                                derivation.current_slot,
+                                derivation.related_slot,
+                                entity_id,
+                                period,
+                            )?
+                        }
+                    }
                     None => Vec::new(),
                 };
                 MembersResume {
@@ -2597,14 +3099,9 @@ impl<'a> Engine<'a> {
                 let context = RelationEvalContext {
                     current_id: entity_id,
                     related_id,
-                    current_entity: derivation
-                        .slot_entities
-                        .get(derivation.current_slot)
-                        .map(String::as_str),
-                    related_entity: derivation
-                        .slot_entities
-                        .get(derivation.related_slot)
-                        .map(String::as_str),
+                    current_entity: derivation.slot_entities.get(derivation.current_slot),
+                    related_entity: derivation.slot_entities.get(derivation.related_slot),
+                    variables: None,
                 };
                 match self.eval_judgment_expr_inner(
                     &derivation.predicate,
@@ -2711,6 +3208,81 @@ impl<'a> Engine<'a> {
                 .is_ok())
     }
 
+    /// An atom fixes every slot, rather than selecting only the two slots
+    /// used by a bare membership judgment. A derived atom reads its own
+    /// forward members for the anchor named in its current slot; that anchor
+    /// can differ from the enclosing predicate's anchor.
+    fn relation_atom_contains(
+        &mut self,
+        relation: &str,
+        ids: &[&str],
+        period: &Period,
+    ) -> Eval<bool> {
+        let program: &'a Program = self.program;
+        let schema = program
+            .relations
+            .get(relation)
+            .ok_or_else(|| EvalError::UnknownRelation(relation.to_string()))?;
+        if ids.len() != schema.arity {
+            return Err(EvalError::TypeMismatch(format!(
+                "relation atom `{relation}` has {} terms, but the relation has arity {}",
+                ids.len(),
+                schema.arity
+            ))
+            .into());
+        }
+        if let Some(derivation) = &schema.derivation {
+            if schema.arity != 2 {
+                return Err(EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` uses a derived relation of arity {}; only arity 2 is supported",
+                    schema.arity
+                ))
+                .into());
+            }
+            let current_id = ids.get(derivation.current_slot).ok_or_else(|| {
+                EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` has no current slot {}",
+                    derivation.current_slot
+                ))
+            })?;
+            let related_id = ids.get(derivation.related_slot).ok_or_else(|| {
+                EvalError::TypeMismatch(format!(
+                    "relation atom `{relation}` has no related slot {}",
+                    derivation.related_slot
+                ))
+            })?;
+            return Ok(self
+                .related_entity_ids(
+                    relation,
+                    derivation.current_slot,
+                    derivation.related_slot,
+                    current_id,
+                    period,
+                )?
+                .binary_search_by(|candidate| candidate.as_str().cmp(related_id))
+                .is_ok());
+        }
+        let Some(first_id) = ids.first() else {
+            return Err(EvalError::TypeMismatch(format!(
+                "relation atom `{relation}` needs at least one term"
+            ))
+            .into());
+        };
+        let records = self
+            .relation_index
+            .get(&(relation.to_string(), 0, (*first_id).to_string()))
+            .map_or(&[][..], Vec::as_slice);
+        self.visits += records.len();
+        Ok(records.iter().any(|record| {
+            record.interval.contains_period(period)
+                && record
+                    .tuple
+                    .iter()
+                    .map(String::as_str)
+                    .eq(ids.iter().copied())
+        }))
+    }
+
     /// `relation`'s schema, when it exists and has both slots.
     fn relation_schema(
         &self,
@@ -2779,6 +3351,10 @@ impl<'a> Engine<'a> {
             self.relation_depth = self.relation_depth.saturating_sub(1);
             if let Some(needed) = self.suspended_on.take() {
                 if on_stack.insert(needed.clone()) {
+                    #[cfg(test)]
+                    {
+                        self.relation_suspensions += 1;
+                    }
                     stack.push(needed);
                     continue;
                 }
@@ -2786,6 +3362,7 @@ impl<'a> Engine<'a> {
                 // program validation refuses. The recursive resolution this
                 // replaces overflowed the stack on one.
                 self.pending_members.remove(&top);
+                self.pending_paths.remove(&top);
                 self.member_chains.remove(&top);
                 self.derived_members.insert(
                     top.clone(),
@@ -2837,8 +3414,16 @@ impl<'a> Engine<'a> {
                     }
                     chain.push(relation);
                     on_chain.insert(relation.name.as_str());
+                    // Paths branch and change the lookup id at every step.
+                    // Their resumable frontier is handled at this chain level.
+                    if derivation.source_path.is_some() {
+                        break None;
+                    }
                     let source = match self.relation_schema(
-                        &derivation.source_relation,
+                        derivation
+                            .source_relation
+                            .as_deref()
+                            .expect("a single source"),
                         derivation.current_slot,
                         derivation.related_slot,
                     ) {
@@ -2890,6 +3475,14 @@ impl<'a> Engine<'a> {
                 .derivation
                 .as_ref()
                 .expect("the chain holds derived relations");
+            if derivation.source_path.is_some() {
+                if let Err(interrupt) = self.fold_path_members(&level, derivation) {
+                    self.member_chains.insert(key.clone(), chain);
+                    return Err(interrupt);
+                }
+                chain.pop();
+                continue;
+            }
             let pending = match self.pending_members.remove(&level) {
                 Some(pending) => pending,
                 None => match self.member_candidates(derivation, entity_id, period) {
@@ -2927,7 +3520,10 @@ impl<'a> Engine<'a> {
         period: &Period,
     ) -> Result<PendingMembers, (EvalError, Vec<TraceEffect>)> {
         let program: &'a Program = self.program;
-        let source = &derivation.source_relation;
+        let source = derivation
+            .source_relation
+            .as_deref()
+            .expect("a single source");
         let mut candidates = self.direct_related_ids(
             source,
             derivation.current_slot,
@@ -2966,6 +3562,116 @@ impl<'a> Engine<'a> {
         })
     }
 
+    /// Generate a path's candidates before filtering them. Keep the path state
+    /// separate from a predicate's state so legacy source-chain frames stay
+    /// small. Captures carry a derived step's effects across either kind of stop.
+    fn fold_path_members(
+        &mut self,
+        level: &DerivedMembersKey,
+        derivation: &'a crate::model::RelationDerivation,
+    ) -> Eval<()> {
+        if let Some(pending) = self.pending_members.remove(level) {
+            return self.filter_members(level, derivation, pending);
+        }
+        let steps = derivation.source_path.as_ref().expect("a path source");
+        let saved = self.pending_paths.remove(level);
+        #[cfg(test)]
+        let mut resumed = saved.is_some();
+        let mut progress = saved.unwrap_or_else(|| PathResume {
+            step: 0,
+            frontier: vec![level.entity_id.clone()],
+            next: 0,
+            reached: Vec::new(),
+            effects: Vec::new(),
+        });
+        self.member_captures.push((
+            level.clone(),
+            self.active_evaluations.len(),
+            std::mem::take(&mut progress.effects),
+        ));
+        while let Some(step) = steps.get(progress.step) {
+            while let Some(id) = progress.frontier.get(progress.next) {
+                match self.related_entity_ids(
+                    &step.relation,
+                    step.from_slot,
+                    step.to_slot,
+                    id,
+                    &level.period,
+                ) {
+                    Ok(ids) => {
+                        progress.reached.extend(ids);
+                        progress.next += 1;
+                        #[cfg(test)]
+                        {
+                            actual_path_work::lookup(
+                                resumed,
+                                self.program.relations[&step.relation]
+                                    .derivation
+                                    .is_some()
+                                    .then_some(progress.step),
+                            );
+                            if resumed {
+                                self.path_coverage.resumed += 1;
+                                resumed = false;
+                            }
+                            if self.program.relations[&step.relation].derivation.is_some() {
+                                self.path_coverage.derived_positions[progress.step.min(3)] += 1;
+                            }
+                        }
+                    }
+                    Err(interrupt) => {
+                        let (_, _, effects) = self.member_captures.pop().expect("path capture");
+                        progress.effects = effects;
+                        if self.suspended_on.is_some() || matches!(interrupt, Interrupt::Defer(_)) {
+                            self.pending_paths.insert(level.clone(), progress);
+                            return Err(interrupt);
+                        }
+                        let Interrupt::Error(error) = interrupt else {
+                            unreachable!("deferral saved above")
+                        };
+                        self.derived_members.insert(
+                            level.clone(),
+                            DerivedMembers {
+                                result: Err(error),
+                                effects: progress.effects,
+                                recorded_on: Vec::new(),
+                            },
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            progress.reached.sort();
+            progress.reached.dedup();
+            progress.frontier = std::mem::take(&mut progress.reached);
+            progress.next = 0;
+            progress.step += 1;
+        }
+        let (_, _, effects) = self.member_captures.pop().expect("path capture");
+        #[cfg(test)]
+        {
+            actual_path_work::completed(&progress.frontier, steps.len());
+            if progress.frontier.is_empty() {
+                self.path_coverage.empty += 1;
+            } else {
+                self.path_coverage.nonempty += 1;
+            }
+            if steps.len() >= 3 {
+                self.path_coverage.long += 1;
+            }
+        }
+        self.filter_members(
+            level,
+            derivation,
+            PendingMembers {
+                candidates: progress.frontier.into(),
+                next: 0,
+                kept: Vec::new(),
+                effects,
+            },
+        )
+    }
+
     /// Test the remaining candidates against the derivation's predicate and
     /// memoize the members that hold. On a relation suspension or rule
     /// deferral, keep the progress in `pending_members` for the retry.
@@ -2983,14 +3689,8 @@ impl<'a> Engine<'a> {
         } = pending;
         self.member_captures
             .push((level.clone(), self.active_evaluations.len(), effects));
-        let current_entity = derivation
-            .slot_entities
-            .get(derivation.current_slot)
-            .map(String::as_str);
-        let related_entity = derivation
-            .slot_entities
-            .get(derivation.related_slot)
-            .map(String::as_str);
+        let current_entity = derivation.slot_entities.get(derivation.current_slot);
+        let related_entity = derivation.slot_entities.get(derivation.related_slot);
         let mut failure = None;
         for (index, candidate) in candidates.iter().enumerate().skip(next) {
             let context = RelationEvalContext {
@@ -2998,6 +3698,7 @@ impl<'a> Engine<'a> {
                 related_id: candidate,
                 current_entity,
                 related_entity,
+                variables: None,
             };
             match self.eval_judgment_expr_inner(
                 &derivation.predicate,
@@ -3258,7 +3959,28 @@ fn collect_judgment_trace_references(
         JudgmentExpr::RoleDerived { term, name } => {
             derived.push(TraceReference::Term(*term, name.clone()));
         }
-        JudgmentExpr::RelationMember { .. } => {}
+        JudgmentExpr::Exists { body, .. } => {
+            // No domain is evaluated on a skipped path. This binder has no
+            // id; outer frames remain available after removing its index.
+            let mut body_references = Vec::new();
+            collect_judgment_trace_references(body, &mut body_references, parameters);
+            derived.extend(
+                body_references
+                    .into_iter()
+                    .filter_map(|reference| match reference {
+                        TraceReference::Term(Term::Var(0), _) => None,
+                        TraceReference::Term(Term::Var(index), name) => {
+                            Some(TraceReference::Term(Term::Var(index - 1), name))
+                        }
+                        reference => Some(reference),
+                    }),
+            );
+        }
+        // Relation membership contributes no rule or parameter dependency.
+        // A comparison reads only the ids already in the binding context.
+        JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_judgment_trace_references(item, derived, parameters);
@@ -3320,13 +4042,59 @@ mod relation_resolution_tests {
     use super::Engine;
     use crate::model::{
         ComparisonOp, DType, DataSet, Derived, DerivedSemantics, Interval, JudgmentExpr, Period,
-        Program, RelationDerivation, RelationSchema, ScalarExpr, ScalarValue,
+        Program, RelationDerivation, RelationSchema, ScalarExpr, ScalarValue, Term,
     };
     use crate::spec::{DatasetSpec, ProgramSpec};
 
     const HOUSEHOLDS: [&str; 2] = ["h1", "h2"];
     const PEOPLE: [&str; 3] = ["p1", "p2", "p3"];
     const RELATIONS: usize = 6;
+
+    /// How a case spends its relations. Source chains grow long when sources
+    /// and reads range over every later relation, and resolutions nest deep
+    /// when they favour the next one, so no one shape covers both.
+    #[derive(Clone, Copy)]
+    struct Shape {
+        /// Weight of a relation read against each other predicate leaf.
+        read: u32,
+        /// Weight of reading the next relation against any later one.
+        next: u32,
+        /// Weight of `base` against any relation, as a source and for a tuple.
+        base: u32,
+        /// Weight of a household rule reading `r0` against any relation.
+        root: u32,
+        /// One past the most tuples a dataset holds.
+        tuples: usize,
+        exists: bool,
+        paths: bool,
+    }
+
+    const BROAD: Shape = Shape {
+        read: 1,
+        next: 0,
+        base: 0,
+        root: 0,
+        tuples: 12,
+        exists: false,
+        paths: false,
+    };
+    const DEEP: Shape = Shape {
+        read: 4,
+        next: 3,
+        base: 3,
+        root: 2,
+        tuples: 32,
+        exists: false,
+        paths: false,
+    };
+    const EXISTS: Shape = Shape {
+        exists: true,
+        ..DEEP
+    };
+    const PATHS: Shape = Shape {
+        paths: true,
+        ..EXISTS
+    };
 
     fn literal(value: i64) -> Value {
         json!({"kind": "literal", "value": {"kind": "integer", "value": value}})
@@ -3338,48 +4106,76 @@ mod relation_resolution_tests {
 
     /// A predicate for derived relation `index`: it may read only relations
     /// after it and person rules, so programs stay acyclic.
-    fn predicate(index: usize) -> BoxedStrategy<Value> {
+    fn predicate(index: usize, shape: Shape) -> BoxedStrategy<Value> {
         let later = (index + 1..RELATIONS)
             .map(|later| format!("r{later}"))
             .collect::<Vec<_>>();
         let mut leaves = vec![
-            Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
-                .boxed(),
-            (0_usize..2)
-                .prop_map(|rule| {
-                    json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
-                })
-                .boxed(),
+            (
+                1,
+                Just(json!({"kind": "comparison", "left": literal(1), "op": "eq", "right": literal(1)}))
+                    .boxed(),
+            ),
+            (
+                1,
+                (0_usize..2)
+                    .prop_map(|rule| {
+                        json!({"kind": "comparison", "left": person_rule(rule), "op": "gte", "right": literal(10)})
+                    })
+                    .boxed(),
+            ),
             // A parameter read and a division that can fail.
-            (0_i64..3)
-                .prop_map(|key| {
-                    json!({"kind": "comparison",
-                        "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
-                        "op": "gt", "right": literal(0)})
-                })
-                .boxed(),
+            (
+                1,
+                (0_i64..3)
+                    .prop_map(|key| {
+                        json!({"kind": "comparison",
+                            "left": {"kind": "div", "left": {"kind": "parameter_lookup", "parameter": "rate", "index": literal(key)}, "right": {"kind": "input", "name": "income"}},
+                            "op": "gt", "right": literal(0)})
+                    })
+                    .boxed(),
+            ),
         ];
-        if !later.is_empty() {
-            let members = later.clone();
-            leaves.push(
-                (prop::sample::select(members), 0_usize..2)
+        if shape.exists {
+            leaves.push((3, prop::bool::ANY.prop_map(|nested| {
+                let read = json!({"kind": "comparison", "left": {
+                    "kind": "role_derived", "term": {"var": 0}, "name": "p0"
+                }, "op": "gte", "right": literal(10)});
+                let body = if nested {
+                    json!({"kind": "exists", "relation": "base", "terms": ["anchor", {"var": 0}], "variable_slot": 1,
+                        "body": {"kind": "and", "items": [read, {"kind": "same_entity", "left": {"var": 0}, "right": {"var": 1}, "negated": false}]}})
+                } else { read };
+                json!({"kind": "exists", "relation": "base", "terms": ["anchor", {"var": 0}], "variable_slot": 1, "body": body})
+            }).boxed()));
+        }
+        if let Some(next) = later.first().cloned() {
+            let read = prop_oneof![shape.next => Just(next), 1 => prop::sample::select(later)];
+            leaves.push((
+                shape.read,
+                (read.clone(), 0_usize..2)
                     .prop_map(|(relation, orientation)| {
                         json!({"kind": "relation_member", "relation": relation,
                             "current_slot": orientation, "related_slot": 1 - orientation})
                     })
                     .boxed(),
-            );
-            leaves.push(
-                prop::sample::select(later)
-                    .prop_map(|relation| {
+            ));
+            if shape.exists {
+                leaves.push((shape.read, read.clone().prop_map(|relation| {
+                    json!({"kind": "exists", "relation": "base", "terms": ["anchor", {"var": 0}], "variable_slot": 1,
+                        "body": {"kind": "relation_atom", "relation": relation, "terms": ["anchor", {"var": 0}]}})
+                }).boxed()));
+            }
+            leaves.push((
+                shape.read,
+                read.prop_map(|relation| {
                         json!({"kind": "comparison",
                             "left": {"kind": "count_related", "relation": relation, "current_slot": 0, "related_slot": 1},
                             "op": "gte", "right": literal(1)})
                     })
                     .boxed(),
-            );
+            ));
         }
-        prop::strategy::Union::new(leaves)
+        prop::strategy::Union::new_weighted(leaves)
             .prop_recursive(2, 6, 3, |inner| {
                 prop_oneof![
                     vec(inner.clone(), 1..3)
@@ -3392,24 +4188,46 @@ mod relation_resolution_tests {
             .boxed()
     }
 
-    fn relation(index: usize) -> BoxedStrategy<Value> {
+    fn relation(index: usize, shape: Shape) -> BoxedStrategy<Value> {
         let sources = std::iter::once("base".to_string())
             .chain((index + 1..RELATIONS).map(|later| format!("r{later}")))
             .collect::<Vec<_>>();
+        let source =
+            prop_oneof![shape.base => Just("base".to_string()), 1 => prop::sample::select(sources)];
         (
-            prop::sample::select(sources),
+            source.clone(),
             prop::sample::select(vec![(0_usize, 1_usize), (1, 0)]),
             prop::bool::ANY,
-            predicate(index),
+            predicate(index, shape),
+            vec(source, 1..5),
         )
             .prop_map(
-                move |(source, (current_slot, related_slot), typed, predicate)| {
+                move |(source, (current_slot, related_slot), typed, predicate, path)| {
                     let mut derivation = json!({
                         "source_relation": source, "current_slot": current_slot,
                         "related_slot": related_slot, "predicate": predicate,
                     });
-                    if typed {
-                        derivation["slot_entities"] = json!(["Household", "Person"]);
+                    if shape.paths {
+                        derivation
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("source_relation");
+                        derivation["source_path"] = json!(
+                            path.into_iter()
+                                .map(|relation| json!({
+                                    "relation":relation, "from_slot":0, "to_slot":1
+                                }))
+                                .collect::<Vec<_>>()
+                        );
+                        derivation["current_slot"] = json!(0);
+                        derivation["related_slot"] = json!(1);
+                    }
+                    if typed || shape.paths {
+                        derivation["slot_entities"] = if shape.paths {
+                            json!(["Person", "Person"])
+                        } else {
+                            json!(["Household", "Person"])
+                        };
                     }
                     json!({"name": format!("r{index}"), "arity": 2, "derivation": derivation})
                 },
@@ -3417,8 +4235,11 @@ mod relation_resolution_tests {
             .boxed()
     }
 
-    fn household_rule(index: usize) -> BoxedStrategy<Value> {
-        let relation = (0..RELATIONS).prop_map(|relation| format!("r{relation}"));
+    fn household_rule(index: usize, shape: Shape) -> BoxedStrategy<Value> {
+        let relation = prop_oneof![
+            shape.root => Just("r0".to_string()),
+            1 => (0..RELATIONS).prop_map(|relation| format!("r{relation}")),
+        ];
         let where_clause = prop::option::of((0_usize..2).prop_map(|rule| {
             json!({"kind": "comparison", "left": person_rule(rule), "op": "lt", "right": literal(30)})
         }));
@@ -3452,31 +4273,43 @@ mod relation_resolution_tests {
     /// derived relations reading later ones through sources and predicates,
     /// and household aggregations over them; with tuples and incomes, some
     /// missing so predicates fail.
-    fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
-        let relations = (0..RELATIONS).map(relation).collect::<Vec<_>>();
-        let rules = (0..3).map(household_rule).collect::<Vec<_>>();
+    fn case_of(shape: Shape) -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
+        let relations = (0..RELATIONS)
+            .map(|index| relation(index, shape))
+            .collect::<Vec<_>>();
+        let rules = (0..3)
+            .map(|index| household_rule(index, shape))
+            .collect::<Vec<_>>();
         let tuples = vec(
             (
-                prop::sample::select(
-                    std::iter::once("base".to_string())
-                        .chain((0..RELATIONS).map(|index| format!("r{index}")))
-                        .collect::<Vec<_>>(),
-                ),
+                prop_oneof![
+                    shape.base => Just("base".to_string()),
+                    1 => prop::sample::select(
+                        std::iter::once("base".to_string())
+                            .chain((0..RELATIONS).map(|index| format!("r{index}")))
+                            .collect::<Vec<_>>(),
+                    ),
+                ],
                 prop::sample::select([HOUSEHOLDS.as_slice(), PEOPLE.as_slice()].concat()),
                 prop::sample::select(PEOPLE.to_vec()),
             ),
-            0..12,
+            0..shape.tuples,
         );
         let incomes = vec(prop::option::of(0_i64..40), PEOPLE.len());
-        (relations, rules, tuples, incomes).prop_map(|(relations, rules, tuples, incomes)| {
+        (relations, rules, tuples, incomes).prop_map(move |(relations, rules, tuples, incomes)| {
             let mut derived = vec![
                 json!({"name": "p0", "entity": "Person", "dtype": "decimal", "unit": null,
                     "semantics": "scalar", "expr": {"kind": "input", "name": "income"}}),
                 json!({"name": "p1", "entity": "Person", "dtype": "decimal", "unit": null,
                     "semantics": "scalar", "expr": {"kind": "add", "items": [person_rule(0), literal(5)]}}),
             ];
-            derived.extend(rules);
-            let relations = std::iter::once(json!({"name": "base", "arity": 2}))
+            derived.extend(rules.into_iter().map(|mut rule| {
+                if shape.paths { rule["entity"] = json!("Person"); }
+                rule
+            }));
+            let mut base = json!({"name": "base", "arity": 2});
+            if shape.paths { base["slot_entities"] = json!(["Person", "Person"]); }
+            let relations = std::iter::once(base)
                 .chain(relations)
                 .collect::<Vec<_>>();
             let program = json!({
@@ -3511,16 +4344,9 @@ mod relation_resolution_tests {
         })
     }
 
-    /// Every household output's value or error, and each household's trace,
-    /// as an engine resolving at most `limit` relations natively gives them.
-    fn evaluate(program: &ProgramSpec, dataset: &DatasetSpec, limit: usize) -> Vec<String> {
-        evaluate_with_oracle(
-            program,
-            dataset,
-            limit,
-            false,
-            crate::depth::suspend_depth(),
-        )
+    /// Broad and deep cases in equal parts.
+    fn case() -> impl Strategy<Value = (ProgramSpec, DatasetSpec)> {
+        prop_oneof![2 => case_of(BROAD), 2 => case_of(DEEP), 1 => case_of(EXISTS), 2 => case_of(PATHS)]
     }
 
     fn evaluate_with_oracle(
@@ -3530,13 +4356,60 @@ mod relation_resolution_tests {
         recursive: bool,
         suspend_depth: usize,
     ) -> Vec<String> {
+        evaluate_counting(program, dataset, limit, recursive, suspend_depth).0
+    }
+
+    /// Every household output's value or error, and each household's trace,
+    /// as an engine resolving at most `limit` relations natively gives them,
+    /// with the number of times that limit stopped a resolution.
+    fn evaluate_counting(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+        recursive: bool,
+        suspend_depth: usize,
+    ) -> (Vec<String>, usize) {
+        let (outcomes, stops, _, _, _) =
+            evaluate_detailed(program, dataset, limit, recursive, suspend_depth);
+        (outcomes, stops)
+    }
+
+    fn evaluate_detailed(
+        program: &ProgramSpec,
+        dataset: &DatasetSpec,
+        limit: usize,
+        recursive: bool,
+        suspend_depth: usize,
+    ) -> (
+        Vec<String>,
+        usize,
+        super::ExistsCoverage,
+        usize,
+        super::PathCoverage,
+    ) {
         let program = program.to_program().expect("the program lowers");
         // These are direct evaluator comparisons. Keep every generated
         // caller-slot orientation and direct tuple, including combinations
         // that strict dataset admission rejects for entity-kind mismatches.
         let dataset = dataset.to_dataset().expect("a valid raw dataset");
+        evaluate_detailed_model(&program, &dataset, limit, recursive, suspend_depth)
+    }
+
+    fn evaluate_detailed_model(
+        program: &Program,
+        dataset: &DataSet,
+        limit: usize,
+        recursive: bool,
+        suspend_depth: usize,
+    ) -> (
+        Vec<String>,
+        usize,
+        super::ExistsCoverage,
+        usize,
+        super::PathCoverage,
+    ) {
         let period = Period::month(2026, 1);
-        let mut engine = Engine::new(&program, &dataset).with_relation_nesting_limit(limit);
+        let mut engine = Engine::new(program, dataset).with_relation_nesting_limit(limit);
         engine.recursive_relation_oracle = recursive;
         engine.suspend_depth = suspend_depth;
         let mut outcomes = Vec::new();
@@ -3558,29 +4431,61 @@ mod relation_resolution_tests {
             trace.sort();
             outcomes.extend(trace);
         }
-        outcomes
+        (
+            outcomes,
+            engine.relation_suspensions,
+            engine.exists_coverage,
+            engine.maximum_depth,
+            engine.path_coverage,
+        )
     }
 
     #[test]
     fn suspended_resolution_matches_native_resolution() {
         let mut runner = TestRunner::new_with_rng(
             Config {
-                cases: 1500,
+                cases: 3000,
                 failure_persistence: None,
                 ..Config::default()
             },
             TestRng::from_seed(RngAlgorithm::ChaCha, &[23; 32]),
         );
         let nested = std::cell::Cell::new(0_usize);
+        let stopped = std::cell::RefCell::new([0_usize; RELATIONS + 1]);
+        let paths = std::cell::RefCell::new(super::PathCoverage::default());
         runner
             .run(&case(), |(program, dataset)| {
-                let native = evaluate(&program, &dataset, super::RELATION_NESTING_LIMIT);
-                let suspended = evaluate(&program, &dataset, 1);
-                if native != suspended {
-                    return Err(TestCaseError::fail(format!(
-                        "native {native:#?}\nsuspended {suspended:#?}\nprogram {}",
-                        serde_json::to_string(&program).expect("serializes")
-                    )));
+                // Convert once per case; every limit/depth still gets a fresh
+                // interpreter and the same independent recursive oracle.
+                let model = program.to_program().expect("the program lowers");
+                let data = dataset.to_dataset().expect("a valid raw dataset");
+                // Relations read only later ones, so the deepest request sits
+                // at depth RELATIONS - 1. That bounds the limits that can stop
+                // a resolution, and no limit can stop this reference.
+                let (native, _, _, maximum_depth, _) = evaluate_detailed_model(&model, &data, usize::MAX, true, usize::MAX);
+                for limit in 1..=RELATIONS {
+                    let mut stopped_here = false;
+                    for suspend_depth in 1..=maximum_depth {
+                        let (suspended, stops, _, _, coverage) = evaluate_detailed_model(&model, &data, limit, false, suspend_depth);
+                        if native != suspended {
+                            return Err(TestCaseError::fail(format!(
+                                "relation nesting {limit}, rule suspend depth {suspend_depth}\nnative {native:#?}\nsuspended {suspended:#?}\nprogram {}",
+                                serde_json::to_string(&program).expect("serializes")
+                            )));
+                        }
+                        stopped_here |= stops > 0;
+                        // These counters come from successful resumed lookups
+                        // and completed candidate generations in the evaluator.
+                        let mut paths = paths.borrow_mut();
+                        paths.resumed += coverage.resumed;
+                        paths.empty += coverage.empty;
+                        paths.nonempty += coverage.nonempty;
+                        paths.long += coverage.long;
+                        for (total, count) in paths.derived_positions.iter_mut().zip(coverage.derived_positions) {
+                            *total += count;
+                        }
+                    }
+                    stopped.borrow_mut()[limit] += usize::from(stopped_here);
                 }
                 if native.iter().any(|line| line.contains("Ok(")) {
                     nested.set(nested.get() + 1);
@@ -3589,6 +4494,33 @@ mod relation_resolution_tests {
             })
             .unwrap();
         assert!(nested.get() > 500, "only {} cases evaluated", nested.get());
+        let paths = paths.into_inner();
+        assert!(
+            paths.resumed >= 25,
+            "resumed candidate generation: {paths:?}"
+        );
+        assert!(
+            paths.empty >= 100 && paths.nonempty >= 25,
+            "empty/nonempty paths: {paths:?}"
+        );
+        assert!(paths.long >= 100, "three-or-more steps: {paths:?}");
+        assert!(
+            paths.derived_positions.iter().all(|count| *count >= 10),
+            "derived step positions: {paths:?}"
+        );
+        eprintln!(
+            "PATH COVERAGE {paths:?}; floors resumed25 empty100 nonempty25 long100 each-position10"
+        );
+        let stopped = stopped.into_inner();
+        for limit in 1..RELATIONS {
+            let cases = stopped[limit];
+            assert!(cases >= 10, "limit {limit} stopped only {cases} cases");
+        }
+        assert_eq!(stopped[RELATIONS], 0, "a limit past the deepest request");
+        eprintln!(
+            "COVERAGE stopped per limit: {stopped:?} nested {}",
+            nested.get()
+        );
     }
 
     /// The old recursive resolver is an independent oracle: source traversal,
@@ -3598,7 +4530,7 @@ mod relation_resolution_tests {
     fn iterative_resolution_matches_recursive_semantics_on_small_dags() {
         let mut runner = TestRunner::new_with_rng(
             Config {
-                cases: 1500,
+                cases: 3000,
                 failure_persistence: None,
                 ..Config::default()
             },
@@ -3622,6 +4554,1017 @@ mod relation_resolution_tests {
                 Ok(())
             })
             .expect("iterative results, errors and ordered trace records match recursion");
+    }
+
+    const IDS: [&str; 3] = ["a", "b", "c"];
+
+    fn typed_relation(
+        program: &mut Program,
+        name: &str,
+        arity: usize,
+        derivation: Option<RelationDerivation>,
+    ) {
+        program.relations.insert(
+            name.to_string(),
+            RelationSchema {
+                name: name.to_string(),
+                arity,
+                slot_entities: vec!["Node".to_string(); arity],
+                derivation,
+            },
+        );
+    }
+
+    fn derivation(source: &str, predicate: JudgmentExpr) -> RelationDerivation {
+        RelationDerivation {
+            source_relation: Some(source.to_string()),
+            source_path: None,
+            current_slot: 0,
+            related_slot: 1,
+            entity: None,
+            member_relation: None,
+            slot_entities: vec!["Node".to_string(), "Node".to_string()],
+            predicate,
+        }
+    }
+
+    fn score(term: Term, threshold: i64) -> JudgmentExpr {
+        JudgmentExpr::Comparison {
+            left: ScalarExpr::RoleDerived {
+                term,
+                name: "score".to_string(),
+            },
+            op: ComparisonOp::Gte,
+            right: ScalarExpr::Literal(ScalarValue::Integer(threshold)),
+        }
+    }
+
+    fn combination(term: Term) -> JudgmentExpr {
+        JudgmentExpr::RelationAtom {
+            relation: "required_combination".to_string(),
+            terms: vec![term, Term::Candidate],
+        }
+    }
+
+    /// The expansion oracle computes tuple domains from the raw records, with
+    /// its own BTreeSet, then builds an ordinary disjunction with literal-id
+    /// terms. `Id` is cfg(test), and neither serialized enum has such a kind.
+    fn exists_case() -> impl Strategy<Value = (Program, Program, DataSet)> {
+        (
+            prop::bool::ANY,
+            prop::bool::ANY,
+            0_usize..3,
+            0_usize..3,
+            vec((0_usize..3, 0_usize..3, 0_usize..3, prop::bool::ANY), 0..24),
+            vec((0_usize..3, 0_usize..3), 0..14),
+            vec(prop::option::of(-2_i64..4), 3),
+            -1_i64..3,
+        )
+            .prop_map(
+                |(derived, nested, variable_slot, candidate, tuples, pairs, scores, threshold)| {
+                    let period = Period::month(2026, 1);
+                    let interval = Interval::covering(&period);
+                    let inactive = Interval::covering(&Period::month(2026, 2));
+                    let mut program = Program::default();
+                    let mut data = DataSet::default();
+                    for (name, arity) in [
+                        ("roster", 2),
+                        ("domain_data", if derived { 2 } else { 3 }),
+                        ("pairs", 2),
+                        ("inner", 2),
+                    ] {
+                        typed_relation(&mut program, name, arity, None);
+                    }
+                    typed_relation(
+                        &mut program,
+                        "required_combination",
+                        2,
+                        Some(derivation("pairs", holds())),
+                    );
+                    if derived {
+                        typed_relation(
+                            &mut program,
+                            "generated",
+                            2,
+                            Some(derivation(
+                                "domain_data",
+                                JudgmentExpr::SameEntity {
+                                    left: Term::Anchor,
+                                    right: Term::Candidate,
+                                    negated: true,
+                                },
+                            )),
+                        );
+                    }
+                    data.add_relation(
+                        "roster",
+                        vec!["a".to_string(), IDS[candidate].to_string()],
+                        interval.clone(),
+                    );
+                    let mut domain = std::collections::BTreeSet::new();
+                    let mut terms = vec![Term::Anchor, Term::Candidate, Term::Candidate];
+                    let generator;
+                    let variable_slot = if derived {
+                        generator = "generated";
+                        terms = vec![Term::Anchor, Term::Var(0)];
+                        1
+                    } else {
+                        generator = "domain_data";
+                        let mut bound = [Term::Anchor, Term::Candidate].into_iter();
+                        for (slot, term) in terms.iter_mut().enumerate() {
+                            *term = if slot == variable_slot {
+                                Term::Var(0)
+                            } else {
+                                bound.next().unwrap()
+                            };
+                        }
+                        variable_slot
+                    };
+                    for (a, b, c, active) in tuples {
+                        let tuple = if derived {
+                            vec![IDS[a].to_string(), IDS[b].to_string()]
+                        } else {
+                            vec![IDS[a].to_string(), IDS[b].to_string(), IDS[c].to_string()]
+                        };
+                        if active {
+                            let matches = if derived {
+                                a == 0 && b != 0
+                            } else {
+                                terms.iter().enumerate().all(|(slot, term)| {
+                                    slot == variable_slot
+                                        || tuple[slot]
+                                            == match term {
+                                                Term::Anchor => "a",
+                                                Term::Candidate => IDS[candidate],
+                                                Term::Var(_) | Term::Id(_) => unreachable!(),
+                                            }
+                                })
+                            };
+                            if matches {
+                                let id = if derived {
+                                    IDS[b]
+                                } else {
+                                    [IDS[a], IDS[b], IDS[c]][variable_slot]
+                                };
+                                domain.insert(id);
+                            }
+                        }
+                        data.add_relation(
+                            "domain_data",
+                            tuple,
+                            if active {
+                                interval.clone()
+                            } else {
+                                inactive.clone()
+                            },
+                        );
+                    }
+                    for &(left, right) in &pairs {
+                        for name in ["pairs", "inner"] {
+                            data.add_relation(
+                                name,
+                                vec![IDS[left].to_string(), IDS[right].to_string()],
+                                interval.clone(),
+                            );
+                        }
+                    }
+                    for (id, value) in IDS.into_iter().zip(scores) {
+                        if let Some(value) = value {
+                            data.add_input(
+                                "score",
+                                "Node",
+                                id,
+                                interval.clone(),
+                                ScalarValue::Integer(value),
+                            );
+                        }
+                    }
+                    program.derived.insert(
+                        "score".to_string(),
+                        rule("score", ScalarExpr::Input("score".to_string())),
+                    );
+                    program.derived.insert(
+                        "head".to_string(),
+                        rule("head", count("selected".to_string())),
+                    );
+                    let body = if nested {
+                        JudgmentExpr::Exists {
+                            relation: "inner".to_string(),
+                            terms: vec![Term::Var(0), Term::Var(0)],
+                            variable_slot: 1,
+                            body: Box::new(JudgmentExpr::And(vec![
+                                JudgmentExpr::SameEntity {
+                                    left: Term::Var(1),
+                                    right: Term::Var(0),
+                                    negated: true,
+                                },
+                                score(Term::Var(0), threshold),
+                                combination(Term::Var(1)),
+                            ])),
+                        }
+                    } else {
+                        JudgmentExpr::And(vec![
+                            score(Term::Var(0), threshold),
+                            combination(Term::Var(0)),
+                        ])
+                    };
+                    typed_relation(
+                        &mut program,
+                        "selected",
+                        2,
+                        Some(derivation(
+                            "roster",
+                            JudgmentExpr::Exists {
+                                relation: generator.to_string(),
+                                terms,
+                                variable_slot,
+                                body: Box::new(body),
+                            },
+                        )),
+                    );
+                    let mut expanded = program.clone();
+                    let items = domain
+                        .into_iter()
+                        .map(|id| {
+                            if nested {
+                                let inner = pairs
+                                    .iter()
+                                    .filter(|(left, _)| IDS[*left] == id)
+                                    .map(|(_, right)| IDS[*right])
+                                    .collect::<std::collections::BTreeSet<_>>();
+                                JudgmentExpr::Or(
+                                    inner
+                                        .into_iter()
+                                        .map(|other| {
+                                            JudgmentExpr::And(vec![
+                                                JudgmentExpr::SameEntity {
+                                                    left: Term::Id(id),
+                                                    right: Term::Id(other),
+                                                    negated: true,
+                                                },
+                                                score(Term::Id(other), threshold),
+                                                combination(Term::Id(id)),
+                                            ])
+                                        })
+                                        .collect(),
+                                )
+                            } else {
+                                JudgmentExpr::And(vec![
+                                    score(Term::Id(id), threshold),
+                                    combination(Term::Id(id)),
+                                ])
+                            }
+                        })
+                        .collect();
+                    expanded
+                        .relations
+                        .get_mut("selected")
+                        .unwrap()
+                        .derivation
+                        .as_mut()
+                        .unwrap()
+                        .predicate = JudgmentExpr::Or(items);
+                    (program, expanded, data)
+                },
+            )
+    }
+
+    fn model_outcome(
+        program: &Program,
+        data: &DataSet,
+        limit: usize,
+        depth: usize,
+    ) -> (Result<String, String>, Vec<String>, super::ExistsCoverage) {
+        let period = Period::month(2026, 1);
+        let mut engine = Engine::new(program, data).with_relation_nesting_limit(limit);
+        engine.suspend_depth = depth;
+        let result = engine
+            .evaluate_scalar("head", "a", &period)
+            .map(|value| {
+                serde_json::to_string(&crate::spec::ScalarValueSpec::from_model(value)).unwrap()
+            })
+            .map_err(|error| error.to_string());
+        let mut trace = engine
+            .evaluated_trace_instances(&period, "a")
+            .iter()
+            .map(|instance| format!("{instance:?}"))
+            .collect::<Vec<_>>();
+        trace.sort();
+        (result, trace, engine.exists_coverage)
+    }
+
+    fn fast_model_outcome(program: &Program, data: &DataSet) -> Result<String, String> {
+        let query = crate::api::ExecutionQuery {
+            entity_id: "a".to_string(),
+            outputs: vec!["head".to_string()],
+            assessment_date: None,
+            period: crate::spec::PeriodSpec {
+                kind: crate::spec::PeriodKindSpec::Month,
+                start: Period::month(2026, 1).start,
+                end: Period::month(2026, 1).end,
+            },
+        };
+        match crate::bulk::try_execute(program, data, &[query])
+            .map_err(|error| error.to_string())?
+        {
+            crate::bulk::FastPathResult::Executed(response) => {
+                assert_eq!(
+                    response.metadata.actual_mode,
+                    crate::api::ExecutionMode::Fast
+                );
+                assert_eq!(response.results.len(), 1, "bulk executed the queried row");
+                match &response.results[0].outputs["head"] {
+                    crate::api::OutputValue::Scalar { value, .. } => {
+                        Ok(serde_json::to_string(value).unwrap())
+                    }
+                    _ => panic!("a scalar head"),
+                }
+            }
+            crate::bulk::FastPathResult::Unsupported { reason } => {
+                // Public Fast falls back to Explain to choose the first
+                // evaluation failure. Literal-id models cannot go through
+                // serialization, so reproduce that routing on this model.
+                let explained = model_outcome(program, data, usize::MAX, usize::MAX).0;
+                let Err(error) = explained else {
+                    panic!("successful exists must execute in bulk: {reason}");
+                };
+                assert_eq!(
+                    reason,
+                    format!("bulk evaluation failed ({error}); explain decides the outcome"),
+                    "fallback must be the evaluation failure, not an unsupported construct"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn role_judgment(term: Term, name: &str) -> JudgmentExpr {
+        JudgmentExpr::RoleDerived {
+            term,
+            name: name.to_string(),
+        }
+    }
+
+    fn quantified(body: JudgmentExpr) -> JudgmentExpr {
+        JudgmentExpr::Exists {
+            relation: "domain".to_string(),
+            terms: vec![Term::Anchor, Term::Var(0)],
+            variable_slot: 1,
+            body: Box::new(body),
+        }
+    }
+
+    fn trace_probe(node: &JudgmentExpr, skipped: bool) -> (Vec<String>, Vec<String>) {
+        let mut program = Program::default();
+        typed_relation(&mut program, "domain", 2, None);
+        let mut eligible = rule("eligible", ScalarExpr::Literal(ScalarValue::Integer(1)));
+        eligible.dtype = DType::Judgment;
+        eligible.semantics = DerivedSemantics::Judgment(holds());
+        program.derived.insert("eligible".to_string(), eligible);
+        let period = Period::month(2026, 1);
+        let mut data = DataSet::default();
+        for id in ["c", "a", "b", "a"] {
+            data.add_relation(
+                "domain",
+                vec!["root".to_string(), id.to_string()],
+                Interval::covering(&period),
+            );
+        }
+        let mut engine = Engine::new(&program, &data);
+        engine.suspend_depth = usize::MAX;
+        let parent = super::CacheKey {
+            derived: "parent".to_string(),
+            entity_id: "root".to_string(),
+            period: period.clone(),
+        };
+        engine.active_evaluations.push(parent.clone());
+        let context = super::RelationEvalContext {
+            current_id: "root",
+            related_id: "candidate",
+            current_entity: None,
+            related_entity: None,
+            variables: None,
+        };
+        if skipped {
+            engine.record_skipped_judgment_dependencies(
+                node,
+                "candidate",
+                &period,
+                Some(context),
+                super::TraceSkipReason::ShortCircuit,
+            );
+        } else {
+            engine
+                .drive(|engine| {
+                    engine.eval_judgment_expr_inner(node, "candidate", &period, Some(context))
+                })
+                .unwrap();
+        }
+        engine.active_evaluations.pop();
+        let trace = engine
+            .execution_trace
+            .get(&parent)
+            .cloned()
+            .unwrap_or_default();
+        let evaluated = trace
+            .dependencies
+            .iter()
+            .map(|key| format!("{}:{}", key.derived, key.entity_id))
+            .collect();
+        let skipped = trace
+            .not_evaluated_dependencies
+            .iter()
+            .filter_map(|dependency| match dependency {
+                super::SkippedTraceDependency::Derived { key, .. } => {
+                    Some(format!("{}:{}", key.derived, key.entity_id))
+                }
+                super::SkippedTraceDependency::Parameter { .. } => None,
+            })
+            .collect();
+        (evaluated, skipped)
+    }
+
+    #[test]
+    fn exists_skipped_reads_use_evaluated_outer_bindings() {
+        let node = quantified(JudgmentExpr::And(vec![
+            JudgmentExpr::Not(Box::new(holds())),
+            role_judgment(Term::Var(0), "eligible"),
+        ]));
+        assert_eq!(
+            trace_probe(&node, false),
+            (
+                vec![],
+                vec![
+                    "eligible:a".to_string(),
+                    "eligible:b".to_string(),
+                    "eligible:c".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn exists_unevaluated_inner_bindings_produce_no_skip_records() {
+        let node = quantified(JudgmentExpr::And(vec![
+            JudgmentExpr::Not(Box::new(holds())),
+            quantified(role_judgment(Term::Var(0), "eligible")),
+        ]));
+        assert_eq!(trace_probe(&node, false), (vec![], vec![]));
+    }
+
+    #[test]
+    fn exists_wholly_skipped_records_anchor_and_candidate_once() {
+        let node = quantified(JudgmentExpr::And(vec![
+            role_judgment(Term::Anchor, "eligible"),
+            role_judgment(Term::Candidate, "eligible"),
+            role_judgment(Term::Var(0), "eligible"),
+            quantified(role_judgment(Term::Anchor, "eligible")),
+        ]));
+        assert_eq!(
+            trace_probe(&node, true),
+            (
+                vec![],
+                vec![
+                    "eligible:root".to_string(),
+                    "eligible:candidate".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn exists_skipped_nested_frames_preserve_enclosing_variable_indices() {
+        let node = quantified(JudgmentExpr::And(vec![
+            JudgmentExpr::Not(Box::new(holds())),
+            quantified(quantified(JudgmentExpr::And(vec![
+                role_judgment(Term::Var(0), "inner"),
+                role_judgment(Term::Var(1), "middle"),
+                role_judgment(Term::Var(2), "outer"),
+            ]))),
+        ]));
+        assert_eq!(
+            trace_probe(&node, false),
+            (
+                vec![],
+                vec![
+                    "outer:a".to_string(),
+                    "outer:b".to_string(),
+                    "outer:c".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn exists_early_stop_records_each_remaining_sorted_distinct_id() {
+        let node = quantified(role_judgment(Term::Var(0), "eligible"));
+        assert_eq!(
+            trace_probe(&node, false),
+            (
+                vec!["eligible:a".to_string()],
+                vec!["eligible:b".to_string(), "eligible:c".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn exists_resume_key_separates_every_binding_period_node_and_parent() {
+        let period = Period::month(2026, 1);
+        let february = Period::month(2026, 2);
+        let mut program = Program::default();
+        typed_relation(&mut program, "domain", 5, None);
+        typed_relation(&mut program, "pairs", 2, None);
+        typed_relation(
+            &mut program,
+            "required_combination",
+            2,
+            Some(derivation("pairs", holds())),
+        );
+        program.derived.insert(
+            "score".to_string(),
+            rule("score", ScalarExpr::Input("score".to_string())),
+        );
+        let mut data = DataSet::default();
+        data.add_relation(
+            "domain",
+            ["a", "b", "x", "y", "z"].map(str::to_string).to_vec(),
+            Interval::covering(&period),
+        );
+        data.add_input(
+            "score",
+            "Node",
+            "z",
+            Interval::covering(&period),
+            ScalarValue::Integer(1),
+        );
+        data.add_relation(
+            "pairs",
+            vec!["z".to_string(), "b".to_string()],
+            Interval::covering(&period),
+        );
+        let node = JudgmentExpr::Exists {
+            relation: "domain".to_string(),
+            terms: vec![
+                Term::Anchor,
+                Term::Candidate,
+                Term::Var(0),
+                Term::Var(1),
+                Term::Var(0),
+            ],
+            variable_slot: 4,
+            body: Box::new(JudgmentExpr::And(vec![
+                score(Term::Var(0), 1),
+                combination(Term::Var(0)),
+            ])),
+        };
+        let mut other_node = node.clone();
+        if let JudgmentExpr::Exists { body, .. } = &mut other_node {
+            *body = Box::new(JudgmentExpr::Not(body.clone()));
+        }
+        // Parent evaluation stays in January even when the expression reads
+        // February, isolating ExistsKey.period from CacheKey.period.
+        let parent_period = period.clone();
+        for limit in 1..=2 {
+            for depth in 1..=8 {
+                let mut engine = Engine::new(&program, &data).with_relation_nesting_limit(limit);
+                engine.suspend_depth = depth;
+                let relation_stops = std::cell::Cell::new(0_usize);
+                let resumed_after_relation_stop = std::cell::Cell::new(0_usize);
+                let run = engine
+                    .drive(|engine| {
+                        let mut outcomes = Vec::new();
+                        for (site, anchor, candidate, inner, outer, period, parent) in [
+                            (&node, "a", "b", "x", "y", &period, "first"),
+                            (&node, "other", "b", "x", "y", &period, "first"),
+                            (&node, "a", "other", "x", "y", &period, "first"),
+                            (&node, "a", "b", "other", "y", &period, "first"),
+                            (&node, "a", "b", "x", "other", &period, "first"),
+                            (&node, "a", "b", "x", "y", &february, "first"),
+                            (&other_node, "a", "b", "x", "y", &period, "first"),
+                            (&node, "a", "b", "x", "y", &period, "second"),
+                        ] {
+                            let outer = super::VariableFrame {
+                                id: outer,
+                                parent: None,
+                            };
+                            let inner = super::VariableFrame {
+                                id: inner,
+                                parent: Some(&outer),
+                            };
+                            let context = super::RelationEvalContext {
+                                current_id: anchor,
+                                related_id: candidate,
+                                current_entity: None,
+                                related_entity: None,
+                                variables: Some(&inner),
+                            };
+                            engine.active_evaluations.push(super::CacheKey {
+                                derived: parent.to_string(),
+                                entity_id: "root".to_string(),
+                                period: parent_period.clone(),
+                            });
+                            // Simulate the enclosing relation resolution that
+                            // normally calls a predicate. Keep owner=None so
+                            // the owner key cannot hide an omitted anchor or
+                            // period from this key-dimension matrix. The parent
+                            // period above is also fixed for that same reason.
+                            let mut resumed_before_retry = None;
+                            let outcome = loop {
+                                assert_eq!(engine.relation_depth, 0);
+                                engine.relation_depth = 1;
+                                let outcome = engine.exists_judgment(site, period, Some(context));
+                                engine.relation_depth = 0;
+                                let Some(needed) = engine.suspended_on.take() else {
+                                    break outcome;
+                                };
+                                // This is a real bound hit in derived_members.
+                                // The ordinary outer resolver consumes it by
+                                // resolving the needed relation, then retries
+                                // the saved predicate. Reproduce that handoff
+                                // here and count only completed resolutions.
+                                match engine.resolve_members(needed) {
+                                    Ok(()) => {
+                                        relation_stops.set(relation_stops.get() + 1);
+                                        // Snapshot after the handoff: a rule
+                                        // resume before this relation stop
+                                        // cannot satisfy the resumed floor.
+                                        resumed_before_retry = Some(engine.exists_coverage.resumed);
+                                    }
+                                    Err(interrupt) => break Err(interrupt),
+                                }
+                            };
+                            if let (Some(resumed_before), true) =
+                                (resumed_before_retry, outcome.is_ok())
+                            {
+                                assert!(
+                                    engine.exists_coverage.resumed > resumed_before,
+                                    "the relation stop must resume the bound exists body"
+                                );
+                                resumed_after_relation_stop
+                                    .set(resumed_after_relation_stop.get() + 1);
+                            }
+                            engine.active_evaluations.pop();
+                            outcomes.push(outcome?);
+                        }
+                        Ok(outcomes)
+                    })
+                    .unwrap();
+                assert_eq!(
+                    run,
+                    vec![
+                        crate::model::JudgmentOutcome::Holds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::NotHolds,
+                        crate::model::JudgmentOutcome::Holds
+                    ],
+                    "relation limit {limit}, depth {depth}"
+                );
+                if limit == 1 {
+                    assert!(
+                        relation_stops.get() >= 1,
+                        "relation limit {limit}, depth {depth} must stop a resolution"
+                    );
+                    assert!(
+                        resumed_after_relation_stop.get() >= 1,
+                        "relation limit {limit}, depth {depth} must resume exists after that stop"
+                    );
+                } else {
+                    assert_eq!(
+                        relation_stops.get(),
+                        0,
+                        "limit {limit} is past this matrix's one enclosing resolution"
+                    );
+                }
+                for parent in ["first", "second"] {
+                    let trace = &engine.execution_trace[&super::CacheKey {
+                        derived: parent.to_string(),
+                        entity_id: "root".to_string(),
+                        period: parent_period.clone(),
+                    }];
+                    assert!(
+                        trace
+                            .dependencies
+                            .iter()
+                            .any(|dependency| dependency.derived == "score"
+                                && dependency.entity_id == "z"),
+                        "{parent} owns its effects at depth {depth}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exists_expands_and_defers_with_observed_paths() {
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[71; 32]),
+        );
+        let coverage = std::cell::Cell::new([0_usize; 5]);
+        let failures = std::cell::Cell::new(0_usize);
+        let bulk_successes = std::cell::Cell::new(0_usize);
+        let independently_compared_traces = std::cell::Cell::new(0_usize);
+        runner
+            .run(&exists_case(), |(program, expanded, data)| {
+                let (oracle, expanded_trace, _) = model_outcome(&expanded, &data, usize::MAX, usize::MAX);
+                let (native, native_trace, native_counts) =
+                    model_outcome(&program, &data, usize::MAX, usize::MAX);
+                prop_assert_eq!(&native, &oracle, "independent sorted-domain disjunction");
+                let flat_body = matches!(
+                    &program.relations["selected"].derivation.as_ref().unwrap().predicate,
+                    JudgmentExpr::Exists { body, .. } if matches!(body.as_ref(), JudgmentExpr::And(_))
+                );
+                if flat_body {
+                    // A flat body's literal-id expansion has the same skip
+                    // records, including early stops and empty domains. A
+                    // wholly skipped nested binder deliberately differs (§5).
+                    prop_assert_eq!(&native_trace, &expanded_trace, "independent flat expansion trace");
+                    independently_compared_traces.set(independently_compared_traces.get() + 1);
+                }
+
+                let (repeated, repeated_trace, _) =
+                    model_outcome(&program, &data, usize::MAX, usize::MAX);
+                prop_assert_eq!(
+                    &repeated,
+                    &oracle,
+                    "deterministic value against independent oracle"
+                );
+                prop_assert_eq!(&repeated_trace, &native_trace, "deterministic trace");
+                let mut permuted = data.clone();
+                permuted.inputs.reverse();
+                permuted.relations.reverse();
+                let (reordered, reordered_trace, _) =
+                    model_outcome(&program, &permuted, usize::MAX, usize::MAX);
+                prop_assert_eq!(
+                    &reordered,
+                    &oracle,
+                    "input, tuple and roster order against independent oracle"
+                );
+                prop_assert_eq!(
+                    &reordered_trace,
+                    &native_trace,
+                    "input, tuple and roster trace order"
+                );
+                prop_assert_eq!(
+                    fast_model_outcome(&program, &permuted),
+                    oracle.clone(),
+                    "fast order against independent oracle"
+                );
+
+                let fast = fast_model_outcome(&program, &data);
+                // A successful helper result requires an actual Executed
+                // bulk response; success through fallback panics above.
+                bulk_successes.set(bulk_successes.get() + usize::from(fast.is_ok()));
+                prop_assert_eq!(fast, oracle.clone(), "fast finite quantifier");
+                prop_assert_eq!(
+                    fast_model_outcome(&expanded, &data),
+                    oracle.clone(),
+                    "fast literal-id expansion"
+                );
+                failures.set(failures.get() + usize::from(oracle.is_err()));
+                let mut observed = [
+                    native_counts.resumed > 0,
+                    native_counts.early_stop > 0,
+                    native_counts.empty > 0,
+                    native_counts.nonempty > 0,
+                    native_counts.nested > 0,
+                ];
+                // The deepest derived resolution here is selected -> generated or
+                // selected -> required_combination. Expression paths contain at
+                // most twelve levels; greater depths cannot defer another rule.
+                for limit in 1..=2 {
+                    for depth in 1..=12 {
+                        let (outcome, trace, counts) = model_outcome(&program, &data, limit, depth);
+                        prop_assert_eq!(&outcome, &oracle, "limit {}, depth {}", limit, depth);
+                        prop_assert_eq!(
+                            &trace,
+                            &native_trace,
+                            "trace limit {}, depth {}",
+                            limit,
+                            depth
+                        );
+                        for (seen, count) in observed.iter_mut().zip([
+                            counts.resumed,
+                            counts.early_stop,
+                            counts.empty,
+                            counts.nonempty,
+                            counts.nested,
+                        ]) {
+                            *seen |= count > 0;
+                        }
+                    }
+                }
+                let mut counts = coverage.get();
+                for (count, observed) in counts.iter_mut().zip(observed) {
+                    *count += usize::from(observed);
+                }
+                coverage.set(counts);
+                Ok(())
+            })
+            .unwrap();
+        let counts = coverage.get();
+        for (name, count, floor) in [
+            ("resumed exists", counts[0], 20),
+            ("early stop", counts[1], 2),
+            ("empty domain", counts[2], 20),
+            ("nonempty domain", counts[3], 100),
+            ("nested frame", counts[4], 20),
+        ] {
+            assert!(count >= floor, "{name}: {count} cases, floor {floor}");
+        }
+        assert!(
+            failures.get() >= 10,
+            "missing-input failures must reach the oracle"
+        );
+        assert!(
+            bulk_successes.get() >= 100,
+            "actual successful bulk cases: {}",
+            bulk_successes.get()
+        );
+        assert!(
+            independently_compared_traces.get() >= 100,
+            "actual independent flat trace comparisons: {}",
+            independently_compared_traces.get()
+        );
+        eprintln!(
+            "EXISTS COVERAGE cases [resumed, early_stop, empty, nonempty, nested] = {counts:?}; failures {}; bulk successes {}; independent flat traces {}",
+            failures.get(),
+            bulk_successes.get(),
+            independently_compared_traces.get()
+        );
+    }
+
+    /// The positive fragment excludes derived relation reads, aggregating
+    /// rule reads, count comparisons and bare membership judgments. Counting
+    /// selected members below only observes the predicate's exact value.
+    #[test]
+    fn exists_positive_base_domains_are_monotone_with_observed_paths() {
+        let strategy = (
+            prop::bool::ANY,
+            0_usize..3,
+            0_usize..3,
+            vec(0_usize..3, 0..8),
+            vec(0_usize..3, 0..8),
+            vec((0_usize..3, 0_usize..3), 0..12),
+        );
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[83; 32]),
+        );
+        let coverage = std::cell::Cell::new([0_usize; 4]);
+        runner
+            .run(
+                &strategy,
+                |(nested, candidate, even_nots, before, added, edges)| {
+                    let mut program = Program::default();
+                    for name in ["domain", "roster", "inner"] {
+                        typed_relation(&mut program, name, 2, None);
+                    }
+                    let body = if nested {
+                        JudgmentExpr::Exists {
+                            relation: "inner".to_string(),
+                            terms: vec![Term::Var(0), Term::Var(0)],
+                            variable_slot: 1,
+                            body: Box::new(JudgmentExpr::SameEntity {
+                                left: Term::Var(0),
+                                right: Term::Candidate,
+                                negated: false,
+                            }),
+                        }
+                    } else {
+                        JudgmentExpr::SameEntity {
+                            left: Term::Var(0),
+                            right: Term::Candidate,
+                            negated: false,
+                        }
+                    };
+                    let mut predicate = quantified(body);
+                    for _ in 0..even_nots {
+                        predicate =
+                            JudgmentExpr::Not(Box::new(JudgmentExpr::Not(Box::new(predicate))));
+                    }
+                    typed_relation(
+                        &mut program,
+                        "selected",
+                        2,
+                        Some(derivation("roster", predicate)),
+                    );
+                    program.derived.insert(
+                        "head".to_string(),
+                        rule("head", count("selected".to_string())),
+                    );
+                    let period = Period::month(2026, 1);
+                    let interval = Interval::covering(&period);
+                    let mut data = DataSet::default();
+                    data.add_relation(
+                        "roster",
+                        vec!["a".to_string(), IDS[candidate].to_string()],
+                        interval.clone(),
+                    );
+                    for (left, right) in &edges {
+                        data.add_relation(
+                            "inner",
+                            vec![IDS[*left].to_string(), IDS[*right].to_string()],
+                            interval.clone(),
+                        );
+                    }
+                    for id in &before {
+                        data.add_relation(
+                            "domain",
+                            vec!["a".to_string(), IDS[*id].to_string()],
+                            interval.clone(),
+                        );
+                    }
+                    let mut extended = data.clone();
+                    for id in &added {
+                        extended.add_relation(
+                            "domain",
+                            vec!["a".to_string(), IDS[*id].to_string()],
+                            interval.clone(),
+                        );
+                    }
+                    let expected = |domain: &[usize]| {
+                        domain.iter().any(|id| {
+                            if nested {
+                                edges
+                                    .iter()
+                                    .any(|(left, right)| left == id && *right == candidate)
+                            } else {
+                                *id == candidate
+                            }
+                        })
+                    };
+                    let before_expected = expected(&before);
+                    let all = before.iter().chain(&added).copied().collect::<Vec<_>>();
+                    let after_expected = expected(&all);
+                    prop_assert!(!before_expected || after_expected);
+                    let mut observed = [false; 4];
+                    for (records, expected) in
+                        [(&data, before_expected), (&extended, after_expected)]
+                    {
+                        let oracle = Ok(serde_json::to_string(
+                            &crate::spec::ScalarValueSpec::from_model(ScalarValue::Integer(
+                                i64::from(expected),
+                            )),
+                        )
+                        .unwrap());
+                        let (value, _, counts) =
+                            model_outcome(&program, records, usize::MAX, usize::MAX);
+                        prop_assert_eq!(
+                            &value,
+                            &oracle,
+                            "exact membership under positive tuple extension"
+                        );
+                        prop_assert_eq!(
+                            fast_model_outcome(&program, records),
+                            oracle,
+                            "fast exact positive value"
+                        );
+                        for (seen, count) in observed.iter_mut().zip([
+                            counts.early_stop,
+                            counts.empty,
+                            counts.nonempty,
+                            counts.nested,
+                        ]) {
+                            *seen |= count > 0;
+                        }
+                    }
+                    let mut counts = coverage.get();
+                    for (count, seen) in counts.iter_mut().zip(observed) {
+                        *count += usize::from(seen);
+                    }
+                    coverage.set(counts);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let counts = coverage.get();
+        for (name, count, floor) in [
+            ("early stop", counts[0], 20),
+            ("empty", counts[1], 20),
+            ("nonempty", counts[2], 150),
+            ("nested", counts[3], 50),
+        ] {
+            assert!(
+                count >= floor,
+                "monotone {name}: {count} cases, floor {floor}"
+            );
+        }
+        eprintln!(
+            "EXISTS MONOTONE COVERAGE cases [early_stop, empty, nonempty, nested] = {counts:?}"
+        );
     }
 
     #[derive(Clone, Copy)]
@@ -3711,7 +5654,8 @@ mod relation_resolution_tests {
                     arity: 2,
                     slot_entities: vec!["Node".to_string(), "Node".to_string()],
                     derivation: Some(RelationDerivation {
-                        source_relation: source,
+                        source_relation: Some(source),
+                        source_path: None,
                         current_slot: 0,
                         related_slot: 1,
                         entity: None,
@@ -4069,7 +6013,8 @@ mod relation_resolution_tests {
                             arity: 2,
                             slot_entities: vec!["Node".to_string(), "Node".to_string()],
                             derivation: Some(RelationDerivation {
-                                source_relation: "base".to_string(),
+                                source_relation: Some("base".to_string()),
+                                source_path: None,
                                 current_slot: 0,
                                 related_slot: 1,
                                 entity: None,
@@ -4191,7 +6136,8 @@ mod relation_resolution_tests {
                     arity: 2,
                     slot_entities: vec!["Node".to_string(), "Node".to_string()],
                     derivation: Some(RelationDerivation {
-                        source_relation: "items".to_string(),
+                        source_relation: Some("items".to_string()),
+                        source_path: None,
                         current_slot: 0,
                         related_slot: 1,
                         entity: None,

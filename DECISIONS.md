@@ -4,6 +4,232 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-10-31 — Relation roles express guarded household membership
+
+**Decision.** Add terms and qualified reads, parameters in predicates,
+relation atoms, term comparisons, bounded `exists` and path sources to
+derived relations. Advertise the completed series as `relation_roles`.
+Keep recursion (#231, #253) and the three-valued option (#215, #251) outside
+this series.
+
+**Why.** A household predicate needs facts about both ends of a pair,
+required combinations between people in scope, and co-residents reached
+through a residence roster. The synthetic 7 CFR 273.1 fixture demonstrates
+those operations without inventing a bounded substitute for a transitive
+household closure:
+
+- It computes the exact household when no residence exception applies and
+  the applicant's two-tie set is closed under ties.
+- Otherwise it reads supplied household ids. With every supplied fact true,
+  one full-period residence record for each co-resident, complete pair facts
+  and correct ids wherever read, it never silently returns a wrong household.
+
+**Consequences.** Explain and fast evaluate the constructs; dense refuses a
+reachable qualified read, atom, term comparison, `exists` or path source by
+name and names #218. Dense also compiles parameter reads in predicates.
+The series extends artifact format 3 and its checked interface block (#250).
+Programs using qualified reads, atoms, term comparisons, `exists` or path
+sources refuse tuples supplied under any derived relation's name; programs
+using none keep their existing union of supplied and derived tuples.
+An atom, `exists` or path source also refuses lenient request binding.
+
+The fixture declares every input with no default. Missing household ids
+fail evaluation naming `snap_household_unit` when a guard selects the
+supplied case. The tests cover eleven hand-worked households, compare an
+independent union-find oracle over generated residences, and check symmetry,
+partitioning, participation, order, modes and deferral. The pilot module in
+rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
+
+## 2026-10-14 — Python callers can state a dense batch's row count, and the extension never defaults it
+
+**Decision.** The Python dense surface takes an optional stated row count.
+`CompiledDenseProgram.execute` and `execute_f64` take a keyword `row_count`
+(keyword-only in the extension), and an `execute_lifetime_f64` batch can take
+the form `(inputs, relations, row_count)`. A stated count becomes
+`DenseBatchSpec::row_count`, so the engine checks it as it checks a Rust
+caller's: every supplied root column and every relation's offsets must agree
+with it, and the engine refuses a count above `MAX_DENSE_ROWS`. With no stated
+count, the extension takes the count as before: from the first supplied root
+input column, in the program's order, else from the first relation's offsets.
+When neither gives one, it raises `ValueError` naming the program's root
+inputs and any supplied inputs outside them, and saying how to state the
+count. It never defaults to zero rows.
+
+**Why.** Rust callers set `row_count` directly; Python callers could not. An
+input-free program (a constant or a parameter lookup) could never run from
+Python. A call that left out the program's root input, or misspelt its key,
+got the false error "dense compilation produced neither root inputs nor
+relations". Since #201 the engine treats an absent input as missing on the
+rows that read it, so with a stated count it reports that. Defaulting to zero
+rows would instead turn a misspelt key into an empty result with no error,
+because no row would read the input.
+
+**Consequences.**
+
+- The extension accepts any non-negative Python or numpy integer that fits
+  `usize` as a stated count, and refuses a bool. Every such count reaches the
+  engine, so `MAX_DENSE_ROWS` alone decides which counts the engine refuses as
+  too large.
+- One Python integer now reaches the executor's per-row buffers, as a Rust
+  caller's `row_count` already could. The executor reserves those buffers
+  fallibly (the entry below), so it refuses a count under the bound that the
+  allocator can't serve: `row_count=2**50` on a constant program raises
+  `RuntimeError` naming the count.
+- The extension reads `related_row_count` the same way: it refuses a bool, and
+  a count above `i64::MAX` reaches the engine instead of raising
+  `OverflowError`.
+- A call to a program that reads a relation, with no root column, no stated
+  count and no relations, now gets "missing dense relation batch `<key>`",
+  naming the key, instead of "dense execution requires relation data".
+- The extension still ignores supplied inputs outside the root inputs when it
+  finds a row count, and names them only in the error for a batch with no row
+  count.
+
+## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
+
+**Decision.** Every buffer the dense executor sizes by a row count, the
+batch's `row_count` or a relation's related count, is reserved with
+`Vec::try_reserve_exact`, through `row_buffer`, `filled_rows` and
+`copied_rows` in `src/lazy.rs`. When the allocator refuses one, the call
+fails with `EvalError::TypeMismatch` naming the count ("evaluation needs a
+buffer of N rows, more than this process can allocate"), propagated through
+`Flow` like any whole-call error. A batch whose buffers fit gets exactly the
+results it got before.
+
+**Why.** Binding (the entry below) bounds each count by `MAX_DENSE_ROWS` and
+reserves a relation's owners fallibly, but trusts a count up to that bound.
+Execution then filled broadcast literals, operator results, row masks,
+projections and cached rule columns with `vec!`. Two kinds of batch could
+therefore still abort the process, the Python interpreter included:
+
+- a stated related count whose 8-byte owners fit but whose 16-byte decimal or
+  24-byte text buffers did not
+- a huge `row_count` for a rule with no input and no relation, such as
+  `formula: 5` over 2^50 rows
+
+**Consequences.**
+
+- The covered buffers are:
+  - every operator's output column, broadcast literals and period dates
+  - placeholders for missing inputs and failed rows
+  - copies of input columns and of cached rule columns
+  - numeric conversions and comparison outcomes
+  - root and related row masks, and root-to-related projections
+  - related counts and sums, parameter lookups, and the lifetime executor's
+    reductions
+
+  `RowMask`'s set operations now return `Result`, so the bulk evaluator
+  propagates a refusal too; there it sends the request to explain, as any bulk
+  error does.
+- Some buffers are gone rather than made fallible:
+  - a mask with no active row holds no bits
+  - masks and relation offsets share their `Vec` instead of copying it into
+    an `Rc` slice
+  - `not` negates in place
+  - a period-invariant input moves its column out instead of copying it
+  - `RowErrors` renames its entries in place and restricts them by inserting
+    them one at a time; collecting into a
+    new map gathered every entry in one buffer first
+- A rule before its commencement date types its formula, which allocates the
+  formula's column, before it records an error on every row. A batch too large
+  to evaluate is refused before a pass over its rows.
+- Still infallible:
+  - allocations sized by something other than a row count (one per rule,
+    period, output or relation key)
+  - the heap data of each text value, cloned per row with ordinary allocation
+  - the entries `RowErrors` records, one per failing row; dense records them
+    only after a buffer for the same rows was granted
+- A reservation fails only when the allocator refuses it. On a host that
+  overcommits memory, a large but possible count can pass its reservation and
+  still exhaust memory as the buffer is filled. A request no host can grant is
+  an error everywhere. On wasm32 the allocator returns null when linear memory
+  cannot grow, so there a request that does not fit in 4 GiB is an error too.
+- `tests/dense_executor_alloc.rs` runs in its own binary, so a regression aborts
+  only that binary. Its allocator refuses three things: any single allocation
+  above a cap that a test sets, the nth allocation of at least 2 KiB that a
+  test chooses, and anything past 1 GiB live. A regression therefore aborts
+  promptly. The cap tests a count whose narrow buffers fit and whose wide ones
+  do not, with small, real batches. Refusing each large allocation in turn
+  reaches the buffers no wider than one already granted, such as masks and
+  copies, which no cap can single out.
+
+## 2026-10-14 — Dense batches justify every row count they claim
+
+**Decision.** Dense binding refuses a batch whose row counts nothing confirms,
+before it makes any allocation sized by them. (Diagnostics and schema metadata
+still allocate; no buffer sized by an unconfirmed count does.) `row_count` is
+the caller's stated root row count: every supplied root column must have that
+length, and it is at most `MAX_DENSE_ROWS` (`isize::MAX` divided by the widest
+per-row buffer element). A relation's related row count is its last offset. A
+nonzero one must be confirmed by a supplied related column of that length or
+by an explicit `DenseRelationBatchSpec::related_row_count`; a stated count
+must equal the last offset, and so must every supplied related column, whether
+or not the program reads it. Counts above `MAX_DENSE_ROWS` are refused, and
+the owners buffer is reserved with `try_reserve_exact`, so a reservation the
+allocator reports as failed is an error rather than an abort. A reservation
+that succeeds guarantees nothing about later allocations. Violations are
+`EvalError::TypeMismatch`.
+
+**Why.** Binding allocates one owner per related row, and the offsets were the
+only statement of how many there are. A relation with no related column (a
+`len`, or a filter that reads only the current entity) sized that buffer from
+the last offset alone: offsets `[0, usize::MAX]` panicked with "capacity
+overflow", and `[0, 2^50]` aborted the process, the Python interpreter
+included. `row_count = usize::MAX` overflowed `row_count + 1`. Requiring
+confirmation turns a malformed offsets vector into an error, as `row_count`
+already did for root columns.
+
+**Consequences.**
+
+- A caller that passes offsets with related rows but no related column must
+  state the count: `related_row_count` in Rust, or
+  `DenseRelationBatch(related_row_count=...)` (the `"related_row_count"`
+  relation-dict key) in Python. It is the caller's assertion, so it should be
+  counted independently of the offsets: one per root and member pair, so a
+  related entity two roots share counts twice. Fixtures in this repository
+  that built such relations now state the counts they built.
+- Missing input columns keep their lazy meaning: an absent root or related
+  column fails only the rows that read it. A relation whose only related column
+  is omitted that way still needs its count confirmed, by a stated count.
+- Binding first walks the schemas in order, checking each key's offsets when
+  its first schema reaches it and each schema's read columns, so the first
+  error a per-schema binding reports is unchanged. Confirmation, the bound and
+  the columns no schema reads are checked after that walk, key by key. The
+  Python extension does not convert unread columns; it passes their lengths
+  in `DenseRelationBatchSpec::input_lengths` (columns supplied by length
+  alone, checked like `inputs` but never readable), so the engine orders
+  the length and confirmation errors, and the extension makes no allocation
+  sized by a claimed length. Unread entries get none of the checks converted
+  columns get: their `len()` is taken as is, with no rank or dtype check.
+  The `DenseRelationBatch` wrapper passes each entry through `np.asarray`,
+  so there a `(3, 2)` array has length 3; the native extension called
+  directly takes any sized object. An unread length that matches is
+  trusted like a stated count, so it can authorize an owners reservation up
+  to the bound. The extension
+  raises its own errors before the engine checks anything, including a
+  root column's length: an unread entry with no `len()` (`ValueError`), a
+  non-string key (`TypeError`), and every error converting a read column.
+- The extension's conversion of read columns checks rank and keeps the dtype
+  of an empty array only for the cases it names: a numpy array that is not
+  one-dimensional is refused, and an empty integer, float or string array
+  keeps that dtype. Other empty arrays (complex, object, datetime, among
+  others) still fall through to the list fallbacks and read as bool. A
+  negative `related_row_count` raises `ValueError`. (The entry on Python
+  callers stating a row count changes how the extension reads a count: one
+  that fits `usize` now reaches the engine.)
+- A stated count is trusted up to the bound. Binding's owners reservation fails
+  cleanly only when the allocator reports the failure. Execution then reserves
+  each per-row buffer fallibly too (the entry above), so a count that fits the
+  owners buffer but not a later, wider buffer is refused there, when the
+  allocator reports that failure.
+- `DenseRelationBatchSpec` gained two public fields (`related_row_count`,
+  `input_lengths`), which breaks struct literals outside this crate; it now
+  derives `Default`, so literals can end with `..Default::default()`. With the new refusal, that makes the next release a
+  breaking one for 0.2.x users: cut it as 0.3.0.
+- Root columns, and the columns no schema reads within a key, are reported
+  smallest name first; read columns keep schema order. So a malformed batch
+  reports the same error on every run.
+
 ## 2026-10-10 — Format 3 carries the program interface and separate producer identities
 
 **Decision.** `ARTIFACT_FORMAT_VERSION` is 3. Compiled artifacts carry

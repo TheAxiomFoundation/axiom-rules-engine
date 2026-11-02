@@ -154,6 +154,9 @@ fn dense_projection_cardinality_type_and_missing() {
         (1, Some(DenseColumn::Integer(vec![1])), Some("TypeMismatch")),
         (1, None, Some("MissingInput")),
     ] {
+        // With the column omitted, nothing else confirms the related row,
+        // so state the count to reach the missing-input check.
+        let related_row_count = column.is_none().then_some(count);
         let batch = DenseBatchSpec {
             row_count: 1,
             inputs: Default::default(),
@@ -164,6 +167,8 @@ fn dense_projection_cardinality_type_and_missing() {
                     inputs: column
                         .map(|v| [("refused".into(), v)].into())
                         .unwrap_or_default(),
+                    related_row_count,
+                    ..Default::default()
                 },
             )]
             .into(),
@@ -304,6 +309,7 @@ fn derived_relation_filters_before_cardinality_and_tracks_dependencies() {
                         ("refused".into(), DenseColumn::Bool(vec![true, false])),
                     ]
                     .into(),
+                    ..Default::default()
                 },
             )]
             .into(),
@@ -360,6 +366,7 @@ fn dense_mask_and_f64_do_not_reach_missing_relation() {
             DenseRelationBatchSpec {
                 offsets: vec![0, 0, 1],
                 inputs: [("refused".into(), DenseColumn::Bool(vec![true]))].into(),
+                ..Default::default()
             },
         )]
         .into(),

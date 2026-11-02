@@ -198,10 +198,16 @@ A bare identifier in scalar position resolves in this order: the reserved
 names `period_start` and `period_end` (the evaluation period's bounds), then
 a declared parameter (lowered as a zero-index table lookup), then a declared
 derived rule, and otherwise a free input slot supplied by the caller at
-execution time. In judgment position the order is: a declared judgment
-derived rule, and otherwise a free Boolean input compared against `true`.
-Relation-predicate membership resolution applies only when lowering
-`derived_relation` predicate formulas, not ordinary rules.
+execution time. Judgment position resolves a bare name as `name == true`
+does: `period_start` and `period_end` are refused (a date is not a
+judgment), a declared parameter is compared against `true`, a declared
+derived rule is read as a judgment, and otherwise a free input is compared
+against `true`. Inside a `derived_relation` predicate, `anchor` and
+`candidate` name terms and are refused bare, and a relation name, after the
+rules, tests membership; ordinary rules have neither. A declaration may not
+take a reserved name or be declared as two of a parameter, a rule and a
+relation ([declaration names](rulespec.md#declaration-names)), so this order
+never chooses between two declarations.
 
 Undeclared names are not an error at lowering time — a typo becomes an input
 the engine then reports as missing. Compile queries can surface the
@@ -498,6 +504,45 @@ A `dtype: Judgment` formula composes:
 Scalar constructs (`if`, `match`, arithmetic, the function table above) are
 rejected in judgment position, and judgment constructs are rejected in scalar
 position — the two grammars meet only at comparisons.
+
+## Formula parse errors
+
+When the lexer or parser rejects a formula, lowering fails with a line and a
+column. This formula has `×` where it needs `*`:
+
+```text
+if canton == 'Zürich': base × 1.2
+else: base
+```
+
+Lowering it fails with:
+
+```text
+failed to parse RuleSpec formula: formula parse error at line 1, col 29: unexpected char '×'
+```
+
+The line and column point into the formula's own text as YAML reads it, not
+into the YAML file that holds it. A block scalar's indentation is not part of
+that text, and YAML reads the file's CRLF and CR line breaks as line feeds. A
+folded (`>`) scalar, for example, joins most of its lines with spaces, so its
+positions follow the joined text. Within the formula text only a line feed
+starts a new line; a `\r` escape in a double-quoted scalar takes a column. The
+engine trims whitespace from both ends of a formula before it parses it, so
+blank lines and spaces before the formula do not count: line 1 holds its
+first non-blank character.
+
+A column counts Unicode scalar values (Rust `char`s) from 1, not UTF-8 bytes
+or user-perceived characters. `ü`, `×`, a tab and `😀` take one column each.
+A character that spans several code points takes one column per code point:
+`é` spelled as `e` plus U+0301 takes two, and so does 👍🏽.
+
+The column names the offending character or the first character of the
+offending token, such as the opening quote of an unterminated string. When a
+formula ends too early, the position falls one column past its last
+character. The error for a line break inside a string literal counts columns
+the same way, but in the formula text before trimming. Errors that lowering
+finds after parsing (`formula lower error:`) carry no position.
+`tests/formula_error_positions.rs` checks each of these statements.
 
 ## The lowered expression vocabulary
 

@@ -75,6 +75,7 @@ fn related_batch(has_member: bool) -> DenseBatchSpec {
             DenseRelationBatchSpec {
                 offsets: vec![0, amount.len()],
                 inputs: HashMap::from([("amount".to_string(), DenseColumn::Integer(amount))]),
+                ..Default::default()
             },
         )]),
     }

@@ -426,6 +426,7 @@ fn dense_families(
             DenseRelationBatchSpec {
                 offsets,
                 inputs: person_columns(roster, &rows, &schema.related_inputs),
+                ..Default::default()
             },
         );
     }
@@ -487,7 +488,11 @@ fn dense_people(roster: &Roster, people: &[usize], output: &str) -> Result<Dense
         }
         relations.insert(
             schema.key.clone(),
-            DenseRelationBatchSpec { offsets, inputs },
+            DenseRelationBatchSpec {
+                offsets,
+                inputs,
+                ..Default::default()
+            },
         );
     }
     let columns = person_columns(roster, people, &["age".to_string(), "eligible".to_string()]);
@@ -1109,6 +1114,7 @@ fn only_returns_text_and_boolean_values_in_every_mode() {
                 DenseRelationBatchSpec {
                     offsets: vec![0, 1],
                     inputs,
+                    ..Default::default()
                 },
             )
         })
@@ -1265,6 +1271,7 @@ fn a_boolean_or_text_value_is_a_type_error_that_names_the_aggregate() {
                 DenseRelationBatchSpec {
                     offsets: vec![0, 3],
                     inputs,
+                    ..Default::default()
                 },
             );
         }
@@ -1565,6 +1572,7 @@ fn dense_refuses_a_nested_aggregate_and_lifetime_refuses_a_bare_one_by_name() {
                     DenseRelationBatchSpec {
                         offsets: vec![0, 1],
                         inputs: HashMap::from([("age".to_string(), DenseColumn::Integer(vec![3]))]),
+                        ..Default::default()
                     },
                 )
             })

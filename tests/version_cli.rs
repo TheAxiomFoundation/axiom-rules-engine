@@ -57,7 +57,11 @@ fn capabilities_report_the_artifact_format_version() {
     let capabilities = value["capabilities"]
         .as_array()
         .expect("capabilities lists names");
-    for capability in ["relation_entity_typing", "related_min_max_only"] {
+    for capability in [
+        "relation_entity_typing",
+        "related_min_max_only",
+        "relation_roles",
+    ] {
         assert!(
             capabilities.iter().any(|listed| listed == capability),
             "capabilities lists {capability}: {capabilities:?}"

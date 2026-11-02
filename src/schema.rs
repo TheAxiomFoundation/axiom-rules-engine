@@ -1136,8 +1136,18 @@ fn derived_relation_ref_schema() -> Value {
         "additionalProperties": true,
         "properties": {
             "arity": { "type": "integer", "minimum": 0 },
-            "source_relation": { "type": "string" },
-            "source": { "type": "string" },
+            "source_relation": { "type": ["string", "null"] },
+            "source": { "type": ["string", "null"] },
+            "source_path": nullable_array(json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "relation": { "type": "string" },
+                    "from_slot": { "type": "integer", "minimum": 0 },
+                    "to_slot": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["relation", "from_slot", "to_slot"]
+            })),
             "entity": string_like_schema(),
             "member_relation": string_like_schema(),
             "slot_entities": nullable_array(json!({ "type": "string" })),

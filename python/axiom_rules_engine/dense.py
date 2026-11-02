@@ -43,8 +43,53 @@ class DerivedMetadata:
 
 @dataclass(frozen=True)
 class DenseRelationBatch:
+    """One relation's rows for a batch.
+
+    Root row ``r``'s related rows are ``offsets[r]:offsets[r + 1]`` of every
+    column in ``inputs``. ``offsets`` has one entry per root row plus one,
+    starts at 0 and never decreases; its last entry is the related row count,
+    which every column in ``inputs`` must have, whether or not the program
+    reads it.
+
+    ``related_row_count`` states that count. When given it must equal
+    ``offsets[-1]``. It is required when the offsets claim related rows but
+    ``inputs`` is empty (for example a ``len`` over the relation, or a filter
+    that reads only the current entity), because nothing else confirms the
+    offsets. It is the caller's assertion, not a check: count the related rows
+    the offsets index, one per root and member pair (a related entity two roots
+    share counts twice), independently of the offsets, rather than copying
+    ``offsets[-1]``.
+    """
+
     offsets: np.ndarray
     inputs: dict[str, np.ndarray]
+    related_row_count: int | None = None
+
+
+LifetimeBatch = (
+    dict[str, np.ndarray]
+    | tuple[dict[str, np.ndarray]]
+    | tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None]
+    | tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None, int | None]
+)
+"""One period's batch for :meth:`CompiledDenseProgram.execute_lifetime_f64`:
+a bare inputs dict, or an ``(inputs[, relations[, row_count]])`` tuple."""
+
+
+def _prepare_relations(
+    relations: dict[str, DenseRelationBatch],
+) -> dict[str, dict[str, Any]]:
+    """The relation dicts the native extension reads."""
+    return {
+        key: {
+            "offsets": np.asarray(batch.offsets),
+            "inputs": {
+                name: np.asarray(values) for name, values in batch.inputs.items()
+            },
+            "related_row_count": batch.related_row_count,
+        }
+        for key, batch in relations.items()
+    }
 
 
 class CompiledDenseProgram:
@@ -191,9 +236,28 @@ class CompiledDenseProgram:
         inputs: dict[str, np.ndarray],
         relations: dict[str, DenseRelationBatch] | None = None,
         outputs: list[str] | None = None,
+        row_count: int | None = None,
     ) -> dict[str, Any]:
+        """Execute one period's batch in exact Decimal arithmetic.
+
+        ``row_count`` states how many root rows the batch has. It must agree
+        with every supplied root column and with each relation's offsets, and
+        must be given when nothing else gives the count: when the program
+        reads no relation and no root input column is supplied (an input-free
+        program, or one called without its root inputs). Without it, the first
+        supplied root input column gives the count, else the first relation's
+        offsets; when neither does, this raises ``ValueError`` naming the
+        program's root inputs. It never defaults to zero rows.
+        """
         return self._run(
-            self._native.execute, period_kind, start, end, inputs, relations, outputs
+            self._native.execute,
+            period_kind,
+            start,
+            end,
+            inputs,
+            relations,
+            outputs,
+            row_count,
         )
 
     def execute_f64(
@@ -205,11 +269,13 @@ class CompiledDenseProgram:
         inputs: dict[str, np.ndarray],
         relations: dict[str, DenseRelationBatch] | None = None,
         outputs: list[str] | None = None,
+        row_count: int | None = None,
     ) -> dict[str, Any]:
         """Execute in f64 arithmetic (faster; floating-point rounding).
 
         Intended for microsimulation-style batch workloads; exact legal
-        determinations should use :meth:`execute`.
+        determinations should use :meth:`execute`. ``row_count`` is as for
+        :meth:`execute`.
         """
         return self._run(
             self._native.execute_f64,
@@ -219,14 +285,14 @@ class CompiledDenseProgram:
             inputs,
             relations,
             outputs,
+            row_count,
         )
 
     def execute_lifetime_f64(
         self,
         *,
         periods: list[tuple[str, str, str]],
-        batches: list[dict[str, np.ndarray]]
-        | list[tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None]],
+        batches: list[LifetimeBatch],
         outputs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Execute over an entity's lifetime in f64 arithmetic.
@@ -237,9 +303,10 @@ class CompiledDenseProgram:
 
         ``periods`` is a list of ``(period_kind, start, end)`` triples;
         ``batches`` is a same-length list where each entry is either a bare
-        ``inputs`` dict (no relations) or an ``(inputs, relations)`` tuple, using
-        the same column and relation shapes :meth:`execute` accepts. Row ``i``
-        must be the same entity in every batch (identical row order and count).
+        ``inputs`` dict (no relations) or an ``(inputs[, relations[,
+        row_count]])`` tuple, using the same column and relation shapes and
+        the same stated ``row_count`` :meth:`execute` accepts. Row ``i`` must
+        be the same entity in every batch (identical row order and count).
         Every requested output's formula must contain an over-periods reduction;
         period-specific outputs should use :meth:`execute_f64`.
         """
@@ -259,28 +326,23 @@ class CompiledDenseProgram:
         )
 
     @staticmethod
-    def _prepare_lifetime_batch(
-        batch: dict[str, np.ndarray]
-        | tuple[dict[str, np.ndarray], dict[str, DenseRelationBatch] | None],
-    ) -> Any:
+    def _prepare_lifetime_batch(batch: LifetimeBatch) -> Any:
+        """The ``(inputs, relations, row_count)`` tuple the extension reads."""
         if isinstance(batch, dict):
-            inputs: dict[str, np.ndarray] = batch
-            relations: dict[str, DenseRelationBatch] | None = None
-        else:
-            inputs, relations = batch
+            batch = (batch,)
+        if not 1 <= len(batch) <= 3:
+            raise ValueError(
+                "each lifetime batch must be an inputs dict or an "
+                "(inputs[, relations[, row_count]]) tuple"
+            )
+        inputs = batch[0]
+        relations = batch[1] if len(batch) > 1 else None
+        row_count = batch[2] if len(batch) > 2 else None
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
-        if relations is None:
-            return (prepared_inputs, None)
-        prepared_relations = {
-            key: {
-                "offsets": np.asarray(rel.offsets),
-                "inputs": {
-                    name: np.asarray(values) for name, values in rel.inputs.items()
-                },
-            }
-            for key, rel in relations.items()
-        }
-        return (prepared_inputs, prepared_relations)
+        prepared_relations = None
+        if relations is not None:
+            prepared_relations = _prepare_relations(relations)
+        return (prepared_inputs, prepared_relations, row_count)
 
     def _run(
         self,
@@ -291,20 +353,12 @@ class CompiledDenseProgram:
         inputs: dict[str, np.ndarray],
         relations: dict[str, DenseRelationBatch] | None,
         outputs: list[str] | None,
+        row_count: int | None,
     ) -> dict[str, Any]:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         prepared_relations = None
         if relations is not None:
-            prepared_relations = {
-                key: {
-                    "offsets": np.asarray(batch.offsets),
-                    "inputs": {
-                        name: np.asarray(values)
-                        for name, values in batch.inputs.items()
-                    },
-                }
-                for key, batch in relations.items()
-            }
+            prepared_relations = _prepare_relations(relations)
         return native_execute(
             period_kind,
             start,
@@ -312,4 +366,5 @@ class CompiledDenseProgram:
             prepared_inputs,
             prepared_relations,
             outputs,
+            row_count=row_count,
         )

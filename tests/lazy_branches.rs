@@ -253,6 +253,7 @@ fn dense_for(
             DenseRelationBatchSpec {
                 offsets,
                 inputs: columns(&members),
+                ..Default::default()
             },
         );
     }

@@ -176,7 +176,7 @@ For a build whose commit is unknown, the response has this shape:
 ```json
 {
   "artifact_format_version": 3,
-  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface"],
+  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
   "engine_version": "0.2.2",
   "engine_build": { "commit": null, "dirty": null },
   "legacy_artifact_formats": [2]
@@ -195,6 +195,13 @@ An engine listing `related_min_max_only` supports artifacts that take
 `min`, `max` or `only` over related entities, through the appropriate format
 loader; an engine without it refuses those expression variants on load (see
 [docs/rulespec.md](docs/rulespec.md#minimum-maximum-and-exactly-one-over-related-entities)).
+An engine listing `relation_roles` supports predicate terms and qualified
+reads, parameters in predicates, relation atoms, term comparisons, bounded
+`exists` and path sources. Explain and fast evaluate these constructs; dense
+refuses a reachable qualified read, atom, term comparison, `exists` or path
+source by name and names #218. Parameter reads in predicates also compile in
+dense. See the [relation-role design](docs/relation-roles.md) and
+[execution semantics](docs/execution-semantics.md).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare

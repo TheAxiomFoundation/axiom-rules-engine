@@ -17,10 +17,13 @@ use crate::model::{
     SCALAR_ENTITY, ScalarExpr, ScalarValue, Term,
 };
 use crate::relation_typing;
-use crate::spec::{InputDeclarationSpec, InputElection, ProgramSpec, ScalarValueSpec, SpecError};
+use crate::spec::{
+    InputDeclarationSpec, InputElection, ProgramSpec, RelationPathStepSpec, ScalarValueSpec,
+    SpecError,
+};
 
-/// `program.interface`. Every list is sorted except a relation's
-/// `slot_entities`, which keeps tuple order.
+/// `program.interface`. Sets are sorted; `slot_entities` keeps tuple order
+/// and a provenance's `source_path` keeps traversal order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -163,9 +166,16 @@ pub enum RelationProvenance {
         source_relation: String,
         reads: RelationReads,
     },
+    /// A `derived_relation` whose candidates come from a path.
+    SourcePath {
+        rule: String,
+        source_path: Vec<RelationPathStepSpec>,
+        reads: RelationReads,
+    },
 }
 
-/// What a derived relation's predicate mentions directly.
+/// What a derived relation's predicate mentions directly, plus the relations
+/// a path source traverses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -293,13 +303,22 @@ impl<'de> Deserialize<'de> for RelationProvenance {
             &[
                 ("supplied", &[]),
                 ("derived", &["rule", "source_relation", "reads"]),
+                ("source_path", &["rule", "source_path", "reads"]),
             ],
         )?;
         Ok(match variant.as_str() {
             "supplied" => Self::Supplied,
-            _ => Self::Derived {
+            "derived" => Self::Derived {
                 rule: field::<String, D::Error>(&mut object, "rule")?,
                 source_relation: field::<String, D::Error>(&mut object, "source_relation")?,
+                reads: field::<RelationReads, D::Error>(&mut object, "reads")?,
+            },
+            _ => Self::SourcePath {
+                rule: field::<String, D::Error>(&mut object, "rule")?,
+                source_path: field::<Vec<RelationPathStepSpec>, D::Error>(
+                    &mut object,
+                    "source_path",
+                )?,
                 reads: field::<RelationReads, D::Error>(&mut object, "reads")?,
             },
         })
@@ -310,6 +329,65 @@ impl<'de> Deserialize<'de> for RelationProvenance {
 /// yields the same interface.
 pub fn derive_interface(program: &ProgramSpec) -> Result<ProgramInterface, SpecError> {
     derive_from_model(&program.to_program()?, &program.input_declarations)
+}
+
+/// Count completed collection work, without exposing counters in the library API.
+#[cfg(test)]
+mod actual_path_work {
+    use std::cell::Cell;
+
+    type Counts = (usize, usize, [usize; 3]);
+    thread_local! {
+        static COUNTS: Cell<Counts> = const { Cell::new((0, 0, [0; 3])) };
+    }
+
+    pub(super) fn lookup(position: usize, derived: bool) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.0 += 1;
+            if derived && position < 3 {
+                value.2[position] += 1;
+            }
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn completed(length: usize) {
+        COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value.1 += usize::from(length >= 3);
+            counts.set(value);
+        });
+    }
+
+    pub(super) fn take() -> Counts {
+        COUNTS.with(|counts| counts.replace((0, 0, [0; 3])))
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/relation_path_interface.rs"]
+mod relation_path_properties;
+
+#[cfg(test)]
+mod path_work_tests {
+    #[test]
+    fn generated_interface_collection_is_exercised() {
+        super::actual_path_work::take();
+        super::relation_path_properties::generated_paths_record_all_edges_and_slots();
+        let (steps, long, derived_positions) = super::actual_path_work::take();
+        assert!(steps >= 300, "interface lookups went dark: {steps}");
+        assert!(long >= 50, "long interface paths went dark: {long}");
+        for (position, count) in derived_positions.into_iter().enumerate() {
+            assert!(
+                count >= 20,
+                "derived interface position {position} went dark: {count}"
+            );
+        }
+        eprintln!(
+            "actual interface work: steps={steps} (floor 300), long={long} (floor 50), derived positions={derived_positions:?} (floor 20 each)"
+        );
+    }
 }
 
 /// Fails only on `declarations`: see [`slot_elections`], and an election
@@ -350,14 +428,32 @@ pub(crate) fn derive_from_model(
         let Some(derivation) = &program.relations[*name].derivation else {
             continue;
         };
-        // A derived relation traverses its source keyed on its current slot.
-        collector.lookup(&derivation.source_relation, derivation.current_slot);
+        // Data steps key on their from slot; derived steps resolve members
+        // at the step relation's current slot.
+        if let Some(path) = &derivation.source_path {
+            for (_position, step) in path.iter().enumerate() {
+                let step_derivation = program
+                    .relations
+                    .get(&step.relation)
+                    .and_then(|relation| relation.derivation.as_ref());
+                let slot =
+                    step_derivation.map_or(step.from_slot, |derivation| derivation.current_slot);
+                collector.lookup(&step.relation, slot);
+                #[cfg(test)]
+                actual_path_work::lookup(_position, step_derivation.is_some());
+            }
+            #[cfg(test)]
+            actual_path_work::completed(path.len());
+        } else if let Some(source) = &derivation.source_relation {
+            collector.lookup(source, derivation.current_slot);
+        }
         let (current_kind, related_kind) =
             relation_typing::predicate_slot_kinds(&collector.slot_kinds, name, derivation);
         let routing = Routing {
             derivation,
             current_kind,
             related_kind: related_kind.clone(),
+            variables: Vec::new(),
         };
         let flow = Flow::Kind(related_kind);
         let first_site = collector.sites.len();
@@ -365,6 +461,9 @@ pub(crate) fn derive_from_model(
         collector.judgment(&derivation.predicate, &flow, Some(&routing));
         let mut relations = BTreeSet::new();
         collect_judgment_relations(&derivation.predicate, &mut relations);
+        if let Some(path) = &derivation.source_path {
+            relations.extend(path.iter().map(|step| step.relation.clone()));
+        }
         predicate_reads.insert(
             (*name).clone(),
             RelationReads {
@@ -443,6 +542,9 @@ pub(crate) fn derive_from_model(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Inspect the program once: doing this for every relation makes a long
+    // chain quadratic even when it uses no relation-role construct.
+    let uses_relation_roles = program.uses_relation_roles();
     let relations = relation_names
         .iter()
         .map(|name| {
@@ -456,20 +558,41 @@ pub(crate) fn derive_from_model(
                     .get(name.as_str())
                     .map(|slots| slots.iter().copied().collect())
                     .unwrap_or_default(),
-                accepts_supplied_tuples: true,
+                accepts_supplied_tuples: schema.derivation.is_none() || !uses_relation_roles,
                 provenance: match &schema.derivation {
                     None => RelationProvenance::Supplied,
-                    Some(derivation) => RelationProvenance::Derived {
-                        rule: (*name).clone(),
-                        source_relation: derivation.source_relation.clone(),
-                        reads: predicate_reads
-                            .remove(name.as_str())
-                            .unwrap_or(RelationReads {
-                                inputs: Vec::new(),
-                                rules: Vec::new(),
-                                relations: Vec::new(),
-                            }),
-                    },
+                    Some(derivation) => {
+                        let reads =
+                            predicate_reads
+                                .remove(name.as_str())
+                                .unwrap_or(RelationReads {
+                                    inputs: Vec::new(),
+                                    rules: Vec::new(),
+                                    relations: Vec::new(),
+                                });
+                        match &derivation.source_path {
+                            Some(path) => RelationProvenance::SourcePath {
+                                rule: (*name).clone(),
+                                source_path: path
+                                    .iter()
+                                    .map(|step| RelationPathStepSpec {
+                                        relation: step.relation.clone(),
+                                        from_slot: step.from_slot,
+                                        to_slot: step.to_slot,
+                                    })
+                                    .collect(),
+                                reads,
+                            },
+                            None => RelationProvenance::Derived {
+                                rule: (*name).clone(),
+                                source_relation: derivation
+                                    .source_relation
+                                    .clone()
+                                    .expect("validated single source"),
+                                reads,
+                            },
+                        }
+                    }
                 },
             }
         })
@@ -553,10 +676,13 @@ enum Flow {
 
 /// Inside a derived relation's predicate, a referenced rule runs on the
 /// current id when its entity is the derivation's declared current kind.
+#[derive(Clone)]
 struct Routing<'a> {
     derivation: &'a RelationDerivation,
     current_kind: Option<String>,
     related_kind: Option<String>,
+    /// Lexical binding kinds, outermost first. `Var(0)` names the last.
+    variables: Vec<Option<String>>,
 }
 
 impl Routing<'_> {
@@ -566,6 +692,9 @@ impl Routing<'_> {
         Flow::Kind(match term {
             Term::Anchor => self.current_kind.clone(),
             Term::Candidate => self.related_kind.clone(),
+            Term::Var(index) => self.variables.iter().rev().nth(index).cloned().flatten(),
+            #[cfg(test)]
+            Term::Id(_) => None,
         })
     }
 }
@@ -874,6 +1003,58 @@ impl Collector<'_> {
                 current_slot,
                 ..
             } => self.lookup(relation, *current_slot),
+            JudgmentExpr::RelationAtom { relation, terms } => {
+                match self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    // A derived atom resolves the members of its current-slot
+                    // term, as a membership test does, and only tests the
+                    // related-slot id against them.
+                    Some(derivation) => self.lookup(relation, derivation.current_slot),
+                    // Every argument is bound: a tuple atom keys on all slots,
+                    // in the relation's declared tuple order.
+                    None => {
+                        for slot in 0..terms.len() {
+                            self.lookup(relation, slot);
+                        }
+                    }
+                }
+            }
+            JudgmentExpr::SameEntity { .. } => {}
+            JudgmentExpr::Exists {
+                relation,
+                terms,
+                variable_slot,
+                body,
+            } => {
+                match self
+                    .program
+                    .relations
+                    .get(relation)
+                    .and_then(|schema| schema.derivation.as_ref())
+                {
+                    Some(derivation) => self.lookup(relation, derivation.current_slot),
+                    None => {
+                        for slot in 0..terms.len() {
+                            if slot != *variable_slot {
+                                self.lookup(relation, slot);
+                            }
+                        }
+                    }
+                }
+                let mut bound = routing.cloned();
+                if let Some(bound) = &mut bound {
+                    let kind = self
+                        .slot_kinds
+                        .get(relation)
+                        .and_then(|kinds| kinds.get(*variable_slot).cloned());
+                    bound.variables.push(kind);
+                }
+                self.judgment(body, flow, bound.as_ref());
+            }
             JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
                 for item in items {
                     self.judgment(item, flow, routing);
@@ -1107,9 +1288,16 @@ fn collect_judgment_relations(expr: &JudgmentExpr, relations: &mut BTreeSet<Stri
             collect_scalar_relations(left, relations);
             collect_scalar_relations(right, relations);
         }
-        JudgmentExpr::Derived(_) | JudgmentExpr::RoleDerived { .. } => {}
-        JudgmentExpr::RelationMember { relation, .. } => {
+        JudgmentExpr::Derived(_)
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
+        JudgmentExpr::RelationMember { relation, .. }
+        | JudgmentExpr::RelationAtom { relation, .. } => {
             relations.insert(relation.clone());
+        }
+        JudgmentExpr::Exists { relation, body, .. } => {
+            relations.insert(relation.clone());
+            collect_judgment_relations(body, relations);
         }
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {

@@ -67,6 +67,15 @@ output's formula is evaluated for that entity and period as follows.
   entity, with no relation context. Its declared output rounding
   applies before any dependent reads the value, including when dense inlines
   the rule into an aggregation or predicate.
+- **Predicates resolve parameters as rule bodies do.** Table parameters,
+  scalar parameters and entity-free rules with literal values read the
+  module's parameter values. A bare Boolean parameter can act as a judgment;
+  a non-Boolean parameter used as a judgment fails when reached. A
+  `parameter` record with an entity or a computed formula lowers to a rule;
+  predicates read it with the routing and qualified-read kind checks of
+  other rules. Parameters have no entity id, so the compiler refuses a
+  qualified parameter read (`relation_role_entity_mismatch`); read it
+  unqualified instead.
 - **A value keeps the kind its expression computes.** A rule's declared
   `dtype` is reported beside its value but never converts it: `count` yields
   an integer even in a rule declared `decimal`, and `sum`, arithmetic,
@@ -88,6 +97,54 @@ output's formula is evaluated for that entity and period as follows.
   which compilation and relation typing already refuse outside a predicate
   (`relation_role_outside_scope`); an evaluator that meets one fails the
   evaluation that reaches it.
+- **Relation atoms fix slot order.** `R(t1, ..., tn)` in a derived relation's
+  predicate tests its term ids in `R`'s declared slots. A data atom requires
+  one supplied tuple matching every id whose interval contains the period.
+  A binary derived atom resolves members for the term in its current slot
+  and tests the term in its related slot. Computing another anchor's members
+  can add substantial work in nested predicates
+  ([relation-roles.md](relation-roles.md) §5; #211). `t1 == t2` and `t1 != t2`
+  compare ids of the same kind and always determine a result. Compilation
+  refuses these constructs outside the predicate's scope, including
+  aggregation `where` clauses (`relation_role_outside_scope`).
+- **Supplied derived tuples depend on the program's constructs.** Programs
+  using qualified reads, relation atoms, term comparisons, `exists` or path
+  sources refuse tuples
+  supplied under any derived relation's name
+  (`supplied_tuples_for_derived_relation`), and their members resolver ignores
+  those tuples even through `Engine::new`. Programs using none retain the
+  union of supplied tuples and filtered source members; a parameter read in a
+  predicate, which raw `ProgramSpec` could always express, is not one of these
+  constructs. An atom, `exists` or path source also refuses lenient request binding
+  (`lenient_binding_with_relation_roles`).
+- **`exists` evaluates a bounded disjunction.** In a derived relation's
+  predicate, `exists(R(anchor, p), body)` binds `p` to each distinct domain id
+  in sorted order. A data generator takes ids from tuples matching every
+  other argument and containing the whole period; it reads the tuple index
+  at the lowest-numbered bound slot, or all that relation's tuples for a
+  unary generator with no bound slot. A derived generator resolves members
+  for its current-slot term and can bind only its related slot. The body
+  holds for some id or the quantifier does not hold, including for an empty
+  domain. Evaluation stops at the first body that holds; a failure propagates
+  in domain order as from `or`. `not exists(G, not body)` expresses "for all"
+  and holds over an empty domain. Variables nest lexically and carry their
+  generator slot's kind. Unqualified reads retain anchor/candidate routing;
+  a variable is read through its term explicitly. Rules and aggregation
+  clauses or values have no variable bindings
+  (`relation_role_outside_scope`).
+- **Path sources join before testing membership.** Starting with the anchor
+  id, each binary step replaces the current ids with those reached from its
+  `from_slot` to its `to_slot`. A data step includes only tuples whose
+  interval contains the whole period. A derived step resolves forward
+  members for each current id. Each frontier is distinct and sorted; only
+  the final frontier becomes candidates, so intermediate ids are dropped.
+  The outer predicate then runs once per candidate in sorted order, as for
+  a single source. An empty frontier gives no members. A failure at any
+  reached id fails the anchor's members, even for candidates that id does
+  not reach. Kind checks require
+  the first step to start at the anchor's kind, every junction to match, and
+  the final step to end at the candidate's kind
+  (`tests/relation_paths_surface.rs`, `tests/relation_paths.rs`).
 - **An error fails the (query, output) it occurs in.** Division by zero, a
   missing input, a missing parameter cell, a non-integral parameter key and a
   type error are all errors of the evaluation that reaches them. Nothing that
@@ -110,12 +167,70 @@ is total. So are `household_size > 0 and income / household_size < limit`, an
 input that is read only on one branch, and a derived rule that is referenced
 only from a branch no row selects.
 
+### Relation predicate compilation
+
+Terms carry their relation slot's kind; a bound variable carries its
+generator slot's kind. Compilation checks a qualified rule read against that
+kind and checks each atom argument against its declared relation slot.
+Input reads remain untyped. A term can appear in a qualified read, relation
+atom or equality/inequality comparison, but the compiler refuses a term used
+as a value (`relation_term_used_as_value`) and a bound variable used outside
+its `exists` body (`relation_variable_out_of_scope`). A new variable
+cannot hide a visible rule, parameter or relation, or rebind an enclosing
+variable (`relation_variable_name_conflict`).
+
+RuleSpec checks declaration names across the import-merged module closure
+before lowering any formula. It refuses a parameter, rule or relation named
+`anchor`, `candidate`, `period_start`, `period_end` or a formula keyword
+(`reserved_declaration_name`), and a name declared as two of a parameter,
+rule and relation (`declaration_name_clash`). A `parameter` record counts as
+the kind it lowers to. Outside predicates, undeclared `anchor` and
+`candidate` retain their ordinary input reads. A bare `period_start` or
+`period_end` reads the built-in date in scalar position and refuses in
+judgment position.
+
+These contracts cover parameter predicates in
+`tests/relation_roles.rs`, declaration and import clashes in
+`tests/declaration_names.rs`, atom kinds in `tests/relation_atoms.rs`, and
+variable scope and names in `tests/relation_exists_lowering.rs`.
+
+### Guarded household fixture
+
+The synthetic 7 CFR 273.1 fixture computes the people within two symmetric
+ties of the applicant. When no co-resident has an exception flag and no tie
+leaves that set, the set is the exact household. Otherwise it reads supplied
+`snap_household_unit` ids and includes co-residents with the applicant's id;
+a missing id fails naming that input. This never silently returns a wrong
+household when every supplied fact is true, under section 8's three
+preconditions: one full-period residence record for each co-resident, evaluated
+or not, complete pair facts and correct supplied ids wherever read. The guard depends on the applicant,
+so in a chain a–b–c–d, b's household needs no ids while a's does. The test
+`applicants_a_and_b_on_a_three_tie_chain` in `tests/snap_household.rs` checks
+both cases; `exception_for_older_roommate` checks the exception branch.
+The separate `snap_participating_member` relation filters (b)(7) ineligible
+members from composition without changing `snap_household_member`.
+
 ### Pins
 
 A rule pin (`CompiledExecutionRequest.pins`) rewrites the pinned rule to
 `if 0 == 0 then <literal> else <original formula>`. Under the reference
 semantics the original formula is never evaluated, so a pinned rule never needs
 the inputs its original formula reads. This holds in every mode.
+
+For reads through terms, explain records evaluated dependencies at the term's
+id. A skipped rule read through `anchor` or `candidate` is also recorded at
+that id. A skipped read through an enclosing `exists` variable is recorded
+at its bound id when that enclosing quantifier is being evaluated. A wholly
+skipped `exists` does not enumerate its domain: it records the body's
+anchor/candidate dependencies once and omits reads through its own variable,
+which has no bound id. Inside a running outer quantifier, a skipped nested
+`exists` still records reads through the outer variable. When an evaluated
+`exists` stops early, it records the body's skipped dependencies for each
+remaining domain id with that variable bound to that id. An evaluated
+`exists` with an empty domain evaluates no body and records no body
+dependencies. Thus expansion as a disjunction preserves values and failures,
+while the wholly skipped and empty
+domain cases have distinct trace rules.
 
 ## Fast mode contract
 
@@ -200,11 +315,13 @@ batch is its base relation's. An aggregation nested inside a
 related expression (a related rule that itself aggregates) makes the dense
 compiler reject the program, whichever aggregate it is.
 
-A derived relation's predicate that reads through a term (`anchor.name`,
-`candidate.name`) makes the dense compiler reject any root entity whose rules
-reach that relation, naming the qualified read and #218; a root that reaches
-no such relation compiles. Explain and fast evaluate it. Parameter reads in a
-predicate compile in dense as in a rule body.
+A derived relation's path source or predicate using a qualified read
+(`anchor.name`, `candidate.name`), relation atom, term comparison or `exists`
+makes the dense compiler
+reject any root entity whose rules reach that relation with
+`DenseCompileError::Unsupported`, naming the construct and #218; a root that
+reaches no such relation compiles. Explain and fast evaluate it. Parameter
+reads in a predicate compile in dense as in a rule body.
 
 Dense evaluates the rules a `where` clause, an aggregated value or a related rule's
 body reads on the related rows, for the related entity as explain does. Only a
@@ -213,6 +330,15 @@ entity on the root row. In that predicate, a rule of an entity that is neither
 slot entity of a relation that declares them (other than an entity-free
 `Scalar` rule) makes the dense compiler reject the program; explain evaluates
 it for the related entity.
+
+A dense call can also fail where explain would not, for want of memory.
+Dense holds a column per node for every row, so it sizes each buffer by the
+batch's root row count or a relation's related count. Binding refuses a count
+nothing confirms, and execution reserves every such buffer fallibly. When the
+allocator refuses one, the call fails with a `TypeMismatch` naming the count,
+whichever rows reach it. On a host that overcommits memory, a large but
+possible count can pass its reservation and still exhaust memory as the buffer
+is filled. Only a refused request becomes an error.
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
@@ -275,8 +401,8 @@ nesting, whatever the chain's length: a 20,000-rule chain answers on a 1 MiB
 thread in every mode (`src/depth.rs`). Fast's relation aggregations, which
 run on the explain engine fast embeds, and dense's lifetime reductions, which
 drive each period's executor, nest one bounded drive inside another and can
-use twice that. Expressions dense inlines are bounded separately (see above),
-and evaluating chains of derived relations is not covered here (#211).
+use twice that. Expressions dense inlines and derived-relation resolution
+have separate bounds (see above and below).
 
 Typing and binding a chain of derived relations is linear in its length and
 never recurses once per link. A derived relation that declares no slot kinds
@@ -300,10 +426,56 @@ builds, so an evaluation that never nests that deep never retries, and 8 in
 debug builds, whose frames are about thirty times larger; deferring early also
 exercises deferral throughout the debug test suite.
 
+Derived-relation resolution has its own native nesting limit
+(`src/engine.rs`, `RELATION_NESTING_LIMIT`; #211). A predicate can ask for the
+members of another derived relation. Once resolution reaches the limit, an
+unresolved request stops the current resolution and names the members it
+needs. The driver resolves those members, caches the result and its trace
+records, then retries the stopped resolution. That retry reads completed work
+from the caches and resumes its predicate at the candidate that stopped it.
+A loop walks source chains, so their length does not consume this native
+nesting budget. The limit is 32 in release builds and 8 in debug
+builds, whose larger frames need an earlier stop: a counted-predicate chain
+needed 2048 KiB at depth 32, but 576 KiB at depth 8 on aarch64-apple-darwin
+(rustc 1.94.1, measured to 16 KiB). This limit is independent of the
+rule-deferral threshold, and compiled artifact bytes do not depend on it.
+
+For every acyclic program, a relation nesting limit of at least one preserves
+the values, errors and explain traces of unlimited native resolution. The
+`engine::relation_resolution_tests` property tests
+`suspended_resolution_matches_native_resolution` and
+`iterative_resolution_matches_recursive_semantics_on_small_dags` compare
+limited resolution with native resolution and an independent recursive
+oracle. `tests/relation_chains.rs` checks a long counted-predicate chain in
+`a_chain_through_count_related_predicates_is_linear_not_exponential`, and
+`count_related_chain_stays_within_a_bounded_stack` pins its native stack budget.
+`tests/relation_atoms.rs` checks values, traces and rule-deferral depths across
+a long atom chain in
+`long_atom_dependency_chains_preserve_values_traces_and_suspend_depths`.
+
+An `exists` keeps its sorted domain, the next id to evaluate and the outcome
+accumulated so far across a suspension. Its progress key includes the node's
+address, the anchor id, the candidate id, every enclosing variable's id in
+order from innermost to outermost, the period, the parent rule evaluation and
+the enclosing member resolution that owns its trace effects. This separates, for example,
+`required_combination(p, candidate)` resolved for several values of `p` in
+one parent rule evaluation. A retry resumes the interrupted body at the same
+domain id; bodies before it retain their completed work.
+
+A path's members resolution saves the step index, sorted current frontier,
+the next id in that frontier, ids reached so far and captured trace effects.
+A derived step can stop while resolving an intermediate id's members. The
+retry reuses completed lookups, resumes that id, and advances to the next
+step only after the frontier is complete. Once candidates are generated,
+the ordinary members predicate loop saves its own progress. Both relation
+nesting limits and rule deferral preserve results and traces
+(`engine::relation_resolution_tests::suspended_resolution_matches_native_resolution`).
+
 What a retry walks again is bounded by the program, not the data. Explain
 records the progress of every loop over data that a deferral can interrupt:
-a `count` or `sum` over related entities, and the resolution of a relation's
-members, which tests a derived relation's predicate on each candidate. The
+a `count` or `sum` over related entities, an `exists` domain, and the resolution
+of a relation's members, which generates a path's candidates and tests a derived
+relation's predicate on each candidate. The
 retry of the same rule evaluation resumes an interrupted loop at the member
 that deferred, and reuses a loop that had finished, so a household whose
 members each defer is not walked again for every member. A relation's own
@@ -323,7 +495,7 @@ a derived relation whose predicate defers for each of 256 members, cost 1.6
 times what recursion costs (each bounded there at three times, whatever the
 member count).
 
-Deferral happens only at rule references, so one rule's own expression
+Rule deferral happens only at rule references, so one rule's own expression
 nesting is still recursed through. Inlined dense expressions have no rule
 references, which is why dense bounds them (see above). Dense computes a rule
 it has never computed even when no row reaches it (to fix the rule's dtype),

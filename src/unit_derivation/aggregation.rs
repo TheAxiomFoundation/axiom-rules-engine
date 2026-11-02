@@ -2529,6 +2529,9 @@ fn bind_aggregation_dataset(
         }
     }
 
+    // These tuples skip request binding. The phase-two program declares only
+    // base relations (`compile_phase_two_artifact`, re-derived on load), so no
+    // tuple here can stand in for a derived relation.
     for relation in &request.relations {
         for fact in &relation.facts {
             if resolve_knowledge(

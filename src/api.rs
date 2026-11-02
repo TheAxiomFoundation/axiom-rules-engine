@@ -337,7 +337,7 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     let dataset = outcome.dataset;
     crate::engine::validate_input_spells(&dataset)?;
 
-    match requested_mode {
+    let result = match requested_mode {
         ExecutionMode::Explain => execute_explain(
             &program,
             &dataset,
@@ -394,7 +394,39 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
                 ),
             }
         }
-    }
+    };
+    result.map_err(|error| with_request_input_name(error, &program))
+}
+
+/// Name a missing input the way a dataset must spell it (#120). Evaluators
+/// report the rule-local slot (`amount`), but a program with public ids binds
+/// only the qualified request name (`us:...#input.amount`), so the bare slot
+/// pasted back into the dataset is refused. The slot becomes the input
+/// catalog's canonical request name, which the dataset binder accepts; a
+/// program without public ids keeps the bare slot, which is its request name.
+fn with_request_input_name(error: ApiError, program: &crate::model::Program) -> ApiError {
+    let ApiError::Eval(EvalError::MissingInput {
+        name,
+        entity_id,
+        period_start,
+        period_end,
+    }) = error
+    else {
+        return error;
+    };
+    let name = program
+        .input_catalog()
+        .get(&name)
+        .map(|request_names| {
+            crate::compile::canonical_request_name(&name, request_names).to_string()
+        })
+        .unwrap_or(name);
+    ApiError::Eval(EvalError::MissingInput {
+        name,
+        entity_id,
+        period_start,
+        period_end,
+    })
 }
 
 /// Each query evaluates its output rules on its `entity_id`, so that id has
@@ -1021,6 +1053,38 @@ fn format_judgment_expression(
         JudgmentExpr::RoleDerived { term, name } => {
             format!("{}.{}", term.as_str(), program.public_derived_key(name))
         }
+        JudgmentExpr::RelationAtom { relation, terms } => format!(
+            "{relation}({})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        JudgmentExpr::Exists {
+            relation,
+            terms,
+            body,
+            ..
+        } => format!(
+            "exists({relation}({}), {})",
+            terms
+                .iter()
+                .map(|term| term.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            format_judgment_expression(program, body)
+        ),
+        JudgmentExpr::SameEntity {
+            left,
+            right,
+            negated,
+        } => format!(
+            "({} {} {})",
+            left.as_str(),
+            if *negated { "!=" } else { "==" },
+            right.as_str()
+        ),
         JudgmentExpr::RelationMember {
             relation,
             current_slot,

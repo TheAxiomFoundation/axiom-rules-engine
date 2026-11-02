@@ -504,6 +504,88 @@
           "type": "object"
         },
         {
+          "description": "Test a declared relation's tuple in its slot order, inside a predicate.",
+          "properties": {
+            "kind": {
+              "const": "relation_atom",
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "terms": {
+              "items": {
+                "$ref": "#/$defs/TermSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "terms"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/JudgmentExprSpec"
+            },
+            "kind": {
+              "const": "exists",
+              "type": "string"
+            },
+            "relation": {
+              "type": "string"
+            },
+            "terms": {
+              "items": {
+                "$ref": "#/$defs/TermSpec"
+              },
+              "type": "array"
+            },
+            "variable_slot": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "relation",
+            "terms",
+            "variable_slot",
+            "body"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compare term ids; both terms must have the same entity kind.",
+          "properties": {
+            "kind": {
+              "const": "same_entity",
+              "type": "string"
+            },
+            "left": {
+              "$ref": "#/$defs/TermSpec"
+            },
+            "negated": {
+              "type": "boolean"
+            },
+            "right": {
+              "$ref": "#/$defs/TermSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "left",
+            "right",
+            "negated"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "items": {
               "items": {
@@ -1111,15 +1193,50 @@
           },
           "type": "array"
         },
+        "source_path": {
+          "items": {
+            "$ref": "#/$defs/RelationPathStepSpec"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "source_relation": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "source_relation",
         "current_slot",
         "related_slot",
         "predicate"
+      ],
+      "type": "object"
+    },
+    "RelationPathStepSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "from_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relation": {
+          "type": "string"
+        },
+        "to_slot": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "relation",
+        "from_slot",
+        "to_slot"
       ],
       "type": "object"
     },
@@ -2037,7 +2154,7 @@
       "type": "object"
     },
     "TermSpec": {
-      "description": "An end of the pair a derived relation's predicate tests, mirroring\n[`crate::model::Term`].",
+      "description": "An entity id in a derived relation's predicate, mirroring\n[`crate::model::Term`].",
       "oneOf": [
         {
           "const": "anchor",
@@ -2048,6 +2165,21 @@
           "const": "candidate",
           "description": "The id being tested: its related slot.",
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Index counted from the innermost enclosing `exists`.",
+          "properties": {
+            "var": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "var"
+          ],
+          "type": "object"
         }
       ]
     },

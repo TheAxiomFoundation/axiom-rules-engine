@@ -123,6 +123,7 @@ fn dense(
                 DenseRelationBatchSpec {
                     offsets: vec![0, usize::from(has_member)],
                     inputs,
+                    ..Default::default()
                 },
             )
         })

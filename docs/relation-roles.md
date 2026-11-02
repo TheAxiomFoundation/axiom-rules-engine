@@ -3,12 +3,12 @@
 Design for #214, step 3 of the unit-derivation plan. Decision d1265 (2026-10-10,
 recorded on #134 and in `unit-derivation.md` section 15): a legal unit is a
 derived relation from an anchor to persons, written by extending
-`derived_relation`. Not built yet.
+`derived_relation`. The series is complete; section 9 records what landed.
 
 ## 1. Purpose
 
 A unit's membership test needs five things that a derived-relation predicate
-cannot do on main:
+could not do before this series:
 
 - read a fact of either end of the pair by name, including when both ends are
   the same kind (a `[Person, Person]` relation);
@@ -151,7 +151,9 @@ written bare, as if it were a value or an input, refuses
 - in a term comparison.
 
 Outside predicates, these names stay ordinary identifiers. Section 2 shows
-that no corpus predicate uses them.
+that no corpus predicate uses them. No declaration may take `anchor` or
+`candidate` as its name ([rulespec.md](rulespec.md#declaration-names)), so a
+term never hides one.
 
 ### 3.2 Qualified reads
 
@@ -178,16 +180,38 @@ arithmetic, comparisons, parameter indices, `if`, and inside an `exists` body.
 It may not appear inside a `count`/`sum` `where` clause or summed value. Those
 have no relation context today and keep none (`relation_role_outside_scope`).
 
-Unqualified reads keep today's routing. Three changes affect existing programs:
+Unqualified reads keep today's routing. Five changes affect existing programs:
 - A bare parameter name in a predicate, or tested as a judgment in a rule
   body, used to read an input of that name and now reads the parameter (3.3).
+  That held when nothing else had the name. A parameter that shared a rule's
+  name read the rule, and in a predicate one that shared a relation's name
+  tested membership; such a program is now refused at declaration (the
+  declaration-name change below).
 - A bare `period_start` or `period_end` tested as a judgment used to resolve
   as any bare name did: to a rule of that name, else (in a predicate) a
   relation, else an input. It is now refused. Both are dates. Scalar position
   reads the built-in before anything else of the same name, and judgment
   position now does the same.
 - A bare `anchor` or `candidate` in a derived relation's predicate was an
-  ordinary name and is now refused (3.1).
+  ordinary name and is now refused (3.1). Read through `.`, a relation of
+  either name used to mean the relation: `sum(anchor.age)` aggregated over
+  it and is now refused, and `min(anchor.age)` took its minimum and now
+  reads the anchor's own `age`. Such a relation can no longer be declared
+  (next change), so no program that compiles keeps either old meaning.
+- A declaration that a bare name cannot read is refused before lowering
+  (`docs/rulespec.md`, "Declaration names"). That covers a parameter, rule
+  or relation named `period_start`, `period_end`, `anchor` or `candidate`,
+  and a relation named after a formula keyword such as `true`
+  (`reserved_declaration_name`). It also covers a name declared as two of a
+  parameter, a rule and a relation (`declaration_name_clash`). Such a
+  program used to compile, and one bare name reached only one of its
+  declarations. On 2026-10-27 no corpus module
+  declares a reserved name, and one declares a clash (rulespec-us#1953); main
+  already refuses that module for another reason.
+- A `parameter` record with an entity or a computed formula lowers to a
+  rule. A predicate used to read its bare name, and `t.name`, as an input of
+  that name. It now reads the rule, as a rule body does (3.3). On 2026-10-27
+  the corpus has 299 such records and no predicate that reads one.
 
 ### 3.3 Parameters in predicates
 
@@ -222,8 +246,8 @@ have `R`'s slot kind for slot `i`, and `R` must have declared slot kinds
 **Supplied tuples.** Decision d1265 keeps entry 5 of the ratified contract:
 a supplied tuple for a relation the program derives is refused
 (`unit-derivation.md` section 15). Today the engine instead adds such tuples
-to the members. In any program that uses a construct from this note, both of
-these change:
+to the members. In any program that uses a qualified read (3.2), an atom or
+a term comparison (3.5), both of these change:
 - Request binding refuses tuples supplied under the name of any derived
   relation (`supplied_tuples_for_derived_relation`).
 - The members resolver never adds a derived relation's own tuples. This also
@@ -231,7 +255,9 @@ these change:
 
 Section 2's survey found no program that uses these constructs, so no existing
 program changes behaviour or bytes. Programs that use none of them keep
-today's union.
+today's union. Parameters in predicates (3.3) do not opt in: a raw
+`ProgramSpec` predicate could always look up a parameter, and such a program
+must keep today's union.
 
 **Lenient binding.** Lenient binding keeps tuples whose kinds do not match
 their slots, which a lookup then misses. Request binding refuses lenient
@@ -248,13 +274,18 @@ the atom over `(anchor, candidate)` in those slots agree (section 7).
 
 A call whose name is a relation is an atom. A relation whose name is also a
 built-in function name (`len`, `sum`, `max` and the others) cannot be used as
-an atom (`relation_name_shadows_builtin`).
+an atom (`relation_name_shadows_builtin`). A call to that name still calls the
+built-in, as it did before atoms; passing it a term, which only an atom
+takes, is refused.
 
 ### 3.5 Term comparison
 
 `t1 == t2` and `t1 != t2`, where both sides are terms of the same kind,
-compare ids. The result is always determined, because ids are given, not
-derived. It expresses "a member other than his or her parent" in 7 CFR
+compare ids. Different kinds refuse with `relation_term_kind_mismatch`; a
+term compared with a value refuses with `relation_term_compared_with_value`.
+Other comparison operators refuse with `relation_term_comparison_operator`.
+The result is always determined, because ids are given, not derived. It
+expresses "a member other than his or her parent" in 7 CFR
 273.1(b)(1)(iii), and "anyone but the applicant" in a quantified set.
 
 ### 3.6 Bounded `exists`
@@ -336,6 +367,10 @@ relation:
   intermediate id. A differential test checks this equivalence (section 7).
 - **Membership.** A candidate's membership is the `and` of its reachability
   and the predicate, as for a single source.
+- **Failures.** A path resolves every id it reaches before it tests a
+  candidate, so a failure at any reached id fails the anchor's members. An
+  `exists` over the same steps stops at its first success and can miss that
+  id.
 - **Exclusive.** `source_relation` and `source_path` are exclusive, and one is
   required.
 - **Required declarations.** A path source requires `arity: 2`,
@@ -457,13 +492,18 @@ over determined ids, which #215 section 7 shows sound.
     gets the skip records that the body's reads at that id would produce. This
     matches the trace of the written-out disjunction.
 - **Cost.** An atom on a derived relation computes that relation's members for
-  another anchor. Members are not cached between drives
-  (`Engine::drive` clears them), so a household predicate with an `exists`
-  over co-residents and a derived atom inside costs about O(n³) for n
-  co-residents per anchor, inside the #240/#245 bounds. #211's member cache
-  reduces this. An `exists` whose result depends only on the anchor, such as
-  section 8's guard, is evaluated again for every candidate. That is because
-  its resume key includes the candidate (3.6).
+  another anchor. The engine keeps each anchor's members for its lifetime
+  (`Engine::drive` leaves `derived_members` in place), so one engine resolves a
+  relation's anchor once per period. Every atom still copies those members into
+  a fresh sorted vector before its binary search. A household predicate with an
+  `exists` over n co-residents and a derived atom inside runs n² atoms over n
+  members. That copies about n³ ids per anchor, plus one members resolution per
+  co-resident, inside the #240/#245 bounds. The engine evaluates an `exists`
+  whose result depends only on the anchor, such as section 8's guard, again for
+  every candidate, because its resume key includes the candidate (3.6). A path
+  source copies and sorts each current id's related ids, then sorts what the
+  step reached. A step that reaches r ids, repeats included, takes about
+  r log r time, and a derived step adds one members resolution per current id.
 - **Failure spread.** In two-valued mode, one co-resident's missing input fails
   every membership that reads it. Encodings should put pair atoms before the
   value reads they guard, because `and` stops at the first `not_holds`.
@@ -528,13 +568,17 @@ handle atoms, domains and paths:
   artifacts.
 - Dense's derivation walk (`derivation_of` and its callers).
 - `unit_derivation/interface.rs`, while that module exists (#232 deletes it).
+- `python/axiom_rules_engine`: the rule-shape check in `concepts.py` and the
+  provenance union in `models.py`.
 
 **Input catalog.** `collect_input_slots_from_judgment_expr` collects inputs
 read through a term (3.2).
 
 **Trace.** As in section 5.
 
-**Capabilities.** `relation_roles`, listed once the series is complete.
+**Capabilities.** `relation_roles` lists the completed series: terms and
+qualified reads, parameters in predicates, relation atoms, term comparisons,
+bounded `exists` and path sources.
 
 **Interface block (#155, PR #250).** A derived relation's provenance there is
 `{kind: derived, rule, source_relation, reads: {inputs, rules, relations}}`.
@@ -548,6 +592,8 @@ so each new variant is a compile error there until it is handled:
   - `Routing` carries current-versus-related flow. A read through `anchor`
     routes as current, and a read through `candidate` as related.
   - Atoms' bound slots go through `Collector::lookup`, as membership tests do.
+    A derived atom keys on its current slot only, which is the slot the
+    engine resolves members for.
 - `derive_interface` looks up `source_relation` at the current slot. A path
   source needs a lookup per step, and a `source_path` arm in
   `RelationProvenance`, whose hand-written `Deserialize` checks exact keys per
@@ -570,7 +616,7 @@ constructs.
 - A test checks that a path artifact never also writes `source_relation`.
   `RelationDerivationSpec` does not deny unknown fields, so writing both would
   let an older engine silently ignore the path.
-- A program that uses none of the additions and makes none of the three
+- A program that uses none of the additions and makes none of the five
   changes in 3.2 compiles to the same bytes as before.
 - If #155's format 3 (#250) merges first, this work adds to format 3 and
   needs no separate version bump.
@@ -593,9 +639,10 @@ and differential tests for them.
    in those needs may differ (section 4).
 4. **Qualified reads agree with routing.** Where today's routing reads the
    same id, an unqualified read equals the qualified one.
-5. **Paths agree with `exists`.** A path source's members equal the members
-   computed with nested `exists` over its steps. The harness supplies a
-   candidate source that covers every id, which the language cannot express.
+5. **Paths agree with `exists`.** When neither side fails, a path source's
+   members equal the members computed with nested `exists` over its steps. The
+   harness supplies a candidate source that covers every id, which the
+   language cannot express. A path can fail where `exists` succeeds (3.7).
 6. **Monotone in tuples.** Take a predicate that reads relations only through
    atoms and `exists` domains on base relations, each under an even number of
    `not`s. Adding tuples to those relations never removes a member, though
@@ -609,7 +656,8 @@ and differential tests for them.
    #253 defines polarity through derived relations for recursion.
 7. **Deferral transparency.** Results and traces are identical at every
    suspend depth (`depth::with_suspend_depth`; compare
-   `tests/deferral_transparency.rs`). The resumable `exists` site is the
+   `tests/deferral_transparency.rs` and, for paths,
+   `tests/support/relation_paths.rs`). The resumable `exists` site is the
    riskiest code in the series.
 8. **Determinism.** Two runs produce identical output and trace bytes.
 9. **Modes agree.** Explain and fast agree on every test program, and dense
@@ -631,18 +679,32 @@ With #215:
 
 ## 8. Worked example: 7 CFR 273.1, common case
 
-This is a synthetic engine fixture, not a RuleSpec module. The pilot module in
-rulespec-us#1428 comes from the encoder. The fixture shows the constructs on
-the pilot's scope:
+`tests/fixtures/snap_household.rulespec.yaml` holds this synthetic engine
+fixture, which is not a RuleSpec module. The pilot module in rulespec-us#1428
+comes from the encoder. The fixture shows the constructs on the pilot's scope:
 - the meal group under (a)(3);
 - the required combinations of (b)(1)(i), (b)(1)(ii) and (b)(1)(iii);
 - the (b)(7) participation filter, kept apart from composition;
 - the (b)(2)–(b)(6) and (b)(7)(vi) exceptions, as inputs with no default.
 
 It must never return a wrong household silently, whether too small or too
-large. That holds under two preconditions, which the fixture's tests meet:
-- **A complete roster.** Every evaluated person has a `member_of_household`
-  record. A person with none has no candidates and gets an empty household.
+large. The engine trusts what the caller supplies, so a wrong age or a false
+exception flag gives a wrong household. With every supplied fact true, the
+promise holds under three preconditions, which the generated cases meet:
+- **One residence for each co-resident.** Everyone who lives in the residence,
+  evaluated or not, has exactly one `member_of_household` record, and that
+  record covers the whole evaluated period. A person with none, or with records
+  that each cover only part of the period, reaches no one and no one reaches
+  them. Their own household comes back empty, and a co-resident's comes back
+  short. So twelve monthly records do not serve a year query. A person recorded
+  in two residences bridges them. `lives_with` stops at each applicant's own
+  co-residents, so an applicant on one side misses people on the other, even
+  with correct ids. The fixture does not check any of this.
+- **Complete pair facts.** A spouse, parent or parental-control tuple that is
+  missing, or that covers only part of the period, reads as false, so the
+  people it would tie stay apart with no failure. An input fails when missing,
+  but a relation tuple does not. #215's declared
+  completeness would close this gap.
 - **Correct supplied ids,** where ids are read. The engine trusts them. Ids
   that split two tied people give a household that is too small. A check the
   pilot can add: a derived relation of ties between people with different
@@ -775,14 +837,24 @@ closure is one household.
 ```
 
 **Inputs.** All of these have no default.
-- `meal_group` and `age`.
+- `meal_group`, a group-valued fact, and `age`. Purchases that form no single
+  group (a buys with b and b with c, but a does not buy with c) have no true
+  `meal_group`. That is a (c) case: set the exception input and supply ids.
+  The fixture still reads `meal_group` and fails if it is missing, so supply
+  any value there. With the flag set, the ids alone decide the household.
 - `snap_household_exception_may_apply`. The person may be described by
   (b)(2) (60 or older and unable to buy and prepare meals because of a
-  disability), (b)(3) or (b)(4) (a boarder or foster placement), (b)(5) or
-  (b)(6) (a roomer or live-in attendant), or (b)(7)(vi) (a resident of an
-  institution, or one of its listed exceptions).
+  disability), (b)(3) or (b)(4) (a board arrangement, including a person
+  who pays less than reasonable compensation and whom the regulation does not
+  call a boarder, or a foster placement), (b)(5) or (b)(6) (a roomer or live-in attendant),
+  (b)(7)(vi) (a resident of an institution, or one of its listed exceptions),
+  or (c) (a situation (a) and (b) do not clearly address, which State policy
+  decides).
 - `snap_household_unit`. The caller's household id, read only in the cases
   above.
+- `under_parental_control_of` carries the (b)(1)(iii) determination itself:
+  the caller supplies a tuple only when the dependence test holds and State
+  law does not treat the child as an adult.
 - (b)(1)(iii) excludes a foster child. `snap_tie` does not test for one,
   because a foster placement is a (b)(4) case. It sets
   `snap_household_exception_may_apply`, so that household comes from the
@@ -799,11 +871,11 @@ closure is one household.
   once the supplied case applies.
 - `lives_with` comes from the roster, so every evaluated person needs a
   `member_of_household` record. A person living alone, (a)(1), is a residence
-  of one. A person with no record has no candidates, so the fixture's tests
-  supply every person's record.
+  of one. The generated cases supply one full-year record per person.
 - The guard's two `exists` depend only on the anchor, but are evaluated again
-  for each candidate (section 5, cost). #231 removes the guard and the
-  supplied ids.
+  for each candidate (section 5, cost). #231 removes the guard and the ids
+  that long chains read. The exception cases still read supplied ids until
+  an encoding decides those paragraphs.
 
 **Hand-worked cases.** The fixture's tests check memberships against these
 households, each worked out by hand from the regulation's text:
@@ -818,57 +890,54 @@ households, each worked out by hand from the regulation's text:
 | A grandparent applicant with their grandchild, who is 15, under the grandparent's parental control, and recorded with their own meal group | One household, by (b)(1)(iii) |
 | Applicant, their child C under 22, C's other parent P, and P's child D under 22 from another relationship; everyone buys separately | All four are one household, by three ties. The guard sees a tie leaving the two-tie set and reads the supplied ids. Missing ids fail evaluation; ids that put all four together give all four. |
 | Two separate groups in one residence, each a chain of three ties, with the applicants at the ends of their chains | Each applicant gets exactly their own group from the supplied ids |
-| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (second precondition above). |
+| A chain a–b–c–d of three ties, with applicants a and b | b is within two ties of everyone and the set is closed, so b's household is computed exactly and no ids are read. a's household comes from the ids. The two agree when the ids are correct (third precondition above). |
 | The applicant shares a meal group with a 64-year-old roommate who may qualify for (b)(2) | The exception input is true, so the household is read from the supplied ids, with no reading of (b)(1) against (b)(2) built in |
 | The applicant shares a meal group with R, a student ineligible under (b)(7)(i); R's spouse S buys food separately | All three are composition members. R is not a participating member; S is. |
 
-## 9. Plan
+## 9. Landed series
 
-Five pull requests, in order. Each has:
+The series delivers these constructs and contracts in five steps:
 
-- a test that fails before it;
-- the full suite green with and without the `unit-derivation` feature;
-- the byte-identity check of invariant 10;
-- its invariants in the PR body, with their tests.
-
-Each is sized for one build lane.
-
-1. **Terms, qualified reads and parameters.** The model, parsing, lowering,
-   reserved names, the kind check for rules, the binding environment, rule
-   edges in every walk, the input catalog, trace routing, the dense refusal,
-   and the `docs/rulespec.md` section.
-2. **Atoms and term comparison.** Relation edges, kind checks, the built-in
-   name refusal, the supplied-tuple refusal, and the differential test against
-   bare membership tests.
-3. **Bounded `exists`.** Variables and scope, the resumable site and its key,
-   the refusals, deferral transparency, and the expansion test.
-4. **Path sources.** The artifact form, candidate generation, every walk in
-   section 6, and the differential test against `exists`. #249 has landed:
-   the chain walks in typing, direction and migration now go through
-   `follow_chains` (`relation_typing.rs`), which follows one successor per
-   node. A path source makes a relation read several relations, one per
-   step, so this PR extends `follow_chains` or adds a graph walk beside it.
-   It also lands after #211, still open, which rewrites the chain walks in
-   validation, binding and all three evaluators, or with an explicit merge
-   plan for it.
-5. **Fixture and docs.** The 273.1 fixture and its hand-worked cases, the
-   `relation_roles` capability, `docs/execution-semantics.md`, and a
+1. **Terms, qualified reads and parameters (#268, #269, #273).** Added the
+   model, parsing, lowering, reserved and duplicate declaration checks, rule
+   kind checks, term bindings, dependency walks, input catalog and trace
+   routing, with named dense refusals and the `docs/rulespec.md` contract.
+2. **Atoms and term comparison (#276, #279).** Added relation edges, kind
+   checks, the built-in name and supplied-tuple refusals, and differential
+   tests against bare membership tests. #279 bounded native relation
+   nesting while preserving values and traces.
+3. **Bounded `exists` (#280, #281).** Added variables and scope, resumable
+   quantification, named refusals, deferral transparency and expansion tests.
+   #281 checked exact values and unit-local unknowns for phase-two reads.
+4. **Path sources (#282).** Added the artifact form, candidate generation,
+   dependency walks and differential tests against `exists`. Typing,
+   direction, migration, validation and binding follow every path step;
+   explain resumes path progress and dense refuses path sources by name.
+5. **Fixture and docs (#283).** Added section 8's synthetic 273.1 fixture, its eleven
+   hand-worked cases and independent household properties, the
+   `relation_roles` capability, `docs/execution-semantics.md` and the
    `DECISIONS.md` entry.
+
+The series extends artifact format 3 and its checked interface block (#250);
+it needs no additional format bump.
 
 **Next steps.**
 
 1. Under the three-valued option, follow the two steps in section 4. The
    later of #251 and each PR here adds the named refusals. The later of
    #215's third PR and this series lifts them.
-2. Recursion (#253, then #231) makes the household exact.
-3. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
-4. The pilot (TheAxiomFoundation/rulespec-us#1428) is encoded. It should
-   follow #231, so that its households are exact rather than guarded.
+2. The encoder (TheAxiomFoundation/axiom-encode#1715) learns the constructs.
+3. The encoder encodes the pilot (TheAxiomFoundation/rulespec-us#1428) in
+   section 8's guarded form, which supplied ids complete where the chain or
+   an exception leaves the computed case.
+4. Recursion (#253, then #231) later computes long chains exactly and
+   retires the guard. The exceptions keep their supplied ids until an encoding
+   decides those paragraphs, because a (b)(2) separation can split a meal tie.
 
 **Dependencies.**
 
 - This series depends on neither #155 nor #215 for its two-valued form.
-- It adds to artifact format 3 if #250 merges first.
+- It extends artifact format 3 and its interface block, which #250 landed.
 - #253 is stacked on this note, and builds on section 7's limits on
   monotonicity.
 
@@ -893,8 +962,11 @@ Each is sized for one build lane.
 - **The supplied-tuple refusal is scoped to programs that use these
   constructs.** Such programs get d1265's refusal for every derived relation.
   Existing programs keep their behaviour.
-- **Unqualified reads do not change.** There are three exceptions. A bare
+- **Unqualified reads do not change.** There are five exceptions. A bare
   parameter name in a predicate, or tested as a judgment in a rule body, now
   reads the parameter (3.3). A bare period built-in tested as a judgment is
   now refused (3.2). A bare `anchor` or `candidate` in a derived relation's
-  predicate is now refused (3.1).
+  predicate is now refused (3.1). A declaration that a bare name cannot read,
+  because a built-in, a term, a keyword or another declaration takes the
+  name, is now refused (3.2). A predicate reads a `parameter` record that
+  lowers to a rule as that rule, not as an input (3.2).
