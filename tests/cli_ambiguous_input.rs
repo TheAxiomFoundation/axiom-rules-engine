@@ -261,3 +261,130 @@ fn a_bare_slot_the_composition_reads_is_named_as_spelled() {
         }
     }
 }
+
+mod property {
+    //! For any dataset of `wages` records under the two accepted names, the
+    //! engine reports an ambiguity exactly when two records share a start
+    //! date and differ in value, and it names the first such pair in dataset
+    //! order, as the dataset spelled them. Explain and fast agree.
+    use super::*;
+    use axiom_rules_engine::api::{ApiError, CompiledExecutionRequest, execute_compiled_request};
+    use axiom_rules_engine::compile::CompiledProgramArtifact;
+    use axiom_rules_engine::engine::EvalError;
+    use proptest::prelude::*;
+
+    /// (name, value, start day in January 2026)
+    type Record = (&'static str, &'static str, u32);
+
+    /// What the engine should report: the first and second names of the
+    /// first conflicting pair, or nothing.
+    fn expected(records: &[Record]) -> Option<(String, Option<String>, u32)> {
+        let mut first_at = std::collections::HashMap::<u32, usize>::new();
+        for (index, (name, value, day)) in records.iter().enumerate() {
+            match first_at.get(day) {
+                Some(&first) if records[first].1 != *value => {
+                    let first_name = records[first].0;
+                    return Some((
+                        first_name.to_string(),
+                        (*name != first_name).then(|| name.to_string()),
+                        *day,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    first_at.insert(*day, index);
+                }
+            }
+        }
+        None
+    }
+
+    fn request(mode: &str, records: &[Record]) -> CompiledExecutionRequest {
+        let inputs = records
+            .iter()
+            .map(|(name, value, day)| {
+                serde_json::json!({
+                    "name": name,
+                    "entity": "Household",
+                    "entity_id": "household-1",
+                    "interval": {"start": format!("2026-01-{day:02}"), "end": "2026-01-31"},
+                    "value": {"kind": "decimal", "value": value},
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "mode": mode,
+            "dataset": {"inputs": inputs, "relations": []},
+            "queries": [{
+                "entity_id": "household-1",
+                "period": {"period_kind": "month", "start": "2026-01-01", "end": "2026-01-31"},
+                "outputs": OUTPUTS,
+            }],
+        }))
+        .expect("a compiled request")
+    }
+
+    fn record() -> impl Strategy<Value = Record> {
+        (
+            prop::sample::select(vec![A_WAGES, B_WAGES]),
+            prop::sample::select(vec!["15", "100"]),
+            prop::sample::select(vec![1u32, 15]),
+        )
+    }
+
+    #[test]
+    fn the_engine_names_the_first_conflicting_pair_as_spelled() {
+        let fixture = shared_slot_fixture("property", false);
+        let artifact =
+            CompiledProgramArtifact::from_json_file(&fixture.artifact).expect("artifact loads");
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256));
+        runner
+            .run(&prop::collection::vec(record(), 1..6), |records| {
+                let expected = expected(&records);
+                for mode in ["explain", "fast"] {
+                    let result =
+                        execute_compiled_request(artifact.clone(), request(mode, &records));
+                    match (&result, &expected) {
+                        (
+                            Err(ApiError::Eval(EvalError::AmbiguousInput {
+                                name,
+                                other_name,
+                                entity_id,
+                                effective_from,
+                            })),
+                            Some((expected_name, expected_other, day)),
+                        ) => {
+                            prop_assert_eq!(name, expected_name, "{} {:?}", mode, records);
+                            prop_assert_eq!(other_name, expected_other, "{} {:?}", mode, records);
+                            prop_assert_eq!(entity_id, "household-1");
+                            prop_assert_eq!(
+                                effective_from.to_string(),
+                                format!("2026-01-{day:02}")
+                            );
+                        }
+                        (Err(ApiError::Eval(EvalError::AmbiguousInput { .. })), None) => {
+                            prop_assert!(
+                                false,
+                                "{} {:?}: no conflict, got {:?}",
+                                mode,
+                                records,
+                                result
+                            );
+                        }
+                        (_, Some(_)) => {
+                            prop_assert!(
+                                false,
+                                "{} {:?}: expected an ambiguity, got {:?}",
+                                mode,
+                                records,
+                                result
+                            );
+                        }
+                        (_, None) => {}
+                    }
+                }
+                Ok(())
+            })
+            .expect("the property holds");
+    }
+}
