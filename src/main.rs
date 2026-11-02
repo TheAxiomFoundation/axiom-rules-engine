@@ -276,40 +276,6 @@ fn wants_help(args: &mut std::iter::Peekable<std::iter::Skip<env::Args>>) -> boo
     args.next_if(|arg| arg == "--help" || arg == "-h").is_some()
 }
 
-fn is_help_flag(arg: &str) -> bool {
-    arg == "--help" || arg == "-h"
-}
-
-/// An option-parsing command prints its usage for a help flag only when the
-/// flag is its one argument. Beside any other argument, before or after it,
-/// the flag is refused, so a command never prints usage and silently drops
-/// the rest (#290).
-fn help_alone(
-    command: &str,
-    flag: &str,
-    arg_count: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if arg_count == 1 {
-        Ok(())
-    } else {
-        Err(format!("`{command} {flag}` takes no other arguments").into())
-    }
-}
-
-/// The value that follows `option`. A help flag is never a value: taken as
-/// one, `emit-schemas --out --help` wrote the schemas into `./--help/` (#290).
-fn option_value(
-    option: &str,
-    value: Option<String>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    match value {
-        Some(value) if is_help_flag(&value) => {
-            Err(format!("`{option}` takes a value, not `{value}`").into())
-        }
-        value => Ok(value),
-    }
-}
-
 fn version_line() -> String {
     format!("axiom-rules-engine {}", env!("CARGO_PKG_VERSION"))
 }
@@ -617,6 +583,40 @@ fn warn_lenient_relation_binding(policy: RelationBinding) {
         eprintln!(
             "warning[lenient_relation_binding]: relation_binding is lenient; mismatched relation tuples are accepted without reordering"
         );
+    }
+}
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
+/// An option-parsing command prints its usage for a help flag only when the
+/// flag is its one argument. Beside any other argument, before or after it,
+/// the flag is refused, so a command never prints usage and silently drops
+/// the rest (#290).
+fn help_alone(
+    command: &str,
+    flag: &str,
+    arg_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if arg_count == 1 {
+        Ok(())
+    } else {
+        Err(format!("`{command} {flag}` takes no other arguments").into())
+    }
+}
+
+/// The value that follows `option`. A help flag is never a value: taken as
+/// one, `emit-schemas --out --help` wrote the schemas into `./--help/` (#290).
+fn option_value(
+    option: &str,
+    value: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match value {
+        Some(value) if is_help_flag(&value) => {
+            Err(format!("`{option}` takes a value, not `{value}`").into())
+        }
+        value => Ok(value),
     }
 }
 
