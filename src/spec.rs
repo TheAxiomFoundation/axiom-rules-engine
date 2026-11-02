@@ -224,9 +224,27 @@ pub const MAX_EXPRESSION_DEPTH: usize = crate::formula::MAX_FORMULA_DEPTH + 3;
 /// formula lowering and [`ProgramSpec::to_program`] count the nodes before
 /// building them and refuse past this bound.
 ///
+/// The formula lowering refuses a formula past [`MAX_FORMULA_SIZE`], which
+/// leaves room for a request pin ([`PIN_NODES`]) below this bound, as
+/// [`MAX_EXPRESSION_DEPTH`] leaves a level for one: so every compiled rule
+/// passes, pinned or not. A program read from JSON is checked against this
+/// bound itself.
+///
 /// The largest rule in the RuleSpec corpora on 2026-10-11 has 462 nodes. At
 /// the bound a rule's runtime expression takes a few megabytes.
 pub const MAX_EXPRESSION_SIZE: u64 = 100_000;
+
+/// The nodes a request pin adds to a rule's expression. A pin rewrites the
+/// rule to `if 0 == 0 then <literal> else <original>`: the `if`, the
+/// comparison, its two literals and the pinned literal.
+pub const PIN_NODES: u64 = 5;
+
+/// The most nodes a RuleSpec formula may lower to: [`MAX_EXPRESSION_SIZE`]
+/// less [`PIN_NODES`], so a rule compiled from a formula still passes
+/// [`ProgramSpec::check_expressions`] once a request pins it. This is the
+/// size bound's counterpart of the formula depth bound sitting a pin's level
+/// below [`MAX_EXPRESSION_DEPTH`].
+pub const MAX_FORMULA_SIZE: u64 = MAX_EXPRESSION_SIZE - PIN_NODES;
 
 impl ProgramSpec {
     /// Refuse an expression that nests deeper than [`MAX_EXPRESSION_DEPTH`],

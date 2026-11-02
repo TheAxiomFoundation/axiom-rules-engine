@@ -2156,7 +2156,7 @@ impl<'a> LoweringSize<'a> {
 }
 
 /// Refuse the formula of `name`, in judgment position or not, if lowering it
-/// would build more than [`crate::spec::MAX_EXPRESSION_SIZE`] runtime nodes,
+/// would build more than [`crate::spec::MAX_FORMULA_SIZE`] runtime nodes,
 /// those it drops included. Checked before lowering, which would otherwise
 /// build them first.
 fn check_lowered_size(
@@ -2171,10 +2171,10 @@ fn check_lowered_size(
     } else {
         size.scalar(expr)
     };
-    if kept.saturating_add(size.dropped) > crate::spec::MAX_EXPRESSION_SIZE {
+    if kept.saturating_add(size.dropped) > crate::spec::MAX_FORMULA_SIZE {
         return Err(FormulaError::lower(format!(
             "the formula of `{name}` expands to more than {} expression nodes; split it into named rules",
-            crate::spec::MAX_EXPRESSION_SIZE
+            crate::spec::MAX_FORMULA_SIZE
         )));
     }
     Ok(())
@@ -4387,7 +4387,7 @@ mod depth_tests {
             variables: std::cell::RefCell::new(Vec::new()),
             relations: std::cell::RefCell::new(HashSet::new()),
         };
-        let max = crate::spec::MAX_EXPRESSION_SIZE;
+        let max = crate::spec::MAX_FORMULA_SIZE;
         let dropping_max_of = |names: u64| {
             let names = usize::try_from(names).expect("fits");
             format!("match max({}): _ => 0", vec!["x"; names].join(", "))

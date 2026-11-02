@@ -9,7 +9,9 @@
 //! now count nodes before building them and refuse past the bound. The
 //! lowering's count includes the subject of a `match` with only `_`, which it
 //! builds and drops, and dense compiles a `match` fallback without a copy of
-//! the last arm, so neither builds more than the expression.
+//! the last arm, so neither builds more than the expression. The lowering's
+//! bound, `spec::MAX_FORMULA_SIZE`, is `spec::PIN_NODES` below the program's,
+//! so a rule compiled from a formula at the bound still runs when pinned.
 //!
 //! Every case here runs in a child process. The test reads the child's
 //! resident memory, sleeping 10 ms between reads, and kills the child, and
@@ -25,7 +27,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use axiom_rules_engine::api::{ExecutionRequest, execute_request};
+use axiom_rules_engine::api::{
+    CompiledExecutionRequest, ExecutionRequest, execute_compiled_request, execute_request,
+};
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseExecutionResult, DenseOutputValue,
@@ -33,7 +37,7 @@ use axiom_rules_engine::dense::{
 };
 use axiom_rules_engine::depth::count_visits;
 use axiom_rules_engine::model::{Period, PeriodKind};
-use axiom_rules_engine::spec::{MAX_EXPRESSION_SIZE, ProgramSpec};
+use axiom_rules_engine::spec::{MAX_EXPRESSION_SIZE, MAX_FORMULA_SIZE, PIN_NODES, ProgramSpec};
 use serde_json::{Value, json};
 
 /// The most a case may grow to. At the size bound a rule takes a few
@@ -191,6 +195,7 @@ fn child_case() {
         "formula_exactly_one_40_deep" => formula_exactly_one_40_deep(),
         "json_exactly_one_131_deep" => json_exactly_one_131_deep(),
         "formula_match_subjects_nested" => formula_match_subjects_nested(),
+        "predicate_match_subjects_nested" => predicate_match_subjects_nested(),
         "formula_at_the_size_bound" => formula_at_the_size_bound(),
         "exactly_one_at_the_size_bound" => exactly_one_at_the_size_bound(),
         "formula_match_with_only_a_wildcard" => formula_match_with_only_a_wildcard(),
@@ -219,9 +224,10 @@ fn assert_too_large(error: impl std::fmt::Display, context: &str) {
 /// not the one conversion reports after lowering built the whole tree.
 fn assert_refused_by_lowering(error: impl std::fmt::Display) {
     let message = error.to_string();
-    assert_too_large(&message, "formula");
     assert!(
-        message.contains("the formula of `deep` expands"),
+        message.contains(&format!(
+            "the formula of `deep` expands to more than {MAX_FORMULA_SIZE} expression nodes"
+        )),
         "expected the lowering to refuse it, got: {message}"
     );
 }
@@ -327,18 +333,92 @@ fn formula_match_subjects_nested() {
     );
 }
 
-/// `max(x, x, ...)` of `n` operands is `n + 1` nodes: at the bound it
-/// compiles and answers, one node past it is refused.
+/// The same nested `match` subjects in a derived relation's predicate, which
+/// is lowered by `lower_judgment_formula`, not with the module's rules: the
+/// lowering refuses it, naming the relation, before it builds anything.
+/// Without that check the lowering built the copies first and ran out of
+/// memory.
+fn predicate_match_subjects_nested() {
+    let arms = (1..=10)
+        .map(|arm| format!(" {arm} => {arm}"))
+        .collect::<String>();
+    let mut subject = "age".to_string();
+    for _ in 0..8 {
+        subject = format!("(match {subject}:{arms} _ => 0)");
+    }
+    let module = format!(
+        r#"format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+    versions:
+      - effective_from: 2026-01-01
+        formula: "{subject} > 1"
+  - name: deep
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(snap_unit)
+"#
+    );
+    let error = CompiledProgramArtifact::from_rulespec_str(&module)
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        error.contains(&format!(
+            "the formula of `snap_unit` expands to more than {MAX_FORMULA_SIZE} expression nodes"
+        )),
+        "expected the lowering to refuse the predicate, got: {error}"
+    );
+}
+
+/// `max(x, x, ...)` of `n` operands is `n + 1` nodes: at the formula bound
+/// it compiles and answers, pinned or not, and one node past it is refused.
 fn formula_at_the_size_bound() {
     let max_of = |operands: u64| {
         let operands = usize::try_from(operands).expect("fits");
         format!("max({})", vec!["x"; operands].join(", "))
     };
+    assert_eq!(MAX_FORMULA_SIZE + PIN_NODES, MAX_EXPRESSION_SIZE);
     let at_bound = CompiledProgramArtifact::from_rulespec_str(&rulespec(
         "Integer",
-        &max_of(MAX_EXPRESSION_SIZE - 1),
+        &max_of(MAX_FORMULA_SIZE - 1),
     ))
     .expect("a formula at the bound compiles");
+    // A request that pins the rule: the pin adds `PIN_NODES`, which brings
+    // the rule to exactly the program bound, and the pinned value answers.
+    for mode in ["explain", "fast"] {
+        let request: CompiledExecutionRequest = serde_json::from_value(json!({
+            "mode": mode,
+            "dataset": {"inputs": [{
+                "name": "x", "entity": "Household", "entity_id": "h1",
+                "interval": {"start": "2026-01-01", "end": "2026-01-31"},
+                "value": {"kind": "integer", "value": 3},
+            }], "relations": []},
+            "queries": [{"entity_id": "h1", "period": period(), "outputs": ["deep"]}],
+            "pins": [{"rule": "deep", "value": {"kind": "integer", "value": 7}}],
+        }))
+        .expect("request deserializes");
+        let response = execute_compiled_request(at_bound.clone(), request)
+            .unwrap_or_else(|error| panic!("{mode}: a pinned rule at the bound runs: {error}"));
+        let output =
+            serde_json::to_value(&response.results[0].outputs["deep"]).expect("serializes");
+        assert_eq!(
+            output["value"],
+            json!({"kind": "integer", "value": 7}),
+            "{mode}"
+        );
+    }
     let program = serde_json::to_value(&at_bound.program).expect("program serializes");
     for mode in ["explain", "fast"] {
         assert_eq!(
@@ -352,11 +432,8 @@ fn formula_at_the_size_bound() {
         );
     }
     assert_refused_by_lowering(
-        CompiledProgramArtifact::from_rulespec_str(&rulespec(
-            "Integer",
-            &max_of(MAX_EXPRESSION_SIZE),
-        ))
-        .expect_err("one node past the bound is refused"),
+        CompiledProgramArtifact::from_rulespec_str(&rulespec("Integer", &max_of(MAX_FORMULA_SIZE)))
+            .expect_err("one node past the bound is refused"),
     );
 }
 
@@ -602,6 +679,11 @@ fn a_program_of_nested_exactly_one_is_refused_wherever_it_enters() {
 #[test]
 fn a_formula_of_nested_match_subjects_is_refused() {
     in_capped_child("formula_match_subjects_nested");
+}
+
+#[test]
+fn a_derived_relation_predicate_of_nested_match_subjects_is_refused() {
+    in_capped_child("predicate_match_subjects_nested");
 }
 
 #[test]
