@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import numpy as np
 
@@ -42,8 +43,43 @@ class DerivedMetadata:
 
 @dataclass(frozen=True)
 class DenseRelationBatch:
+    """One relation's rows for a batch.
+
+    Root row ``r``'s related rows are ``offsets[r]:offsets[r + 1]`` of every
+    column in ``inputs``. ``offsets`` has one entry per root row plus one,
+    starts at 0 and never decreases; its last entry is the related row count,
+    which every column in ``inputs`` must have, whether or not the program
+    reads it.
+
+    ``related_row_count`` states that count. When given it must equal
+    ``offsets[-1]``. It is required when the offsets claim related rows but
+    ``inputs`` is empty (for example a ``len`` over the relation, or a filter
+    that reads only the current entity), because nothing else confirms the
+    offsets. It is the caller's assertion, not a check: count the related rows
+    the offsets index, one per root and member pair (a related entity two roots
+    share counts twice), independently of the offsets, rather than copying
+    ``offsets[-1]``.
+    """
+
     offsets: np.ndarray
     inputs: dict[str, np.ndarray]
+    related_row_count: int | None = None
+
+
+def _prepare_relations(
+    relations: dict[str, DenseRelationBatch],
+) -> dict[str, dict[str, Any]]:
+    """The relation dicts the native extension reads."""
+    return {
+        key: {
+            "offsets": np.asarray(batch.offsets),
+            "inputs": {
+                name: np.asarray(values) for name, values in batch.inputs.items()
+            },
+            "related_row_count": batch.related_row_count,
+        }
+        for key, batch in relations.items()
+    }
 
 
 class CompiledDenseProgram:
@@ -86,6 +122,46 @@ class CompiledDenseProgram:
                 str(Path(path)), roots, entity
             )
         )
+
+    @classmethod
+    def from_artifact_file(
+        cls,
+        path: str | Path,
+        *,
+        entity: str | None = None,
+        accept_artifact_format: Literal[2] | None = None,
+    ) -> "CompiledDenseProgram":
+        """Load a compiled artifact (``compile``'s output) for dense execution.
+
+        The artifact must be format 3. ``accept_artifact_format=2`` also loads
+        a format-2 artifact, unchanged, through the engine's format-2
+        compatibility loader, with a warning.
+        """
+        if NativeCompiledDenseProgram is None:
+            raise RuntimeError(
+                "axiom_rules_engine_dense is not installed. Build it with "
+                "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
+            )
+        if accept_artifact_format not in (None, 2):
+            raise ValueError(
+                "accept_artifact_format accepts only 2, the format the engine "
+                "reads through its compatibility loader"
+            )
+        native = NativeCompiledDenseProgram.from_artifact_file(
+            str(Path(path)), entity, accept_artifact_format
+        )
+        if native.artifact_format_version == 2:
+            warnings.warn(
+                f"read {path} as artifact format 2 through the format-2 "
+                "compatibility loader; recompile it with this engine for format 3",
+                stacklevel=2,
+            )
+        return cls(native)
+
+    @property
+    def artifact_format_version(self) -> int:
+        """The format of the artifact this program was loaded or compiled as."""
+        return self._native.artifact_format_version
 
     @property
     def root_entity(self) -> str:
@@ -230,16 +306,7 @@ class CompiledDenseProgram:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         if relations is None:
             return (prepared_inputs, None)
-        prepared_relations = {
-            key: {
-                "offsets": np.asarray(rel.offsets),
-                "inputs": {
-                    name: np.asarray(values) for name, values in rel.inputs.items()
-                },
-            }
-            for key, rel in relations.items()
-        }
-        return (prepared_inputs, prepared_relations)
+        return (prepared_inputs, _prepare_relations(relations))
 
     def _run(
         self,
@@ -254,16 +321,7 @@ class CompiledDenseProgram:
         prepared_inputs = {name: np.asarray(values) for name, values in inputs.items()}
         prepared_relations = None
         if relations is not None:
-            prepared_relations = {
-                key: {
-                    "offsets": np.asarray(batch.offsets),
-                    "inputs": {
-                        name: np.asarray(values)
-                        for name, values in batch.inputs.items()
-                    },
-                }
-                for key, batch in relations.items()
-            }
+            prepared_relations = _prepare_relations(relations)
         return native_execute(
             period_kind,
             start,

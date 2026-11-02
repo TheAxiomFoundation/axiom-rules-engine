@@ -1169,6 +1169,7 @@ fn run_dense(program: &Value) -> Result<String, String> {
             axiom_rules_engine::dense::DenseRelationBatchSpec {
                 offsets: vec![0, 2],
                 inputs: HashMap::from([("age".to_string(), DenseColumn::Integer(vec![30, 40]))]),
+                ..Default::default()
             },
         )]),
     };

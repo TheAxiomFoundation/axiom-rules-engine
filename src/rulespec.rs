@@ -13,9 +13,10 @@ pub use crate::formula::MAX_FORMULA_DEPTH;
 use crate::source::ModuleSource;
 
 use crate::spec::{
-    DerivedSemanticsSpec, IndexedParameterSpec, JudgmentExprSpec, ParameterVersionSpec,
-    ProgramSpec, RelatedValueRefSpec, RelationDerivationSpec, RelationSpec, ScalarExprSpec,
-    ScalarValueSpec, UnitSpec,
+    DerivedSemanticsSpec, IndexedParameterSpec, InputDeclarationSpec, InputElection,
+    JudgmentExprSpec, ParameterVersionSpec, ProgramSpec, RelatedValueRefSpec,
+    RelationDerivationSpec, RelationPathStepSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    UnitSpec,
 };
 
 /// The only content roots admitted directly below a jurisdiction directory.
@@ -35,6 +36,103 @@ pub const RULESPEC_ATOMIC_ROOTS: [&str; 4] = ["legislation", "policies", "regula
 
 #[derive(Debug, Error)]
 pub enum RuleSpecError {
+    #[error("invalid selected-year input: {0}")]
+    SelectedYearInput(String),
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid id `{id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationId { path: String, id: String },
+    #[error("RuleSpec module `{path}` repeats interpretation id `{id}`")]
+    DuplicateInterpretationId { path: String, id: String },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid alternative id `{alternative_id}`; expected lowercase kebab-case"
+    )]
+    InvalidInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` repeats alternative id `{alternative_id}`"
+    )]
+    DuplicateInterpretationAlternativeId {
+        path: String,
+        id: String,
+        alternative_id: String,
+    },
+    #[error("RuleSpec module `{path}` interpretation `{id}` has blank `{field}`: {value:?}")]
+    BlankInterpretationField {
+        path: String,
+        id: String,
+        field: String,
+        value: String,
+    },
+    #[error("RuleSpec module `{path}` interpretation `{id}` requires non-empty `{field}`")]
+    EmptyInterpretationCollection {
+        path: String,
+        id: String,
+        field: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has noncanonical corpus citation path `{value}`"
+    )]
+    InvalidInterpretationCitationPath {
+        path: String,
+        id: String,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` date `{value}`; expected a real YYYY-MM-DD date"
+    )]
+    InvalidInterpretationDate {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` has invalid `{field}` record `{value}`; expected https://"
+    )]
+    InvalidInterpretationRecord {
+        path: String,
+        id: String,
+        field: &'static str,
+        value: String,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` with status {status:?} has `{field}` {requirement}"
+    )]
+    InvalidInterpretationStatusFields {
+        path: String,
+        id: String,
+        status: InterpretationStatus,
+        field: &'static str,
+        requirement: &'static str,
+    },
+    #[error(
+        "RuleSpec module `{path}` interpretation `{id}` affects rules not defined in this document: {names:?}"
+    )]
+    UnresolvedInterpretationAffects {
+        path: String,
+        id: String,
+        names: Vec<String>,
+    },
+    #[error(
+        "only_related in `{citing}` requires one declared Boolean input `{input}` owned by the related entity: {message}"
+    )]
+    OnlyRelatedInput {
+        citing: String,
+        input: String,
+        message: String,
+    },
+    #[error("RuleSpec module `{module}` input `{input}`: {message}")]
+    InputElection {
+        module: String,
+        input: String,
+        message: String,
+    },
+    #[error("RuleSpec module `{module}` `inputs` entry {index} carries an `election` but no name")]
+    UnnamedInputElection { module: String, index: usize },
     #[error("yaml parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
     /// A module reached through the import walk failed to deserialize. Names
@@ -92,6 +190,28 @@ pub enum RuleSpecError {
     Source(#[from] crate::source::SourceError),
     #[error("failed to parse RuleSpec formula: {0}")]
     Formula(#[from] crate::formula::FormulaError),
+    /// `name` and `entity` are copied into the generated formula source
+    /// unquoted, so each must lex as exactly one token.
+    #[error("RuleSpec rule {name:?} has {field} {value:?}; it must be exactly one {expected}")]
+    InvalidFormulaField {
+        name: String,
+        field: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    /// The generated formula source indents every formula line, which would
+    /// change the value of a string literal that spans a line feed.
+    #[error(
+        "RuleSpec rule `{name}` has a line break inside the string literal at formula line {line}, column {col}; write it as the \\n escape"
+    )]
+    MultilineStringLiteral {
+        name: String,
+        line: usize,
+        col: usize,
+    },
+    /// An unclosed `"""` block would hide the rest of the generated source.
+    #[error("RuleSpec rule `{name}` has a formula whose `\"\"\"` block is never closed")]
+    UnterminatedFormulaBlock { name: String },
     #[error("RuleSpec rule `{name}` uses unsupported kind `{kind}`")]
     UnsupportedRuleKind { name: String, kind: String },
     #[error("RuleSpec rule `{name}` must declare `kind`")]
@@ -100,6 +220,28 @@ pub enum RuleSpecError {
         "RuleSpec rule `{name}` declares `rounding` but has kind `{kind}`; output rounding applies only to `derived` currency rules"
     )]
     RoundingOnNonDerivedRule { name: String, kind: String },
+    /// A bare read of a reserved name never reaches a declaration of it.
+    #[error(
+        "[reserved_declaration_name] `{name}` is declared in `{path}` as {kind}, but the name is reserved: {reason}; rename it"
+    )]
+    ReservedDeclarationName {
+        kind: &'static str,
+        name: String,
+        path: String,
+        reason: &'static str,
+    },
+    /// Each bare read of a name reaches one declaration, so two declarations
+    /// of different kinds would give one name two meanings.
+    #[error(
+        "[declaration_name_clash] `{name}` is declared in `{first_path}` as {first} and in `{second_path}` as {second}; each bare `{name}` would read just one of them, so one name would mean two things; rename one"
+    )]
+    DeclarationNameClash {
+        name: String,
+        first: &'static str,
+        first_path: String,
+        second: &'static str,
+        second_path: String,
+    },
     #[error(
         "RuleSpec file `{path}` rule `{name}` declares unsupported `default`; rule-level defaults have no defined semantics, so remove it and express the fallback explicitly in the formula"
     )]
@@ -153,6 +295,22 @@ pub enum RuleSpecError {
     MissingDerivedRelationArity { name: String },
     #[error("RuleSpec derived relation `{name}` must declare derived_relation.source_relation")]
     MissingDerivedRelationSource { name: String },
+    #[error(
+        "relation_path_source_conflict: RuleSpec derived relation `{name}` cannot declare both source_relation and source_path"
+    )]
+    RelationPathSourceConflict { name: String },
+    #[error(
+        "relation_path_requires_binary_declaration: RuleSpec path-sourced relation `{name}` must explicitly declare arity: 2, slot_entities and distinct current_slot and related_slot"
+    )]
+    RelationPathRequiresBinaryDeclaration { name: String },
+    #[error(
+        "relation_path_forbidden_field: RuleSpec path-sourced relation `{name}` cannot declare {field}"
+    )]
+    RelationPathForbiddenField { name: String, field: &'static str },
+    #[error(
+        "relation_path_empty: RuleSpec derived relation `{name}` must declare at least one source_path step"
+    )]
+    RelationPathEmpty { name: String },
     #[error(
         "RuleSpec derived relation `{name}` must declare exactly one membership formula version"
     )]
@@ -383,10 +541,40 @@ impl fmt::Display for RuleSpecDiagnosticReport {
 pub struct RuleSpecLoweringOutcome {
     pub program: ProgramSpec,
     pub diagnostics: Vec<RuleSpecDiagnostic>,
+    /// The module texts a loader read to lower `program`. Set by the loaders
+    /// below; `None` when a [`RulesDocument`] was lowered directly.
+    pub source: Option<RuleSpecSourceTexts>,
+}
+
+/// Every module text a loader read to lower a program, the root included,
+/// each with the SHA-256 of its exact text. A compiled artifact records it as
+/// its `source_closure`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuleSpecSourceTexts {
+    /// The root module's canonical target; `None` for an originless root (an
+    /// in-memory string or a composition file).
+    pub root: Option<String>,
+    /// `(target, sha256)` in the order the loader read them, with 64
+    /// lowercase hex digits per digest. The originless root has no target.
+    pub modules: Vec<(Option<String>, String)>,
+}
+
+fn text_sha256(text: &str) -> String {
+    crate::digest::hex(&crate::digest::sha256(text.as_bytes()))
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RulesDocument {
+    /// Retained for validation of only_related and selected-year reads, and
+    /// for the elections it declares; every other key stays inert.
+    #[serde(default)]
+    pub inputs: serde_yaml::Value,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub imported_input_declarations: Vec<(Option<String>, serde_yaml::Value)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub input_origin: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
@@ -423,6 +611,12 @@ pub struct ModuleMetadata {
     pub encoding_provenance: Option<EncodingProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validation: Vec<ValidationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "crate::schema::interpretations_json_schema")
+    )]
+    pub interpretations: Vec<Interpretation>,
 }
 
 impl ModuleMetadata {
@@ -430,7 +624,7 @@ impl ModuleMetadata {
     /// error reporting: the file path for filesystem loads, the canonical
     /// target for source-backed loads, or the module id / `<memory>` for
     /// in-memory strings.
-    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+    pub(crate) fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
         if let Some(verification) = self.source_verification.as_ref()
             && !is_canonical_corpus_citation_path(&verification.corpus_citation_path)
         {
@@ -448,6 +642,303 @@ impl ModuleMetadata {
             return Err(RuleSpecError::InvalidSourceSha256 {
                 path: path.to_string(),
                 value: sha.to_string(),
+            });
+        }
+        let mut ids = HashSet::new();
+        for interpretation in &self.interpretations {
+            interpretation.validate(path)?;
+            if !ids.insert(&interpretation.id) {
+                return Err(RuleSpecError::DuplicateInterpretationId {
+                    path: path.to_string(),
+                    id: interpretation.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An adopted reading of ambiguous, conflicting, or nonliteral source text.
+/// Descriptive only: the encoder verifies excerpts against the corpus.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Interpretation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub question: String,
+    pub texts: Vec<InterpretationText>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    pub alternatives: Vec<InterpretationAlternative>,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub basis: String,
+    pub status: InterpretationStatus,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ruling: Option<InterpretationRuling>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub confirmation: Option<InterpretationConfirmation>,
+    #[serde(deserialize_with = "deserialize_strict_string_list")]
+    pub affects: Vec<String>,
+}
+
+/// A verbatim provision in tension with another reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationText {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub corpus_citation_path: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+}
+
+/// Another reading and its optional effect on the result.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationAlternative {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub id: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub reading: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effect: Option<String>,
+}
+
+/// An organisation's ruling, linked to its public record.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationRuling {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub record: String,
+}
+
+/// The publisher organisation's words confirming or contradicting a reading.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InterpretationConfirmation {
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub by: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub date: String,
+    #[serde(deserialize_with = "deserialize_strict_string")]
+    pub excerpt: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_strict_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub record: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum InterpretationStatus {
+    Open,
+    Ruled,
+    Confirmed,
+    Contradicted,
+}
+
+impl<'de> Deserialize<'de> for InterpretationStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = deserialize_strict_string(deserializer)?;
+        match value.as_str() {
+            "open" => Ok(Self::Open),
+            "ruled" => Ok(Self::Ruled),
+            "confirmed" => Ok(Self::Confirmed),
+            "contradicted" => Ok(Self::Contradicted),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["open", "ruled", "confirmed", "contradicted"],
+            )),
+        }
+    }
+}
+
+fn is_interpretation_id(value: &str) -> bool {
+    value.split('-').all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    })
+}
+
+impl Interpretation {
+    fn validate(&self, path: &str) -> Result<(), RuleSpecError> {
+        if !is_interpretation_id(&self.id) {
+            return Err(RuleSpecError::InvalidInterpretationId {
+                path: path.to_string(),
+                id: self.id.clone(),
+            });
+        }
+        for (field, value) in [
+            ("question", &self.question),
+            ("reading", &self.reading),
+            ("basis", &self.basis),
+        ] {
+            self.validate_nonblank(path, field, value)?;
+        }
+        for (field, empty) in [
+            ("texts", self.texts.is_empty()),
+            ("alternatives", self.alternatives.is_empty()),
+            ("affects", self.affects.is_empty()),
+        ] {
+            if empty {
+                return Err(RuleSpecError::EmptyInterpretationCollection {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    field,
+                });
+            }
+        }
+        for (index, text) in self.texts.iter().enumerate() {
+            if !is_canonical_corpus_citation_path(&text.corpus_citation_path) {
+                return Err(RuleSpecError::InvalidInterpretationCitationPath {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    value: text.corpus_citation_path.clone(),
+                });
+            }
+            self.validate_nonblank(path, &format!("texts[{index}].excerpt"), &text.excerpt)?;
+        }
+        let mut alternative_ids = HashSet::new();
+        for (index, alternative) in self.alternatives.iter().enumerate() {
+            if !is_interpretation_id(&alternative.id) {
+                return Err(RuleSpecError::InvalidInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
+            if !alternative_ids.insert(&alternative.id) {
+                return Err(RuleSpecError::DuplicateInterpretationAlternativeId {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    alternative_id: alternative.id.clone(),
+                });
+            }
+            self.validate_nonblank(
+                path,
+                &format!("alternatives[{index}].reading"),
+                &alternative.reading,
+            )?;
+        }
+        for (field, present, required) in [
+            (
+                "ruling",
+                self.ruling.is_some(),
+                self.status != InterpretationStatus::Open,
+            ),
+            (
+                "confirmation",
+                self.confirmation.is_some(),
+                matches!(
+                    self.status,
+                    InterpretationStatus::Confirmed | InterpretationStatus::Contradicted
+                ),
+            ),
+        ] {
+            if present != required {
+                return Err(RuleSpecError::InvalidInterpretationStatusFields {
+                    path: path.to_string(),
+                    id: self.id.clone(),
+                    status: self.status,
+                    field,
+                    requirement: if required { "required" } else { "forbidden" },
+                });
+            }
+        }
+        if let Some(ruling) = &self.ruling {
+            self.validate_nonblank(path, "ruling.by", &ruling.by)?;
+            self.validate_date(path, "ruling.date", &ruling.date)?;
+            self.validate_record(path, "ruling.record", &ruling.record)?;
+        }
+        if let Some(confirmation) = &self.confirmation {
+            self.validate_nonblank(path, "confirmation.by", &confirmation.by)?;
+            self.validate_nonblank(path, "confirmation.excerpt", &confirmation.excerpt)?;
+            self.validate_date(path, "confirmation.date", &confirmation.date)?;
+            if let Some(record) = &confirmation.record {
+                self.validate_record(path, "confirmation.record", record)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_nonblank(&self, path: &str, field: &str, value: &str) -> Result<(), RuleSpecError> {
+        if value.trim().is_empty() {
+            return Err(RuleSpecError::BlankInterpretationField {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field: field.to_string(),
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_date(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        let exact_shape = value.len() == 10
+            && value.bytes().enumerate().all(|(index, byte)| {
+                if index == 4 || index == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }
+            });
+        if !exact_shape || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
+            return Err(RuleSpecError::InvalidInterpretationDate {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_record(
+        &self,
+        path: &str,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), RuleSpecError> {
+        if !value.starts_with("https://") {
+            return Err(RuleSpecError::InvalidInterpretationRecord {
+                path: path.to_string(),
+                id: self.id.clone(),
+                field,
+                value: value.to_string(),
             });
         }
         Ok(())
@@ -622,6 +1113,8 @@ pub struct DerivedRelationRef {
     pub arity: Option<usize>,
     #[serde(default, alias = "source")]
     pub source_relation: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<Vec<RelationPathStepSpec>>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
     pub entity: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_like")]
@@ -860,7 +1353,16 @@ fn validate_composed_dependency_metadata(source: &str, path: &str) -> Result<(),
 }
 
 fn validate_recursive_corpus_contract(source: &str, path: &str) -> Result<(), RuleSpecError> {
-    let value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(source)?;
+    // Interpretations have a strict typed contract, validated below before
+    // import merging. Let that validator report citation failures with the
+    // entry id rather than the generic recursive corpus-path error.
+    if let Some(module) = value
+        .get_mut("module")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        module.remove(serde_yaml::Value::String("interpretations".to_string()));
+    }
     validate_recursive_corpus_value(&value, path)
 }
 
@@ -964,7 +1466,66 @@ fn is_canonical_corpus_jurisdiction(value: &str) -> bool {
     })
 }
 
-fn is_relation_entity_kind_label(value: &str) -> bool {
+/// `(origin, slot, election)`: an election some module declares.
+type DeclaredElection<'a> = (Option<&'a str>, String, InputElection);
+
+/// The elections one module's `inputs:` block declares. The block is a list of entries with `name`, or
+/// a mapping from name to entry. Every key but `election` stays inert and
+/// unvalidated: a block with no `election` anywhere yields nothing, whatever
+/// its shape.
+fn declared_elections<'a>(
+    origin: Option<&'a str>,
+    block: &serde_yaml::Value,
+) -> Result<Vec<DeclaredElection<'a>>, RuleSpecError> {
+    let entries: Vec<(Option<&serde_yaml::Value>, &serde_yaml::Value)> = match block {
+        serde_yaml::Value::Sequence(items) => {
+            items.iter().map(|item| (item.get("name"), item)).collect()
+        }
+        serde_yaml::Value::Mapping(entries) => entries
+            .iter()
+            .map(|(name, entry)| (Some(name), entry))
+            .collect(),
+        _ => return Ok(Vec::new()),
+    };
+    let mut elections = Vec::new();
+    for (index, (name, entry)) in entries.into_iter().enumerate() {
+        let Some(election) = entry.get("election") else {
+            continue;
+        };
+        let Some(slot) = name.and_then(serde_yaml::Value::as_str) else {
+            return Err(RuleSpecError::UnnamedInputElection {
+                module: module_label(origin),
+                index,
+            });
+        };
+        let fail = |message: String| RuleSpecError::InputElection {
+            module: module_label(origin),
+            input: slot.to_string(),
+            message,
+        };
+        let election = serde_yaml::from_value::<InputElection>(election.clone())
+            .map_err(|error| fail(format!("invalid election: {error}")))?;
+        if let Some(message) = election.shape_error() {
+            return Err(fail(message));
+        }
+        elections.push((origin, slot.to_string(), election));
+    }
+    Ok(elections)
+}
+
+/// A module's request name for one of its input slots.
+fn request_name(origin: Option<&str>, slot: &str) -> String {
+    origin.map_or_else(
+        || slot.to_string(),
+        |origin| format!("{origin}#input.{slot}"),
+    )
+}
+
+fn module_label(origin: Option<&str>) -> String {
+    origin.unwrap_or("<root>").to_string()
+}
+
+pub(crate) fn is_relation_entity_kind_label(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_uppercase())
         && bytes.all(|byte| byte.is_ascii_alphanumeric())
@@ -990,7 +1551,12 @@ pub fn lower_rulespec_str_with_options(
     let mut document: RulesDocument = serde_yaml::from_str(source)?;
     document.validate_atomic_module_metadata("<memory>")?;
     document.assign_origin_target(None);
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules: vec![(None, text_sha256(source))],
+    });
+    Ok(outcome)
 }
 
 #[cfg(feature = "fs")]
@@ -1072,7 +1638,19 @@ pub fn load_composed_rulespec_file_with_options(
         combined = merge_rules_documents(combined, imported);
     }
     combined = merge_rules_documents(combined, document.without_imports());
-    combined.to_program_spec_with_options(options)
+    let mut outcome = combined.to_program_spec_with_options(options)?;
+    let mut modules = vec![(None, text_sha256(&source))];
+    modules.extend(
+        context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256)),
+    );
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: None,
+        modules,
+    });
+    Ok(outcome)
 }
 
 /// Load and lower the module at `root_target` (canonical form, for example
@@ -1110,7 +1688,16 @@ pub fn load_rulespec_with_source_with_options(
         &mut context,
         ModuleSurface::Atomic,
     )?;
-    document.to_program_spec_with_options(options)
+    let mut outcome = document.to_program_spec_with_options(options)?;
+    outcome.source = Some(RuleSpecSourceTexts {
+        root: Some(root_target),
+        modules: context
+            .read
+            .into_iter()
+            .map(|(target, sha256)| (Some(target), sha256))
+            .collect(),
+    });
+    Ok(outcome)
 }
 
 fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
@@ -1123,6 +1710,8 @@ fn emit_rule_spec_diagnostics(diagnostics: &[RuleSpecDiagnostic]) {
 struct SourceLoadContext {
     stack: Vec<String>,
     loaded: HashSet<String>,
+    /// `(target, sha256)` of every module text read, in read order.
+    read: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1151,6 +1740,7 @@ fn load_rulespec_document_from_source(
         .ok_or_else(|| RuleSpecError::ModuleNotFound {
             target: target.to_string(),
         })?;
+    context.read.push((target.to_string(), text_sha256(&text)));
     // Parse once up front so a syntax error names this module and keeps its
     // position, instead of surfacing as a missing discriminator.
     if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
@@ -1279,6 +1869,10 @@ fn merge_rules_documents(mut base: RulesDocument, extension: RulesDocument) -> R
     if extension.module.is_some() {
         base.module = extension.module;
     }
+    base.imported_input_declarations
+        .push((extension.input_origin, extension.inputs));
+    base.imported_input_declarations
+        .extend(extension.imported_input_declarations);
     base.units.extend(extension.units);
     base.relations.extend(extension.relations);
     base.rules.extend(extension.rules);
@@ -1989,10 +2583,29 @@ fn canonical_composed_dependency(
 
 impl RulesDocument {
     fn validate_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
-        match &self.module {
-            Some(module) => module.validate(path),
-            None => Ok(()),
+        if let Some(module) = &self.module {
+            module.validate(path)?;
+            // Resolve against this document before imports are merged or
+            // lowering assigns runtime names. Imported and deferred-only
+            // names are not definitions in this module.
+            let names: HashSet<&str> = self.rules.iter().map(|rule| rule.name.as_str()).collect();
+            for interpretation in &module.interpretations {
+                let unresolved: Vec<String> = interpretation
+                    .affects
+                    .iter()
+                    .filter(|name| !names.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                if !unresolved.is_empty() {
+                    return Err(RuleSpecError::UnresolvedInterpretationAffects {
+                        path: path.to_string(),
+                        id: interpretation.id.clone(),
+                        names: unresolved,
+                    });
+                }
+            }
         }
+        Ok(())
     }
 
     fn validate_atomic_module_metadata(&self, path: &str) -> Result<(), RuleSpecError> {
@@ -2009,6 +2622,7 @@ impl RulesDocument {
     }
 
     fn assign_origin_target(&mut self, origin_target: Option<String>) {
+        self.input_origin = origin_target.clone();
         // The module-level corpus citation path rides onto every rule here,
         // because `merge_rules_documents` keeps only the root module's
         // metadata: without stamping, an imported module's join key would be
@@ -2024,6 +2638,65 @@ impl RulesDocument {
         }
     }
 
+    /// The elections every module's `inputs:` block declares, sorted by
+    /// request name. Each is checked against the inputs its own module's
+    /// rules and derived-relation predicates read: an atomic module's request
+    /// names are its own `<module>#input.<slot>`, so the expression-read
+    /// catalog says which module reads what.
+    fn input_declarations(
+        &self,
+        program: &ProgramSpec,
+    ) -> Result<Vec<InputDeclarationSpec>, RuleSpecError> {
+        let mut declared = Vec::new();
+        for (origin, block) in std::iter::once((self.input_origin.as_deref(), &self.inputs)).chain(
+            self.imported_input_declarations
+                .iter()
+                .map(|(origin, block)| (origin.as_deref(), block)),
+        ) {
+            declared.extend(declared_elections(origin, block)?);
+        }
+        if declared.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A program that does not build fails compilation with its own
+        // error, before any interface is derived from these declarations.
+        let catalog = program
+            .to_program()
+            .ok()
+            .map(|model| model.input_read_catalog());
+        let mut by_input = BTreeMap::<String, InputElection>::new();
+        for (origin, slot, election) in declared {
+            let fail = |message: String| RuleSpecError::InputElection {
+                module: module_label(origin),
+                input: slot.clone(),
+                message,
+            };
+            let input = request_name(origin, &slot);
+            if catalog.as_ref().is_some_and(|catalog| {
+                !catalog
+                    .get(&slot)
+                    .is_some_and(|request_names| request_names.contains(&input))
+            }) {
+                return Err(fail(
+                    "carries an election, but no rule or derived-relation predicate of this module reads an input of that name".to_string(),
+                ));
+            }
+            match by_input.get(&input) {
+                None => {
+                    by_input.insert(input, election);
+                }
+                Some(previous) if *previous == election => {}
+                Some(_) => {
+                    return Err(fail("is declared with two different elections".to_string()));
+                }
+            }
+        }
+        Ok(by_input
+            .into_iter()
+            .map(|(input, election)| InputDeclarationSpec { input, election })
+            .collect())
+    }
+
     fn without_imports(mut self) -> Self {
         self.imports.clear();
         self
@@ -2035,6 +2708,118 @@ impl RulesDocument {
         Ok(outcome.program)
     }
 
+    /// How lowering reads each rule, in `self.rules` order: `Some(true)` for
+    /// a parameter or derived rule that `lower_module` reads as a parameter
+    /// (a parameter table, or no entity and every version a literal),
+    /// `Some(false)` for one it reads as a derived rule, and `None` for any
+    /// other kind or a definition that does not write or parse (the module's
+    /// lowering refuses it where it meets it, so errors keep their order).
+    /// Each definition is classified on its own, as `lower_module` classifies
+    /// it.
+    fn parameter_classes(&self) -> Vec<Option<bool>> {
+        self.rules
+            .iter()
+            .map(|rule| match rule.kind {
+                Some(RuleKind::Parameter | RuleKind::Derived) => rule.lowers_to_parameter(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The names rule lowering reads as parameters in this module, which
+    /// derived-relation predicates read the same way (relation roles,
+    /// section 3.3). A module without derived relations needs none of this.
+    fn predicate_parameter_names(&self, classes: &[Option<bool>]) -> HashSet<String> {
+        if !self
+            .rules
+            .iter()
+            .any(|rule| matches!(rule.kind, Some(RuleKind::DerivedRelation)))
+        {
+            return HashSet::new();
+        }
+        self.rules
+            .iter()
+            .zip(classes)
+            .filter(|(_, class)| **class == Some(true))
+            .map(|(rule, _)| rule.name.clone())
+            .collect()
+    }
+
+    /// Refuse a declaration that a bare name cannot read unambiguously
+    /// (docs/rulespec.md, "Declaration names"): one that takes a reserved
+    /// name, or one that shares its name with a declaration of another kind.
+    /// This runs over the import-merged closure, before anything is lowered.
+    ///
+    /// Parameters and derived rules are classed as lowering reads them, so an
+    /// entity-free rule with a literal value is a parameter here. Duplicates
+    /// of one kind are left to the checks that already handle them:
+    /// compatible parameters merge, and a second rule or relation of a name
+    /// fails to compile. A source relation is a provenance record that no
+    /// formula reads by name, so it is not checked. Nor is an `inputs:`
+    /// entry: inputs are inferred from reads, the entry only describes one,
+    /// and `input_declarations` refuses an election on a slot no formula of
+    /// its module reads. A rule whose kind or definition is invalid is
+    /// skipped here; lowering refuses it.
+    fn validate_declaration_names(&self, classes: &[Option<bool>]) -> Result<(), RuleSpecError> {
+        let rules = self.rules.iter().zip(classes).filter_map(|(rule, class)| {
+            let (role, label) = match rule.kind.as_ref()? {
+                RuleKind::Parameter | RuleKind::Derived => {
+                    let parameter = (*class)?;
+                    let declared_parameter = matches!(rule.kind, Some(RuleKind::Parameter));
+                    match (parameter, declared_parameter) {
+                        (true, true) => (DeclaredAs::Parameter, "a parameter"),
+                        (true, false) => (
+                            DeclaredAs::Parameter,
+                            "a derived rule with no entity and a literal value (a parameter once lowered)",
+                        ),
+                        (false, false) => (DeclaredAs::Rule, "a derived rule"),
+                        (false, true) => (
+                            DeclaredAs::Rule,
+                            "a parameter with an entity or a computed formula (a derived rule once lowered)",
+                        ),
+                    }
+                }
+                RuleKind::DataRelation => (DeclaredAs::Relation, "a data relation"),
+                RuleKind::DerivedRelation => (DeclaredAs::Relation, "a derived relation"),
+                RuleKind::SourceRelation | RuleKind::Unsupported(_) => return None,
+            };
+            Some(Declaration {
+                name: &rule.name,
+                role,
+                label,
+                path: rule.source_path(),
+            })
+        });
+
+        let mut first = HashMap::<&str, Declaration>::new();
+        for declaration in rules {
+            if let Some(reason) = reserved_name_reason(declaration.name) {
+                return Err(RuleSpecError::ReservedDeclarationName {
+                    kind: declaration.label,
+                    name: declaration.name.to_string(),
+                    path: declaration.path,
+                    reason,
+                });
+            }
+            match first.get(declaration.name) {
+                Some(earlier) if earlier.role != declaration.role => {
+                    return Err(RuleSpecError::DeclarationNameClash {
+                        name: declaration.name.to_string(),
+                        first: earlier.label,
+                        first_path: earlier.path.clone(),
+                        second: declaration.label,
+                        second_path: declaration.path,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    first.insert(declaration.name, declaration);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn to_program_spec_with_options(
         &self,
         options: RuleSpecLoweringOptions,
@@ -2044,6 +2829,8 @@ impl RulesDocument {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
         }
         self.validate_unit_declarations()?;
+        let parameter_classes = self.parameter_classes();
+        self.validate_declaration_names(&parameter_classes)?;
         let mut formula_source = String::new();
         self.write_header(&mut formula_source);
 
@@ -2051,13 +2838,20 @@ impl RulesDocument {
         let mut relation_rewrites = HashMap::new();
         let mut table_parameters = Vec::new();
         let mut table_parameter_names = HashSet::new();
+        // The names a predicate reads as rules, as rule lowering does: every
+        // derived rule, and a parameter that lowers to a rule (one with an
+        // entity, or a computed formula). `lower_judgment_formula` drops the
+        // names that lower to parameters.
         let derived_rule_names = self
             .rules
             .iter()
-            .filter_map(|rule| match rule.kind.as_ref() {
-                Some(RuleKind::Derived) => Some(rule.name.clone()),
-                _ => None,
+            .zip(&parameter_classes)
+            .filter(|(rule, class)| match rule.kind {
+                Some(RuleKind::Derived) => true,
+                Some(RuleKind::Parameter) => **class == Some(false),
+                _ => false,
             })
+            .map(|(rule, _)| rule.name.clone())
             .collect::<HashSet<String>>();
         let relation_predicate_names = self
             .rules
@@ -2067,6 +2861,7 @@ impl RulesDocument {
                 _ => None,
             })
             .collect::<HashSet<String>>();
+        let predicate_parameter_names = self.predicate_parameter_names(&parameter_classes);
         for rule in &self.rules {
             let kind = match rule.declared_kind() {
                 Ok(kind) => kind,
@@ -2120,8 +2915,11 @@ impl RulesDocument {
                 }
                 RuleKind::DerivedRelation => {
                     rule.reject_top_level_arity()?;
-                    let relation = rule
-                        .to_derived_relation_spec(&derived_rule_names, &relation_predicate_names)?;
+                    let relation = rule.to_derived_relation_spec(
+                        &derived_rule_names,
+                        &relation_predicate_names,
+                        &predicate_parameter_names,
+                    )?;
                     if relation.name != rule.name {
                         if let Some(origin_target) = rule.origin_target.as_deref() {
                             relation_rewrites.insert(
@@ -2171,28 +2969,50 @@ impl RulesDocument {
             })
             .map(|rule| rule.canonical_relation_id())
             .collect::<HashSet<_>>();
-        crate::relation_direction::resolve(&mut program, &defaulted_slots).map_err(|error| {
-            match error {
-                crate::relation_direction::DirectionError::Aggregate {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousRelationDirection {
-                    relation,
-                    citing,
-                    entity,
-                    slot_entities,
-                },
-                crate::relation_direction::DirectionError::DerivedSlots {
-                    relation,
-                    slot_entities,
-                } => RuleSpecError::AmbiguousDerivedRelationSlots {
-                    relation,
-                    slot_entities,
-                },
-            }
+        crate::relation_direction::resolve(
+            &mut program,
+            &defaulted_slots,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(|error| match error {
+            crate::relation_direction::DirectionError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            } => RuleSpecError::OnlyRelatedInput {
+                citing,
+                input,
+                message,
+            },
+            crate::relation_direction::DirectionError::Aggregate {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            } => RuleSpecError::AmbiguousRelationDirection {
+                relation,
+                citing,
+                entity,
+                slot_entities,
+            },
+            crate::relation_direction::DirectionError::DerivedSlots {
+                relation,
+                slot_entities,
+            } => RuleSpecError::AmbiguousDerivedRelationSlots {
+                relation,
+                slot_entities,
+            },
         })?;
+        crate::selected_year::bind(
+            &mut program,
+            &self.inputs,
+            self.input_origin.as_deref(),
+            &self.imported_input_declarations,
+        )
+        .map_err(RuleSpecError::SelectedYearInput)?;
+        program.input_declarations = self.input_declarations(&program)?;
         // Carried for tooling and artifact pass-through only; nothing in
         // compilation or execution reads it.
         program.module = self.module.clone();
@@ -2204,6 +3024,7 @@ impl RulesDocument {
         Ok(RuleSpecLoweringOutcome {
             program,
             diagnostics,
+            source: None,
         })
     }
 
@@ -2422,15 +3243,22 @@ impl RulesDocument {
         let Some(module) = &self.module else {
             return;
         };
+        // A `#` comment ends at a line feed and the text after it would be
+        // lexed as formula source, so every line of a header field goes behind
+        // its own prefix. A value without a line feed is written as before.
         if let Some(title) = &module.title {
-            out.push_str("# title: ");
-            out.push_str(title);
-            out.push('\n');
+            for line in title.split('\n') {
+                out.push_str("# title: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(status) = &module.status {
-            out.push_str("# status: ");
-            out.push_str(status);
-            out.push('\n');
+            for line in status.split('\n') {
+                out.push_str("# status: ");
+                out.push_str(line);
+                out.push('\n');
+            }
         }
         if let Some(summary) = &module.summary {
             for line in summary.lines() {
@@ -2446,6 +3274,101 @@ impl RulesDocument {
 }
 
 impl RuleDefinition {
+    /// `name` and `entity` are written into the formula source unquoted, so
+    /// the lexer must read each as exactly one token: more tokens could
+    /// declare other rules, and a comment or `"""` block would silently drop
+    /// the rest of the value. A name must also match exactly, because later
+    /// stages find each rule's parameter or output by its YAML name.
+    fn validate_source_name(&self) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(&self.name, true) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "name",
+            value: self.name.clone(),
+            expected: "identifier or path",
+        })
+    }
+
+    /// Surrounding whitespace in an entity lexes to nothing and has always
+    /// been accepted, so only the text inside it must be one identifier.
+    fn validate_source_entity(&self, entity: &str) -> Result<(), RuleSpecError> {
+        if is_single_formula_token(
+            entity.trim_matches(|c: char| c.is_ascii_whitespace()),
+            false,
+        ) {
+            return Ok(());
+        }
+        Err(RuleSpecError::InvalidFormulaField {
+            name: self.name.clone(),
+            field: "entity",
+            value: entity.to_string(),
+            expected: "identifier",
+        })
+    }
+
+    /// `write_formula_definition` splits each formula at line feeds, indents
+    /// every line and trims its trailing whitespace. Between tokens that
+    /// changes only whitespace. Reject the two cases where it changes the
+    /// program: a string literal containing a line feed, whose value the
+    /// rewrite would change, and an unclosed `"""` block, which ends at the end
+    /// of the formula's own parse but would hide every later rule in the
+    /// generated source. `written` is the formula as written; it is trimmed
+    /// here as the writer trims it, and error positions refer to `written`.
+    fn validate_formula_source(&self, written: &str) -> Result<(), RuleSpecError> {
+        use crate::formula::{Lexer, TokType};
+
+        let formula = written.trim();
+        if !formula.contains('\n') && !formula.contains("\"\"\"") {
+            return Ok(());
+        }
+        // Lex with a sentinel on a line of its own after the formula. It is
+        // only read as a token at that line, column 1 if every `"""` block in
+        // the formula was closed.
+        const END: &str = "__rulespec_formula_end__";
+        let mut line_offsets = vec![0];
+        line_offsets.extend(formula.match_indices('\n').map(|(offset, _)| offset + 1));
+        let tokens = Lexer::new(&format!("{formula}\n{END}")).tokenise()?;
+        if !tokens.iter().any(|token| {
+            token.ty == TokType::Ident
+                && token.value == END
+                && token.line == line_offsets.len() + 1
+                && token.col == 1
+        }) {
+            return Err(RuleSpecError::UnterminatedFormulaBlock {
+                name: self.name.clone(),
+            });
+        }
+        // Token columns count bytes, so each string's opening quote is at a
+        // known byte offset. Scan its raw bytes to the closing quote.
+        let bytes = formula.as_bytes();
+        for token in tokens.iter().filter(|token| token.ty == TokType::String) {
+            let start = line_offsets[token.line - 1] + token.col - 1;
+            let quote = bytes[start];
+            let mut offset = start + 1;
+            while offset < bytes.len() && bytes[offset] != quote {
+                // Check before skipping an escape: a backslash followed by a
+                // raw line feed is also changed by the rewrite.
+                if bytes[offset] == b'\n'
+                    || (bytes[offset] == b'\\' && bytes.get(offset + 1) == Some(&b'\n'))
+                {
+                    // Point at the opening quote in the formula as written,
+                    // counting characters.
+                    let at = written.len() - written.trim_start().len() + start;
+                    let line_start = written[..at].rfind('\n').map_or(0, |index| index + 1);
+                    return Err(RuleSpecError::MultilineStringLiteral {
+                        name: self.name.clone(),
+                        line: written[..at].matches('\n').count() + 1,
+                        col: written[line_start..at].chars().count() + 1,
+                    });
+                }
+                offset += if bytes[offset] == b'\\' { 2 } else { 1 };
+            }
+        }
+        Ok(())
+    }
+
     fn source_path(&self) -> String {
         self.origin_target
             .clone()
@@ -2553,6 +3476,23 @@ impl RuleDefinition {
             .any(|version| !version.values.is_empty())
     }
 
+    /// Whether lowering reads this parameter or derived rule as a parameter:
+    /// a parameter table, or a definition `lower_module` classifies as one
+    /// (no entity, and every version a literal). `None` when the definition
+    /// does not write or parse, or a table's name is not one formula token;
+    /// the module's lowering refuses it where it meets it, so its error comes
+    /// first.
+    fn lowers_to_parameter(&self) -> Option<bool> {
+        if self.is_parameter_table() {
+            return self.validate_source_name().is_ok().then_some(true);
+        }
+        let mut definition = String::new();
+        self.write_formula_definition(&mut definition).ok()?;
+        crate::formula::parameter_names(&definition)
+            .ok()
+            .map(|names| names.contains(&self.name))
+    }
+
     fn to_indexed_parameter_spec(&self) -> Result<IndexedParameterSpec, RuleSpecError> {
         let indexed_by =
             self.indexed_by
@@ -2623,27 +3563,69 @@ impl RuleDefinition {
         &self,
         derived_names: &HashSet<String>,
         relation_predicate_names: &HashSet<String>,
+        parameter_names: &HashSet<String>,
     ) -> Result<RelationSpec, RuleSpecError> {
         let derived_relation = self.derived_relation.as_ref().ok_or_else(|| {
             RuleSpecError::MissingDerivedRelation {
                 name: self.name.clone(),
             }
         })?;
+        // Keep the legacy missing-arity refusal and its ordering unchanged.
+        if derived_relation.source_path.is_none() && derived_relation.arity.is_none() {
+            return Err(RuleSpecError::MissingDerivedRelationArity {
+                name: self.name.clone(),
+            });
+        }
+        let source_relation = derived_relation
+            .source_relation
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .map(str::to_string);
+        if derived_relation.source_relation.is_some() && derived_relation.source_path.is_some() {
+            return Err(RuleSpecError::RelationPathSourceConflict {
+                name: self.name.clone(),
+            });
+        }
+        if let Some(path) = &derived_relation.source_path {
+            if derived_relation.arity != Some(2)
+                || derived_relation.slot_entities.len() != 2
+                || !matches!(
+                    (derived_relation.current_slot, derived_relation.related_slot),
+                    (Some(0), Some(1)) | (Some(1), Some(0))
+                )
+            {
+                return Err(RuleSpecError::RelationPathRequiresBinaryDeclaration {
+                    name: self.name.clone(),
+                });
+            }
+            for (field, value) in [
+                ("entity", &derived_relation.entity),
+                ("member_relation", &derived_relation.member_relation),
+            ] {
+                if value.is_some() {
+                    return Err(RuleSpecError::RelationPathForbiddenField {
+                        name: self.name.clone(),
+                        field,
+                    });
+                }
+            }
+            if path.is_empty() {
+                return Err(RuleSpecError::RelationPathEmpty {
+                    name: self.name.clone(),
+                });
+            }
+        } else if source_relation.is_none() {
+            return Err(RuleSpecError::MissingDerivedRelationSource {
+                name: self.name.clone(),
+            });
+        }
         let arity =
             derived_relation
                 .arity
                 .ok_or_else(|| RuleSpecError::MissingDerivedRelationArity {
                     name: self.name.clone(),
                 })?;
-        let source_relation = derived_relation
-            .source_relation
-            .as_deref()
-            .map(str::trim)
-            .filter(|source| !source.is_empty())
-            .ok_or_else(|| RuleSpecError::MissingDerivedRelationSource {
-                name: self.name.clone(),
-            })?
-            .to_string();
         let versions = self.effective_versions();
         if versions.len() != 1 {
             return Err(RuleSpecError::InvalidDerivedRelationFormulaVersions {
@@ -2662,15 +3644,19 @@ impl RuleDefinition {
             formula,
             derived_names.clone(),
             relation_predicate_names.clone(),
+            parameter_names.clone(),
         )?;
-        let (inferred_current_slot, inferred_related_slot) =
-            crate::formula::infer_relation_slots_for_rulespec(source_relation.as_str());
+        let (inferred_current_slot, inferred_related_slot) = source_relation
+            .as_deref()
+            .map(crate::formula::infer_relation_slots_for_rulespec)
+            .unwrap_or((0, 1));
         Ok(RelationSpec {
             name: self.canonical_relation_id(),
             arity,
             slot_entities: derived_relation.slot_entities.clone(),
             derivation: Some(RelationDerivationSpec {
                 source_relation,
+                source_path: derived_relation.source_path.clone(),
                 current_slot: derived_relation
                     .current_slot
                     .unwrap_or(inferred_current_slot),
@@ -2827,6 +3813,10 @@ impl RuleDefinition {
     }
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
+        if let Some(entity) = self.entity.as_deref().filter(|value| !value.is_empty()) {
+            self.validate_source_entity(entity)?;
+        }
         let versions = self.effective_versions();
         if versions.is_empty() {
             return Err(RuleSpecError::MissingFormula {
@@ -2863,6 +3853,7 @@ impl RuleDefinition {
                 .ok_or_else(|| RuleSpecError::MissingFormula {
                     name: self.name.clone(),
                 })?;
+            self.validate_formula_source(version.formula.as_deref().unwrap_or(formula))?;
             out.push_str("    from ");
             out.push_str(&start.to_string());
             if let Some(end) = version.effective_to {
@@ -2881,6 +3872,7 @@ impl RuleDefinition {
     }
 
     fn write_formula_stub_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
+        self.validate_source_name()?;
         let effective_from = self
             .versions
             .iter()
@@ -2916,6 +3908,52 @@ impl RuleDefinition {
             .or_else(|| self.sources.iter().find_map(|source| source.url.clone()));
         (citation, url)
     }
+}
+
+/// What a bare name reads when a declaration takes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclaredAs {
+    Parameter,
+    Rule,
+    Relation,
+}
+
+/// One name a module declares, for [`RulesDocument::validate_declaration_names`].
+struct Declaration<'a> {
+    name: &'a str,
+    role: DeclaredAs,
+    label: &'static str,
+    path: String,
+}
+
+/// Why a declaration may not take `name`, when a bare read of it always means
+/// something else. Formula lowering reads `period_start` and `period_end` as
+/// the period's dates before any declaration (`lower_to_scalar`), and reserves
+/// `anchor` and `candidate` as terms inside a derived relation's predicate
+/// (`term_named`). The lexer reads a keyword (`true`, `and`, `if`, ...) as a
+/// literal or syntax, never as a name; a parameter or rule cannot take one
+/// (`validate_source_name`), but a relation could.
+fn reserved_name_reason(name: &str) -> Option<&'static str> {
+    if crate::formula::keyword(name).is_some() {
+        return Some(
+            "it is a formula keyword, which a formula reads as a literal or as syntax, never as a declaration",
+        );
+    }
+    Some(match name {
+        "period_start" => {
+            "a bare `period_start` means the start date of the period being computed, never a declaration"
+        }
+        "period_end" => {
+            "a bare `period_end` means the end date of the period being computed, never a declaration"
+        }
+        "anchor" => {
+            "in a derived relation's predicate, `anchor` names the term for the id the relation is read from, never a declaration"
+        }
+        "candidate" => {
+            "in a derived relation's predicate, `candidate` names the term for the id being tested, never a declaration"
+        }
+        _ => return None,
+    })
 }
 
 fn unit_kinds_equal(left: &crate::spec::UnitKindSpec, right: &crate::spec::UnitKindSpec) -> bool {
@@ -3262,8 +4300,11 @@ fn rewrite_filtered_entity_member_aliases(program: &mut ProgramSpec) {
 fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, relation_name: &str) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -3301,6 +4342,11 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             rewrite_relation_alias_in_scalar(from, alias, relation_name);
             rewrite_relation_alias_in_scalar(to, alias, relation_name);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3314,6 +4360,16 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3359,11 +4415,20 @@ fn rewrite_relation_alias_in_judgment(
             rewrite_relation_alias_in_scalar(left, alias, relation_name);
             rewrite_relation_alias_in_scalar(right, alias, relation_name);
         }
-        JudgmentExprSpec::Derived { .. } => {}
-        JudgmentExprSpec::RelationMember { relation, .. } => {
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. }
+        | JudgmentExprSpec::RelationAtom { relation, .. } => {
             if relation == alias {
                 *relation = relation_name.to_string();
             }
+        }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            if relation == alias {
+                *relation = relation_name.to_string();
+            }
+            rewrite_relation_alias_in_judgment(body, alias, relation_name);
         }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
@@ -3476,7 +4541,12 @@ fn rewrite_relation_references(
             continue;
         };
         if let Some(derivation) = &mut relation.derivation {
-            rewrite_relation_name(&mut derivation.source_relation, origin_target, rewrites);
+            if let Some(source) = &mut derivation.source_relation {
+                rewrite_relation_name(source, origin_target, rewrites);
+            }
+            for step in derivation.source_path.iter_mut().flatten() {
+                rewrite_relation_name(&mut step.relation, origin_target, rewrites);
+            }
             rewrite_judgment_relation_references(
                 &mut derivation.predicate,
                 origin_target,
@@ -3566,7 +4636,7 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
     }
     for relation in &program.relations {
         if let Some(derivation) = &relation.derivation {
-            names.insert(derivation.source_relation.clone());
+            names.extend(derivation.source_relations().map(str::to_string));
             collect_judgment_relation_names(&derivation.predicate, &mut names);
         }
     }
@@ -3576,8 +4646,11 @@ fn used_relation_names(program: &ProgramSpec) -> HashSet<String> {
 fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<String>) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -3615,6 +4688,9 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             collect_scalar_relation_names(from, names);
             collect_scalar_relation_names(to, names);
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            names.insert(relation.clone());
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3626,6 +4702,16 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             where_clause,
             ..
@@ -3661,9 +4747,16 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
 
 fn collect_judgment_relation_names(expr: &JudgmentExprSpec, names: &mut HashSet<String>) {
     match expr {
-        JudgmentExprSpec::Derived { .. } => {}
-        JudgmentExprSpec::RelationMember { relation, .. } => {
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationMember { relation, .. }
+        | JudgmentExprSpec::RelationAtom { relation, .. } => {
             names.insert(relation.clone());
+        }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            names.insert(relation.clone());
+            collect_judgment_relation_names(body, names);
         }
         JudgmentExprSpec::Comparison { left, right, .. } => {
             collect_scalar_relation_names(left, names);
@@ -3691,8 +4784,11 @@ fn rewrite_scalar_relation_references(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::Derived { .. }
+        | ScalarExprSpec::RoleInput { .. }
+        | ScalarExprSpec::RoleDerived { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => {}
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
@@ -3802,6 +4898,9 @@ fn rewrite_scalar_relation_references(
                 derived_origin_targets,
             );
         }
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            rewrite_relation_name(relation, origin_target, rewrites);
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -3828,6 +4927,18 @@ fn rewrite_scalar_relation_references(
             }
         }
         ScalarExprSpec::SumRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            relation,
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             relation,
             value,
             where_clause,
@@ -3943,9 +5054,31 @@ fn rewrite_judgment_relation_references(
                 derived_origin_targets,
             );
         }
-        JudgmentExprSpec::Derived { .. } => {}
+        JudgmentExprSpec::Derived { .. }
+        | JudgmentExprSpec::RoleDerived { .. }
+        | JudgmentExprSpec::SameEntity { .. } => {}
         JudgmentExprSpec::RelationMember { relation, .. } => {
             rewrite_relation_name(relation, origin_target, rewrites);
+        }
+        JudgmentExprSpec::RelationAtom { relation, .. } => {
+            // Atoms name declared relations, including imported declarations.
+            // Prefer a declaration in the predicate's own module, then an
+            // imported name only when it identifies exactly one relation.
+            if !rewrite_relation_name(relation, origin_target, rewrites) {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
+        }
+        JudgmentExprSpec::Exists { relation, body, .. } => {
+            if !rewrite_relation_name(relation, origin_target, rewrites) {
+                rewrite_unambiguous_relation_name(relation, unambiguous_short_rewrites);
+            }
+            rewrite_judgment_relation_references(
+                body,
+                origin_target,
+                rewrites,
+                unambiguous_short_rewrites,
+                derived_origin_targets,
+            );
         }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
@@ -4026,16 +5159,18 @@ fn judgment_uses_imported_derived(
             scalar_uses_imported_derived(left, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(right, origin_target, derived_origin_targets)
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
-        JudgmentExprSpec::RelationMember { .. } => false,
+        JudgmentExprSpec::RelationMember { .. }
+        | JudgmentExprSpec::RelationAtom { .. }
+        | JudgmentExprSpec::SameEntity { .. } => false,
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => items.iter().any(|item| {
             judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
         }),
-        JudgmentExprSpec::Not { item } => {
+        JudgmentExprSpec::Not { item } | JudgmentExprSpec::Exists { body: item, .. } => {
             judgment_uses_imported_derived(item, origin_target, derived_origin_targets)
         }
     }
@@ -4048,11 +5183,13 @@ fn scalar_uses_imported_derived(
 ) -> bool {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. }
+        | ScalarExprSpec::RoleInput { .. }
         | ScalarExprSpec::PeriodStart
         | ScalarExprSpec::PeriodEnd => false,
-        ScalarExprSpec::Derived { name } => {
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             derived_reference_is_imported(name, origin_target, derived_origin_targets)
         }
         ScalarExprSpec::ParameterLookup { index, .. }
@@ -4087,11 +5224,22 @@ fn scalar_uses_imported_derived(
             scalar_uses_imported_derived(from, origin_target, derived_origin_targets)
                 || scalar_uses_imported_derived(to, origin_target, derived_origin_targets)
         }
+        ScalarExprSpec::OnlyRelated { .. } => false,
         ScalarExprSpec::CountRelated { where_clause, .. } => where_clause
             .as_deref()
             .map(|expr| judgment_uses_imported_derived(expr, origin_target, derived_origin_targets))
             .unwrap_or(false),
         ScalarExprSpec::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             value,
             where_clause,
             ..
@@ -4164,6 +5312,27 @@ fn write_metadata_raw(out: &mut String, key: &str, value: Option<&str>) {
     out.push('\n');
 }
 
+/// Whether the formula lexer reads `text` as exactly one identifier (or path,
+/// when allowed) spelled exactly `text`. Only identifier bytes reach the
+/// lexer, so quotes and backslashes in a malformed value are never lexed.
+fn is_single_formula_token(text: &str, allow_path: bool) -> bool {
+    use crate::formula::{Lexer, TokType};
+
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'/'))
+        && Lexer::new(text).tokenise().is_ok_and(|tokens| {
+            matches!(
+                tokens.as_slice(),
+                [token, end] if (token.ty == TokType::Ident
+                    || (allow_path && token.ty == TokType::Path))
+                    && token.value == text
+                    && end.ty == TokType::Eof
+            )
+        })
+}
+
 fn quote_formula_string(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -4200,6 +5369,23 @@ where
             "expected string, got {other:?}"
         ))),
     }
+}
+
+// A supplied optional field must contain its declared type. Serde's default
+// handles absence; explicit null must not stand in for a forbidden block.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_strict_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_strict_string(deserializer).map(Some)
 }
 
 fn deserialize_strict_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -4258,5 +5444,47 @@ fn scalar_value_from_yaml<E: serde::de::Error>(
         other => Err(serde::de::Error::custom(format!(
             "expected scalar parameter value, got {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod source_integrity_properties {
+    use super::{ModuleMetadata, RulesDocument};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+    #[test]
+    fn single_line_title_and_status_keep_the_historical_header_bytes() {
+        let value = || {
+            proptest::collection::vec(
+                any::<char>().prop_filter("no line feed", |character| *character != '\n'),
+                0..64,
+            )
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+        };
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 256,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[247; 32]),
+        );
+        runner
+            .run(&(value(), value()), |(title, status)| {
+                let document = RulesDocument {
+                    module: Some(ModuleMetadata {
+                        title: Some(title.clone()),
+                        status: Some(status.clone()),
+                        ..ModuleMetadata::default()
+                    }),
+                    ..RulesDocument::default()
+                };
+                let mut actual = String::new();
+                document.write_header(&mut actual);
+                prop_assert_eq!(actual, format!("# title: {title}\n# status: {status}\n\n"));
+                Ok(())
+            })
+            .expect("a header value without a line feed must keep its exact bytes");
     }
 }

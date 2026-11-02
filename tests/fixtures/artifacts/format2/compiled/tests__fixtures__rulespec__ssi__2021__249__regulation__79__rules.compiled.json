@@ -1,0 +1,1268 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Scottish Council Tax Reduction (SSI 2021/249) reg 79 — applicant's daily\nmaximum reduction.\n\nFor a dwelling with annual council tax A (net of discounts and other\nreductions) and B days in the financial year:\n  bands A–D:  daily_max = A/B − non_dep_deductions\n  bands E–H:  daily_max = (A − A/C)/B − non_dep_deductions\nwhere C is the band taper factor (E:1.075, F:1.125, G:1.175, H:1.225).\n\nReg 79(4): A is divided by the number of jointly and severally liable\npersons, except where the joint liability is partner-only. Students\n(reg 20(2) of the 2012 Act) are excluded from the liable count —\ncaller pre-applies `is_not_student` on each liable Person."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "liable_person",
+        "arity": 2,
+        "slot_entities": [
+          "Person",
+          "Dwelling"
+        ]
+      }
+    ],
+    "parameters": [],
+    "derived": [
+      {
+        "name": "days_in_fy",
+        "entity": "Dwelling",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(1)(b)",
+        "source_url": "https://www.legislation.gov.uk/ssi/2021/249/regulation/79",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "days_between",
+              "from": {
+                "kind": "period_start"
+              },
+              "to": {
+                "kind": "period_end"
+              }
+            },
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "days_between",
+                  "from": {
+                    "kind": "period_start"
+                  },
+                  "to": {
+                    "kind": "period_end"
+                  }
+                },
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_non_student_liable",
+        "entity": "Dwelling",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(4), excluding students per 2012 Act reg 20(2)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "liable_person",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_not_student"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "liable_person",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_not_student"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "a_raw",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(1)(a)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "sub",
+          "left": {
+            "kind": "sub",
+            "left": {
+              "kind": "input",
+              "name": "ct_annual"
+            },
+            "right": {
+              "kind": "input",
+              "name": "ct_discounts"
+            }
+          },
+          "right": {
+            "kind": "input",
+            "name": "ct_other_reductions"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "sub",
+              "left": {
+                "kind": "sub",
+                "left": {
+                  "kind": "input",
+                  "name": "ct_annual"
+                },
+                "right": {
+                  "kind": "input",
+                  "name": "ct_discounts"
+                }
+              },
+              "right": {
+                "kind": "input",
+                "name": "ct_other_reductions"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "liable_divisor",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(4)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "partner_only_joint"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "1"
+            }
+          },
+          "else_expr": {
+            "kind": "max",
+            "items": [
+              {
+                "kind": "derived",
+                "name": "num_non_student_liable"
+              },
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "1"
+                }
+              }
+            ]
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "partner_only_joint"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "1"
+                }
+              },
+              "else_expr": {
+                "kind": "max",
+                "items": [
+                  {
+                    "kind": "derived",
+                    "name": "num_non_student_liable"
+                  },
+                  {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "1"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "a_effective",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(1)(a) with reg 79(4)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "div",
+          "left": {
+            "kind": "derived",
+            "name": "a_raw"
+          },
+          "right": {
+            "kind": "derived",
+            "name": "liable_divisor"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "div",
+              "left": {
+                "kind": "derived",
+                "name": "a_raw"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "liable_divisor"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "is_band_e_to_h",
+        "entity": "Dwelling",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(2)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "band_number"
+          },
+          "op": "gt",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 4
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "band_number"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 4
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "band_taper_factor",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": null,
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(2) — C factor by band",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "band_number"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 5
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "1.075"
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "band_number"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 6
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "1.125"
+              }
+            },
+            "else_expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "band_number"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 7
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "1.175"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "band_number"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 8
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "1.225"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "band_number"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "1"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "input",
+                        "name": "band_number"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 2
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "1"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "input",
+                          "name": "band_number"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 3
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "1"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "input",
+                            "name": "band_number"
+                          },
+                          "op": "eq",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 4
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "decimal",
+                            "value": "1"
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "no_match",
+                          "subject": {
+                            "kind": "input",
+                            "name": "band_number"
+                          },
+                          "patterns": [
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 5
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 6
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 7
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 8
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 1
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 2
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 3
+                              }
+                            },
+                            {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 4
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "band_number"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 5
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "1.075"
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "band_number"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 6
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "1.125"
+                  }
+                },
+                "else_expr": {
+                  "kind": "if",
+                  "condition": {
+                    "kind": "comparison",
+                    "left": {
+                      "kind": "input",
+                      "name": "band_number"
+                    },
+                    "op": "eq",
+                    "right": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    }
+                  },
+                  "then_expr": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "1.175"
+                    }
+                  },
+                  "else_expr": {
+                    "kind": "if",
+                    "condition": {
+                      "kind": "comparison",
+                      "left": {
+                        "kind": "input",
+                        "name": "band_number"
+                      },
+                      "op": "eq",
+                      "right": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "integer",
+                          "value": 8
+                        }
+                      }
+                    },
+                    "then_expr": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "decimal",
+                        "value": "1.225"
+                      }
+                    },
+                    "else_expr": {
+                      "kind": "if",
+                      "condition": {
+                        "kind": "comparison",
+                        "left": {
+                          "kind": "input",
+                          "name": "band_number"
+                        },
+                        "op": "eq",
+                        "right": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "integer",
+                            "value": 1
+                          }
+                        }
+                      },
+                      "then_expr": {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "decimal",
+                          "value": "1"
+                        }
+                      },
+                      "else_expr": {
+                        "kind": "if",
+                        "condition": {
+                          "kind": "comparison",
+                          "left": {
+                            "kind": "input",
+                            "name": "band_number"
+                          },
+                          "op": "eq",
+                          "right": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "integer",
+                              "value": 2
+                            }
+                          }
+                        },
+                        "then_expr": {
+                          "kind": "literal",
+                          "value": {
+                            "kind": "decimal",
+                            "value": "1"
+                          }
+                        },
+                        "else_expr": {
+                          "kind": "if",
+                          "condition": {
+                            "kind": "comparison",
+                            "left": {
+                              "kind": "input",
+                              "name": "band_number"
+                            },
+                            "op": "eq",
+                            "right": {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "integer",
+                                "value": 3
+                              }
+                            }
+                          },
+                          "then_expr": {
+                            "kind": "literal",
+                            "value": {
+                              "kind": "decimal",
+                              "value": "1"
+                            }
+                          },
+                          "else_expr": {
+                            "kind": "if",
+                            "condition": {
+                              "kind": "comparison",
+                              "left": {
+                                "kind": "input",
+                                "name": "band_number"
+                              },
+                              "op": "eq",
+                              "right": {
+                                "kind": "literal",
+                                "value": {
+                                  "kind": "integer",
+                                  "value": 4
+                                }
+                              }
+                            },
+                            "then_expr": {
+                              "kind": "literal",
+                              "value": {
+                                "kind": "decimal",
+                                "value": "1"
+                              }
+                            },
+                            "else_expr": {
+                              "kind": "no_match",
+                              "subject": {
+                                "kind": "input",
+                                "name": "band_number"
+                              },
+                              "patterns": [
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 5
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 6
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 7
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 8
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 1
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 2
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 3
+                                  }
+                                },
+                                {
+                                  "kind": "literal",
+                                  "value": {
+                                    "kind": "integer",
+                                    "value": 4
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "a_after_taper",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(2)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "is_band_e_to_h"
+          },
+          "then_expr": {
+            "kind": "sub",
+            "left": {
+              "kind": "derived",
+              "name": "a_effective"
+            },
+            "right": {
+              "kind": "div",
+              "left": {
+                "kind": "derived",
+                "name": "a_effective"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "band_taper_factor"
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "derived",
+            "name": "a_effective"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "is_band_e_to_h"
+              },
+              "then_expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "derived",
+                  "name": "a_effective"
+                },
+                "right": {
+                  "kind": "div",
+                  "left": {
+                    "kind": "derived",
+                    "name": "a_effective"
+                  },
+                  "right": {
+                    "kind": "derived",
+                    "name": "band_taper_factor"
+                  }
+                }
+              },
+              "else_expr": {
+                "kind": "derived",
+                "name": "a_effective"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "daily_max_before_non_dep",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(1) — A_after_taper / B",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "div",
+          "left": {
+            "kind": "derived",
+            "name": "a_after_taper"
+          },
+          "right": {
+            "kind": "derived",
+            "name": "days_in_fy"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "div",
+              "left": {
+                "kind": "derived",
+                "name": "a_after_taper"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "days_in_fy"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "daily_max_reduction",
+        "entity": "Dwelling",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Day",
+        "source": "SSI 2021/249 reg 79(1)",
+        "source_url": "https://www.legislation.gov.uk/ssi/2021/249/regulation/79",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "derived",
+                "name": "daily_max_before_non_dep"
+              },
+              "right": {
+                "kind": "input",
+                "name": "non_dep_deductions_daily"
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2021-11-01",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "derived",
+                    "name": "daily_max_before_non_dep"
+                  },
+                  "right": {
+                    "kind": "input",
+                    "name": "non_dep_deductions_daily"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "a_raw",
+      "band_taper_factor",
+      "days_in_fy",
+      "is_band_e_to_h",
+      "num_non_student_liable",
+      "liable_divisor",
+      "a_effective",
+      "a_after_taper",
+      "daily_max_before_non_dep",
+      "daily_max_reduction"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": false,
+      "blockers": [
+        "days_in_fy: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_fy: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_fy: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_fy: bulk fast mode does not yet support days_between; explain mode and the generic dense path do",
+        "days_in_fy: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do",
+        "days_in_fy: bulk fast mode does not yet support period_start / period_end; explain mode and the generic dense path do"
+      ]
+    },
+    "input_catalog": [
+      {
+        "slot": "band_number",
+        "canonical_request_name": "band_number",
+        "request_names": [
+          "band_number"
+        ]
+      },
+      {
+        "slot": "ct_annual",
+        "canonical_request_name": "ct_annual",
+        "request_names": [
+          "ct_annual"
+        ]
+      },
+      {
+        "slot": "ct_discounts",
+        "canonical_request_name": "ct_discounts",
+        "request_names": [
+          "ct_discounts"
+        ]
+      },
+      {
+        "slot": "ct_other_reductions",
+        "canonical_request_name": "ct_other_reductions",
+        "request_names": [
+          "ct_other_reductions"
+        ]
+      },
+      {
+        "slot": "is_not_student",
+        "canonical_request_name": "is_not_student",
+        "request_names": [
+          "is_not_student"
+        ]
+      },
+      {
+        "slot": "non_dep_deductions_daily",
+        "canonical_request_name": "non_dep_deductions_daily",
+        "request_names": [
+          "non_dep_deductions_daily"
+        ]
+      },
+      {
+        "slot": "partner_only_joint",
+        "canonical_request_name": "partner_only_joint",
+        "request_names": [
+          "partner_only_joint"
+        ]
+      }
+    ]
+  }
+}

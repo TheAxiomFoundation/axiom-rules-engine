@@ -1,0 +1,14 @@
+format: rulespec/v1
+units: [{name: CAD, kind: currency, minor_units: 2}]
+inputs: [{name: income, entity: Person, dtype: Money, unit: CAD, period: Year}]
+rules:
+- name: out
+  kind: derived
+  entity: Person
+  dtype: Money
+  unit: CAD
+  period: Month
+  versions:
+  - effective_from: '2026-07-01'
+    effective_to: '2026-07-31'
+    formula: input_for_year(income, 2025)

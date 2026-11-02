@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use axiom_rules_engine::compile::CompiledProgramArtifact;
+use axiom_rules_engine::compile::{CompileError, CompiledProgramArtifact};
 use axiom_rules_engine::dense::{
     DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseRelationBatchSpec, DenseRelationKey,
     DenseRelationSchema,
@@ -9,8 +9,11 @@ use axiom_rules_engine::dense::{
 use axiom_rules_engine::model::{JudgmentOutcome, Period, PeriodKind};
 use axiom_rules_engine::spec::DTypeSpec;
 use chrono::NaiveDate;
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::{
+    Element, PyArray1, PyArrayDescrMethods, PyArrayMethods, PyUntypedArray, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use rust_decimal::Decimal;
@@ -83,6 +86,9 @@ struct CompiledDenseProgramHandle {
     derived_metadata: Vec<DerivedMetadataHandle>,
     input_catalog: HashMap<String, String>,
     input_request_names: HashMap<String, Vec<String>>,
+    /// The format of the artifact the program came from.
+    #[pyo3(get)]
+    artifact_format_version: u32,
 }
 
 #[pymethods]
@@ -108,6 +114,37 @@ impl CompiledDenseProgramHandle {
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let artifact = CompiledProgramArtifact::from_composed_rulespec_file(path, &roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        compiled_dense_from_artifact(artifact, entity)
+    }
+
+    /// Load a compiled artifact file. It must be format 3;
+    /// `accept_artifact_format=2` also reads a format-2 artifact, unchanged,
+    /// through the format-2 compatibility loader.
+    #[staticmethod]
+    #[pyo3(signature = (path, entity=None, accept_artifact_format=None))]
+    fn from_artifact_file(
+        path: &str,
+        entity: Option<&str>,
+        accept_artifact_format: Option<u32>,
+    ) -> PyResult<Self> {
+        let accept_format_2 = match accept_artifact_format {
+            None => false,
+            Some(2) => true,
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "accept_artifact_format accepts only 2, the format the engine reads through its compatibility loader; got {other}"
+                )));
+            }
+        };
+        let artifact = match CompiledProgramArtifact::from_json_file(path) {
+            Err(CompileError::UnsupportedArtifactFormatVersion { found: 2, .. })
+                if accept_format_2 =>
+            {
+                CompiledProgramArtifact::from_legacy_format_2_json_file(path)
+            }
+            loaded => loaded,
+        }
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
         compiled_dense_from_artifact(artifact, entity)
     }
 
@@ -289,6 +326,7 @@ fn compiled_dense_from_artifact(
         derived_metadata,
         input_catalog,
         input_request_names,
+        artifact_format_version: artifact.artifact_format_version,
     })
 }
 
@@ -503,6 +541,8 @@ fn build_batch(
                     DenseRelationBatchSpec {
                         offsets,
                         inputs: HashMap::new(),
+                        related_row_count: extract_related_row_count(relation_dict)?,
+                        input_lengths: HashMap::new(),
                     },
                     input_dict,
                 ))
@@ -523,6 +563,12 @@ fn build_batch(
         }
     }
 
+    // Only the columns a schema reads are converted; the engine gets the
+    // rest's lengths alone.
+    for (key, (batch, input_dict)) in bound_relations.iter_mut() {
+        forward_unread_lengths(batch, input_dict, key, row_count)?;
+    }
+
     Ok(DenseBatchSpec {
         row_count,
         inputs: root_inputs,
@@ -533,15 +579,101 @@ fn build_batch(
     })
 }
 
+/// Pass the engine the lengths of the relation's supplied columns that no
+/// schema reads, which are never converted, so it applies the same rules to
+/// them as to a Rust caller's columns: each must have one value per related
+/// row, and one that does confirms the related row count. Only lengths cross,
+/// so the extension makes no allocation sized by a column's claimed length,
+/// and the engine orders the length and confirmation errors among themselves.
+/// An unread entry gets none of the checks `dense_column_from_python` makes:
+/// its `len()` is taken as is, so any sized object counts and a `(3, 2)`
+/// array has length 3. A matching length is trusted like a stated
+/// `related_row_count`, so it can authorize the engine's owners reservation
+/// up to its row bound. This function's own errors are raised before the
+/// engine checks anything, a root column's length included: an unread entry
+/// with no `len()` (`ValueError`) and a key that is not a string
+/// (`TypeError`). Malformed offsets are left for the engine to report first.
+fn forward_unread_lengths(
+    batch: &mut DenseRelationBatchSpec,
+    input_dict: &Bound<'_, PyDict>,
+    key: &DenseRelationKey,
+    row_count: usize,
+) -> PyResult<()> {
+    let offsets = &batch.offsets;
+    let well_formed = row_count.checked_add(1) == Some(offsets.len())
+        && offsets.first() == Some(&0)
+        && offsets.windows(2).all(|pair| pair[0] <= pair[1]);
+    if !well_formed {
+        return Ok(());
+    }
+    for (name, column) in input_dict.iter() {
+        let name = name.extract::<String>()?;
+        if batch.inputs.contains_key(&name) {
+            continue;
+        }
+        let length = column.len().map_err(|_| {
+            PyValueError::new_err(format!(
+                "dense relation input `{name}` for `{}` must be an array or list with one value per related row",
+                relation_key(key)
+            ))
+        })?;
+        batch.input_lengths.insert(name, length);
+    }
+    Ok(())
+}
+
+/// A relation dict's optional `related_row_count`. Absent or `None` leaves the
+/// related row count to be confirmed by the relation's columns. It is read as
+/// an `i64`: a value outside that range raises `OverflowError`, and a negative
+/// one `ValueError`.
+fn extract_related_row_count(relation_dict: &Bound<'_, PyDict>) -> PyResult<Option<usize>> {
+    let Some(value) = relation_dict.get_item("related_row_count")? else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    let count = value.extract::<i64>()?;
+    usize::try_from(count)
+        .map(Some)
+        .map_err(|_| PyValueError::new_err("dense relation related_row_count must be non-negative"))
+}
+
 fn dense_column_from_python(value: &Bound<'_, PyAny>) -> PyResult<DenseColumn> {
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, bool>>() {
-        return Ok(DenseColumn::Bool(array.as_slice()?.to_vec()));
+    let value = &plain_ndarray(value)?;
+    if let Ok(array) = value.cast::<PyArray1<bool>>() {
+        return Ok(DenseColumn::Bool(bool_array_values(array)?));
     }
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, i64>>() {
-        return Ok(DenseColumn::Integer(array.as_slice()?.to_vec()));
+    if let Ok(array) = value.cast::<PyArray1<i64>>() {
+        return Ok(DenseColumn::Integer(array_values(array)?));
     }
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
-        return decimal_column_from_f64(array.as_slice()?);
+    if let Ok(array) = value.cast::<PyArray1<f64>>() {
+        return decimal_column_from_f64(&array_values(array)?);
+    }
+    // A converted column is one-dimensional (unread columns cross by length
+    // alone and are not checked here). The list fallbacks below would read a
+    // `(0, 2)` array, which iterates as no rows, as an empty column.
+    if let Ok(array) = value.cast::<PyUntypedArray>() {
+        if array.ndim() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "dense columns must be one-dimensional, but this array has shape {:?}",
+                array.shape()
+            )));
+        }
+    }
+    // An empty array of any dtype converts as an empty list of anything, so
+    // the list fallbacks below would call it bool. Keep an integer, float or
+    // string dtype; any other empty array (complex, object, datetime, ...)
+    // still reads as bool.
+    if let Ok(array) = value.cast::<PyUntypedArray>()
+        && array.len() == 0
+    {
+        match array.dtype().kind() {
+            b'i' | b'u' => return Ok(DenseColumn::Integer(Vec::new())),
+            b'f' => return Ok(DenseColumn::Decimal(Vec::new())),
+            b'U' | b'S' => return Ok(DenseColumn::Text(Vec::new())),
+            _ => {}
+        }
     }
     if let Ok(values) = value.extract::<Vec<bool>>() {
         return Ok(DenseColumn::Bool(values));
@@ -574,13 +706,97 @@ fn decimal_column_from_f64(values: &[f64]) -> PyResult<DenseColumn> {
         .map(DenseColumn::Decimal)
 }
 
+/// An ndarray subclass as a plain `ndarray` over the same memory, which is
+/// what the wrapper's `np.asarray` passes; anything else, unchanged. The
+/// readers below call numpy's `view` and `numpy.require`, and on a subclass
+/// those would run its own `view`, `copy` and `__array_finalize__`, which
+/// could decide what is read. A subclass is read as its storage, so a masked
+/// array is read without its mask, as before.
+fn plain_ndarray<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    if !value.is_instance_of::<PyUntypedArray>() || value.is_exact_instance_of::<PyUntypedArray>() {
+        return Ok(value.clone());
+    }
+    let py = value.py();
+    py.import(intern!(py, "numpy"))?
+        .call_method1(intern!(py, "asarray"), (value,))
+}
+
+/// A bool array's values by numpy's truth rule: every nonzero byte is True.
+/// numpy lets a bool hold any byte (`uint8_array.view(bool)` keeps them all),
+/// but a Rust `bool` must be 0 or 1, so a `&[bool]` over that storage is
+/// undefined behaviour. Read it through a `uint8` view instead.
+fn bool_array_values(array: &Bound<'_, PyArray1<bool>>) -> PyResult<Vec<bool>> {
+    let py = array.py();
+    let bytes = array
+        .call_method1(intern!(py, "view"), (numpy::dtype::<u8>(py),))?
+        .cast_into::<PyArray1<u8>>()?;
+    if bytes.len() != array.len() {
+        return Err(PyValueError::new_err(
+            "a uint8 view of a dense bool column must have one byte per value",
+        ));
+    }
+    Ok(array_values(&bytes)?
+        .into_iter()
+        .map(|byte| byte != 0)
+        .collect())
+}
+
+/// Copy a one-dimensional array's values. A `&[T]` over its storage is sound
+/// only when the storage is contiguous and aligned for `T`, and rust-numpy's
+/// `as_slice` checks contiguity alone. numpy allows strided, reversed and
+/// broadcast arrays, and arrays that start at any byte of their buffer. Any
+/// array that is not both goes through `numpy.require(requirements=("C",
+/// "A"))`, which copies it into new storage, and the result is checked again
+/// before it is read.
+fn array_values<T: Element + Copy>(array: &Bound<'_, PyArray1<T>>) -> PyResult<Vec<T>> {
+    // An empty array's data pointer can still be misaligned, which a
+    // zero-length slice may not be, so read no storage at all.
+    if array.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(values) = values_through_slice(array)? {
+        return Ok(values);
+    }
+    let py = array.py();
+    let requirements = PyDict::new(py);
+    requirements.set_item(intern!(py, "requirements"), ("C", "A"))?;
+    let copy = py
+        .import(intern!(py, "numpy"))?
+        .call_method(intern!(py, "require"), (array,), Some(&requirements))?
+        .cast_into::<PyArray1<T>>()?;
+    if copy.len() == array.len()
+        && let Some(values) = values_through_slice(&copy)?
+    {
+        return Ok(values);
+    }
+    Err(PyValueError::new_err(
+        "numpy could not copy a dense column into aligned, contiguous storage",
+    ))
+}
+
+/// The array's values through a slice, or `None` when its storage is not
+/// contiguous, non-null and aligned for `T`. Fails if Rust code holds the
+/// array mutably.
+fn values_through_slice<T: Element + Copy>(
+    array: &Bound<'_, PyArray1<T>>,
+) -> PyResult<Option<Vec<T>>> {
+    // Borrow before checking: rust-numpy's first borrow imports numpy, which
+    // can run Python, and no Python may run between the checks and the slice.
+    let array = array.try_readonly()?;
+    let data = array.data();
+    if !array.is_c_contiguous() || data.is_null() || !data.is_aligned() {
+        return Ok(None);
+    }
+    Ok(Some(array.as_slice()?.to_vec()))
+}
+
 fn extract_index_vec(value: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, i64>>() {
-        return array
-            .as_slice()?
-            .iter()
+    let value = &plain_ndarray(value)?;
+    if let Ok(array) = value.cast::<PyArray1<i64>>() {
+        return array_values(array)?
+            .into_iter()
             .map(|item| {
-                usize::try_from(*item).map_err(|_| {
+                usize::try_from(item).map_err(|_| {
                     PyValueError::new_err("dense relation offsets must be non-negative")
                 })
             })

@@ -69,6 +69,18 @@ impl RowMask {
         self.count == self.len
     }
 
+    /// Whether both masks hold exactly the same rows.
+    pub(crate) fn same_rows(&self, other: &RowMask) -> bool {
+        self.len == other.len
+            && self.count == other.count
+            && match (&self.bits, &other.bits) {
+                (Some(left), Some(right)) => Rc::ptr_eq(left, right) || left == right,
+                // A mask holding every row keeps no bits, so equal lengths
+                // and counts already decide the rest.
+                _ => true,
+            }
+    }
+
     pub(crate) fn contains(&self, row: usize) -> bool {
         match &self.bits {
             None => row < self.len,
@@ -86,11 +98,23 @@ impl RowMask {
 
     /// The active rows for which `keep` holds.
     pub(crate) fn filter(&self, mut keep: impl FnMut(usize) -> bool) -> Self {
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut bits = vec![false; self.len];
         for row in self.rows() {
             bits[row] = keep(row);
         }
         Self::from_bits(bits)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        match (&self.bits, &other.bits) {
+            (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
     /// The active rows that have no recorded error.
@@ -268,6 +292,18 @@ mod tests {
         assert!(odd.union(&even).is_all());
         assert!(RowMask::none(3).is_empty());
         assert!(RowMask::from_bits(vec![true, true]).is_all());
+    }
+
+    #[test]
+    fn filtering_an_empty_mask_reuses_its_storage() {
+        let empty = RowMask::none(1_000);
+        let filtered = empty.filter(|_| panic!("no candidate remains"));
+        let (Some(before), Some(after)) = (&empty.bits, &filtered.bits) else {
+            panic!("an empty mask has explicit backing storage");
+        };
+        assert!(Rc::ptr_eq(before, after));
+        assert_eq!(filtered.len(), 1_000);
+        assert_eq!(filtered.count(), 0);
     }
 
     #[test]

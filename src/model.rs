@@ -249,6 +249,66 @@ pub enum RelatedValueRef {
     Derived(String),
 }
 
+/// Which end of the related entities' values an
+/// [`ScalarExpr::ExtremeRelated`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extreme {
+    Min,
+    Max,
+}
+
+impl Extreme {
+    /// The formula builtin that lowers to this aggregate, used in diagnostics:
+    /// `min`/`max`, or `min_where`/`max_where` when a `where` clause selects
+    /// the members.
+    pub fn call_name(self, filtered: bool) -> &'static str {
+        match (self, filtered) {
+            (Self::Min, false) => "min",
+            (Self::Max, false) => "max",
+            (Self::Min, true) => "min_where",
+            (Self::Max, true) => "max_where",
+        }
+    }
+
+    /// Whether `candidate` replaces `best` as the extreme so far. Ties keep
+    /// `best`; callers that must not depend on member order break them
+    /// separately.
+    pub fn improves<T: PartialOrd>(self, candidate: &T, best: &T) -> bool {
+        match self {
+            Self::Min => candidate < best,
+            Self::Max => candidate > best,
+        }
+    }
+}
+
+/// An entity id in a derived relation's predicate. Anchor and candidate use
+/// the containing derivation's slot kinds; a variable uses its generator's
+/// slot kind. Terms are meaningful only inside a derived relation's
+/// predicate (docs/relation-roles.md, section 3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Term {
+    Anchor,
+    Candidate,
+    /// De Bruijn index, counted from the innermost enclosing `exists`.
+    Var(usize),
+    /// Literal ids exist only for independent expansion oracles in unit tests.
+    #[cfg(test)]
+    Id(&'static str),
+}
+
+impl Term {
+    /// A stable term label for diagnostics and expression descriptions.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Anchor => "anchor",
+            Self::Candidate => "candidate",
+            Self::Var(_) => "variable",
+            #[cfg(test)]
+            Self::Id(id) => id,
+        }
+    }
+}
+
 /// Which reduction an [`ScalarExpr::OverPeriods`] applies across an entity's
 /// own period axis. Valid only under the lifetime execution surface
 /// (`DenseCompiledProgram::execute_lifetime`); the per-period execution paths
@@ -286,6 +346,10 @@ impl OverPeriodsKind {
 
 #[derive(Clone, Debug)]
 pub enum ScalarExpr {
+    InputForYear {
+        input: String,
+        year: i32,
+    },
     Literal(ScalarValue),
     Input(String),
     /// Look up an entity's input, returning `default` if no record covers the
@@ -328,6 +392,12 @@ pub enum ScalarExpr {
         from: Box<ScalarExpr>,
         to: Box<ScalarExpr>,
     },
+    OnlyRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+    },
     CountRelated {
         relation: String,
         current_slot: usize,
@@ -335,6 +405,29 @@ pub enum ScalarExpr {
         where_clause: Option<Box<JudgmentExpr>>,
     },
     SumRelated {
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The least or greatest `value` over the related entities `where`
+    /// selects (`min(r.f)`, `max_where(r, f, p)`). Members resolve as for
+    /// [`ScalarExpr::SumRelated`]. Numbers compare numerically and dates
+    /// chronologically; with no selected member the evaluation fails rather
+    /// than inventing a value.
+    ExtremeRelated {
+        extreme: Extreme,
+        relation: String,
+        current_slot: usize,
+        related_slot: usize,
+        value: RelatedValueRef,
+        where_clause: Option<Box<JudgmentExpr>>,
+    },
+    /// The `value` of the one related entity `where` selects (`only(r.f)`).
+    /// Members resolve as for [`ScalarExpr::SumRelated`]; zero members or
+    /// more than one fail the evaluation, so it never returns a default.
+    SingleRelated {
         relation: String,
         current_slot: usize,
         related_slot: usize,
@@ -365,6 +458,19 @@ pub enum ScalarExpr {
         value: Box<ScalarExpr>,
         n: Option<Box<ScalarExpr>>,
     },
+    /// `t.name` for an input: the input read at the term's id. Valid only in
+    /// a derived relation's predicate, outside any aggregation's `where`
+    /// clause or aggregated value.
+    RoleInput {
+        term: Term,
+        name: String,
+    },
+    /// `t.name` for a scalar derived rule: the rule evaluated at the term's
+    /// id. The rule's entity is the term's kind (checked at compile).
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -380,9 +486,34 @@ pub enum JudgmentExpr {
         current_slot: usize,
         related_slot: usize,
     },
+    /// A tuple test whose arguments follow the relation's declared slot order.
+    RelationAtom {
+        relation: String,
+        terms: Vec<Term>,
+    },
+    /// Finite disjunction over the generator's variable slot. Other generator
+    /// terms address the enclosing environment; the body binds `Var(0)`.
+    Exists {
+        relation: String,
+        terms: Vec<Term>,
+        variable_slot: usize,
+        body: Box<JudgmentExpr>,
+    },
+    /// Compare the ids of two terms of the same entity kind.
+    SameEntity {
+        left: Term,
+        right: Term,
+        negated: bool,
+    },
     And(Vec<JudgmentExpr>),
     Or(Vec<JudgmentExpr>),
     Not(Box<JudgmentExpr>),
+    /// `t.name` for a judgment derived rule, evaluated at the term's id. The
+    /// same scope and kind rules as [`ScalarExpr::RoleDerived`] apply.
+    RoleDerived {
+        term: Term,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -450,14 +581,34 @@ pub struct RelationSchema {
 }
 
 #[derive(Clone, Debug)]
+pub struct RelationPathStep {
+    pub relation: String,
+    pub from_slot: usize,
+    pub to_slot: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct RelationDerivation {
-    pub source_relation: String,
+    pub source_relation: Option<String>,
+    pub source_path: Option<Vec<RelationPathStep>>,
     pub current_slot: usize,
     pub related_slot: usize,
     pub entity: Option<String>,
     pub member_relation: Option<String>,
     pub slot_entities: Vec<String>,
     pub predicate: JudgmentExpr,
+}
+
+impl RelationDerivation {
+    /// Relation edges read to generate candidates, in source order.
+    pub fn source_relations(&self) -> impl Iterator<Item = &str> {
+        self.source_relation.as_deref().into_iter().chain(
+            self.source_path
+                .iter()
+                .flatten()
+                .map(|step| step.relation.as_str()),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +641,7 @@ pub struct IndexedParameter {
 
 #[derive(Clone, Debug, Default)]
 pub struct Program {
+    pub selected_year_inputs: HashMap<String, crate::selected_year::SelectedYearInput>,
     pub units: HashMap<String, UnitDef>,
     pub relations: HashMap<String, RelationSchema>,
     pub parameters: HashMap<String, IndexedParameter>,
@@ -574,6 +726,37 @@ impl Program {
             Some(UnitKind::Currency { minor_units }) => Some(*minor_units),
             _ => None,
         }
+    }
+
+    /// Whether the program opts into the relation-role supplied-tuple contract.
+    /// Inspect every version too, independent of the period being evaluated.
+    pub fn uses_relation_roles(&self) -> bool {
+        self.has_relation_construct(false)
+    }
+
+    /// Atoms require strict tuple binding, unlike qualified reads alone.
+    pub fn uses_relation_atoms(&self) -> bool {
+        self.has_relation_construct(true)
+    }
+
+    fn has_relation_construct(&self, atoms_only: bool) -> bool {
+        self.relations.values().any(|relation| {
+            relation.derivation.as_ref().is_some_and(|derivation| {
+                derivation.source_path.is_some()
+                    || judgment_has_relation_construct(&derivation.predicate, atoms_only)
+            })
+        }) || self.derived.values().any(|derived| {
+            std::iter::once(&derived.semantics)
+                .chain(derived.versions.iter().map(|version| &version.semantics))
+                .any(|semantics| match semantics {
+                    DerivedSemantics::Scalar(expr) => {
+                        scalar_has_relation_construct(expr, atoms_only)
+                    }
+                    DerivedSemantics::Judgment(expr) => {
+                        judgment_has_relation_construct(expr, atoms_only)
+                    }
+                })
+        })
     }
 
     pub fn resolve_derived_name(&self, reference: &str) -> Option<String> {
@@ -675,6 +858,19 @@ impl Program {
     /// exact owning `<module>#input.<slot>` name. A shared slot may therefore
     /// have multiple allowed request names.
     pub fn input_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(true)
+    }
+
+    /// Request names from expression read sites, retaining their module
+    /// owners. An unused parameter's `indexed_by` label contributes nothing.
+    pub(crate) fn input_read_catalog(&self) -> BTreeMap<String, Vec<String>> {
+        self.input_catalog_with_index_labels(false)
+    }
+
+    fn input_catalog_with_index_labels(
+        &self,
+        include_index_labels: bool,
+    ) -> BTreeMap<String, Vec<String>> {
         let mut catalog: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for derived in self.derived.values() {
             let mut slots = HashSet::new();
@@ -717,22 +913,24 @@ impl Program {
                     .insert(request_name);
             }
         }
-        for parameter in self.parameters.values() {
-            let Some(slot) = parameter.indexed_by.as_deref() else {
-                continue;
-            };
-            let request_name = parameter
-                .id
-                .as_deref()
-                .and_then(public_rule_target)
-                .map_or_else(
-                    || slot.to_string(),
-                    |target| format!("{target}#input.{slot}"),
-                );
-            catalog
-                .entry(slot.to_string())
-                .or_default()
-                .insert(request_name);
+        if include_index_labels {
+            for parameter in self.parameters.values() {
+                let Some(slot) = parameter.indexed_by.as_deref() else {
+                    continue;
+                };
+                let request_name = parameter
+                    .id
+                    .as_deref()
+                    .and_then(public_rule_target)
+                    .map_or_else(
+                        || slot.to_string(),
+                        |target| format!("{target}#input.{slot}"),
+                    );
+                catalog
+                    .entry(slot.to_string())
+                    .or_default()
+                    .insert(request_name);
+            }
         }
         catalog
             .into_iter()
@@ -780,12 +978,25 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
         | ScalarExpr::Derived(_)
         | ScalarExpr::PeriodStart
         | ScalarExpr::PeriodEnd => {}
+        ScalarExpr::InputForYear { input, .. } => {
+            slots.insert(
+                input
+                    .rsplit_once("#input.")
+                    .map_or(input.as_str(), |(_, slot)| slot),
+            );
+        }
         ScalarExpr::Input(name) => {
             slots.insert(name.as_str());
         }
         ScalarExpr::InputOrElse { name, .. } => {
             slots.insert(name.as_str());
         }
+        // An input read only through a term enters the catalog as a bare
+        // read does, under the owning relation's request name.
+        ScalarExpr::RoleInput { name, .. } => {
+            slots.insert(name.as_str());
+        }
+        ScalarExpr::RoleDerived { .. } => {}
         ScalarExpr::ParameterLookup { index, .. } => {
             collect_input_slots_from_scalar_expr(index, slots);
         }
@@ -819,12 +1030,27 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
             collect_input_slots_from_scalar_expr(from, slots);
             collect_input_slots_from_scalar_expr(to, slots);
         }
+        ScalarExpr::OnlyRelated { value, .. } => {
+            if let RelatedValueRef::Input(name) = value {
+                slots.insert(name.as_str());
+            }
+        }
         ScalarExpr::CountRelated { where_clause, .. } => {
             if let Some(where_clause) = where_clause {
                 collect_input_slots_from_judgment_expr(where_clause, slots);
             }
         }
         ScalarExpr::SumRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::ExtremeRelated {
+            value,
+            where_clause,
+            ..
+        }
+        | ScalarExpr::SingleRelated {
             value,
             where_clause,
             ..
@@ -860,6 +1086,73 @@ fn collect_input_slots_from_scalar_expr<'a>(expr: &'a ScalarExpr, slots: &mut Ha
     }
 }
 
+// Keep this walk exhaustive: new relation constructs must opt into binding's
+// contract even when nested in a scalar conditional or an inactive version.
+// Only variants a ProgramSpec could not express before relation roles count.
+// A predicate's `parameter_lookup` is not one: raw ProgramSpec programs have
+// always been able to build it, and they keep the union of supplied tuples.
+fn judgment_has_relation_construct(expr: &JudgmentExpr, atoms_only: bool) -> bool {
+    match expr {
+        JudgmentExpr::RelationAtom { .. } | JudgmentExpr::Exists { .. } => true,
+        JudgmentExpr::SameEntity { .. } | JudgmentExpr::RoleDerived { .. } => !atoms_only,
+        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => false,
+        JudgmentExpr::Comparison { left, right, .. } => {
+            scalar_has_relation_construct(left, atoms_only)
+                || scalar_has_relation_construct(right, atoms_only)
+        }
+        JudgmentExpr::And(items) | JudgmentExpr::Or(items) => items
+            .iter()
+            .any(|item| judgment_has_relation_construct(item, atoms_only)),
+        JudgmentExpr::Not(item) => judgment_has_relation_construct(item, atoms_only),
+    }
+}
+
+fn scalar_has_relation_construct(expr: &ScalarExpr, atoms_only: bool) -> bool {
+    let scalar = |expr| scalar_has_relation_construct(expr, atoms_only);
+    match expr {
+        ScalarExpr::RoleInput { .. } | ScalarExpr::RoleDerived { .. } => !atoms_only,
+        ScalarExpr::Literal(_)
+        | ScalarExpr::Input(_)
+        | ScalarExpr::InputOrElse { .. }
+        | ScalarExpr::Derived(_)
+        | ScalarExpr::InputForYear { .. }
+        | ScalarExpr::PeriodStart
+        | ScalarExpr::PeriodEnd
+        | ScalarExpr::OnlyRelated { .. } => false,
+        ScalarExpr::ParameterLookup { index, .. } => scalar(index),
+        ScalarExpr::Add(items) | ScalarExpr::Min(items) | ScalarExpr::Max(items) => {
+            items.iter().any(scalar)
+        }
+        ScalarExpr::Sub(left, right)
+        | ScalarExpr::Mul(left, right)
+        | ScalarExpr::Div(left, right) => scalar(left) || scalar(right),
+        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => scalar(value),
+        ScalarExpr::DateAddDays { date, days } => scalar(date) || scalar(days),
+        ScalarExpr::DateAddMonths { date, months } => scalar(date) || scalar(months),
+        ScalarExpr::DateAddYears { date, years } => scalar(date) || scalar(years),
+        ScalarExpr::DaysBetween { from, to } => scalar(from) || scalar(to),
+        ScalarExpr::CountRelated { where_clause, .. }
+        | ScalarExpr::SumRelated { where_clause, .. }
+        | ScalarExpr::ExtremeRelated { where_clause, .. }
+        | ScalarExpr::SingleRelated { where_clause, .. } => where_clause
+            .as_ref()
+            .is_some_and(|predicate| judgment_has_relation_construct(predicate, atoms_only)),
+        ScalarExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            judgment_has_relation_construct(condition, atoms_only)
+                || scalar(then_expr)
+                || scalar(else_expr)
+        }
+        ScalarExpr::NoMatch { subject, patterns } => scalar(subject) || patterns.iter().any(scalar),
+        ScalarExpr::OverPeriods { value, n, .. } => {
+            scalar(value) || n.as_ref().is_some_and(|n| scalar(n))
+        }
+    }
+}
+
 fn collect_input_slots_from_judgment_expr<'a>(
     expr: &'a JudgmentExpr,
     slots: &mut HashSet<&'a str>,
@@ -869,13 +1162,17 @@ fn collect_input_slots_from_judgment_expr<'a>(
             collect_input_slots_from_scalar_expr(left, slots);
             collect_input_slots_from_scalar_expr(right, slots);
         }
-        JudgmentExpr::Derived(_) | JudgmentExpr::RelationMember { .. } => {}
+        JudgmentExpr::Derived(_)
+        | JudgmentExpr::RoleDerived { .. }
+        | JudgmentExpr::RelationMember { .. }
+        | JudgmentExpr::RelationAtom { .. }
+        | JudgmentExpr::SameEntity { .. } => {}
         JudgmentExpr::And(items) | JudgmentExpr::Or(items) => {
             for item in items {
                 collect_input_slots_from_judgment_expr(item, slots);
             }
         }
-        JudgmentExpr::Not(item) => {
+        JudgmentExpr::Not(item) | JudgmentExpr::Exists { body: item, .. } => {
             collect_input_slots_from_judgment_expr(item, slots);
         }
     }

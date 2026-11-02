@@ -1,0 +1,806 @@
+{
+  "relations": [
+    {
+      "name": "member_of_household",
+      "arity": 2,
+      "slot_entities": [
+        "Person",
+        "Household"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "name": "allotment_table",
+      "unit": null,
+      "indexed_by": "household_size",
+      "versions": [
+        {
+          "effective_from": "2020-01-01",
+          "effective_to": "2023-12-31",
+          "values": {
+            "1": {
+              "kind": "integer",
+              "value": 100
+            },
+            "2": {
+              "kind": "integer",
+              "value": 180
+            }
+          }
+        },
+        {
+          "effective_from": "2024-01-01",
+          "values": {
+            "2": {
+              "kind": "integer",
+              "value": 190
+            },
+            "3": {
+              "kind": "integer",
+              "value": 260
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "derived": [
+    {
+      "name": "flagged",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "flag"
+        },
+        "op": "eq",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "bool",
+            "value": true
+          }
+        }
+      }
+    },
+    {
+      "name": "outside_north",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "region"
+        },
+        "op": "ne",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "text",
+            "value": "north"
+          }
+        }
+      }
+    },
+    {
+      "name": "review_date",
+      "entity": "Household",
+      "dtype": "date",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "date_add_days",
+        "date": {
+          "kind": "input",
+          "name": "start_date"
+        },
+        "days": {
+          "kind": "input",
+          "name": "grace_days"
+        }
+      }
+    },
+    {
+      "name": "age_in_days",
+      "entity": "Household",
+      "dtype": "integer",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "days_between",
+        "from": {
+          "kind": "input",
+          "name": "birth_date"
+        },
+        "to": {
+          "kind": "period_end"
+        }
+      }
+    },
+    {
+      "name": "before_deadline",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "deadline"
+        },
+        "op": "gte",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "date",
+            "value": "2026-01-01"
+          }
+        }
+      }
+    },
+    {
+      "name": "due_already",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "due"
+        },
+        "op": "lt",
+        "right": {
+          "kind": "period_start"
+        }
+      }
+    },
+    {
+      "name": "moved_in_next_month",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "move_in"
+        },
+        "op": "eq",
+        "right": {
+          "kind": "date_add_months",
+          "date": {
+            "kind": "period_start"
+          },
+          "months": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "allotment",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "parameter_lookup",
+        "parameter": "allotment_table",
+        "index": {
+          "kind": "input",
+          "name": "household_size"
+        }
+      }
+    },
+    {
+      "name": "net",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "sub",
+        "left": {
+          "kind": "input",
+          "name": "gross"
+        },
+        "right": {
+          "kind": "mul",
+          "left": {
+            "kind": "input",
+            "name": "rate"
+          },
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0.5"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "bounded",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "max",
+        "items": [
+          {
+            "kind": "min",
+            "items": [
+              {
+                "kind": "input",
+                "name": "claimed"
+              },
+              {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 100
+                }
+              }
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "rounded",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "add",
+        "items": [
+          {
+            "kind": "ceil",
+            "value": {
+              "kind": "input",
+              "name": "upper"
+            }
+          },
+          {
+            "kind": "floor",
+            "value": {
+              "kind": "input",
+              "name": "lower"
+            }
+          },
+          {
+            "kind": "div",
+            "left": {
+              "kind": "input",
+              "name": "numerator"
+            },
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "household_wages",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "sum_related",
+        "relation": "member_of_household",
+        "current_slot": 1,
+        "related_slot": 0,
+        "value": {
+          "kind": "input",
+          "name": "wage"
+        }
+      }
+    },
+    {
+      "name": "over_integer",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "hours"
+        },
+        "op": "gt",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "integer",
+            "value": 20
+          }
+        }
+      }
+    },
+    {
+      "name": "over_decimal",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "ratio"
+        },
+        "op": "lte",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "decimal",
+            "value": "0.75"
+          }
+        }
+      }
+    },
+    {
+      "name": "over_sum",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "cap"
+        },
+        "op": "lt",
+        "right": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            },
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 2
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "over_count",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "size_claimed"
+        },
+        "op": "ne",
+        "right": {
+          "kind": "count_related",
+          "relation": "member_of_household",
+          "current_slot": 1,
+          "related_slot": 0
+        }
+      }
+    },
+    {
+      "name": "over_related_sum",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "declared_wages"
+        },
+        "op": "eq",
+        "right": {
+          "kind": "sum_related",
+          "relation": "member_of_household",
+          "current_slot": 1,
+          "related_slot": 0,
+          "value": {
+            "kind": "input",
+            "name": "wage"
+          }
+        }
+      }
+    },
+    {
+      "name": "over_days",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "tenure_days"
+        },
+        "op": "gte",
+        "right": {
+          "kind": "days_between",
+          "from": {
+            "kind": "period_start"
+          },
+          "to": {
+            "kind": "period_end"
+          }
+        }
+      }
+    },
+    {
+      "name": "with_bonus",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "add",
+        "items": [
+          {
+            "kind": "input",
+            "name": "gross"
+          },
+          {
+            "kind": "input_or_else",
+            "name": "bonus",
+            "default": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "bonus_floor",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "floor",
+        "value": {
+          "kind": "input_or_else",
+          "name": "bonus",
+          "default": {
+            "kind": "decimal",
+            "value": "0"
+          }
+        }
+      }
+    },
+    {
+      "name": "passthrough",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "input",
+        "name": "bare"
+      }
+    },
+    {
+      "name": "chosen",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "if",
+        "condition": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "flag"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "bool",
+              "value": true
+            }
+          }
+        },
+        "then_expr": {
+          "kind": "input",
+          "name": "branch_value"
+        },
+        "else_expr": {
+          "kind": "literal",
+          "value": {
+            "kind": "integer",
+            "value": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "same_pair",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "left_value"
+        },
+        "op": "eq",
+        "right": {
+          "kind": "input",
+          "name": "right_value"
+        }
+      }
+    },
+    {
+      "name": "against_rule",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "against_rule_value"
+        },
+        "op": "gt",
+        "right": {
+          "kind": "derived",
+          "name": "net"
+        }
+      }
+    },
+    {
+      "name": "against_lookup",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "against_lookup_value"
+        },
+        "op": "gt",
+        "right": {
+          "kind": "parameter_lookup",
+          "parameter": "allotment_table",
+          "index": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "against_if",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "against_if_value"
+        },
+        "op": "gt",
+        "right": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 2
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ordered_bool",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "ordered_flag"
+        },
+        "op": "lt",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "bool",
+            "value": true
+          }
+        }
+      }
+    },
+    {
+      "name": "ordered_text",
+      "entity": "Household",
+      "dtype": "judgment",
+      "unit": null,
+      "semantics": "judgment",
+      "expr": {
+        "kind": "comparison",
+        "left": {
+          "kind": "input",
+          "name": "ordered_label"
+        },
+        "op": "gte",
+        "right": {
+          "kind": "literal",
+          "value": {
+            "kind": "text",
+            "value": "m"
+          }
+        }
+      }
+    },
+    {
+      "name": "matched",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "if",
+        "condition": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "tier"
+          },
+          "op": "eq",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        },
+        "then_expr": {
+          "kind": "literal",
+          "value": {
+            "kind": "integer",
+            "value": 10
+          }
+        },
+        "else_expr": {
+          "kind": "no_match",
+          "subject": {
+            "kind": "input",
+            "name": "tier"
+          },
+          "patterns": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 1
+              }
+            },
+            {
+              "kind": "input",
+              "name": "tier_pattern"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "lifetime_hours",
+      "entity": "Household",
+      "dtype": "decimal",
+      "unit": null,
+      "semantics": "scalar",
+      "expr": {
+        "kind": "over_periods",
+        "over": "sum",
+        "value": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "input",
+              "name": "period_hours"
+            },
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
