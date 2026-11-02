@@ -34,7 +34,8 @@
 //!
 //! A release build does all of it on a 1 MiB thread. CI runs these tests in
 //! a debug build, whose frames are several times larger, on the stacks named
-//! below; `cargo test --release --test formula_depth` checks the 1 MiB claim.
+//! below, and again in a release build on 1 MiB (the "release stack tests"
+//! step), which is what checks the 1 MiB claim.
 //!
 //! The parser's own unit tests (`src/formula.rs`) check the depth it
 //! computes against an independent count on generated formulas, and that
@@ -883,9 +884,15 @@ enum Kind {
     Or,
     ExactlyOne,
     Comparison,
+    /// `max_where` over the members: `extreme_related` with a `where`.
+    ExtremeRelated,
+    /// A filtered `only` over the members: `single_related` with a `where`.
+    SingleRelated,
+    /// `exists` in a derived relation's predicate, which the rule counts.
+    Exists,
 }
 
-const KINDS: [Kind; 23] = [
+const KINDS: [Kind; 26] = [
     Kind::Ceil,
     Kind::Floor,
     Kind::Add,
@@ -909,6 +916,9 @@ const KINDS: [Kind; 23] = [
     Kind::Or,
     Kind::ExactlyOne,
     Kind::Comparison,
+    Kind::ExtremeRelated,
+    Kind::SingleRelated,
+    Kind::Exists,
 ];
 
 /// An expression `depth` levels deep and its depth, built from `leaf` (of
@@ -953,9 +963,12 @@ fn deep_program(kind: Kind, depth: usize) -> Value {
     };
     let not_chain =
         |depth: usize| judgment_chain(depth, &|inner| json!({"kind": "not", "item": inner}));
-    let relations = json!([{
+    let mut relations = json!([{
         "name": "member_of_household", "arity": 2, "slot_entities": ["Person", "Household"],
     }]);
+    let age = json!({"kind": "input", "name": "age"});
+    let older_than_35 =
+        json!({"kind": "comparison", "left": age, "op": "gt", "right": int_lit(35)});
     let (semantics, dtype, expr) = match kind {
         Kind::Ceil | Kind::Floor => {
             let name = if matches!(kind, Kind::Ceil) {
@@ -1096,6 +1109,47 @@ fn deep_program(kind: Kind, depth: usize) -> Value {
             let expr = json!({"kind": "exactly_one", "items": [not_chain(depth - 1), never]});
             ("judgment", "judgment", expr)
         }
+        Kind::ExtremeRelated | Kind::SingleRelated => {
+            // A `not` chain over `age > 35`: whatever its parity, it holds for
+            // exactly one of the two members, so `only` has one to read.
+            let filter = chain_of(depth - 1, older_than_35, 2, |inner, d| {
+                link(json!({"kind": "not", "item": inner}), d, 0)
+            });
+            let mut expr = json!({
+                "kind": "single_related",
+                "relation": "member_of_household", "current_slot": 1, "related_slot": 0,
+                "value": age, "where": filter,
+            });
+            if matches!(kind, Kind::ExtremeRelated) {
+                expr["kind"] = json!("extreme_related");
+                expr["extreme"] = json!("max");
+            }
+            ("scalar", "decimal", expr)
+        }
+        // The deep expression is the predicate of `eligible`: an `exists`
+        // over the household's members around a `not` chain over a term
+        // comparison. The rule counts `eligible`.
+        Kind::Exists => {
+            let same = json!({"kind": "same_entity", "left": {"var": 0}, "right": "candidate", "negated": false});
+            let body = chain_of(depth - 1, same, 1, |inner, d| {
+                link(json!({"kind": "not", "item": inner}), d, 0)
+            });
+            let predicate = json!({
+                "kind": "exists", "relation": "member_of_household",
+                "terms": [{"var": 0}, "anchor"], "variable_slot": 0, "body": body,
+            });
+            relations.as_array_mut().expect("relations").push(json!({
+                "name": "eligible", "arity": 2, "slot_entities": ["Person", "Household"],
+                "derivation": {
+                    "source_relation": "member_of_household", "current_slot": 1, "related_slot": 0,
+                    "slot_entities": ["Person", "Household"], "predicate": predicate,
+                },
+            }));
+            let expr = json!({
+                "kind": "count_related", "relation": "eligible", "current_slot": 1, "related_slot": 0,
+            });
+            ("scalar", "integer", expr)
+        }
         Kind::Comparison => {
             let left = scalar_chain(
                 depth - 1,
@@ -1137,10 +1191,15 @@ fn members_dataset() -> Value {
 }
 
 /// `deep` in `mode`, read from JSON text as a host sends it: the answer, or
-/// the error, as text.
+/// the error, as text. The members' `age` is sent only to a program that
+/// reads it, since a request may not carry an input no rule reads.
 fn run_program(mode: &str, program: &Value) -> Result<String, String> {
+    let mut dataset = members_dataset();
+    if !program.to_string().contains(r#""name":"age""#) {
+        dataset["inputs"] = json!([]);
+    }
     let request = json!({
-        "mode": mode, "program": program, "dataset": members_dataset(), "queries": queries(),
+        "mode": mode, "program": program, "dataset": dataset, "queries": queries(),
     })
     .to_string();
     let request =
@@ -1213,11 +1272,16 @@ fn the_expression_bound_is_the_formula_bound_plus_lowering_and_a_pin() {
 
 /// At the expression bound, every kind of expression read from JSON runs in
 /// explain, fast and dense without exhausting the stack, and the modes agree:
-/// fast and dense either decline (an error) or give explain's answer.
+/// explain answers, fast gives explain's answer, and dense declines (an
+/// error) or gives explain's answer. Two kinds have no answer at the bound,
+/// for reasons of their own, not depth: an uncovered `match` (`no_match`)
+/// fails when it is reached, and `over_periods` runs only in lifetime
+/// execution.
 #[test]
 fn every_kind_of_expression_at_the_expression_bound_runs_alike_in_every_mode() {
+    let mut answered = 0;
     for kind in KINDS {
-        on_stack(AT_BOUND_STACK, || {
+        answered += on_stack(AT_BOUND_STACK, || {
             let program = deep_program(kind, MAX_EXPRESSION_DEPTH);
             let explain = run_program("explain", &program);
             let fast = run_program("fast", &program);
@@ -1225,14 +1289,23 @@ fn every_kind_of_expression_at_the_expression_bound_runs_alike_in_every_mode() {
             if let (Ok(dense), Ok(explain)) = (run_dense(&program), &explain) {
                 assert_eq!(&dense, explain, "{kind:?}: dense and explain disagree");
             }
-            if let Err(error) = &explain {
-                assert!(
-                    !error.contains("levels deep"),
-                    "{kind:?}: refused at the bound: {error}"
-                );
+            match (&explain, kind) {
+                (Ok(_), Kind::NoMatch | Kind::OverPeriods) => {
+                    panic!("{kind:?}: expected to decline at the bound, answered {explain:?}")
+                }
+                (Ok(_), _) => 1,
+                (Err(error), Kind::NoMatch | Kind::OverPeriods) => {
+                    assert!(
+                        !error.contains("levels deep"),
+                        "{kind:?}: refused at the bound: {error}"
+                    );
+                    0
+                }
+                (Err(error), _) => panic!("{kind:?}: explain did not answer: {error}"),
             }
         });
     }
+    assert_eq!(answered, KINDS.len() - 2);
 }
 
 /// One level past the expression bound, a program is refused wherever it
@@ -1651,6 +1724,23 @@ fn a_program_too_deep_is_refused_before_anything_else_walks_it() {
         let at_bound = artifact(MAX_EXPRESSION_DEPTH);
         assert!(at_bound.contains("nowhere"), "{at_bound}");
         assert_expression_too_deep(artifact(MAX_EXPRESSION_DEPTH + 1), "artifact");
+
+        // The same through the legacy format-2 loader, from a format-2
+        // artifact this engine wrote.
+        let format_2 = |depth: usize| {
+            let mut artifact: Value = serde_json::from_str(include_str!(
+                "fixtures/artifacts/format2/compiled/tests__fixtures__rulespec__other__flat_tax__rules.compiled.json"
+            ))
+            .expect("the format-2 fixture parses");
+            artifact["program"]["derived"] =
+                chain_over(json!({"kind": "derived", "name": "nowhere"}), depth)["derived"].clone();
+            CompiledProgramArtifact::from_legacy_format_2_json_str(&artifact.to_string())
+                .expect_err("refused")
+                .to_string()
+        };
+        let at_bound = format_2(MAX_EXPRESSION_DEPTH);
+        assert!(at_bound.contains("nowhere"), "{at_bound}");
+        assert_expression_too_deep(format_2(MAX_EXPRESSION_DEPTH + 1), "format-2 artifact");
 
         // A program compiled in Rust: its metadata walks the expressions.
         let compiled = |depth: usize| {

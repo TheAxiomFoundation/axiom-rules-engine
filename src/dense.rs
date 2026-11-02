@@ -2022,101 +2022,15 @@ impl<'a> DenseCompiler<'a> {
         compiled
     }
 
-    fn compile_scalar_node(
-        &mut self,
-        derived_name: &str,
-        expr: &ScalarExpr,
-    ) -> Compiling<CompiledScalarExpr> {
+    /// The relation aggregations of a root rule's formula, compiled outside
+    /// [`Self::compile_scalar_node`]. That function recurses once per
+    /// expression level, and its frame is sized for its largest arm; these
+    /// arms hold the most locals, so keeping them in a frame of their own
+    /// keeps every level of a deep formula small. With them inline, compiling
+    /// a 131-level chain took 1,189 KiB of stack in a release build.
+    #[inline(never)]
+    fn compile_aggregation(&mut self, expr: &ScalarExpr) -> Compiling<CompiledScalarExpr> {
         match expr {
-            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
-                Err(relation_role_unsupported(*term, name).into())
-            }
-            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
-            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
-                "selected-year input requires period-aware Explain execution".into(),
-            )
-            .into()),
-            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
-            ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
-                input: self.root_input(name),
-                default: default.clone(),
-            }),
-            ScalarExpr::Derived(name) => {
-                let dependency = self.program.derived.get(name).ok_or_else(|| {
-                    DenseCompileError::Unsupported(format!(
-                        "unknown scalar dependency `{name}` referenced from `{derived_name}`"
-                    ))
-                })?;
-                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
-                    return Err(DenseCompileError::CrossEntityDependency {
-                        derived: derived_name.to_string(),
-                        dependency: name.clone(),
-                        entity: dependency.entity.clone(),
-                    }
-                    .into());
-                }
-                Ok(CompiledScalarExpr::Derived(self.compile_rule(name)?))
-            }
-            ScalarExpr::ParameterLookup { parameter, index } => {
-                Ok(CompiledScalarExpr::ParameterLookup {
-                    parameter: self.parameter(parameter)?,
-                    index: Box::new(self.compile_scalar_expr(derived_name, index)?),
-                })
-            }
-            ScalarExpr::Add(items) => Ok(CompiledScalarExpr::Add(
-                items
-                    .iter()
-                    .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
-            )),
-            ScalarExpr::Sub(left, right) => Ok(CompiledScalarExpr::Sub(
-                Box::new(self.compile_scalar_expr(derived_name, left)?),
-                Box::new(self.compile_scalar_expr(derived_name, right)?),
-            )),
-            ScalarExpr::Mul(left, right) => Ok(CompiledScalarExpr::Mul(
-                Box::new(self.compile_scalar_expr(derived_name, left)?),
-                Box::new(self.compile_scalar_expr(derived_name, right)?),
-            )),
-            ScalarExpr::Div(left, right) => Ok(CompiledScalarExpr::Div(
-                Box::new(self.compile_scalar_expr(derived_name, left)?),
-                Box::new(self.compile_scalar_expr(derived_name, right)?),
-            )),
-            ScalarExpr::Max(items) => Ok(CompiledScalarExpr::Max(
-                items
-                    .iter()
-                    .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
-            )),
-            ScalarExpr::Min(items) => Ok(CompiledScalarExpr::Min(
-                items
-                    .iter()
-                    .map(|item| self.compile_scalar_expr(derived_name, item))
-                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
-            )),
-            ScalarExpr::Ceil(value) => Ok(CompiledScalarExpr::Ceil(Box::new(
-                self.compile_scalar_expr(derived_name, value)?,
-            ))),
-            ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
-                self.compile_scalar_expr(derived_name, value)?,
-            ))),
-            ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
-            ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
-            ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
-                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
-                days: Box::new(self.compile_scalar_expr(derived_name, days)?),
-            }),
-            ScalarExpr::DateAddMonths { date, months } => Ok(CompiledScalarExpr::DateAddMonths {
-                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
-                months: Box::new(self.compile_scalar_expr(derived_name, months)?),
-            }),
-            ScalarExpr::DateAddYears { date, years } => Ok(CompiledScalarExpr::DateAddYears {
-                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
-                years: Box::new(self.compile_scalar_expr(derived_name, years)?),
-            }),
-            ScalarExpr::DaysBetween { from, to } => Ok(CompiledScalarExpr::DaysBetween {
-                from: Box::new(self.compile_scalar_expr(derived_name, from)?),
-                to: Box::new(self.compile_scalar_expr(derived_name, to)?),
-            }),
             ScalarExpr::OnlyRelated {
                 relation,
                 current_slot,
@@ -2225,6 +2139,110 @@ impl<'a> DenseCompiler<'a> {
                     predicate,
                 })
             }
+            _ => unreachable!("compile_aggregation takes only relation aggregations"),
+        }
+    }
+
+    fn compile_scalar_node(
+        &mut self,
+        derived_name: &str,
+        expr: &ScalarExpr,
+    ) -> Compiling<CompiledScalarExpr> {
+        match expr {
+            ScalarExpr::RoleInput { term, name } | ScalarExpr::RoleDerived { term, name } => {
+                Err(relation_role_unsupported(*term, name).into())
+            }
+            ScalarExpr::Literal(value) => Ok(CompiledScalarExpr::Literal(value.clone())),
+            ScalarExpr::InputForYear { .. } => Err(DenseCompileError::Unsupported(
+                "selected-year input requires period-aware Explain execution".into(),
+            )
+            .into()),
+            ScalarExpr::Input(name) => Ok(CompiledScalarExpr::Input(self.root_input(name))),
+            ScalarExpr::InputOrElse { name, default } => Ok(CompiledScalarExpr::InputOrElse {
+                input: self.root_input(name),
+                default: default.clone(),
+            }),
+            ScalarExpr::Derived(name) => {
+                let dependency = self.program.derived.get(name).ok_or_else(|| {
+                    DenseCompileError::Unsupported(format!(
+                        "unknown scalar dependency `{name}` referenced from `{derived_name}`"
+                    ))
+                })?;
+                if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
+                    return Err(DenseCompileError::CrossEntityDependency {
+                        derived: derived_name.to_string(),
+                        dependency: name.clone(),
+                        entity: dependency.entity.clone(),
+                    }
+                    .into());
+                }
+                Ok(CompiledScalarExpr::Derived(self.compile_rule(name)?))
+            }
+            ScalarExpr::ParameterLookup { parameter, index } => {
+                Ok(CompiledScalarExpr::ParameterLookup {
+                    parameter: self.parameter(parameter)?,
+                    index: Box::new(self.compile_scalar_expr(derived_name, index)?),
+                })
+            }
+            ScalarExpr::Add(items) => Ok(CompiledScalarExpr::Add(
+                items
+                    .iter()
+                    .map(|item| self.compile_scalar_expr(derived_name, item))
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
+            )),
+            ScalarExpr::Sub(left, right) => Ok(CompiledScalarExpr::Sub(
+                Box::new(self.compile_scalar_expr(derived_name, left)?),
+                Box::new(self.compile_scalar_expr(derived_name, right)?),
+            )),
+            ScalarExpr::Mul(left, right) => Ok(CompiledScalarExpr::Mul(
+                Box::new(self.compile_scalar_expr(derived_name, left)?),
+                Box::new(self.compile_scalar_expr(derived_name, right)?),
+            )),
+            ScalarExpr::Div(left, right) => Ok(CompiledScalarExpr::Div(
+                Box::new(self.compile_scalar_expr(derived_name, left)?),
+                Box::new(self.compile_scalar_expr(derived_name, right)?),
+            )),
+            ScalarExpr::Max(items) => Ok(CompiledScalarExpr::Max(
+                items
+                    .iter()
+                    .map(|item| self.compile_scalar_expr(derived_name, item))
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
+            )),
+            ScalarExpr::Min(items) => Ok(CompiledScalarExpr::Min(
+                items
+                    .iter()
+                    .map(|item| self.compile_scalar_expr(derived_name, item))
+                    .collect::<Compiling<Vec<CompiledScalarExpr>>>()?,
+            )),
+            ScalarExpr::Ceil(value) => Ok(CompiledScalarExpr::Ceil(Box::new(
+                self.compile_scalar_expr(derived_name, value)?,
+            ))),
+            ScalarExpr::Floor(value) => Ok(CompiledScalarExpr::Floor(Box::new(
+                self.compile_scalar_expr(derived_name, value)?,
+            ))),
+            ScalarExpr::PeriodStart => Ok(CompiledScalarExpr::PeriodStart),
+            ScalarExpr::PeriodEnd => Ok(CompiledScalarExpr::PeriodEnd),
+            ScalarExpr::DateAddDays { date, days } => Ok(CompiledScalarExpr::DateAddDays {
+                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
+                days: Box::new(self.compile_scalar_expr(derived_name, days)?),
+            }),
+            ScalarExpr::DateAddMonths { date, months } => Ok(CompiledScalarExpr::DateAddMonths {
+                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
+                months: Box::new(self.compile_scalar_expr(derived_name, months)?),
+            }),
+            ScalarExpr::DateAddYears { date, years } => Ok(CompiledScalarExpr::DateAddYears {
+                date: Box::new(self.compile_scalar_expr(derived_name, date)?),
+                years: Box::new(self.compile_scalar_expr(derived_name, years)?),
+            }),
+            ScalarExpr::DaysBetween { from, to } => Ok(CompiledScalarExpr::DaysBetween {
+                from: Box::new(self.compile_scalar_expr(derived_name, from)?),
+                to: Box::new(self.compile_scalar_expr(derived_name, to)?),
+            }),
+            ScalarExpr::OnlyRelated { .. }
+            | ScalarExpr::CountRelated { .. }
+            | ScalarExpr::SumRelated { .. }
+            | ScalarExpr::ExtremeRelated { .. }
+            | ScalarExpr::SingleRelated { .. } => self.compile_aggregation(expr),
             ScalarExpr::If {
                 condition,
                 then_expr,

@@ -532,7 +532,7 @@ The bound exists because every stage walks a formula's tree recursively.
 Before it, a formula nested a few thousand levels deep overflowed the stack,
 which aborts the process instead of returning an error. At the bound a
 release build compiles and evaluates a formula in every mode on a 1 MiB
-thread. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
+thread; CI's release stack tests check that on every change. The deepest formula in the RuleSpec corpora on 2026-10-10 needs 76
 levels.
 
 A program can also arrive as JSON: a compiled artifact, or a request with an
@@ -546,8 +546,9 @@ or not. A deeper expression is refused with ``the expression of derived rule
 A compiled artifact carries any formula within the bound. Its JSON nests
 about two levels per level of a sum, a call or an `and`/`or` chain, and one
 per level of an `if`, an `elif` branch or a `match` arm, so an artifact can
-nest about 260 levels deep. The engine reads an artifact, and a request with
-an inline program, from JSON nested up to 512 levels
+nest about 260 levels deep. The engine reads an artifact (a stage-3 aggregation
+artifact, which embeds its source artifacts, included), and a request with an
+inline program, from JSON nested up to 512 levels
 (`compile::MAX_JSON_DEPTH`, four times the formula bound) and refuses a
 document nested deeper. serde_json alone stops at 128 levels, which used to
 refuse artifacts `compile` had just written: a sum of 61 terms, or an `elif`

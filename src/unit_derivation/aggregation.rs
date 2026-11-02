@@ -682,7 +682,7 @@ impl CompiledAggregationArtifact {
         source: &str,
         loading: EmbeddedArtifactLoading,
     ) -> Result<Self, UnitDerivationError> {
-        let artifact: Self = serde_json::from_str(source).map_err(|error| {
+        let artifact: Self = crate::json::from_str(source).map_err(|error| {
             UnitDerivationError::InvalidAggregationArtifact(format!(
                 "could not deserialize compiled artifact: {error}"
             ))
@@ -691,7 +691,7 @@ impl CompiledAggregationArtifact {
         // Deserializing an embedded artifact drops what its loader refuses,
         // such as a key format 3 does not have, so each also goes through
         // that loader as written.
-        let written: serde_json::Value = serde_json::from_str(source).map_err(|error| {
+        let written: serde_json::Value = crate::json::from_str(source).map_err(|error| {
             UnitDerivationError::InvalidAggregationArtifact(format!(
                 "could not deserialize compiled artifact: {error}"
             ))

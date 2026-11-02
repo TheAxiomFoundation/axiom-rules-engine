@@ -3687,3 +3687,40 @@ fn phase_two_programs_declare_only_base_relations() {
     assert!(!program.uses_relation_roles());
     assert!(!program.uses_relation_atoms());
 }
+
+/// A stage-3 artifact embeds its source artifact, so it nests deeper than
+/// that artifact. It is read with the loader's JSON budget, as an artifact
+/// is: a source formula at the formula bound (a flat sum of 128 terms, which
+/// serializes two levels of JSON per term) reloads. With serde_json's
+/// default 128 levels it failed with `recursion limit exceeded` from 62
+/// terms.
+#[test]
+fn a_stage_3_artifact_whose_source_formula_is_at_the_bound_reloads() {
+    let terms = crate::rulespec::MAX_FORMULA_DEPTH;
+    let source = format!(
+        "{}\n  - name: deep_sum\n    kind: derived\n    entity: Child\n    dtype: Integer\n    period: Year\n    versions:\n      - effective_from: '2026-04-01'\n        formula: {}\n",
+        include_str!("../../tests/fixtures/unit_derivation/nz_best_start_gross.rulespec.yaml")
+            .trim_end(),
+        vec!["1"; terms].join(" + ")
+    );
+    let source_artifact = compile_nz_source_artifact(&source);
+    let mut registry = UnitDerivationDocumentRegistry::default();
+    let artifact = registry
+        .register_aggregation_source(
+            include_str!("../../tests/fixtures/unit_derivation/nz_income_explorer_family.yaml"),
+            &source_artifact,
+        )
+        .expect("the stage-3 artifact compiles");
+    let written = artifact.to_json_pretty().expect("the artifact serializes");
+    assert!(
+        crate::json::from_str::<serde_json::Value>(&written).is_ok()
+            && serde_json::from_str::<serde_json::Value>(&written).is_err(),
+        "the artifact nests past serde_json's default 128 levels"
+    );
+    let reloaded =
+        CompiledAggregationArtifact::from_json_str(&written).expect("the stage-3 artifact reloads");
+    assert_eq!(
+        reloaded.to_json_pretty().expect("the artifact serializes"),
+        written
+    );
+}
