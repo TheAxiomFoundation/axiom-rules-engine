@@ -1848,11 +1848,13 @@ struct DenseCompiler<'a> {
     /// Each inlined body's index in the table its site and kind select.
     inline_index: HashMap<InlineSite, usize>,
     /// The reads of inlined bodies (each a `references` increment) made by
-    /// rules and bodies still compiling. A rule that finishes keeps its
-    /// reads, and so does a body once it is recorded, since the retry shares
-    /// it rather than compiling it again. When a task defers, the reads still
-    /// here, those the unwound rules made themselves, are taken back, since
-    /// the retry makes them again (see [`Self::compile_tasks`]).
+    /// rules, bodies and derived relations' predicates still compiling. A
+    /// rule that finishes keeps its reads. So does a body once it is
+    /// recorded, and a predicate once its relation's filter is set, since the
+    /// retry shares the body and finds the relation registered rather than
+    /// compiling either again. When a task defers, the reads still here,
+    /// those the unwound rules made themselves, are taken back, since the
+    /// retry makes them again (see [`Self::compile_tasks`]).
     inline_reads: Vec<(InlineTable, usize)>,
     /// Expression levels evaluated since compiling last reported them (see
     /// [`crate::depth::count_visits`]).
@@ -2007,8 +2009,9 @@ impl<'a> DenseCompiler<'a> {
             let compiled = self.compile_rule(&target);
             if let Err(CompileStop::Defer(_)) = compiled {
                 // The retry makes again each read the unwound rules made
-                // themselves, and shares the bodies they compiled, whose own
-                // reads were kept when each was recorded: take back the
+                // themselves. It shares the bodies they compiled and finds the
+                // relations they registered, whose reads were kept when each
+                // body was recorded and each predicate compiled: take back the
                 // former, so a body counts the reads of the compiled program.
                 for (table, index) in std::mem::take(&mut self.inline_reads) {
                     *self.inline_references(table, index) -= 1;
@@ -3354,10 +3357,15 @@ impl<'a> DenseCompiler<'a> {
             // The predicate is compiled once per relation, so a `match` in
             // it is named by whichever rule evaluates the relation.
             self.related_rules.push(String::new());
+            let reads = self.inline_reads.len();
             let filter = self.compile_related_predicate(index, &derivation.predicate);
             self.membership_scope = scope;
             self.related_rules.pop();
             self.relations[index].filter = Some(filter?);
+            // The relation stays registered, so a retry after a deferral finds
+            // it and does not compile its predicate again: the predicate keeps
+            // the reads it made, as a recorded body does.
+            self.inline_reads.truncate(reads);
             parent = Some(index);
         }
         Ok(parent.expect("the chain compiled at least one link"))

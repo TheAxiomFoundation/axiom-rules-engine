@@ -1042,6 +1042,29 @@ fn a_shared_body_is_held_to_the_inline_depth_bound_from_every_read() {
     });
 }
 
+/// `program` with each rule of `outputs` also reading a fresh scalar-entity
+/// rule after its own expression. Dense compiles a scalar-entity rule only
+/// when a rule reads it, so at a low deferral threshold compiling each output
+/// defers after the reads its own expression makes.
+fn with_reads_of_fresh_scalars(mut program: Value, outputs: &[&str]) -> Value {
+    let rules = program["derived"].as_array_mut().expect("rules");
+    for rule in rules.iter_mut() {
+        let name = rule["name"].as_str().expect("a name").to_string();
+        if outputs.contains(&name.as_str()) {
+            let expr = rule["expr"].take();
+            rule["expr"] = add(vec![expr, derived(&format!("{name}_offset"))]);
+        }
+    }
+    for output in outputs {
+        rules.push(scalar_rule(
+            &format!("{output}_offset"),
+            "Scalar",
+            integer(1),
+        ));
+    }
+    program
+}
+
 /// The read count of each inlined body, by its `Debug` rendering, sorted.
 fn read_counts(compiled: &DenseCompiledProgram) -> Vec<usize> {
     let plan = format!("{compiled:?}");
@@ -1159,10 +1182,88 @@ fn compile_deferral_leaves_each_body_with_the_reads_of_the_program() {
             ));
         }
         rules.push(scalar_rule("h200", "Scalar", integer(2)));
+        // A derived relation's predicate reads bodies directly. Its relation
+        // stays registered when `total` defers on `offset`, and the retry does
+        // not compile the predicate again, so the predicate keeps its reads.
+        for arm in ["current scalar", "current judgment"] {
+            for depth in [2, 6] {
+                let program = with_reads_of_fresh_scalars(diamond_program(arm, depth), &["total"]);
+                let recursive = counts(&program, usize::MAX);
+                assert_eq!(counts(&program, 1), recursive, "{arm} at depth {depth}");
+                if depth == 2 {
+                    assert_eq!(recursive, vec![1, 3, 3], "{arm}");
+                }
+            }
+        }
+
         let chained = read_counts(
             &compile_dense(&self::program(vec![member()], rules)).expect("dense compiles"),
         );
         assert_eq!(chained.len(), 17);
         assert_eq!(chained.iter().filter(|count| **count >= 2).count(), 16);
     });
+}
+
+/// For the differential's random rule graphs, read through every inlining
+/// site, a compile that defers leaves each body with the reads of the
+/// program that compiles: at deferral thresholds of 1, 2, 3, 5 and 8 levels
+/// the read counts equal those when nothing defers. In half the cases each
+/// output also reads a fresh scalar-entity rule after its own expression, so
+/// compiling it defers after its reads, including those of the derived
+/// relations' predicates it registers. Without a deferral every logged read
+/// is one node of the compiled program, so those counts are exact.
+#[test]
+fn deferring_at_any_threshold_leaves_the_read_counts_of_the_program() {
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
+    let deferred_after_reads = std::cell::Cell::new(0_usize);
+    let case = std::cell::Cell::new(0_usize);
+    runner
+        .run(
+            &(
+                prop::collection::vec(choice(), 1..8),
+                prop::collection::vec(choice(), 1..6),
+            ),
+            |(person_choices, household_choices)| {
+                let people = graph("p", "Person", "income", &person_choices);
+                let homes = graph("h", "Household", "size", &household_choices);
+                let mut program = random_program(&people, &homes);
+                case.set(case.get() + 1);
+                if case.get() % 2 == 0 {
+                    program = with_reads_of_fresh_scalars(
+                        program,
+                        &["total", "counted", "chained", "direct"],
+                    );
+                    deferred_after_reads.set(deferred_after_reads.get() + 1);
+                }
+                let counts = |levels| {
+                    axiom_rules_engine::depth::with_suspend_depth(levels, || {
+                        read_counts(&compile_dense(&program).expect("dense compiles"))
+                    })
+                };
+                let recursive = counts(usize::MAX);
+                for levels in [1, 2, 3, 5, 8] {
+                    prop_assert_eq!(
+                        counts(levels),
+                        recursive.clone(),
+                        "threshold {} for program {}",
+                        levels,
+                        program
+                    );
+                }
+                Ok(())
+            },
+        )
+        .expect("deferral keeps the read counts");
+    assert!(
+        deferred_after_reads.get() >= 64,
+        "only {} cases read a fresh scalar rule",
+        deferred_after_reads.get()
+    );
 }
