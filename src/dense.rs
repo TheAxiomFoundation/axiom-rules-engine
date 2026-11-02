@@ -377,6 +377,10 @@ const WIDEST_DENSE_ELEMENT: usize = {
         size_of::<NaiveDate>(),
         size_of::<JudgmentOutcome>(),
         size_of::<ScalarValue>(),
+        // `min`/`max` over a relation keep each root's best value so far.
+        size_of::<Option<Decimal>>(),
+        size_of::<Option<f64>>(),
+        size_of::<Option<NaiveDate>>(),
     ];
     let mut widest = 1;
     let mut index = 0;

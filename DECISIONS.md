@@ -29,9 +29,10 @@ strings reserved fallibly. If the allocator refuses one, the call fails with
 the refusal of a buffer of the rows the error was raised on. Every other
 `RowErrors` entry is unchanged.
 
-**Why.** After the entry below, every row buffer was reserved fallibly, but a
-text column copied its value's heap data once per row with ordinary
-allocation. A stated related count of N over a root text of L bytes asked for
+**Why.** After "Dense execution reserves every row-count buffer fallibly"
+(2026-10-14), every row buffer was reserved fallibly, but a text column
+copied its value's heap data once per row with ordinary allocation. A stated
+related count of N over a root text of L bytes asked for
 about N × L bytes in small allocations. On wasm32 or under an address-space
 limit the first refused one aborted the process; on a host that overcommits
 memory the rest could exhaust it. An error naming the text copied it once per
@@ -96,6 +97,51 @@ supplied case. The tests cover eleven hand-worked households, compare an
 independent union-find oracle over generated residences, and check symmetry,
 partitioning, participation, order, modes and deferral. The pilot module in
 rulespec-us#1428 comes from the encoder; this fixture is an engine test input.
+
+## 2026-10-14 — Python callers can state a dense batch's row count, and the extension never defaults it
+
+**Decision.** The Python dense surface takes an optional stated row count.
+`CompiledDenseProgram.execute` and `execute_f64` take a keyword `row_count`
+(keyword-only in the extension), and an `execute_lifetime_f64` batch can take
+the form `(inputs, relations, row_count)`. A stated count becomes
+`DenseBatchSpec::row_count`, so the engine checks it as it checks a Rust
+caller's: every supplied root column and every relation's offsets must agree
+with it, and the engine refuses a count above `MAX_DENSE_ROWS`. With no stated
+count, the extension takes the count as before: from the first supplied root
+input column, in the program's order, else from the first relation's offsets.
+When neither gives one, it raises `ValueError` naming the program's root
+inputs and any supplied inputs outside them, and saying how to state the
+count. It never defaults to zero rows.
+
+**Why.** Rust callers set `row_count` directly; Python callers could not. An
+input-free program (a constant or a parameter lookup) could never run from
+Python. A call that left out the program's root input, or misspelt its key,
+got the false error "dense compilation produced neither root inputs nor
+relations". Since #201 the engine treats an absent input as missing on the
+rows that read it, so with a stated count it reports that. Defaulting to zero
+rows would instead turn a misspelt key into an empty result with no error,
+because no row would read the input.
+
+**Consequences.**
+
+- The extension accepts any non-negative Python or numpy integer that fits
+  `usize` as a stated count, and refuses a bool. Every such count reaches the
+  engine, so `MAX_DENSE_ROWS` alone decides which counts the engine refuses as
+  too large.
+- One Python integer now reaches the executor's per-row buffers, as a Rust
+  caller's `row_count` already could. The executor reserves those buffers
+  fallibly (the entry below), so it refuses a count under the bound that the
+  allocator can't serve: `row_count=2**50` on a constant program raises
+  `RuntimeError` naming the count.
+- The extension reads `related_row_count` the same way: it refuses a bool, and
+  a count above `i64::MAX` reaches the engine instead of raising
+  `OverflowError`.
+- A call to a program that reads a relation, with no root column, no stated
+  count and no relations, now gets "missing dense relation batch `<key>`",
+  naming the key, instead of "dense execution requires relation data".
+- The extension still ignores supplied inputs outside the root inputs when it
+  finds a row count, and names them only in the error for a batch with no row
+  count.
 
 ## 2026-10-14 — Dense execution reserves every row-count buffer fallibly
 
@@ -227,8 +273,9 @@ already did for root columns.
   one-dimensional is refused, and an empty integer, float or string array
   keeps that dtype. Other empty arrays (complex, object, datetime, among
   others) still fall through to the list fallbacks and read as bool. A
-  `related_row_count` outside `i64` raises `OverflowError`, and a negative
-  one raises `ValueError`.
+  negative `related_row_count` raises `ValueError`. (The entry on Python
+  callers stating a row count changes how the extension reads a count: one
+  that fits `usize` now reaches the engine.)
 - A stated count is trusted up to the bound. Binding's owners reservation fails
   cleanly only when the allocator reports the failure. Execution then reserves
   each per-row buffer fallibly too (the entry above), so a count that fits the

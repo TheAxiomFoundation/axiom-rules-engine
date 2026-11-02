@@ -924,6 +924,20 @@ fn related_cases() -> Vec<RelatedCase> {
             wider: [true, false],
         },
         RelatedCase {
+            // With the related columns supplied, `flag` is boolean: `max`
+            // fails every member with a type error, after reserving each
+            // root's best value. Without them, `flag`'s placeholder is the
+            // executor's numeric column.
+            name: "max of a boolean over a relation",
+            rules: vec![scalar_rule(
+                "out",
+                "decimal",
+                extreme_related("max", "member", "flag", None),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
             name: "date shift on related rows",
             rules: count_where(compare(
                 date_shift(
