@@ -3694,8 +3694,21 @@ fn phase_two_programs_declare_only_base_relations() {
 /// serializes two levels of JSON per term) reloads. With serde_json's
 /// default 128 levels it failed with `recursion limit exceeded` from 62
 /// terms.
+///
+/// A debug build needs more than a test thread's default stack to compile a
+/// formula at the bound, so this runs on 16 MiB, as `tests/formula_depth.rs`
+/// does.
 #[test]
 fn a_stage_3_artifact_whose_source_formula_is_at_the_bound_reloads() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(stage_3_artifact_at_the_bound_reloads)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread");
+}
+
+fn stage_3_artifact_at_the_bound_reloads() {
     let terms = crate::rulespec::MAX_FORMULA_DEPTH;
     let source = format!(
         "{}\n  - name: deep_sum\n    kind: derived\n    entity: Child\n    dtype: Integer\n    period: Year\n    versions:\n      - effective_from: '2026-04-01'\n        formula: {}\n",
