@@ -11,11 +11,13 @@
 //!    as the column with its values: the oracle does not distinguish them.
 //! 3. Differential: an accepted batch's `len(members)` and `sum(members.income)`
 //!    equal the values computed directly from its offsets, household flags and
-//!    incomes; a missing income fails the first row that reads one, as lazy
-//!    evaluation does.
-//! 4. Period invariance is total over dtypes: lifetime execution fails exactly
-//!    the rows whose base value varies across periods or is not numeric, and
-//!    reports the lowest such row with the values it compared.
+//!    incomes; when a row reads a missing income the batch fails with
+//!    `MissingInput` (the error kind is checked, not which row it names).
+//! 4. Period invariance across dtypes: lifetime execution fails exactly the
+//!    rows whose base value varies across periods or is not numeric, and
+//!    reports the lowest such row with the values it compared. Each period's
+//!    base dtype is drawn at random, so dtype pairings are sampled across
+//!    cases, not enumerated.
 //!
 //! Shapes start as small batches binding accepts (every nonzero related count
 //! confirmed), then take at most one corruption. A huge
@@ -381,7 +383,7 @@ enum Refusal {
 }
 
 /// The batch contract, written independently of the binder, in the order it
-/// reports problems, then the first row lazy evaluation fails.
+/// reports problems, then whether lazy evaluation fails a row.
 fn expected_refusal(shape: &Shape, reads_income: bool) -> Option<Refusal> {
     use Refusal::TypeMismatch;
     if shape.row_count > MAX_ROWS {
@@ -442,7 +444,7 @@ fn expected_refusal(shape: &Shape, reads_income: bool) -> Option<Refusal> {
     if HUGE.contains(&related) {
         return Some(TypeMismatch("more than this process can allocate"));
     }
-    // A missing income fails the first row that reads one: an active
+    // A missing income fails the batch when some row reads one: an active
     // household with a member.
     if reads_income && shape.income.is_none() {
         let reads =

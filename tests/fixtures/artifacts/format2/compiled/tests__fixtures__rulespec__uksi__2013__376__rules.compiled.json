@@ -1,0 +1,2487 @@
+{
+  "artifact_format_version": 2,
+  "engine_version": "0.2.2",
+  "program": {
+    "module": {
+      "summary": "Universal Credit Regulations 2013 (SI 2013/376) — core monthly award\ncalculation, 2025-26 rates.\n\nScope: standard allowance, child element (with two-child limit handled\nby a pre-applied qualifying flag), disabled-child addition, LCWRA element,\ncarer element, housing element (net of non-dep deductions), capital\ntariff income, unearned income deduction, earned income taper with work\nallowance, capital disentitlement above £16,000.\n\nOut of scope (each a layer of UC in its own right — adds incrementally\nas operators land): childcare costs element, benefit cap, transitional\nprotection / managed-migration run-on, mixed-age-couple alternative\namount, sanctions / hardship / third-party deductions, Work Capability\nAssessment determination (`has_lcwra` is an input), LHA / bedroom /\nservice-charge rules (`eligible_housing_costs` and\n`non_dep_deductions_total` are pre-computed inputs), two-child-limit\nexceptions (`qualifies_for_child_element` is pre-applied on each Child)."
+    },
+    "units": [
+      {
+        "name": "GBP",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "USD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "EUR",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "CHF",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "NOK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "GHp",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "NGN",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "UGX",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "ZMW",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ETB",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "RWF",
+        "kind": "currency",
+        "minor_units": 0
+      },
+      {
+        "name": "TZS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "DKK",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "AMD",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "ILS",
+        "kind": "currency",
+        "minor_units": 2
+      },
+      {
+        "name": "count",
+        "kind": "count"
+      },
+      {
+        "name": "person",
+        "kind": "count"
+      },
+      {
+        "name": "ratio",
+        "kind": "ratio"
+      },
+      {
+        "name": "status",
+        "kind": "custom",
+        "label": "judgment"
+      }
+    ],
+    "relations": [
+      {
+        "name": "adult_of_benefit_unit",
+        "arity": 2,
+        "slot_entities": [
+          "Adult",
+          "BenefitUnit"
+        ]
+      },
+      {
+        "name": "child_of_benefit_unit",
+        "arity": 2,
+        "slot_entities": [
+          "Child",
+          "BenefitUnit"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "uc_standard_allowance_single_under_25",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "316.98"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_single_25_or_over",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "400.14"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_couple_under_25",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "497.55"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_standard_allowance_couple_25_or_over",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "628.1"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_child_element_higher",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "339"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_child_element_standard",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "292.81"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_disabled_child_lower",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "158.76"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_disabled_child_higher",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "495.87"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_lcwra_element",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "423.27"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_carer_element",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "201.68"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_work_allowance_with_housing",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "411"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_work_allowance_without_housing",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "684"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_taper_rate",
+        "unit": null,
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "0.55"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_capital_lower",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 6000
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_capital_upper",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "integer",
+                "value": 16000
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_capital_tariff_per_250",
+        "unit": "GBP",
+        "indexed_by": null,
+        "source": null,
+        "source_url": null,
+        "versions": [
+          {
+            "effective_from": "2025-04-07",
+            "values": {
+              "0": {
+                "kind": "decimal",
+                "value": "4.35"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "derived": [
+      {
+        "name": "num_adults_25_or_over",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 36",
+        "source_url": "https://www.legislation.gov.uk/uksi/2013/376/regulation/36",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "adult_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "age_25_or_over"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "adult_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "age_25_or_over"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "any_adult_25_or_over",
+        "entity": "BenefitUnit",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "num_adults_25_or_over"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "num_adults_25_or_over"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "standard_allowance",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 36",
+        "source_url": "https://www.legislation.gov.uk/uksi/2013/376/regulation/36",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_couple"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          },
+          "then_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "derived",
+              "name": "any_adult_25_or_over"
+            },
+            "then_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_standard_allowance_couple_25_or_over",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "else_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_standard_allowance_couple_under_25",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "derived",
+              "name": "any_adult_25_or_over"
+            },
+            "then_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_standard_allowance_single_25_or_over",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "else_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_standard_allowance_single_under_25",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_couple"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              },
+              "then_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "derived",
+                  "name": "any_adult_25_or_over"
+                },
+                "then_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_standard_allowance_couple_25_or_over",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                },
+                "else_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_standard_allowance_couple_under_25",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              },
+              "else_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "derived",
+                  "name": "any_adult_25_or_over"
+                },
+                "then_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_standard_allowance_single_25_or_over",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                },
+                "else_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_standard_allowance_single_under_25",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_qualifying_children",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 24B (two-child limit pre-applied)",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "qualifies_for_child_element"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "qualifies_for_child_element"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_higher_rate_children",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 24(2) first child pre-2017",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "qualifies_for_higher_rate"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "qualifies_for_higher_rate"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_standard_rate_children",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "qualifies_for_standard_rate"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "qualifies_for_standard_rate"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "child_element_total",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 24(2)",
+        "source_url": "https://www.legislation.gov.uk/uksi/2013/376/regulation/24",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_higher_rate_children"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_child_element_higher",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_standard_rate_children"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_child_element_standard",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_higher_rate_children"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "uc_child_element_higher",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_standard_rate_children"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "uc_child_element_standard",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_children_disabled_lower",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "disability_is_lower"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "disability_is_lower"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_children_disabled_higher",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "child_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "disability_is_higher"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "child_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "disability_is_higher"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "disabled_child_element_total",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 24(2) disabled child addition",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_children_disabled_lower"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_disabled_child_lower",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            },
+            {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "num_children_disabled_higher"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_disabled_child_higher",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_children_disabled_lower"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "uc_disabled_child_lower",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_children_disabled_higher"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "uc_disabled_child_higher",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_adults_with_lcwra",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "adult_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "has_lcwra"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "adult_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "has_lcwra"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "has_lcwra_in_bu",
+        "entity": "BenefitUnit",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 27",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "num_adults_with_lcwra"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "num_adults_with_lcwra"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "lcwra_element",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 27",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "has_lcwra_in_bu"
+          },
+          "then_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "uc_lcwra_element",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "has_lcwra_in_bu"
+              },
+              "then_expr": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_lcwra_element",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "num_adults_carer",
+        "entity": "BenefitUnit",
+        "dtype": "integer",
+        "unit": null,
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "count_related",
+          "relation": "adult_of_benefit_unit",
+          "current_slot": 1,
+          "related_slot": 0,
+          "where": {
+            "kind": "comparison",
+            "left": {
+              "kind": "input",
+              "name": "is_carer"
+            },
+            "op": "eq",
+            "right": {
+              "kind": "literal",
+              "value": {
+                "kind": "bool",
+                "value": true
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "count_related",
+              "relation": "adult_of_benefit_unit",
+              "current_slot": 1,
+              "related_slot": 0,
+              "where": {
+                "kind": "comparison",
+                "left": {
+                  "kind": "input",
+                  "name": "is_carer"
+                },
+                "op": "eq",
+                "right": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "bool",
+                    "value": true
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "has_carer",
+        "entity": "BenefitUnit",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 29",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "derived",
+            "name": "num_adults_carer"
+          },
+          "op": "gte",
+          "right": {
+            "kind": "literal",
+            "value": {
+              "kind": "integer",
+              "value": 1
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "num_adults_carer"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "carer_element",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 29",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "has_carer"
+          },
+          "then_expr": {
+            "kind": "parameter_lookup",
+            "parameter": "uc_carer_element",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "has_carer"
+              },
+              "then_expr": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_carer_element",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "housing_element",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 25 and reg 28",
+        "source_url": "https://www.legislation.gov.uk/uksi/2013/376/regulation/25",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "input",
+                "name": "eligible_housing_costs"
+              },
+              "right": {
+                "kind": "input",
+                "name": "non_dep_deductions_total"
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "input",
+                    "name": "eligible_housing_costs"
+                  },
+                  "right": {
+                    "kind": "input",
+                    "name": "non_dep_deductions_total"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "max_uc",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 22",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "add",
+          "items": [
+            {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "add",
+                  "items": [
+                    {
+                      "kind": "add",
+                      "items": [
+                        {
+                          "kind": "add",
+                          "items": [
+                            {
+                              "kind": "derived",
+                              "name": "standard_allowance"
+                            },
+                            {
+                              "kind": "derived",
+                              "name": "child_element_total"
+                            }
+                          ]
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "disabled_child_element_total"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "lcwra_element"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "carer_element"
+                }
+              ]
+            },
+            {
+              "kind": "derived",
+              "name": "housing_element"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "add",
+              "items": [
+                {
+                  "kind": "add",
+                  "items": [
+                    {
+                      "kind": "add",
+                      "items": [
+                        {
+                          "kind": "add",
+                          "items": [
+                            {
+                              "kind": "add",
+                              "items": [
+                                {
+                                  "kind": "derived",
+                                  "name": "standard_allowance"
+                                },
+                                {
+                                  "kind": "derived",
+                                  "name": "child_element_total"
+                                }
+                              ]
+                            },
+                            {
+                              "kind": "derived",
+                              "name": "disabled_child_element_total"
+                            }
+                          ]
+                        },
+                        {
+                          "kind": "derived",
+                          "name": "lcwra_element"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "derived",
+                      "name": "carer_element"
+                    }
+                  ]
+                },
+                {
+                  "kind": "derived",
+                  "name": "housing_element"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "eligible_for_work_allowance",
+        "entity": "BenefitUnit",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 22(2)",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "or",
+          "items": [
+            {
+              "kind": "comparison",
+              "left": {
+                "kind": "derived",
+                "name": "num_qualifying_children"
+              },
+              "op": "gte",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 1
+                }
+              }
+            },
+            {
+              "kind": "derived",
+              "name": "has_lcwra_in_bu"
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "or",
+              "items": [
+                {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "derived",
+                    "name": "num_qualifying_children"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 1
+                    }
+                  }
+                },
+                {
+                  "kind": "derived",
+                  "name": "has_lcwra_in_bu"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "work_allowance_amount",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 22(2) and Schedule 4",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "eligible_for_work_allowance"
+          },
+          "then_expr": {
+            "kind": "if",
+            "condition": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "has_housing_costs"
+              },
+              "op": "eq",
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "bool",
+                  "value": true
+                }
+              }
+            },
+            "then_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_work_allowance_with_housing",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            },
+            "else_expr": {
+              "kind": "parameter_lookup",
+              "parameter": "uc_work_allowance_without_housing",
+              "index": {
+                "kind": "literal",
+                "value": {
+                  "kind": "integer",
+                  "value": 0
+                }
+              }
+            }
+          },
+          "else_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "eligible_for_work_allowance"
+              },
+              "then_expr": {
+                "kind": "if",
+                "condition": {
+                  "kind": "comparison",
+                  "left": {
+                    "kind": "input",
+                    "name": "has_housing_costs"
+                  },
+                  "op": "eq",
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "bool",
+                      "value": true
+                    }
+                  }
+                },
+                "then_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_work_allowance_with_housing",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                },
+                "else_expr": {
+                  "kind": "parameter_lookup",
+                  "parameter": "uc_work_allowance_without_housing",
+                  "index": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "integer",
+                      "value": 0
+                    }
+                  }
+                }
+              },
+              "else_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "earnings_above_work_allowance",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": null,
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "input",
+                "name": "earned_income_monthly"
+              },
+              "right": {
+                "kind": "derived",
+                "name": "work_allowance_amount"
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "input",
+                    "name": "earned_income_monthly"
+                  },
+                  "right": {
+                    "kind": "derived",
+                    "name": "work_allowance_amount"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "earnings_deduction",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 22 — 55% taper",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "mul",
+          "left": {
+            "kind": "derived",
+            "name": "earnings_above_work_allowance"
+          },
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "uc_taper_rate",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "mul",
+              "left": {
+                "kind": "derived",
+                "name": "earnings_above_work_allowance"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_taper_rate",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "capital_above_lower",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 72",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "input",
+                "name": "capital_total"
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_capital_lower",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "input",
+                    "name": "capital_total"
+                  },
+                  "right": {
+                    "kind": "parameter_lookup",
+                    "parameter": "uc_capital_lower",
+                    "index": {
+                      "kind": "literal",
+                      "value": {
+                        "kind": "integer",
+                        "value": 0
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "tariff_income",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 72",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "mul",
+          "left": {
+            "kind": "floor",
+            "value": {
+              "kind": "div",
+              "left": {
+                "kind": "derived",
+                "name": "capital_above_lower"
+              },
+              "right": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "250"
+                }
+              }
+            }
+          },
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "uc_capital_tariff_per_250",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "mul",
+              "left": {
+                "kind": "floor",
+                "value": {
+                  "kind": "div",
+                  "left": {
+                    "kind": "derived",
+                    "name": "capital_above_lower"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": {
+                      "kind": "decimal",
+                      "value": "250"
+                    }
+                  }
+                }
+              },
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_capital_tariff_per_250",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "over_capital_limit",
+        "entity": "BenefitUnit",
+        "dtype": "judgment",
+        "unit": null,
+        "period": "Month",
+        "source": "UC Regs 2013 reg 18",
+        "source_url": null,
+        "semantics": "judgment",
+        "expr": {
+          "kind": "comparison",
+          "left": {
+            "kind": "input",
+            "name": "capital_total"
+          },
+          "op": "gt",
+          "right": {
+            "kind": "parameter_lookup",
+            "parameter": "uc_capital_upper",
+            "index": {
+              "kind": "literal",
+              "value": {
+                "kind": "integer",
+                "value": 0
+              }
+            }
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "judgment",
+            "expr": {
+              "kind": "comparison",
+              "left": {
+                "kind": "input",
+                "name": "capital_total"
+              },
+              "op": "gt",
+              "right": {
+                "kind": "parameter_lookup",
+                "parameter": "uc_capital_upper",
+                "index": {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "integer",
+                    "value": 0
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_award_before_capital_test",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 22",
+        "source_url": null,
+        "semantics": "scalar",
+        "expr": {
+          "kind": "max",
+          "items": [
+            {
+              "kind": "literal",
+              "value": {
+                "kind": "decimal",
+                "value": "0"
+              }
+            },
+            {
+              "kind": "sub",
+              "left": {
+                "kind": "sub",
+                "left": {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "derived",
+                    "name": "max_uc"
+                  },
+                  "right": {
+                    "kind": "derived",
+                    "name": "earnings_deduction"
+                  }
+                },
+                "right": {
+                  "kind": "input",
+                  "name": "unearned_income_monthly"
+                }
+              },
+              "right": {
+                "kind": "derived",
+                "name": "tariff_income"
+              }
+            }
+          ]
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "max",
+              "items": [
+                {
+                  "kind": "literal",
+                  "value": {
+                    "kind": "decimal",
+                    "value": "0"
+                  }
+                },
+                {
+                  "kind": "sub",
+                  "left": {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "sub",
+                      "left": {
+                        "kind": "derived",
+                        "name": "max_uc"
+                      },
+                      "right": {
+                        "kind": "derived",
+                        "name": "earnings_deduction"
+                      }
+                    },
+                    "right": {
+                      "kind": "input",
+                      "name": "unearned_income_monthly"
+                    }
+                  },
+                  "right": {
+                    "kind": "derived",
+                    "name": "tariff_income"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "uc_award",
+        "entity": "BenefitUnit",
+        "dtype": "decimal",
+        "unit": "GBP",
+        "period": "Month",
+        "source": "UC Regs 2013 reg 18 + reg 22",
+        "source_url": "https://www.legislation.gov.uk/uksi/2013/376/regulation/22",
+        "semantics": "scalar",
+        "expr": {
+          "kind": "if",
+          "condition": {
+            "kind": "derived",
+            "name": "over_capital_limit"
+          },
+          "then_expr": {
+            "kind": "literal",
+            "value": {
+              "kind": "decimal",
+              "value": "0"
+            }
+          },
+          "else_expr": {
+            "kind": "derived",
+            "name": "uc_award_before_capital_test"
+          }
+        },
+        "versions": [
+          {
+            "effective_from": "2013-04-29",
+            "semantics": "scalar",
+            "expr": {
+              "kind": "if",
+              "condition": {
+                "kind": "derived",
+                "name": "over_capital_limit"
+              },
+              "then_expr": {
+                "kind": "literal",
+                "value": {
+                  "kind": "decimal",
+                  "value": "0"
+                }
+              },
+              "else_expr": {
+                "kind": "derived",
+                "name": "uc_award_before_capital_test"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "evaluation_order": [
+      "capital_above_lower",
+      "housing_element",
+      "num_adults_25_or_over",
+      "any_adult_25_or_over",
+      "num_adults_carer",
+      "has_carer",
+      "carer_element",
+      "num_adults_with_lcwra",
+      "has_lcwra_in_bu",
+      "lcwra_element",
+      "num_children_disabled_higher",
+      "num_children_disabled_lower",
+      "disabled_child_element_total",
+      "num_higher_rate_children",
+      "num_qualifying_children",
+      "eligible_for_work_allowance",
+      "num_standard_rate_children",
+      "child_element_total",
+      "over_capital_limit",
+      "standard_allowance",
+      "max_uc",
+      "tariff_income",
+      "work_allowance_amount",
+      "earnings_above_work_allowance",
+      "earnings_deduction",
+      "uc_award_before_capital_test",
+      "uc_award"
+    ],
+    "fast_path": {
+      "strategy": "generic_bulk",
+      "compatible": true,
+      "blockers": []
+    },
+    "input_catalog": [
+      {
+        "slot": "age_25_or_over",
+        "canonical_request_name": "age_25_or_over",
+        "request_names": [
+          "age_25_or_over"
+        ]
+      },
+      {
+        "slot": "capital_total",
+        "canonical_request_name": "capital_total",
+        "request_names": [
+          "capital_total"
+        ]
+      },
+      {
+        "slot": "disability_is_higher",
+        "canonical_request_name": "disability_is_higher",
+        "request_names": [
+          "disability_is_higher"
+        ]
+      },
+      {
+        "slot": "disability_is_lower",
+        "canonical_request_name": "disability_is_lower",
+        "request_names": [
+          "disability_is_lower"
+        ]
+      },
+      {
+        "slot": "earned_income_monthly",
+        "canonical_request_name": "earned_income_monthly",
+        "request_names": [
+          "earned_income_monthly"
+        ]
+      },
+      {
+        "slot": "eligible_housing_costs",
+        "canonical_request_name": "eligible_housing_costs",
+        "request_names": [
+          "eligible_housing_costs"
+        ]
+      },
+      {
+        "slot": "has_housing_costs",
+        "canonical_request_name": "has_housing_costs",
+        "request_names": [
+          "has_housing_costs"
+        ]
+      },
+      {
+        "slot": "has_lcwra",
+        "canonical_request_name": "has_lcwra",
+        "request_names": [
+          "has_lcwra"
+        ]
+      },
+      {
+        "slot": "is_carer",
+        "canonical_request_name": "is_carer",
+        "request_names": [
+          "is_carer"
+        ]
+      },
+      {
+        "slot": "is_couple",
+        "canonical_request_name": "is_couple",
+        "request_names": [
+          "is_couple"
+        ]
+      },
+      {
+        "slot": "non_dep_deductions_total",
+        "canonical_request_name": "non_dep_deductions_total",
+        "request_names": [
+          "non_dep_deductions_total"
+        ]
+      },
+      {
+        "slot": "qualifies_for_child_element",
+        "canonical_request_name": "qualifies_for_child_element",
+        "request_names": [
+          "qualifies_for_child_element"
+        ]
+      },
+      {
+        "slot": "qualifies_for_higher_rate",
+        "canonical_request_name": "qualifies_for_higher_rate",
+        "request_names": [
+          "qualifies_for_higher_rate"
+        ]
+      },
+      {
+        "slot": "qualifies_for_standard_rate",
+        "canonical_request_name": "qualifies_for_standard_rate",
+        "request_names": [
+          "qualifies_for_standard_rate"
+        ]
+      },
+      {
+        "slot": "unearned_income_monthly",
+        "canonical_request_name": "unearned_income_monthly",
+        "request_names": [
+          "unearned_income_monthly"
+        ]
+      }
+    ]
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from .models import (
     CompiledExecutionRequest,
@@ -51,15 +52,33 @@ class AxiomRulesEngine:
         return ExecutionResponse.model_validate_json(process.stdout)
 
     def execute_compiled(
-        self, *, artifact_path: str | Path, request: CompiledExecutionRequest
+        self,
+        *,
+        artifact_path: str | Path,
+        request: CompiledExecutionRequest,
+        accept_artifact_format: Literal[2] | None = None,
     ) -> ExecutionResponse:
+        """Run a compiled artifact.
+
+        The artifact must be format 3. ``accept_artifact_format=2`` also
+        runs a format-2 artifact, unchanged, through the engine's format-2
+        compatibility loader; the engine notes that on stderr.
+        """
+        argv = [
+            str(self.binary_path),
+            "run-compiled",
+            "--artifact",
+            str(Path(artifact_path)),
+        ]
+        if accept_artifact_format is not None:
+            if accept_artifact_format != 2:
+                raise ValueError(
+                    "accept_artifact_format accepts only 2, the format the engine "
+                    "reads through its compatibility loader"
+                )
+            argv.extend(["--accept-artifact-format", "2"])
         process = subprocess.run(
-            [
-                str(self.binary_path),
-                "run-compiled",
-                "--artifact",
-                str(Path(artifact_path)),
-            ],
+            argv,
             input=request.model_dump_json(exclude_none=True),
             text=True,
             capture_output=True,
@@ -158,6 +177,7 @@ class AxiomRulesEngine:
         dataset: Dataset,
         queries: list[ExecutionQuery],
         relation_binding: RelationBinding = "strict",
+        accept_artifact_format: Literal[2] | None = None,
     ) -> ExecutionResponse:
         return self.execute_compiled(
             artifact_path=artifact_path,
@@ -167,4 +187,5 @@ class AxiomRulesEngine:
                 queries=queries,
                 relation_binding=relation_binding,
             ),
+            accept_artifact_format=accept_artifact_format,
         )

@@ -1,0 +1,79 @@
+{
+  "entities": [
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Household"
+    },
+    {
+      "id_template": "Person:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Person"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": "bool",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "is_boarder",
+      "name": "is_boarder",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "bool",
+      "dtype_basis": "usage",
+      "election": {
+        "actor": "Household",
+        "provision": "us/regulation/7/273/1/b/3"
+      },
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "provider_requests_boarder_inclusion",
+      "name": "provider_requests_boarder_inclusion",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "bool",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "purchases_and_prepares_with_household",
+      "name": "purchases_and_prepares_with_household",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": [
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "member_of_household",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Person",
+        "Household"
+      ]
+    }
+  ]
+}

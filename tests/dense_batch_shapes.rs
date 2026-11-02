@@ -681,7 +681,15 @@ fn row_count_at_usize_max_is_refused() {
             },
             output,
         );
-        assert_type_mismatch(result, &["row_count", &usize::MAX.to_string()]);
+        // The row bound's own message: the offsets check's overflow error
+        // also names `row_count` and its value.
+        assert_type_mismatch(
+            result,
+            &[
+                &format!("row_count {} exceeds", usize::MAX),
+                "the most rows a dense batch can hold",
+            ],
+        );
     }
 }
 

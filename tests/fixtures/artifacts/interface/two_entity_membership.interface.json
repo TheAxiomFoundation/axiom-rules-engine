@@ -1,0 +1,111 @@
+{
+  "entities": [
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Household"
+    },
+    {
+      "id_template": "Person:{index}",
+      "instances": {
+        "source": "supplied"
+      },
+      "kind": "Person"
+    },
+    {
+      "id_template": "Household:{index}",
+      "instances": {
+        "of": "Household",
+        "source": "alias",
+        "via": [
+          "snap_unit"
+        ]
+      },
+      "kind": "SnapUnit"
+    }
+  ],
+  "inputs": [
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "age",
+      "name": "age",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "earned_income",
+      "name": "earned_income",
+      "values": null,
+      "values_basis": null
+    },
+    {
+      "default": null,
+      "dtype": "decimal",
+      "dtype_basis": "usage",
+      "election": null,
+      "entities": [
+        "Person"
+      ],
+      "legal_id": "unearned_income",
+      "name": "unearned_income",
+      "values": null,
+      "values_basis": null
+    }
+  ],
+  "relations": [
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "member_of_household",
+      "provenance": {
+        "kind": "supplied"
+      },
+      "slot_entities": [
+        "Person",
+        "Household"
+      ]
+    },
+    {
+      "accepts_supplied_tuples": true,
+      "arity": 2,
+      "lookup_slots": [
+        1
+      ],
+      "name": "snap_unit",
+      "provenance": {
+        "kind": "derived",
+        "reads": {
+          "inputs": [],
+          "relations": [],
+          "rules": [
+            "member_eligible"
+          ]
+        },
+        "rule": "snap_unit",
+        "source_relation": "member_of_household"
+      },
+      "slot_entities": [
+        "Person",
+        "Household"
+      ]
+    }
+  ]
+}
