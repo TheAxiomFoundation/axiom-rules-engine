@@ -5731,22 +5731,14 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
         for (index, column) in others.iter().enumerate() {
             let first_period: Arc<str> =
                 Arc::from(period_label(self.period_executors[index].period));
-            let mut last: Option<Rc<Quoted>> = None;
-            for row in live.rows() {
-                if !varying.contains(row) && values_differ(reference, column, row) {
-                    let quoted = Quoted {
-                        rows: self.row_count,
-                        error: QuotedError::OverPeriodsTopNPeriodVarying {
-                            reduction,
-                            first_period: Arc::clone(&first_period),
-                            first_value: quoted_value(column, row),
-                            second_period: Arc::clone(&second_period),
-                            second_value: quoted_value(reference, row),
-                        },
-                    };
-                    varying.record_error(row, share_quoted(&mut last, quoted));
-                }
-            }
+            record_top_n_varying(
+                reduction,
+                (&first_period, column),
+                (&second_period, reference),
+                &live,
+                self.row_count,
+                &mut varying,
+            );
         }
         live = live.without(&varying)?;
         errors.absorb(varying);
@@ -5836,24 +5828,14 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
             // `offset` indexes `rest`, so the diverging period is `offset + 1`.
             let second_period: Arc<str> =
                 Arc::from(period_label(self.period_executors[offset + 1].period));
-            let mut last: Option<Rc<Quoted>> = None;
-            for row in live.rows() {
-                if !errors.contains(row) && values_differ(first, column, row) {
-                    // The error quotes both values without copying them;
-                    // consecutive rows with the same pair share it.
-                    let quoted = Quoted {
-                        rows: self.row_count,
-                        error: QuotedError::LifetimePeriodVaryingInput {
-                            input: Arc::clone(&input),
-                            first_period: Arc::clone(&first_period),
-                            first_value: quoted_value(first, row),
-                            second_period: Arc::clone(&second_period),
-                            second_value: quoted_value(column, row),
-                        },
-                    };
-                    errors.record_error(row, share_quoted(&mut last, quoted));
-                }
-            }
+            record_varying_input(
+                &input,
+                (&first_period, first),
+                (&second_period, column),
+                &live,
+                self.row_count,
+                &mut errors,
+            );
         }
         // Every live row agrees across all periods: bind the (identical) first
         // period's column, preserving its original dtype for the caller.
@@ -5897,6 +5879,66 @@ impl<'a, N: DenseNum> LifetimeExecutor<'a, N> {
                 let (values, errors) = self.eval_judgment(item, mask)?;
                 Ok((negate(values), errors))
             }
+        }
+    }
+}
+
+/// Record `LifetimePeriodVaryingInput` on each row of `rows` not yet failed
+/// whose value differs between the two periods' columns. Each error quotes
+/// both values without copying them; consecutive rows with the same pair
+/// share one (`share_quoted`).
+fn record_varying_input(
+    input: &Arc<str>,
+    (first_period, first): (&Arc<str>, &DenseColumn),
+    (second_period, second): (&Arc<str>, &DenseColumn),
+    rows: &RowMask,
+    row_count: usize,
+    errors: &mut RowErrors,
+) {
+    let mut last: Option<Rc<Quoted>> = None;
+    for row in rows.rows() {
+        if !errors.contains(row) && values_differ(first, second, row) {
+            let quoted = Quoted {
+                rows: row_count,
+                error: QuotedError::LifetimePeriodVaryingInput {
+                    input: Arc::clone(input),
+                    first_period: Arc::clone(first_period),
+                    first_value: quoted_value(first, row),
+                    second_period: Arc::clone(second_period),
+                    second_value: quoted_value(second, row),
+                },
+            };
+            errors.record_error(row, share_quoted(&mut last, quoted));
+        }
+    }
+}
+
+/// Record `OverPeriodsTopNPeriodVarying` on each row of `rows` not yet failed
+/// whose `n` differs between an earlier period's column and the reference
+/// period's. `n` can be a text, so each error quotes both values without
+/// copying them; consecutive rows with the same pair share one.
+fn record_top_n_varying(
+    reduction: &'static str,
+    (first_period, first): (&Arc<str>, &DenseColumn),
+    (second_period, reference): (&Arc<str>, &DenseColumn),
+    rows: &RowMask,
+    row_count: usize,
+    errors: &mut RowErrors,
+) {
+    let mut last: Option<Rc<Quoted>> = None;
+    for row in rows.rows() {
+        if !errors.contains(row) && values_differ(reference, first, row) {
+            let quoted = Quoted {
+                rows: row_count,
+                error: QuotedError::OverPeriodsTopNPeriodVarying {
+                    reduction,
+                    first_period: Arc::clone(first_period),
+                    first_value: quoted_value(first, row),
+                    second_period: Arc::clone(second_period),
+                    second_value: quoted_value(reference, row),
+                },
+            };
+            errors.record_error(row, share_quoted(&mut last, quoted));
         }
     }
 }
@@ -6692,5 +6734,97 @@ mod quoted_failure_tests {
         labels.record_failures(&integers, &RowMask::all(3), &mut errors);
         let values: Vec<String> = (0..3).map(|row| reported_value(&errors, row)).collect();
         assert_eq!(values, ["7", "7", "8"]);
+    }
+
+    fn texts(values: &[&str]) -> DenseColumn {
+        // Equal values share one `Arc`, as a column filled by sharing does.
+        let mut seen: Vec<Arc<str>> = Vec::new();
+        DenseColumn::Text(
+            values
+                .iter()
+                .map(|value| {
+                    if let Some(shared) = seen.iter().find(|shared| &***shared == *value) {
+                        return Arc::clone(shared);
+                    }
+                    let shared: Arc<str> = Arc::from(*value);
+                    seen.push(Arc::clone(&shared));
+                    shared
+                })
+                .collect(),
+        )
+    }
+
+    /// The pair each failing row's period-varying error quotes, rendered;
+    /// `None` for a row with no error.
+    fn reported_pairs(errors: &RowErrors, rows: usize) -> Vec<Option<(String, String)>> {
+        (0..rows)
+            .map(|row| match errors.get(row).map(RowError::to_eval) {
+                None => None,
+                Some(EvalError::LifetimePeriodVaryingInput {
+                    first_value,
+                    second_value,
+                    ..
+                })
+                | Some(EvalError::OverPeriodsTopNPeriodVarying {
+                    first_value,
+                    second_value,
+                    ..
+                }) => Some((first_value, second_value)),
+                Some(other) => panic!("row {row}: unexpected {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The two columns each recorder compares: the first period's values,
+    /// then the second's. Row 2 agrees, and every varying row after row 0
+    /// changes one of its pair, so a later row that reused an earlier row's
+    /// error would report the wrong pair.
+    fn varying_periods() -> (DenseColumn, DenseColumn, Vec<Option<(String, String)>>) {
+        let first = texts(&["a", "a", "a", "a", "b", "b"]);
+        let second = texts(&["x", "x", "a", "y", "y", "y"]);
+        let pair = |first: &str, second: &str| Some((format!("{first:?}"), format!("{second:?}")));
+        let expected = vec![
+            pair("a", "x"),
+            pair("a", "x"),
+            None,
+            pair("a", "y"),
+            pair("b", "y"),
+            pair("b", "y"),
+        ];
+        (first, second, expected)
+    }
+
+    /// Invariant: each varying row of a lifetime input reports its own pair
+    /// of values, however its run is shared.
+    #[test]
+    fn each_varying_input_row_quotes_its_own_pair() {
+        let (first, second, expected) = varying_periods();
+        let mut errors = RowErrors::new();
+        record_varying_input(
+            &Arc::from("name"),
+            (&Arc::from("in 2024"), &first),
+            (&Arc::from("in 2025"), &second),
+            &RowMask::all(6),
+            6,
+            &mut errors,
+        );
+        assert_eq!(reported_pairs(&errors, 6), expected);
+    }
+
+    /// Invariant: each varying row of `sum_top_n`'s `n` reports its own
+    /// pair of values, however its run is shared.
+    #[test]
+    fn each_varying_top_n_row_quotes_its_own_pair() {
+        let (first, reference, expected) = varying_periods();
+        let mut errors = RowErrors::new();
+        record_top_n_varying(
+            "sum_top_n",
+            (&Arc::from("in 2024"), &first),
+            (&Arc::from("in 2025"), &reference),
+            &RowMask::all(6),
+            6,
+            &mut errors,
+        );
+        assert_eq!(reported_pairs(&errors, 6), expected);
     }
 }
