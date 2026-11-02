@@ -507,8 +507,9 @@ position — the two grammars meet only at comparisons.
 
 ## Formula parse errors
 
-When the lexer or parser rejects a formula, lowering fails with a line and a
-column. This formula has `×` where it needs `*`:
+When the lexer or parser rejects a formula, lowering fails with the rule's
+name, a line and a column. This formula, in the rule `subject`, has `×` where
+it needs `*`:
 
 ```text
 if canton == 'Zürich': base × 1.2
@@ -518,18 +519,24 @@ else: base
 Lowering it fails with:
 
 ```text
-failed to parse RuleSpec formula: formula parse error at line 1, col 29: unexpected char '×'
+failed to parse the formula of RuleSpec rule `subject`: formula parse error at line 1, col 29: unexpected char '×'
 ```
+
+When the rule has several versions, the message also names the failing
+version's `effective_from`:
+`` failed to parse the formula of RuleSpec rule `subject` effective from 2026-01-01: ... ``.
 
 The line and column point into the formula's own text as YAML reads it, not
 into the YAML file that holds it. A block scalar's indentation is not part of
 that text, and YAML reads the file's CRLF and CR line breaks as line feeds. A
 folded (`>`) scalar, for example, joins most of its lines with spaces, so its
 positions follow the joined text. Within the formula text only a line feed
-starts a new line; a `\r` escape in a double-quoted scalar takes a column. The
-engine trims whitespace from both ends of a formula before it parses it, so
-blank lines and spaces before the formula do not count: line 1 holds its
-first non-blank character.
+starts a new line; a `\r` escape in a double-quoted scalar takes a column.
+Whitespace before the formula counts: a formula that starts with a blank line
+reports its first non-blank line as line 2, and spaces before its first
+character move line 1's columns right. The engine trims the formula before it
+parses it and then moves the position back by what it trimmed, so every
+error that carries a position counts from the formula as written.
 
 A column counts Unicode scalar values (Rust `char`s) from 1, not UTF-8 bytes
 or user-perceived characters. `ü`, `×`, a tab and `😀` take one column each.
@@ -539,10 +546,25 @@ A character that spans several code points takes one column per code point:
 The column names the offending character or the first character of the
 offending token, such as the opening quote of an unterminated string. When a
 formula ends too early, the position falls one column past its last
-character. The error for a line break inside a string literal counts columns
-the same way, but in the formula text before trimming. Errors that lowering
-finds after parsing (`formula lower error:`) carry no position.
-`tests/formula_error_positions.rs` checks each of these statements.
+non-whitespace character. The error for a line break inside a string literal
+counts the same way. Errors that lowering finds after parsing (`formula lower
+error:`) carry no position. One found in the module the loader generates from
+every rule names no rule: `failed to parse RuleSpec formula: formula lower
+error: ...`. `tests/formula_error_positions.rs` checks each of these
+statements.
+
+### Effective dates
+
+A version's `effective_from` and `effective_to` must lie between 0000-01-01
+and 9999-12-31: the loader writes each date into the formula source it
+generates, which spells a year in four digits. A date outside that range,
+such as `'+10000-01-01'`, fails before any formula is parsed:
+
+```text
+RuleSpec file `<memory>` rule `subject` has effective_from +10000-01-01, outside the dates a RuleSpec version can take (0000-01-01 to 9999-12-31)
+```
+
+`tests/effective_date_range.rs` checks this for every kind of rule.
 
 ## The lowered expression vocabulary
 
