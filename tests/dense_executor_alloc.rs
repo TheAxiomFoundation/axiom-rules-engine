@@ -356,6 +356,46 @@ fn sum_related(relation: &str, value: &str, where_clause: Option<Value>) -> Valu
     expr
 }
 
+fn related_value(name: &str) -> Value {
+    json!({ "kind": "input", "name": name })
+}
+
+fn only_related(relation: &str, value: &str) -> Value {
+    json!({
+        "kind": "only_related", "relation": relation, "current_slot": 0, "related_slot": 1,
+        "value": related_value(value),
+    })
+}
+
+/// `min` or `max` (`extreme`) of `value` over `relation`'s members.
+fn extreme_related(
+    extreme: &str,
+    relation: &str,
+    value: &str,
+    where_clause: Option<Value>,
+) -> Value {
+    let mut expr = json!({
+        "kind": "extreme_related", "extreme": extreme, "relation": relation,
+        "current_slot": 0, "related_slot": 1, "value": related_value(value),
+    });
+    if let Some(where_clause) = where_clause {
+        expr["where"] = where_clause;
+    }
+    expr
+}
+
+/// `only(relation.value)`: the value of the one member a root selects.
+fn single_related(relation: &str, value: &str, where_clause: Option<Value>) -> Value {
+    let mut expr = json!({
+        "kind": "single_related", "relation": relation, "current_slot": 0, "related_slot": 1,
+        "value": related_value(value),
+    });
+    if let Some(where_clause) = where_clause {
+        expr["where"] = where_clause;
+    }
+    expr
+}
+
 fn member_of(relation: &str) -> Value {
     json!({ "kind": "relation_member", "relation": relation, "current_slot": 0, "related_slot": 1 })
 }
@@ -812,11 +852,39 @@ fn lifetime_cases() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// Lifetime rules before their commencement date. Every row that reaches
+/// one fails; the formula is typed first, under no rows, so its column is
+/// the first buffer and no per-row error is recorded for rows that cannot
+/// exist.
+fn lifetime_commencement_cases() -> Vec<(&'static str, Vec<Value>)> {
+    let reduction = || over_periods("sum", integer(5), None);
+    vec![
+        (
+            "lifetime rule before commencement",
+            vec![commencing(
+                scalar_rule("out", "decimal", reduction()),
+                "2030-01-01",
+            )],
+        ),
+        (
+            "lifetime judgment before commencement",
+            vec![commencing(
+                judgment_rule("out", compare(reduction(), "gt", integer(3))),
+                "2030-01-01",
+            )],
+        ),
+    ]
+}
+
 #[test]
 fn a_huge_lifetime_row_count_is_refused_by_every_reduction() {
     let _serial = serial();
-    for (case, expr) in lifetime_cases().into_iter().chain(ambiguous_leaves(false)) {
-        let rules = vec![scalar_rule("out", "decimal", expr)];
+    let cases = lifetime_cases()
+        .into_iter()
+        .chain(ambiguous_leaves(false))
+        .map(|(case, expr)| (case, vec![scalar_rule("out", "decimal", expr)]))
+        .chain(lifetime_commencement_cases());
+    for (case, rules) in cases {
         let program =
             compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
         let outputs = vec!["out".to_string()];
@@ -948,6 +1016,50 @@ fn related_cases() -> Vec<RelatedCase> {
             rules: count_where(member_of("member")),
             chosen: anyone(),
             wider: [false, false],
+        },
+        RelatedCase {
+            // Every household has many members, so each fails as ambiguous;
+            // the missing input is never read.
+            name: "only related",
+            rules: vec![scalar_rule("out", "bool", only_related("member", "flag"))],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "only related among chosen members",
+            rules: vec![scalar_rule("out", "bool", only_related("chosen", "flag"))],
+            chosen: compare(input_or_else("age", 30), "gt", integer(0)),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "min over a relation",
+            rules: vec![scalar_rule(
+                "out",
+                "decimal",
+                extreme_related("min", "member", "income", None),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "max of a date over a relation, where",
+            rules: vec![scalar_rule(
+                "out",
+                "date",
+                extreme_related("max", "member", "born", Some(member_of("member"))),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "only over a relation",
+            rules: vec![scalar_rule(
+                "out",
+                "decimal",
+                single_related("member", "income", Some(member_of("member"))),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
         },
         RelatedCase {
             name: "date shift on related rows",
@@ -1096,9 +1208,30 @@ fn number(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
             (
                 select(vec!["member", "adult", "chosen"]),
                 select(vec!["income", "age"]),
-                prop::option::of(predicate),
+                prop::option::of(predicate.clone()),
             )
                 .prop_map(|(relation, value, predicate)| sum_related(relation, value, predicate))
+                .boxed(),
+        );
+        leaves.push(
+            (
+                select(vec!["min", "max"]),
+                select(vec!["member", "adult", "chosen"]),
+                select(vec!["income", "age"]),
+                prop::option::of(predicate.clone()),
+            )
+                .prop_map(|(extreme, relation, value, predicate)| {
+                    extreme_related(extreme, relation, value, predicate)
+                })
+                .boxed(),
+        );
+        leaves.push(
+            (
+                select(vec!["member", "adult", "chosen"]),
+                select(vec!["income", "age"]),
+                prop::option::of(predicate),
+            )
+                .prop_map(|(relation, value, predicate)| single_related(relation, value, predicate))
                 .boxed(),
         );
     }
@@ -1153,6 +1286,19 @@ fn date_expr(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
                 .boxed(),
         );
     }
+    if scope.relations {
+        leaves.push(
+            (
+                select(vec!["min", "max"]),
+                select(vec!["member", "adult", "chosen"]),
+                prop::option::of(related_judgment(&Scope::default(), 1)),
+            )
+                .prop_map(|(extreme, relation, predicate)| {
+                    extreme_related(extreme, relation, "born", predicate)
+                })
+                .boxed(),
+        );
+    }
     let leaf = union(leaves);
     if depth == 0 {
         return leaf;
@@ -1193,6 +1339,13 @@ fn judgment(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         leaves.push(
             select(scope.judgments.clone())
                 .prop_map(|name| derived(&name))
+                .boxed(),
+        );
+    }
+    if scope.relations {
+        leaves.push(
+            select(vec!["member", "adult", "chosen"])
+                .prop_map(|relation| compare(only_related(relation, "flag"), "eq", boolean(true)))
                 .boxed(),
         );
     }
@@ -1456,6 +1609,12 @@ fn number_column(rows: usize) -> BoxedStrategy<DenseColumn> {
     .boxed()
 }
 
+fn bool_column(rows: usize) -> BoxedStrategy<DenseColumn> {
+    prop::collection::vec(any::<bool>(), rows)
+        .prop_map(DenseColumn::Bool)
+        .boxed()
+}
+
 fn date_column(rows: usize) -> BoxedStrategy<DenseColumn> {
     prop::collection::vec(0_i64..=400, rows)
         .prop_map(|days| {
@@ -1521,6 +1680,8 @@ fn batch(relations: bool, rows: BoxedStrategy<usize>) -> impl Strategy<Value = D
                 let related_columns = columns(vec![
                     ("income", number_column(related)),
                     ("age", integer_column(related)),
+                    ("flag", bool_column(related)),
+                    ("born", date_column(related)),
                 ]);
                 (
                     Just(rows),
@@ -1919,6 +2080,22 @@ fn ambiguous_leaves(relations: bool) -> Vec<(&'static str, Value)> {
             "sum over a relation first",
             counted(sum_related("member", "income", None)),
         ));
+        leaves.push((
+            "only related first",
+            if_then_else(
+                compare(only_related("member", "flag"), "eq", boolean(true)),
+                reduction(),
+                integer(0),
+            ),
+        ));
+        leaves.push((
+            "min over a relation first",
+            counted(extreme_related("min", "member", "income", None)),
+        ));
+        leaves.push((
+            "only over a relation first",
+            counted(single_related("member", "income", None)),
+        ));
     }
     leaves
 }
@@ -1934,6 +2111,18 @@ fn sweep_batch(rows: usize, members: usize, related_columns: bool) -> DenseBatch
                 DenseColumn::Decimal(vec![Decimal::new(125, 2); related]),
             ),
             ("age".to_string(), alternating(related)),
+            (
+                "flag".to_string(),
+                DenseColumn::Bool((0..related).map(|row| row % 3 == 0).collect()),
+            ),
+            (
+                "born".to_string(),
+                DenseColumn::Date(
+                    (0..related)
+                        .map(|row| day("2000-01-01") + chrono::Days::new((row % 400) as u64))
+                        .collect(),
+                ),
+            ),
         ])
     } else {
         HashMap::new()
@@ -1997,9 +2186,12 @@ fn every_listed_case_refuses_each_large_allocation() {
             }
         }
     }
-    let lifetime = lifetime_cases().into_iter().chain(ambiguous_leaves(true));
-    for (case, expr) in lifetime {
-        let rules = vec![scalar_rule("out", "decimal", expr)];
+    let lifetime = lifetime_cases()
+        .into_iter()
+        .chain(ambiguous_leaves(true))
+        .map(|(case, expr)| (case, vec![scalar_rule("out", "decimal", expr)]))
+        .chain(lifetime_commencement_cases());
+    for (case, rules) in lifetime {
         let program = compile(&program(rules, Some(member_of("member"))))
             .unwrap_or_else(|error| panic!("{case}: {error}"));
         let batches = vec![
