@@ -18,14 +18,32 @@ wasm build and the CLI cannot drift apart:
 | Export | In | Out |
 | --- | --- | --- |
 | `compile(modules_json, root_target)` | `{canonical_target: yaml_text}` map + root target | `CompiledProgramArtifact` JSON (same format the CLI's `compile` writes) |
-| `execute(artifact_json, request_json)` | artifact JSON + `CompiledExecutionRequest` JSON (`mode`, `relation_binding`, `dataset`, `queries`) | `ExecutionResponse` JSON (same format the CLI's `run-compiled` prints) |
+| `execute(artifact_json, request_json)` | format-3 artifact JSON + `CompiledExecutionRequest` JSON (`mode`, `relation_binding`, `dataset`, `queries`) | `ExecutionResponse` JSON (same format the CLI's `run-compiled` prints) |
+| `execute_legacy_format_2(artifact_json, request_json)` | format-2 artifact JSON + `CompiledExecutionRequest` JSON | `ExecutionResponse` JSON, as `execute` |
 | `engine_version()` | — | core crate version string, for provenance display |
-| `artifact_format_version()` | — | exact artifact format this engine writes/accepts |
+| `engine_build()` | — | `{"commit": ..., "dirty": ...}` JSON, the `engine_build` that `compile` stamps |
+| `artifact_format_version()` | — | the artifact format `compile` writes and `execute` reads (3) |
+
+`execute` reads artifact format 3 only. It refuses any other format with the
+core's message, which says whether the artifact or the engine is older. A
+format-2 artifact runs unchanged through `execute_legacy_format_2`, the core's
+format-2 compatibility loader, which refuses every other format; recompiling
+the module text with `compile` gives the format-3 artifact. See
+[`docs/artifact-format.md`](../docs/artifact-format.md).
+
+The compiled `program.interface` describes entity instances, input slots
+(including elections), and relations. The loader re-derives it from
+the embedded program. `engine_build` identifies the compiling build, and
+`source_closure` hashes the exact module texts read, including imports.
+Only `artifact_format_version` gates loading; producer versions and builds
+are recorded for provenance.
 
 Canonical targets are the exact `<jurisdiction>:<atomic-root>/<path>` form
 (`us:policies/usda/snap/fy-2026-cola/maximum-allotments`). Imports are absolute
-canonical targets, so durable ids are identical across hosts: an artifact
-compiled in the browser matches one compiled by the CLI from the same modules.
+canonical targets, so durable ids and executable content are identical across
+hosts. Full artifact bytes match for the same module texts, compile options
+and build identity; browser and CLI builds may carry different `engine_build`
+values.
 
 Errors (unresolved imports, cycles, bad payloads, evaluation failures) are
 thrown as JS `Error`s carrying the core's error messages.
@@ -52,7 +70,7 @@ its declared kinds, is refused at load. Recompile from typed RuleSpec, or type
 it with `axiom-rules-engine migrate artifact`. This request policy does not
 change the artifact format version. See
 [dataset binding](../docs/rulespec.md#semantics) for migration details and the
-equivalent CLI and Rust API options.
+equivalent CLI and Rust options.
 
 ## Building
 

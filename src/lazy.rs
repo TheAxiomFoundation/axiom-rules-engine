@@ -13,10 +13,12 @@
 //!   enclosing expression, exactly as the reference evaluation of that row
 //!   stops there.
 //!
-//! Every buffer either evaluator sizes by a row count goes through
-//! [`row_buffer`] or [`filled_rows`], which reserve it fallibly. A batch can
-//! state more rows than any buffer of them fits in memory, and the failed
-//! allocation is then an error naming the count, not an aborted process.
+//! Every row mask, and every buffer the dense evaluator sizes by a row count,
+//! goes through [`row_buffer`], [`filled_rows`] or [`copied_rows`], which
+//! reserve it fallibly. A dense batch can state more rows than any buffer of
+//! them fits in memory, and the failed allocation is then an error naming the
+//! count, not an aborted process. The bulk evaluator's own column buffers are
+//! not covered.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -109,6 +111,18 @@ impl RowMask {
         self.count == self.len
     }
 
+    /// Whether both masks hold exactly the same rows.
+    pub(crate) fn same_rows(&self, other: &RowMask) -> bool {
+        self.len == other.len
+            && self.count == other.count
+            && match (&self.bits, &other.bits) {
+                (Some(left), Some(right)) => Rc::ptr_eq(left, right) || left == right,
+                // A mask holding every row or none keeps no bits, so equal
+                // lengths and counts already decide the rest.
+                _ => true,
+            }
+    }
+
     pub(crate) fn contains(&self, row: usize) -> bool {
         match &self.bits {
             None => self.is_all() && row < self.len,
@@ -135,6 +149,15 @@ impl RowMask {
             bits[row] = keep(row);
         }
         Ok(Self::from_bits(bits))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        match (&self.bits, &other.bits) {
+            (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
     /// The active rows that have no recorded error.
@@ -315,6 +338,19 @@ mod tests {
         assert!(odd.union(&even)?.is_all());
         assert!(RowMask::none(3).is_empty());
         assert!(RowMask::from_bits(vec![true, true]).is_all());
+        Ok(())
+    }
+
+    #[test]
+    fn filtering_an_empty_mask_reuses_it() -> Result<(), EvalError> {
+        let empty = RowMask::none(1_000);
+        let filtered = empty.filter(|_| panic!("no candidate remains"))?;
+        assert!(filtered.shares_storage_with(&empty));
+        assert_eq!(filtered.len(), 1_000);
+        assert_eq!(filtered.count(), 0);
+
+        let cleared = RowMask::from_bits(vec![false; 4]).filter(|_| true)?;
+        assert!(cleared.is_empty() && cleared.shares_storage_with(&RowMask::none(4)));
         Ok(())
     }
 

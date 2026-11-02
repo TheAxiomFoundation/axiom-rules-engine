@@ -451,7 +451,7 @@ fn dense_family_allowance_matches_explain_mode() {
                             "earned_income".to_string(),
                             DenseColumn::Decimal(earned_income),
                         )]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -689,7 +689,7 @@ fn dense_sum_related_over_derived_matches_explain_mode() {
                                 DenseColumn::Bool(is_eligible_column),
                             ),
                         ]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -840,7 +840,7 @@ fn dense_filtered_entity_scope_matches_explain_mode() {
                                 ]),
                             ),
                         ]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -963,7 +963,7 @@ fn dense_filtered_entity_membership_can_depend_on_current_entity_predicates() {
                             "has_ssn".to_string(),
                             DenseColumn::Bool(vec![true, true]),
                         )]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -1091,7 +1091,7 @@ fn dense_filtered_entities_can_compose_source_relations() {
                             ),
                             ("age".to_string(), DenseColumn::Integer(vec![30, 12, 40])),
                         ]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -1380,7 +1380,7 @@ fn dense_scottish_ctr_max_matches_explain_mode() {
                             "is_not_student".to_string(),
                             DenseColumn::Bool(is_not_student),
                         )]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -1531,7 +1531,7 @@ fn dense_child_benefit_rates_matches_explain_mode() {
                             "is_enhanced_eligible".to_string(),
                             DenseColumn::Bool(is_enhanced),
                         )]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -2057,6 +2057,7 @@ fn dense_ct_marginal_relief_matches_explain_mode() {
                         offsets,
                         inputs: HashMap::new(),
                         related_row_count: Some(cursor),
+                        ..Default::default()
                     },
                 )]),
             },
@@ -2255,7 +2256,7 @@ fn dense_state_pension_transitional_matches_explain_mode() {
                                 DenseColumn::Bool(is_post_commencement_qy),
                             ),
                         ]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -2737,7 +2738,7 @@ fn uc_dense_batch(cases: &[UcCase]) -> DenseBatchSpec {
                         ("has_lcwra".to_string(), DenseColumn::Bool(adult_has_lcwra)),
                         ("is_carer".to_string(), DenseColumn::Bool(adult_is_carer)),
                     ]),
-                    related_row_count: None,
+                    ..Default::default()
                 },
             ),
             (
@@ -2770,7 +2771,7 @@ fn uc_dense_batch(cases: &[UcCase]) -> DenseBatchSpec {
                             DenseColumn::Bool(child_dis_higher),
                         ),
                     ]),
-                    related_row_count: None,
+                    ..Default::default()
                 },
             ),
         ]),
@@ -3148,7 +3149,7 @@ fn dense_notional_capital_matches_explain_mode() {
                                 DenseColumn::Bool(disposal_counts_for_ctr),
                             ),
                         ]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -3289,6 +3290,7 @@ fn child_benefit_dense_batch(cases: &[ChildBenefitCase]) -> DenseBatchSpec {
                 offsets,
                 inputs: HashMap::new(),
                 related_row_count: Some(cursor),
+                ..Default::default()
             },
         )]),
     }

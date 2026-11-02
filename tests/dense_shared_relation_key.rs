@@ -199,7 +199,7 @@ fn relation_batch(households: &Households) -> DenseRelationBatchSpec {
             .zip(columns)
             .map(|(name, values)| (name.to_string(), DenseColumn::Integer(values)))
             .collect(),
-        related_row_count: None,
+        ..Default::default()
     }
 }
 
@@ -404,6 +404,7 @@ fn single_relation_binding_peak(
             .collect(),
         inputs,
         related_row_count: Some(related_count),
+        ..Default::default()
     };
     let (result, peak) = peak_allocation(|| execute(compiled, row_count, batch, &["one"]));
     assert_eq!(result, Ok(vec![vec![1]; row_count]));
@@ -604,7 +605,7 @@ fn malformed_related_count_returns_type_mismatch_before_allocating_owners() {
                     DenseRelationBatchSpec {
                         offsets: vec![0, usize::MAX],
                         inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
-                        related_row_count: None,
+                        ..Default::default()
                     },
                 )]),
             },
@@ -641,7 +642,7 @@ fn malformed_related_counts_allocate_bounded_memory() {
             let batch = DenseRelationBatchSpec {
                 offsets: vec![0, related_count],
                 inputs: HashMap::from([(name.clone(), DenseColumn::Integer(vec![1]))]),
-                related_row_count: None,
+                ..Default::default()
             };
             let (result, peak) = peak_allocation(|| execute(&compiled, 1, batch, &["one"]));
             prop_assert_eq!(
@@ -756,7 +757,7 @@ fn a_later_schemas_column_is_reported_before_the_added_checks() {
             ("aaa".to_string(), DenseColumn::Integer(vec![1])),
             (only_second.clone(), DenseColumn::Integer(vec![1])),
         ]),
-        related_row_count: None,
+        ..Default::default()
     };
     let error = execute(&compiled, 1, batch, &["head_count", "head_income"])
         .expect_err("the second schema's column is short");

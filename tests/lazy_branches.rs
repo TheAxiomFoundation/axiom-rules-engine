@@ -253,7 +253,7 @@ fn dense_for(
             DenseRelationBatchSpec {
                 offsets,
                 inputs: columns(&members),
-                related_row_count: None,
+                ..Default::default()
             },
         );
     }

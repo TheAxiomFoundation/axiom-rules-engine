@@ -559,10 +559,16 @@ supplied-wins or derived-wins are both rejected.
   moment Knowledge states enter the ordinary engine, so the lift
   ([#215](https://github.com/TheAxiomFoundation/axiom-rules-engine/issues/215))
   must precede them. `if` conditions and `where` clauses test `is_holds()`
-  the same way. The constitution path requires the lifted semantics. Direct
-  records supplied under a derived relation's own name — accepted and
-  unioned by the current engine — are likewise excluded from the
-  constitution path outside the shadow channel.
+  the same way. Until that lift, the phase-two evaluator walks a rule before
+  it runs the ordinary engine, and any unresolved tuple the rule can reach
+  makes the answer Indeterminate. The walk places a fold or membership read
+  at the requested entity. A read at a fold's related entities or in a
+  relation predicate counts every unresolved tuple of its relation and that
+  relation's sources, so a fact that would not change the answer can still
+  hold it Indeterminate. The constitution path requires the lifted
+  semantics. Direct records supplied under a derived relation's own name —
+  accepted and unioned by the current engine — are likewise excluded from
+  the constitution path outside the shadow channel.
 
 ## 9. Authoring surface (illustrative only)
 
@@ -869,8 +875,9 @@ blocking, attachments, bars) has met synthetic plans only. An encoding of
   and the stage-3 plan grammar, so the NZ family plan lives in
   `tests/fixtures/unit_derivation/nz_income_explorer_family.yaml` and not in a
   jurisdiction repo.
-- The ordinary engine has no unknown. A missing input is an error unless the
-  rule declares a default, and no expression originates `Undetermined`.
+- The ordinary engine has no unknown. A missing input is an error (RuleSpec
+  refuses rule-level defaults; the engine's `InputOrElse` has no RuleSpec
+  spelling), and no expression originates `Undetermined`.
 - Artifacts remain format 2 and do not mark a relation derived or supplied.
 - `run-compiled`, the dense path and the execution trace know nothing of
   derived units.

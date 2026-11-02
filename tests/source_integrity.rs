@@ -40,13 +40,19 @@ fn compile(module: &Value) -> Result<CompiledProgramArtifact, CompileError> {
     CompiledProgramArtifact::from_rulespec_str(&source(module))
 }
 
-/// The serialized artifact without the module metadata it carries through.
+/// The serialized artifact without the module metadata it carries through,
+/// and without `source_closure`, which hashes the module text and so records
+/// the metadata by design.
 fn program_without_module_metadata(artifact: &CompiledProgramArtifact) -> Value {
     let mut artifact = serde_json::to_value(artifact).expect("serialize artifact");
     artifact["program"]
         .as_object_mut()
         .expect("artifact program is an object")
         .remove("module");
+    artifact
+        .as_object_mut()
+        .expect("artifact is an object")
+        .remove("source_closure");
     artifact
 }
 

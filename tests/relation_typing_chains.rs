@@ -230,3 +230,34 @@ fn a_chain_declaring_fresh_kinds_per_link_is_refused_in_linear_time() {
         "{report}"
     );
 }
+
+#[test]
+fn path_graphs_type_and_visit_shared_tails_in_linear_time() {
+    for branching in [false, true] {
+        let mut relations = vec![json!({"name": "base", "arity": 2,
+            "slot_entities": ["Person", "Person"]})];
+        for link in 0..LINKS {
+            let next = if link + 1 < LINKS {
+                relation_name(link + 1)
+            } else {
+                "base".to_string()
+            };
+            let sources = if branching {
+                vec![next.clone(), "base".to_string(), next]
+            } else {
+                vec![next]
+            };
+            relations.push(json!({"name": relation_name(link), "arity": 2,
+                "derivation": {"source_path": sources.into_iter().map(|relation|
+                    json!({"relation": relation, "from_slot": 0, "to_slot": 1})).collect::<Vec<_>>(),
+                    "slot_entities": ["Person", "Person"], "current_slot": 0, "related_slot": 1,
+                    "predicate": always()}}));
+        }
+        let mut count = head_count();
+        count["entity"] = json!("Person");
+        let model = program(relations, vec![count]);
+        timed("path graph typing", || check_program(&model)).expect("every junction is Person");
+        let executed = timed("path graph execution walk", || executed_relations(&model));
+        assert_eq!(executed.len(), LINKS + 1, "branching {branching}");
+    }
+}

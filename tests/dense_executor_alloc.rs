@@ -36,6 +36,12 @@
 //!    refusal naming one of the batch's counts whose widest buffer exceeds the
 //!    cap. When every count's widest buffer fits under the cap, it returns
 //!    exactly what it returns uncapped.
+//! 3. **Any refusal.** For every generated program and batch large enough
+//!    that each count-sized buffer is a large allocation, refusing any one of
+//!    an execution's large allocations, first through last, refuses the call
+//!    with one of the batch's counts. A cap cannot reach a buffer no wider than
+//!    one already granted, such as a row mask or a copy of a column; this can.
+//!    On a host short of memory, any of them may be the one refused.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -54,8 +60,6 @@ use proptest::test_runner::{Config, TestRunner};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 
-// This binary sets caps only; it numbers no allocations.
-#[allow(dead_code)]
 #[path = "support/guarded_alloc.rs"]
 mod guarded_alloc;
 
@@ -63,6 +67,19 @@ use guarded_alloc::{Guarded, capped, serial};
 
 #[global_allocator]
 static ALLOCATOR: Guarded = Guarded;
+
+/// Allocations of at least this many bytes are numbered while a test counts
+/// them. In a batch of at least this many rows, every count-sized buffer is
+/// one of them. Nothing else execution allocates is this large: the largest
+/// is a `RowErrors` map node, about 1.5 KiB (eleven 128-byte entries).
+const LARGE: usize = 2 << 10;
+
+/// Run `run`, refusing its `refuse`-th allocation of at least `LARGE` bytes
+/// (none when 0). Returns its result and how many large allocations it asked
+/// for, the refused one included.
+fn refusing_large<T>(refuse: usize, run: impl FnOnce() -> T) -> (T, usize) {
+    guarded_alloc::refusing_large(LARGE, refuse, run)
+}
 
 // ---------------------------------------------------------------------------
 // Refusals
@@ -201,6 +218,46 @@ fn sum_related(relation: &str, value: &str, where_clause: Option<Value>) -> Valu
     expr
 }
 
+fn related_value(name: &str) -> Value {
+    json!({ "kind": "input", "name": name })
+}
+
+fn only_related(relation: &str, value: &str) -> Value {
+    json!({
+        "kind": "only_related", "relation": relation, "current_slot": 0, "related_slot": 1,
+        "value": related_value(value),
+    })
+}
+
+/// `min` or `max` (`extreme`) of `value` over `relation`'s members.
+fn extreme_related(
+    extreme: &str,
+    relation: &str,
+    value: &str,
+    where_clause: Option<Value>,
+) -> Value {
+    let mut expr = json!({
+        "kind": "extreme_related", "extreme": extreme, "relation": relation,
+        "current_slot": 0, "related_slot": 1, "value": related_value(value),
+    });
+    if let Some(where_clause) = where_clause {
+        expr["where"] = where_clause;
+    }
+    expr
+}
+
+/// `only(relation.value)`: the value of the one member a root selects.
+fn single_related(relation: &str, value: &str, where_clause: Option<Value>) -> Value {
+    let mut expr = json!({
+        "kind": "single_related", "relation": relation, "current_slot": 0, "related_slot": 1,
+        "value": related_value(value),
+    });
+    if let Some(where_clause) = where_clause {
+        expr["where"] = where_clause;
+    }
+    expr
+}
+
 fn member_of(relation: &str) -> Value {
     json!({ "kind": "relation_member", "relation": relation, "current_slot": 0, "related_slot": 1 })
 }
@@ -273,6 +330,14 @@ fn program(rules: Vec<Value>, chosen: Option<Value>) -> Value {
             { "name": "t", "unit": null, "versions": table(json!({
                 "0": { "kind": "text", "value": "zero" },
                 "1": { "kind": "text", "value": "one" },
+            })) },
+            { "name": "u", "unit": null, "versions": table(json!({
+                "0": { "kind": "bool", "value": false },
+                "1": { "kind": "bool", "value": true },
+            })) },
+            { "name": "w", "unit": null, "versions": table(json!({
+                "0": { "kind": "date", "value": "2026-01-01" },
+                "1": { "kind": "date", "value": "2026-06-30" },
             })) },
         ],
         "derived": rules,
@@ -408,6 +473,8 @@ fn root_cases() -> Vec<(&'static str, Vec<Value>)> {
             scalar("decimal", lookup("q", integer(1))),
         ),
         ("text parameter", scalar("text", lookup("t", integer(1)))),
+        ("bool parameter", scalar("bool", lookup("u", integer(1)))),
+        ("date parameter", scalar("date", lookup("w", integer(1)))),
         (
             "add",
             scalar("integer", items("add", vec![integer(5), integer(1)])),
@@ -523,6 +590,24 @@ fn root_cases() -> Vec<(&'static str, Vec<Value>)> {
             ],
         ),
         (
+            "scalar rule read as a judgment",
+            vec![
+                scalar_rule("five", "integer", integer(5)),
+                judgment_rule("out", derived("five")),
+            ],
+        ),
+        (
+            "judgment read as a scalar",
+            vec![
+                judgment_rule("big", compare(integer(5), "gt", integer(3))),
+                scalar_rule(
+                    "out",
+                    "integer",
+                    items("add", vec![derived("big"), integer(1)]),
+                ),
+            ],
+        ),
+        (
             "rounded",
             vec![rounded(scalar_rule("out", "decimal", decimal("2.555")))],
         ),
@@ -629,11 +714,39 @@ fn lifetime_cases() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// Lifetime rules before their commencement date. Every row that reaches
+/// one fails; the formula is typed first, under no rows, so its column is
+/// the first buffer and no per-row error is recorded for rows that cannot
+/// exist.
+fn lifetime_commencement_cases() -> Vec<(&'static str, Vec<Value>)> {
+    let reduction = || over_periods("sum", integer(5), None);
+    vec![
+        (
+            "lifetime rule before commencement",
+            vec![commencing(
+                scalar_rule("out", "decimal", reduction()),
+                "2030-01-01",
+            )],
+        ),
+        (
+            "lifetime judgment before commencement",
+            vec![commencing(
+                judgment_rule("out", compare(reduction(), "gt", integer(3))),
+                "2030-01-01",
+            )],
+        ),
+    ]
+}
+
 #[test]
 fn a_huge_lifetime_row_count_is_refused_by_every_reduction() {
     let _serial = serial();
-    for (case, expr) in lifetime_cases() {
-        let rules = vec![scalar_rule("out", "decimal", expr)];
+    let cases = lifetime_cases()
+        .into_iter()
+        .chain(ambiguous_leaves(false))
+        .map(|(case, expr)| (case, vec![scalar_rule("out", "decimal", expr)]))
+        .chain(lifetime_commencement_cases());
+    for (case, rules) in cases {
         let program =
             compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
         let outputs = vec!["out".to_string()];
@@ -670,8 +783,8 @@ fn stated_relation_batch(related: usize) -> DenseBatchSpec {
             member_key(),
             DenseRelationBatchSpec {
                 offsets: vec![0, related],
-                inputs: HashMap::new(),
                 related_row_count: Some(related),
+                ..Default::default()
             },
         )]),
     }
@@ -765,6 +878,50 @@ fn related_cases() -> Vec<RelatedCase> {
             rules: count_where(member_of("member")),
             chosen: anyone(),
             wider: [false, false],
+        },
+        RelatedCase {
+            // Every household has many members, so each fails as ambiguous;
+            // the missing input is never read.
+            name: "only related",
+            rules: vec![scalar_rule("out", "bool", only_related("member", "flag"))],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "only related among chosen members",
+            rules: vec![scalar_rule("out", "bool", only_related("chosen", "flag"))],
+            chosen: compare(input_or_else("age", 30), "gt", integer(0)),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "min over a relation",
+            rules: vec![scalar_rule(
+                "out",
+                "decimal",
+                extreme_related("min", "member", "income", None),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "max of a date over a relation, where",
+            rules: vec![scalar_rule(
+                "out",
+                "date",
+                extreme_related("max", "member", "born", Some(member_of("member"))),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
+        },
+        RelatedCase {
+            name: "only over a relation",
+            rules: vec![scalar_rule(
+                "out",
+                "decimal",
+                single_related("member", "income", Some(member_of("member"))),
+            )],
+            chosen: anyone(),
+            wider: [true, false],
         },
         RelatedCase {
             name: "date shift on related rows",
@@ -913,9 +1070,30 @@ fn number(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
             (
                 select(vec!["member", "adult", "chosen"]),
                 select(vec!["income", "age"]),
-                prop::option::of(predicate),
+                prop::option::of(predicate.clone()),
             )
                 .prop_map(|(relation, value, predicate)| sum_related(relation, value, predicate))
+                .boxed(),
+        );
+        leaves.push(
+            (
+                select(vec!["min", "max"]),
+                select(vec!["member", "adult", "chosen"]),
+                select(vec!["income", "age"]),
+                prop::option::of(predicate.clone()),
+            )
+                .prop_map(|(extreme, relation, value, predicate)| {
+                    extreme_related(extreme, relation, value, predicate)
+                })
+                .boxed(),
+        );
+        leaves.push(
+            (
+                select(vec!["member", "adult", "chosen"]),
+                select(vec!["income", "age"]),
+                prop::option::of(predicate),
+            )
+                .prop_map(|(relation, value, predicate)| single_related(relation, value, predicate))
                 .boxed(),
         );
     }
@@ -959,11 +1137,27 @@ fn date_expr(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         Just(json!({ "kind": "period_end" })).boxed(),
         Just(date("2026-01-15")).boxed(),
         Just(input("d")).boxed(),
+        number(scope, 0)
+            .prop_map(|index| lookup("w", index))
+            .boxed(),
     ];
     if !scope.dates.is_empty() {
         leaves.push(
             select(scope.dates.clone())
                 .prop_map(|name| derived(&name))
+                .boxed(),
+        );
+    }
+    if scope.relations {
+        leaves.push(
+            (
+                select(vec!["min", "max"]),
+                select(vec!["member", "adult", "chosen"]),
+                prop::option::of(related_judgment(&Scope::default(), 1)),
+            )
+                .prop_map(|(extreme, relation, predicate)| {
+                    extreme_related(extreme, relation, "born", predicate)
+                })
                 .boxed(),
         );
     }
@@ -999,11 +1193,21 @@ fn judgment(scope: &Scope, depth: u32) -> BoxedStrategy<Value> {
         )
             .prop_map(|(op, label, index)| compare(lookup("t", index), op, text(label)))
             .boxed(),
+        (select(vec!["eq", "ne"]), any::<bool>(), number(scope, 0))
+            .prop_map(|(op, value, index)| compare(lookup("u", index), op, boolean(value)))
+            .boxed(),
     ];
     if !scope.judgments.is_empty() {
         leaves.push(
             select(scope.judgments.clone())
                 .prop_map(|name| derived(&name))
+                .boxed(),
+        );
+    }
+    if scope.relations {
+        leaves.push(
+            select(vec!["member", "adult", "chosen"])
+                .prop_map(|relation| compare(only_related(relation, "flag"), "eq", boolean(true)))
                 .boxed(),
         );
     }
@@ -1128,6 +1332,19 @@ fn finish(rule: Value, from: Option<&str>, round: bool) -> Value {
 /// A generated program's rules and, when it has relations, the predicate
 /// of `chosen`.
 type Rules = (Vec<Value>, Option<Value>);
+
+/// Generated rules with their names in a random order to request them in.
+/// A rule an earlier output reads only on some rows is then extended to more
+/// rows by a later one, as it is when a caller asks for outputs out of
+/// dependency order.
+fn with_outputs(
+    rules: impl Strategy<Value = Rules>,
+) -> impl Strategy<Value = (Rules, Vec<String>)> {
+    rules.prop_flat_map(|rules| {
+        let outputs = names(&rules.0);
+        (Just(rules), Just(outputs).prop_shuffle())
+    })
+}
 
 /// Eight rules, each reading only earlier ones. `h` (a number) and `hj` (a
 /// judgment) read no relation, so `chosen`'s predicate can read them on the
@@ -1254,6 +1471,12 @@ fn number_column(rows: usize) -> BoxedStrategy<DenseColumn> {
     .boxed()
 }
 
+fn bool_column(rows: usize) -> BoxedStrategy<DenseColumn> {
+    prop::collection::vec(any::<bool>(), rows)
+        .prop_map(DenseColumn::Bool)
+        .boxed()
+}
+
 fn date_column(rows: usize) -> BoxedStrategy<DenseColumn> {
     prop::collection::vec(0_i64..=400, rows)
         .prop_map(|days| {
@@ -1285,8 +1508,13 @@ fn columns(
         .boxed()
 }
 
-fn root_rows() -> impl Strategy<Value = usize> {
-    prop_oneof![0_usize..=4, 5_usize..=64, 65_usize..=1500]
+fn root_rows() -> BoxedStrategy<usize> {
+    prop_oneof![0_usize..=4, 5_usize..=64, 65_usize..=1500].boxed()
+}
+
+/// Enough rows that every count-sized buffer is a large allocation.
+fn large_rows() -> BoxedStrategy<usize> {
+    (LARGE..=LARGE + 256).boxed()
 }
 
 fn root_columns(rows: usize) -> BoxedStrategy<HashMap<String, DenseColumn>> {
@@ -1301,8 +1529,8 @@ fn root_columns(rows: usize) -> BoxedStrategy<HashMap<String, DenseColumn>> {
 }
 
 /// A batch of `rows` households, each with up to six members.
-fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
-    root_rows().prop_flat_map(move |rows| {
+fn batch(relations: bool, rows: BoxedStrategy<usize>) -> impl Strategy<Value = DenseBatchSpec> {
+    rows.prop_flat_map(move |rows| {
         let members = prop::collection::vec(0_usize..=6, rows);
         (Just(rows), root_columns(rows), members, any::<bool>()).prop_flat_map(
             move |(rows, inputs, members, state_count)| {
@@ -1314,6 +1542,8 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
                 let related_columns = columns(vec![
                     ("income", number_column(related)),
                     ("age", integer_column(related)),
+                    ("flag", bool_column(related)),
+                    ("born", date_column(related)),
                 ]);
                 (
                     Just(rows),
@@ -1339,6 +1569,7 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
                                             offsets,
                                             inputs: related_inputs,
                                             related_row_count: state_count.then_some(related),
+                                            ..Default::default()
                                         },
                                     )])
                                 } else {
@@ -1353,8 +1584,8 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
 }
 
 /// One to three periods of the same households, each with its own columns.
-fn lifetime_batches() -> impl Strategy<Value = Vec<DenseBatchSpec>> {
-    (root_rows(), 1_usize..=3).prop_flat_map(|(rows, periods)| {
+fn lifetime_batches(rows: BoxedStrategy<usize>) -> impl Strategy<Value = Vec<DenseBatchSpec>> {
+    (rows, 1_usize..=3).prop_flat_map(|(rows, periods)| {
         prop::collection::vec(root_columns(rows), periods).prop_map(move |periods| {
             periods
                 .into_iter()
@@ -1438,13 +1669,12 @@ fn runner(cases: u32) -> TestRunner {
 fn every_generated_program_refuses_a_huge_root_row_count() {
     let _serial = serial();
     let strategy = (
-        rules(false),
+        with_outputs(rules(false)),
         select(MODES.to_vec()),
         select(HUGE_ROWS.to_vec()),
     );
     runner(512)
-        .run(&strategy, |((rules, _), mode, rows)| {
-            let outputs = names(&rules);
+        .run(&strategy, |(((rules, _), outputs), mode, rows)| {
             let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
             let result = execute(&program, mode, empty_batch(rows), &outputs);
             match &result {
@@ -1484,28 +1714,30 @@ fn a_cap_changes_a_result_only_by_refusing_a_count() {
     let _serial = serial();
     let strategy = (any::<bool>()).prop_flat_map(|relations| {
         (
-            rules(relations),
-            batch(relations),
+            with_outputs(rules(relations)),
+            batch(relations, root_rows()),
             select(MODES.to_vec()),
             cap(),
         )
     });
     runner(512)
-        .run(&strategy, |((rules, chosen), batch, mode, cap)| {
-            let outputs = names(&rules);
-            let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
-            let counts = counts(&batch);
-            let uncapped = execute(&program, mode, batch.clone(), &outputs);
-            let result = capped(cap.unwrap_or(usize::MAX), || {
-                execute(&program, mode, batch, &outputs)
-            });
-            if let Some(cap) = cap
-                && counts.iter().all(|count| count * WIDEST <= cap)
-            {
-                prop_assert_eq!(summary(&result), summary(&uncapped));
-            }
-            check_differential(&counts, cap, &uncapped, &result)
-        })
+        .run(
+            &strategy,
+            |(((rules, chosen), outputs), batch, mode, cap)| {
+                let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
+                let counts = counts(&batch);
+                let uncapped = execute(&program, mode, batch.clone(), &outputs);
+                let result = capped(cap.unwrap_or(usize::MAX), || {
+                    execute(&program, mode, batch, &outputs)
+                });
+                if let Some(cap) = cap
+                    && counts.iter().all(|count| count * WIDEST <= cap)
+                {
+                    prop_assert_eq!(summary(&result), summary(&uncapped));
+                }
+                check_differential(&counts, cap, &uncapped, &result)
+            },
+        )
         .expect("a cap only ever refuses a count");
 }
 
@@ -1514,7 +1746,7 @@ fn a_cap_changes_a_lifetime_result_only_by_refusing_a_count() {
     let _serial = serial();
     let strategy = (
         lifetime_rules(),
-        lifetime_batches(),
+        lifetime_batches(root_rows()),
         select(MODES.to_vec()),
         cap(),
     );
@@ -1530,4 +1762,311 @@ fn a_cap_changes_a_lifetime_result_only_by_refusing_a_count() {
             check_differential(&counts, cap, &uncapped, &result)
         })
         .expect("a cap only ever refuses a count");
+}
+
+/// Execute `input` once counting its large allocations, then once refusing
+/// each of them in turn. Each refusal must refuse the call with one of
+/// `counts`. The input is cloned before numbering starts, so only
+/// execution's own allocations are numbered.
+fn check_every_refusal<B: Clone>(
+    counts: &[usize],
+    input: &B,
+    run: impl Fn(B) -> Result<DenseExecutionResult, EvalError>,
+) -> Result<(), TestCaseError> {
+    let fresh = input.clone();
+    let (unrefused, large) = refusing_large(0, || run(fresh));
+    if let Err(error) = &unrefused {
+        prop_assert!(
+            refused_count(error).is_none(),
+            "an unrefused batch was refused: {error:?}"
+        );
+    }
+    prop_assert!(
+        large > 0,
+        "a batch of {counts:?} rows made no large allocation"
+    );
+    for refuse in 1..=large {
+        let fresh = input.clone();
+        let (result, _) = refusing_large(refuse, || run(fresh));
+        match &result {
+            Err(error) => prop_assert!(
+                refused_count(error).is_some_and(|count| counts.contains(&count)),
+                "refusing large allocation {refuse} of {large} gave {error:?}"
+            ),
+            Ok(_) => prop_assert!(
+                false,
+                "refusing large allocation {refuse} of {large} still succeeded"
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn refusing_any_large_allocation_refuses_the_call() {
+    let _serial = serial();
+    let strategy = any::<bool>().prop_flat_map(|relations| {
+        (
+            with_outputs(rules(relations)),
+            batch(relations, large_rows()),
+            select(MODES.to_vec()),
+        )
+    });
+    runner(24)
+        .run(&strategy, |(((rules, chosen), outputs), batch, mode)| {
+            let program = compile(&program(rules, chosen)).map_err(TestCaseError::fail)?;
+            check_every_refusal(&counts(&batch), &batch, |batch| {
+                execute(&program, mode, batch, &outputs)
+            })
+        })
+        .expect("refusing any large allocation refuses the call");
+}
+
+#[test]
+fn refusing_any_large_lifetime_allocation_refuses_the_call() {
+    let _serial = serial();
+    let strategy = (
+        lifetime_rules(),
+        lifetime_batches(large_rows()),
+        select(MODES.to_vec()),
+    );
+    runner(16)
+        .run(&strategy, |(rules, batches, mode)| {
+            let program = compile(&program(rules, None)).map_err(TestCaseError::fail)?;
+            let outputs = vec!["life".to_string()];
+            check_every_refusal(&[batches[0].row_count], &batches, |batches| {
+                execute_lifetime(&program, mode, batches, &outputs)
+            })
+        })
+        .expect("refusing any large allocation refuses the call");
+}
+
+// ---------------------------------------------------------------------------
+// Every listed case, refusing each large allocation in turn
+// ---------------------------------------------------------------------------
+
+/// Rows enough that every count-sized buffer is a large allocation.
+const SWEEP_ROWS: usize = LARGE + 5;
+
+/// A root input that is negative, zero or positive by row, so rules take
+/// different branches on different rows.
+fn alternating(rows: usize) -> DenseColumn {
+    DenseColumn::Integer((0..rows).map(|row| (row % 3) as i64 - 1).collect())
+}
+
+/// Rules whose cache is filled for some rows and then extended to the rest.
+/// `pick` reads `small` only where `a` is positive, and `out` reads it on
+/// every row afterwards; `chosen` reads `positive` only where `a` is
+/// nonzero, and `either` reads it on the rows `chosen` leaves.
+fn extended_caches() -> Vec<(&'static str, Vec<Value>)> {
+    vec![
+        (
+            "scalar cache extended to more rows",
+            vec![
+                scalar_rule(
+                    "small",
+                    "integer",
+                    items("add", vec![input("a"), integer(1)]),
+                ),
+                scalar_rule(
+                    "pick",
+                    "integer",
+                    if_then_else(
+                        compare(input("a"), "gt", integer(0)),
+                        derived("small"),
+                        integer(0),
+                    ),
+                ),
+                scalar_rule(
+                    "out",
+                    "integer",
+                    items("add", vec![derived("pick"), derived("small")]),
+                ),
+            ],
+        ),
+        (
+            "judgment cache extended to more rows",
+            vec![
+                judgment_rule("positive", compare(input("a"), "gt", integer(0))),
+                judgment_rule(
+                    "chosen",
+                    items(
+                        "and",
+                        vec![compare(input("a"), "ne", integer(0)), derived("positive")],
+                    ),
+                ),
+                judgment_rule(
+                    "out",
+                    items("or", vec![derived("chosen"), derived("positive")]),
+                ),
+            ],
+        ),
+    ]
+}
+
+/// Each lifetime leaf with no single period outside a reduction, evaluated
+/// before the reduction beside it, so its placeholder is the first buffer
+/// for its rows. The relation leaves need the relation's batches.
+fn ambiguous_leaves(relations: bool) -> Vec<(&'static str, Value)> {
+    let start = || json!({ "kind": "period_start" });
+    let end = || json!({ "kind": "period_end" });
+    let reduction = || over_periods("sum", integer(5), None);
+    let dated = |leaf: Value| if_then_else(compare(leaf, "lte", end()), reduction(), integer(0));
+    let counted = |leaf: Value| items("add", vec![leaf, reduction()]);
+    let mut leaves = vec![
+        ("period start first", dated(start())),
+        (
+            "period end first",
+            if_then_else(compare(end(), "gte", start()), reduction(), integer(0)),
+        ),
+        (
+            "date add days first",
+            dated(date_shift("date_add_days", start(), integer(1))),
+        ),
+        (
+            "date add months first",
+            dated(date_shift("date_add_months", start(), integer(1))),
+        ),
+        (
+            "date add years first",
+            dated(date_shift("date_add_years", start(), integer(1))),
+        ),
+        ("days between first", counted(days_between(start(), end()))),
+    ];
+    if relations {
+        leaves.push((
+            "count over a relation first",
+            counted(count_related("member", None)),
+        ));
+        leaves.push((
+            "sum over a relation first",
+            counted(sum_related("member", "income", None)),
+        ));
+        leaves.push((
+            "only related first",
+            if_then_else(
+                compare(only_related("member", "flag"), "eq", boolean(true)),
+                reduction(),
+                integer(0),
+            ),
+        ));
+        leaves.push((
+            "min over a relation first",
+            counted(extreme_related("min", "member", "income", None)),
+        ));
+        leaves.push((
+            "only over a relation first",
+            counted(single_related("member", "income", None)),
+        ));
+    }
+    leaves
+}
+
+/// `rows` households of `members` members each, with an alternating root
+/// input `a`. Related columns are supplied, or the count is stated.
+fn sweep_batch(rows: usize, members: usize, related_columns: bool) -> DenseBatchSpec {
+    let related = rows * members;
+    let inputs = if related_columns {
+        HashMap::from([
+            (
+                "income".to_string(),
+                DenseColumn::Decimal(vec![Decimal::new(125, 2); related]),
+            ),
+            ("age".to_string(), alternating(related)),
+            (
+                "flag".to_string(),
+                DenseColumn::Bool((0..related).map(|row| row % 3 == 0).collect()),
+            ),
+            (
+                "born".to_string(),
+                DenseColumn::Date(
+                    (0..related)
+                        .map(|row| day("2000-01-01") + chrono::Days::new((row % 400) as u64))
+                        .collect(),
+                ),
+            ),
+        ])
+    } else {
+        HashMap::new()
+    };
+    DenseBatchSpec {
+        row_count: rows,
+        inputs: HashMap::from([("a".to_string(), alternating(rows))]),
+        relations: HashMap::from([(
+            member_key(),
+            DenseRelationBatchSpec {
+                offsets: (0..=rows).map(|row| row * members).collect(),
+                inputs,
+                related_row_count: (!related_columns).then_some(related),
+                ..Default::default()
+            },
+        )]),
+    }
+}
+
+/// Every case the deterministic tests list, run once per large allocation
+/// with that allocation refused. A random program reaches a node kind only
+/// by chance; this reaches each listed one every run.
+#[test]
+fn every_listed_case_refuses_each_large_allocation() {
+    let _serial = serial();
+    let check = |case: &str, result: Result<(), TestCaseError>| {
+        if let Err(error) = result {
+            panic!("{case}: {error}");
+        }
+    };
+    let outputs = vec!["out".to_string()];
+    let root = sweep_batch(SWEEP_ROWS, 0, true);
+    let root_only = DenseBatchSpec {
+        relations: HashMap::new(),
+        ..root
+    };
+    for (case, rules) in root_cases().into_iter().chain(extended_caches()) {
+        let program =
+            compile(&program(rules, None)).unwrap_or_else(|error| panic!("{case}: {error}"));
+        for mode in MODES {
+            check(
+                &format!("{case}, {mode:?}"),
+                check_every_refusal(&[SWEEP_ROWS], &root_only, |batch| {
+                    execute(&program, mode, batch, &outputs)
+                }),
+            );
+        }
+    }
+    for case in related_cases() {
+        let program = compile(&program(case.rules, Some(case.chosen)))
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        for related_columns in [false, true] {
+            let batch = sweep_batch(SWEEP_ROWS, 2, related_columns);
+            for mode in MODES {
+                check(
+                    &format!("{}, {mode:?}, related columns {related_columns}", case.name),
+                    check_every_refusal(&[SWEEP_ROWS, 2 * SWEEP_ROWS], &batch, |batch| {
+                        execute(&program, mode, batch, &outputs)
+                    }),
+                );
+            }
+        }
+    }
+    let lifetime = lifetime_cases()
+        .into_iter()
+        .chain(ambiguous_leaves(true))
+        .map(|(case, expr)| (case, vec![scalar_rule("out", "decimal", expr)]))
+        .chain(lifetime_commencement_cases());
+    for (case, rules) in lifetime {
+        let program = compile(&program(rules, Some(member_of("member"))))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let batches = vec![
+            sweep_batch(SWEEP_ROWS, 2, true),
+            sweep_batch(SWEEP_ROWS, 2, true),
+        ];
+        for mode in MODES {
+            check(
+                &format!("{case}, {mode:?}"),
+                check_every_refusal(&[SWEEP_ROWS, 2 * SWEEP_ROWS], &batches, |batches| {
+                    execute_lifetime(&program, mode, batches, &outputs)
+                }),
+            );
+        }
+    }
 }

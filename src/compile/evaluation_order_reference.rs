@@ -3,7 +3,9 @@
 //! of the order's graph. It is the oracle for the differential tests in
 //! `evaluation_order_tests`: the order is stored in artifact metadata and
 //! compared exactly when an artifact loads, so the production path must
-//! return what this returns, errors included, for every program.
+//! return what this returns, errors included, for the legacy programs in that
+//! generator. Atom programs use the full relation graph and have separate
+//! ordering regressions in `tests/relation_atom_order.rs`.
 //!
 //! Frozen: everything below the imports is the code as it stood, except that
 //! `evaluation_order`, `relation_derivation_dependencies` and
@@ -13,7 +15,12 @@
 //! predicate rules into every rule that counts or sums over the relation, so
 //! it is quadratic in that fan-out; keep it out of timing tests. The helpers
 //! this change did not touch (`validate_relation_derivation_graph` and the
-//! relation-member collectors) are shared with the production path.
+//! relation-member collectors) are shared with the production path. Its
+//! collectors gain arms only for expression kinds added since, each read as
+//! the production collectors read it: a rule read through a term
+//! (`role_derived`) is a dependency, an input read through one is not.
+//! No generated program has an atom, so that arm is unreachable here; a term
+//! comparison reads no rule.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -196,7 +203,10 @@ fn reject_relation_routed_cycles(
         }
         let mut relations = HashSet::new();
         collect_relation_members_from_judgment(&derivation.predicate, &mut relations);
-        relations.insert(derivation.source_relation.clone());
+        if derivation.source_path.is_some() {
+            unreachable!("the frozen evaluation-order oracle covers legacy programs only");
+        }
+        relations.insert(derivation.source_relation.clone().expect("legacy source"));
         for source in relations {
             add_edge(relation_index(&source), index);
         }
@@ -289,8 +299,14 @@ fn collect_scalar_dependencies(
 ) {
     match expr {
         ScalarExprSpec::Literal { .. }
+        | ScalarExprSpec::InputForYear { .. }
         | ScalarExprSpec::Input { .. }
         | ScalarExprSpec::InputOrElse { .. } => {}
+        ScalarExprSpec::OnlyRelated { relation, .. } => {
+            if let Some(relation_dependencies) = relation_dependencies.get(relation) {
+                dependencies.extend(relation_dependencies.iter().cloned());
+            }
+        }
         ScalarExprSpec::CountRelated {
             relation,
             where_clause,
@@ -303,9 +319,10 @@ fn collect_scalar_dependencies(
                 collect_judgment_dependencies(predicate, dependencies, relation_dependencies);
             }
         }
-        ScalarExprSpec::Derived { name } => {
+        ScalarExprSpec::Derived { name } | ScalarExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
+        ScalarExprSpec::RoleInput { .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. } => {
             collect_scalar_dependencies(index, dependencies, relation_dependencies);
         }
@@ -343,6 +360,18 @@ fn collect_scalar_dependencies(
             collect_scalar_dependencies(to, dependencies, relation_dependencies);
         }
         ScalarExprSpec::SumRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::ExtremeRelated {
+            value,
+            relation,
+            where_clause,
+            ..
+        }
+        | ScalarExprSpec::SingleRelated {
             value,
             relation,
             where_clause,
@@ -392,10 +421,15 @@ fn collect_judgment_dependencies(
             collect_scalar_dependencies(left, dependencies, relation_dependencies);
             collect_scalar_dependencies(right, dependencies, relation_dependencies);
         }
-        JudgmentExprSpec::Derived { name } => {
+        JudgmentExprSpec::Derived { name } | JudgmentExprSpec::RoleDerived { name, .. } => {
             dependencies.insert(name.clone());
         }
-        JudgmentExprSpec::RelationMember { .. } => {}
+        JudgmentExprSpec::RelationMember { .. } | JudgmentExprSpec::SameEntity { .. } => {}
+        JudgmentExprSpec::RelationAtom { .. } | JudgmentExprSpec::Exists { .. } => {
+            unreachable!(
+                "the evaluation-order generator builds no atoms or exists; relation construct programs take the combined-graph order tested in tests/relation_atom_order.rs"
+            )
+        }
         JudgmentExprSpec::And { items }
         | JudgmentExprSpec::Or { items }
         | JudgmentExprSpec::ExactlyOne { items } => {

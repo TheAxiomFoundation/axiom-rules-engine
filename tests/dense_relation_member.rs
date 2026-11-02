@@ -326,6 +326,7 @@ fn dense_for(
                             .map(|household| household.members.len())
                             .sum(),
                     ),
+                    ..Default::default()
                 },
             )
         })
@@ -687,7 +688,7 @@ fn dense_answers_when_no_row_reaches_a_where_clause_relation_member() {
                             DenseRelationBatchSpec {
                                 offsets: vec![0, 0],
                                 inputs: HashMap::new(),
-                                related_row_count: None,
+                                ..Default::default()
                             },
                         )
                     })
@@ -1155,6 +1156,7 @@ fn link_answers(
                                 offsets,
                                 inputs,
                                 related_row_count: Some(related.len()),
+                                ..Default::default()
                             },
                         )
                     })

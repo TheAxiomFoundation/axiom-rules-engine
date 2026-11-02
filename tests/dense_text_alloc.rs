@@ -327,6 +327,7 @@ fn stated_members(name: &str, related: usize) -> DenseBatchSpec {
                 offsets: vec![0, related],
                 inputs: HashMap::new(),
                 related_row_count: Some(related),
+                ..Default::default()
             },
         )]),
     }
@@ -973,6 +974,7 @@ fn batch(relations: bool) -> impl Strategy<Value = DenseBatchSpec> {
                                     )])
                                 })
                                 .unwrap_or_default(),
+                            ..Default::default()
                         };
                         DenseBatchSpec {
                             row_count: rows,

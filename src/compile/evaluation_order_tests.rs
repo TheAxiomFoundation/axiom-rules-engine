@@ -43,7 +43,7 @@ use super::{CompileError, evaluation_order, evaluation_order_reference};
 use crate::spec::{
     ComparisonOpSpec, DTypeSpec, DerivedSemanticsSpec, DerivedSpec, DerivedVersionSpec,
     JudgmentExprSpec, OverPeriodsKindSpec, ProgramSpec, RelatedValueRefSpec,
-    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec,
+    RelationDerivationSpec, RelationSpec, ScalarExprSpec, ScalarValueSpec, TermSpec,
 };
 
 const DEFAULT_CASES: u32 = 1_000;
@@ -541,7 +541,8 @@ fn derived_relation(name: &str, source: &str, predicate: JudgmentExprSpec) -> Re
         arity: 2,
         slot_entities: Vec::new(),
         derivation: Some(RelationDerivationSpec {
-            source_relation: source.to_string(),
+            source_relation: Some(source.to_string()),
+            source_path: None,
             current_slot: 0,
             related_slot: 1,
             entity: None,
@@ -1176,6 +1177,56 @@ fn a_cycle_only_the_routed_check_sees_is_still_refused() {
     );
 }
 
+/// A rule read through a term is a dependency in both forms: the judgment
+/// form (`candidate.f`, a bare judgment) and the scalar form
+/// (`candidate.f >= 0`). `e` counts over `R`, whose predicate reads `f`:
+/// when `f` reads `e` the two form a cycle, and when `f` reads nothing it is
+/// listed before `e`.
+#[test]
+fn a_rule_read_through_a_term_is_a_dependency_in_both_forms() {
+    for term in [TermSpec::Anchor, TermSpec::Candidate] {
+        let judgment = JudgmentExprSpec::RoleDerived {
+            term,
+            name: "f".to_string(),
+        };
+        let scalar = JudgmentExprSpec::Comparison {
+            left: Box::new(ScalarExprSpec::RoleDerived {
+                term,
+                name: "f".to_string(),
+            }),
+            op: ComparisonOpSpec::Gte,
+            right: Box::new(integer(0)),
+        };
+        for predicate in [judgment, scalar] {
+            let cycle = Err(format!(
+                "{:?}",
+                CompileError::CyclicDependency {
+                    cycle: "e, f".to_string()
+                }
+            ));
+            let ordered = Ok(vec!["f".to_string(), "e".to_string()]);
+            for (body, expected) in [(derived("e"), cycle), (integer(1), ordered)] {
+                let program = ProgramSpec {
+                    relations: vec![
+                        base_relation("members"),
+                        derived_relation("R", "members", predicate.clone()),
+                    ],
+                    derived: vec![
+                        scalar_rule("e", count_related("R".to_string(), None)),
+                        scalar_rule("f", body),
+                    ],
+                    ..ProgramSpec::default()
+                };
+                assert_eq!(
+                    assert_matches_reference(&program),
+                    expected,
+                    "{predicate:?}"
+                );
+            }
+        }
+    }
+}
+
 /// The first rule in program order with an unknown dependency reports its
 /// smallest one, though the relation it counts over adds known rules that
 /// sort earlier.
@@ -1212,4 +1263,77 @@ fn an_unknown_dependency_is_reported_as_before() {
             }
         ))
     );
+}
+
+#[test]
+fn every_path_step_is_an_order_and_cycle_edge() {
+    use crate::spec::RelationPathStepSpec;
+    let path = |steps: &[&str]| {
+        let mut relation =
+            derived_relation("path", BASE, JudgmentExprSpec::And { items: Vec::new() });
+        let derivation = relation.derivation.as_mut().unwrap();
+        derivation.source_relation = None;
+        derivation.source_path = Some(
+            steps
+                .iter()
+                .map(|relation| RelationPathStepSpec {
+                    relation: (*relation).to_string(),
+                    from_slot: 0,
+                    to_slot: 1,
+                })
+                .collect(),
+        );
+        relation
+    };
+    for position in 0..3 {
+        let mut steps = vec![BASE; 3];
+        steps[position] = "path";
+        let program = ProgramSpec {
+            relations: vec![base_relation(BASE), path(&steps)],
+            ..ProgramSpec::default()
+        };
+        assert!(
+            matches!(
+                evaluation_order(&program),
+                Err(CompileError::CyclicRelationDependency { .. })
+            ),
+            "cycle through step {position}"
+        );
+        steps[position] = UNKNOWN_RELATION;
+        let program = ProgramSpec {
+            relations: vec![base_relation(BASE), path(&steps)],
+            ..ProgramSpec::default()
+        };
+        assert!(
+            matches!(
+                evaluation_order(&program),
+                Err(CompileError::UnknownRelationDependency { .. })
+            ),
+            "unknown dependency through step {position}"
+        );
+    }
+    // A rule counts a path whose later step filters by that same rule.
+    // The source-only graph has no cycle; the rule-routed graph must catch it.
+    let program = ProgramSpec {
+        relations: vec![
+            base_relation(BASE),
+            path(&[BASE, "filter"]),
+            derived_relation(
+                "filter",
+                BASE,
+                JudgmentExprSpec::Derived {
+                    name: "total".to_string(),
+                },
+            ),
+        ],
+        derived: vec![scalar_rule(
+            "total",
+            count_related("path".to_string(), None),
+        )],
+        ..ProgramSpec::default()
+    };
+    assert!(matches!(
+        evaluation_order(&program),
+        Err(CompileError::CyclicDependency { .. })
+    ));
 }

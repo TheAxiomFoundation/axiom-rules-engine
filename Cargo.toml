@@ -8,13 +8,19 @@ repository = "https://github.com/TheAxiomFoundation/axiom-rules-engine"
 keywords = ["rules-engine", "rules-as-code", "legal", "policy", "rulespec"]
 # The published crate carries the library, CLI, and format docs only. Tests,
 # fixtures, and the Python wrapper stay repo-only. Generated schemas also stay
-# out (they regenerate via `emit-schemas`) with one exception: the `schema`
-# feature's src/schema.rs include_str!s compiled-artifact.v1.schema.json, so
-# that file must ship or all-features builds (docs.rs included) cannot compile.
+# out (they regenerate via `emit-schemas`) with two exceptions: the `schema`
+# feature's src/schema.rs include_str!s the archived
+# compiled-artifact.v1.schema.json and compiled-artifact.v2.schema.json, so
+# those files must ship or all-features builds (docs.rs included) cannot
+# compile.
+# build.rs stamps the artifact's `engine_build`; without it a published crate
+# would not build.
 include = [
+    "build.rs",
     "src/**",
     "docs/**",
     "schemas/compiled-artifact.v1.schema.json",
+    "schemas/compiled-artifact.v2.schema.json",
     "README.md",
     "LICENSE",
 ]
@@ -43,7 +49,8 @@ fs = []
 schema = ["dep:schemars"]
 # Stage-2 prototype for the ratified unit-derivation semantics. The runtime
 # configuration inside the module is independently disabled by default. This
-# feature does not extend artifact v2 or any publication/launch surface. CI
+# feature does not extend the compiled artifact format or any
+# publication/launch surface. CI
 # also runs `cargo test --features "schema unit-derivation"`, which covers the
 # module's unit tests, the stage-3 CLI fixture, and the four experimental
 # stage-3 schemas.

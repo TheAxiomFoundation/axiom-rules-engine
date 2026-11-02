@@ -528,6 +528,7 @@ fn dense_inlined_chain(n: usize) -> Result<String, String> {
                 offsets: vec![0, 2],
                 inputs: HashMap::new(),
                 related_row_count: Some(2),
+                ..Default::default()
             },
         )]),
     };
