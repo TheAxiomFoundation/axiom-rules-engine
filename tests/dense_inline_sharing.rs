@@ -1196,6 +1196,30 @@ fn compile_deferral_leaves_each_body_with_the_reads_of_the_program() {
             }
         }
 
+        // A rule that finishes inside another rule's attempt keeps its own
+        // reads when that attempt defers: `second` reads `first`, so `first`
+        // finishes inside `second`'s attempt whatever order the tasks run
+        // in, and then `second` defers on `offset`.
+        let program = self::program(
+            vec![member()],
+            vec![
+                scalar_rule("p", "Person", add(vec![input("income"), integer(1)])),
+                scalar_rule("first", "Household", sum("member", "p", None)),
+                scalar_rule("offset", "Scalar", integer(1)),
+                scalar_rule(
+                    "second",
+                    "Household",
+                    add(vec![
+                        derived("first"),
+                        sum("member", "p", None),
+                        derived("offset"),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(counts(&program, usize::MAX), vec![2]);
+        assert_eq!(counts(&program, 1), vec![2]);
+
         let chained = read_counts(
             &compile_dense(&self::program(vec![member()], rules)).expect("dense compiles"),
         );
@@ -1207,8 +1231,9 @@ fn compile_deferral_leaves_each_body_with_the_reads_of_the_program() {
 /// For the differential's random rule graphs, read through every inlining
 /// site, a compile that defers leaves each body with the reads of the
 /// program that compiles: at deferral thresholds of 1, 2, 3, 5 and 8 levels
-/// the read counts equal those when nothing defers. In half the cases each
-/// output also reads a fresh scalar-entity rule after its own expression, so
+/// the read counts equal those when nothing defers. In about half the cases each
+/// output also reads a fresh scalar-entity rule after its own expression (a
+/// choice drawn with the case, so a failure shrinks and reproduces), so
 /// compiling it defers after its reads, including those of the derived
 /// relations' predicates it registers. Without a deferral every logged read
 /// is one node of the compiled program, so those counts are exact.
@@ -1223,19 +1248,18 @@ fn deferring_at_any_threshold_leaves_the_read_counts_of_the_program() {
         TestRng::deterministic_rng(RngAlgorithm::ChaCha),
     );
     let deferred_after_reads = std::cell::Cell::new(0_usize);
-    let case = std::cell::Cell::new(0_usize);
     runner
         .run(
             &(
                 prop::collection::vec(choice(), 1..8),
                 prop::collection::vec(choice(), 1..6),
+                any::<bool>(),
             ),
-            |(person_choices, household_choices)| {
+            |(person_choices, household_choices, read_fresh_scalars)| {
                 let people = graph("p", "Person", "income", &person_choices);
                 let homes = graph("h", "Household", "size", &household_choices);
                 let mut program = random_program(&people, &homes);
-                case.set(case.get() + 1);
-                if case.get() % 2 == 0 {
+                if read_fresh_scalars {
                     program = with_reads_of_fresh_scalars(
                         program,
                         &["total", "counted", "chained", "direct"],
