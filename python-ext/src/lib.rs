@@ -93,39 +93,53 @@ struct CompiledDenseProgramHandle {
 
 #[pymethods]
 impl CompiledDenseProgramHandle {
+    /// Compile a RuleSpec module. Without `outputs`, every rule of the root
+    /// entity in the module's import closure is compiled; with `outputs`,
+    /// only those rules and the rules they reach (see
+    /// `compiled_dense_from_artifact`).
     #[staticmethod]
-    #[pyo3(signature = (path, rulespec_roots, entity=None))]
-    fn from_file(path: &str, rulespec_roots: Vec<String>, entity: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (path, rulespec_roots, entity=None, outputs=None))]
+    fn from_file(
+        path: &str,
+        rulespec_roots: Vec<String>,
+        entity: Option<&str>,
+        outputs: Option<Vec<String>>,
+    ) -> PyResult<Self> {
         let roots = axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new(&rulespec_roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let artifact = CompiledProgramArtifact::from_rulespec_file(path, &roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        compiled_dense_from_artifact(artifact, entity)
+        compiled_dense_from_artifact(artifact, entity, outputs.as_deref())
     }
 
+    /// Compile an originless composition; `entity` and `outputs` as for
+    /// `from_file`.
     #[staticmethod]
-    #[pyo3(signature = (path, rulespec_roots, entity=None))]
+    #[pyo3(signature = (path, rulespec_roots, entity=None, outputs=None))]
     fn from_composed_file(
         path: &str,
         rulespec_roots: Vec<String>,
         entity: Option<&str>,
+        outputs: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let roots = axiom_rules_engine::rulespec::CanonicalRuleSpecRoots::new(&rulespec_roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let artifact = CompiledProgramArtifact::from_composed_rulespec_file(path, &roots)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        compiled_dense_from_artifact(artifact, entity)
+        compiled_dense_from_artifact(artifact, entity, outputs.as_deref())
     }
 
     /// Load a compiled artifact file. It must be format 3;
     /// `accept_artifact_format=2` also reads a format-2 artifact, unchanged,
-    /// through the format-2 compatibility loader.
+    /// through the format-2 compatibility loader. `entity` and `outputs` as
+    /// for `from_file`.
     #[staticmethod]
-    #[pyo3(signature = (path, entity=None, accept_artifact_format=None))]
+    #[pyo3(signature = (path, entity=None, accept_artifact_format=None, outputs=None))]
     fn from_artifact_file(
         path: &str,
         entity: Option<&str>,
         accept_artifact_format: Option<u32>,
+        outputs: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let accept_format_2 = match accept_artifact_format {
             None => false,
@@ -145,7 +159,7 @@ impl CompiledDenseProgramHandle {
             loaded => loaded,
         }
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        compiled_dense_from_artifact(artifact, entity)
+        compiled_dense_from_artifact(artifact, entity, outputs.as_deref())
     }
 
     /// Metadata for every derived rule in the compiled module, across all
@@ -306,9 +320,14 @@ impl CompiledDenseProgramHandle {
     }
 }
 
+/// Compile `artifact` for dense execution: every rule of the root entity, or,
+/// given `outputs`, only those rules and the rules they reach, so the dense
+/// compiler never judges a rule none of them reaches
+/// (`DenseCompiledProgram::from_artifact_for_outputs`).
 fn compiled_dense_from_artifact(
     artifact: CompiledProgramArtifact,
     entity: Option<&str>,
+    outputs: Option<&[String]>,
 ) -> PyResult<CompiledDenseProgramHandle> {
     // Capture authoring metadata (including `period`, which the runtime model
     // drops) for every derived rule across all entities — the dense program
@@ -339,8 +358,13 @@ fn compiled_dense_from_artifact(
         .iter()
         .map(|entry| (entry.slot.clone(), entry.request_names.clone()))
         .collect();
-    let compiled = DenseCompiledProgram::from_artifact(&artifact, entity)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let compiled = match outputs {
+        Some(outputs) => {
+            DenseCompiledProgram::from_artifact_for_outputs(&artifact, entity, outputs)
+        }
+        None => DenseCompiledProgram::from_artifact(&artifact, entity),
+    }
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(CompiledDenseProgramHandle {
         compiled,
         derived_metadata,

@@ -76,6 +76,18 @@ LifetimeBatch = (
 a bare inputs dict, or an ``(inputs[, relations[, row_count]])`` tuple."""
 
 
+def _requested_outputs(outputs: Iterable[str] | None) -> list[str] | None:
+    """The rule names a compile entry point passes the extension."""
+    if outputs is None:
+        return None
+    if isinstance(outputs, str):
+        raise TypeError(
+            "outputs takes an iterable of rule names, not a single string; "
+            f"pass [{outputs!r}]"
+        )
+    return list(outputs)
+
+
 def _prepare_relations(
     relations: dict[str, DenseRelationBatch],
 ) -> dict[str, dict[str, Any]]:
@@ -103,14 +115,43 @@ class CompiledDenseProgram:
         *,
         rulespec_roots: Iterable[str | Path],
         entity: str | None = None,
+        outputs: Iterable[str] | None = None,
     ) -> "CompiledDenseProgram":
+        """Compile a RuleSpec module for dense execution.
+
+        Without ``outputs``, this compiles every rule of the root entity that
+        the module's import closure holds, so any one of them that dense
+        cannot compile refuses the program, even one no output you want
+        reaches.
+
+        With ``outputs``, it compiles only those rules and the rules they
+        reach. A rule none of them reaches is not dense-compiled, so dense
+        does not refuse the program for it; a rule they do reach refuses it as
+        before. The RuleSpec compile that runs first, relation typing
+        included, still checks every rule of the import closure. Name outputs
+        by rule name, as :meth:`execute` takes them. Each must be a rule of
+        the root entity or an entity-free ``Scalar`` rule. With no
+        ``entity``, the outputs' entity is the root entity, and for
+        ``Scalar`` outputs alone, the module's one entity, as without
+        ``outputs``. :attr:`output_names`,
+        :attr:`root_inputs` and :attr:`relations` then list only what those
+        rules read, so a batch needs nothing else. :meth:`execute` infers the
+        row count from those columns and relations alone, so pass
+        ``row_count`` when the batch supplies none of them. For every output
+        both compile, given the same row count, the values and errors are the
+        same either way.
+        """
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(
                 "axiom_rules_engine_dense is not installed. Build it with "
                 "`maturin develop --release --manifest-path python-ext/Cargo.toml`."
             )
         roots = [str(Path(root)) for root in rulespec_roots]
-        return cls(NativeCompiledDenseProgram.from_file(str(Path(path)), roots, entity))
+        return cls(
+            NativeCompiledDenseProgram.from_file(
+                str(Path(path)), roots, entity, _requested_outputs(outputs)
+            )
+        )
 
     @classmethod
     def from_composed_file(
@@ -119,8 +160,12 @@ class CompiledDenseProgram:
         *,
         rulespec_roots: Iterable[str | Path],
         entity: str | None = None,
+        outputs: Iterable[str] | None = None,
     ) -> "CompiledDenseProgram":
-        """Compile an originless composition emitted by axiom-compose."""
+        """Compile an originless composition emitted by axiom-compose.
+
+        ``entity`` and ``outputs`` are as for :meth:`from_file`.
+        """
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(
                 "axiom_rules_engine_dense is not installed. Build it with "
@@ -129,7 +174,7 @@ class CompiledDenseProgram:
         roots = [str(Path(root)) for root in rulespec_roots]
         return cls(
             NativeCompiledDenseProgram.from_composed_file(
-                str(Path(path)), roots, entity
+                str(Path(path)), roots, entity, _requested_outputs(outputs)
             )
         )
 
@@ -140,12 +185,14 @@ class CompiledDenseProgram:
         *,
         entity: str | None = None,
         accept_artifact_format: Literal[2] | None = None,
+        outputs: Iterable[str] | None = None,
     ) -> "CompiledDenseProgram":
         """Load a compiled artifact (``compile``'s output) for dense execution.
 
         The artifact must be format 3. ``accept_artifact_format=2`` also loads
         a format-2 artifact, unchanged, through the engine's format-2
-        compatibility loader, with a warning.
+        compatibility loader, with a warning. ``entity`` and ``outputs`` are
+        as for :meth:`from_file`.
         """
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(
@@ -158,7 +205,7 @@ class CompiledDenseProgram:
                 "reads through its compatibility loader"
             )
         native = NativeCompiledDenseProgram.from_artifact_file(
-            str(Path(path)), entity, accept_artifact_format
+            str(Path(path)), entity, accept_artifact_format, _requested_outputs(outputs)
         )
         if native.artifact_format_version == 2:
             warnings.warn(
@@ -183,6 +230,11 @@ class CompiledDenseProgram:
 
     @property
     def output_names(self) -> list[str]:
+        """The rules this program compiled, which :meth:`execute` computes.
+
+        Every rule of the root entity and the ``Scalar`` rules they reach, or,
+        when compiled with ``outputs``, those rules and the rules they reach.
+        """
         return list(self._native.output_names())
 
     @property
