@@ -549,6 +549,15 @@ carry the reference control flow as data:
   rows that have asked for it so far and extended when a later reference asks
   for more rows. A rule reached only through dead branches is never computed
   for those rows, and its errors never surface.
+- **Shared inlined bodies.** Dense inlines a rule wherever an aggregation's
+  value, a `where` clause or a derived relation's predicate reads it, along
+  with the rules it reads. Each inlined rule's body is compiled once for each
+  place it is evaluated: root rows, or one relation's related rows. A body
+  read more than once is cached per row like a derived rule's column, so a
+  rule graph with shared dependencies compiles and evaluates in time linear
+  in its size. The body is the formula the inlined copy had; the rule's
+  commencement check and rounding still apply at each read. A shared read is
+  held to `MAX_INLINE_DEPTH` as if the body were compiled again there.
 - **Relation aggregations** in fast run row by row on the explain
   interpreter itself, so related-id resolution, derived-relation filtering and
   `where` laziness match by construction. Dense masks related rows by stage:
