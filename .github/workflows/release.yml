@@ -7,6 +7,10 @@
 # - cargo fetch --locked before each offline dist build (populate the cache so
 #   the offline build cannot resolve newer deps, and does not fail on a clean runner)
 # - validate Cargo.lock with --locked/--offline and force dist builds offline
+# - install dist in build-local-artifacts from each platform's archive, checked
+#   against a pinned digest, and fail on any other runner (#114)
+# - run Cleanup under bash with set -euo pipefail, and strip the blank lines from
+#   the published .sha256 files (#122)
 # Finding 3 (tag ruleset) is a repository-settings change and is intentionally not handled here.
 # MANUAL CHANGE — re-apply after every `dist init` regeneration:
 # - the concurrency block above `jobs:`, a copy of the one in ci.yml, which
