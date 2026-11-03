@@ -787,8 +787,6 @@ class _FormulaParser:
         return expr
 
     def parse_expr(self) -> _Expr:
-        if _is_identifier(self.peek()) and self.peek(1) == "=":
-            raise _FormulaRefused
         if self.peek() == "match":
             return self.parse_match()
         if self.peek() == "if":
@@ -897,7 +895,7 @@ class _FormulaParser:
             self.variables.update(
                 argument.name
                 for argument in arguments[0].arguments
-                if isinstance(argument, _Var) and argument.name not in PREDICATE_TERMS
+                if isinstance(argument, _Var)
             )
         return _Call(function, arguments)
 
@@ -969,14 +967,11 @@ def _read_call(
     function: str, arguments: list[_Expr], scope: _FormulaScope, inputs: set[str]
 ) -> None:
     # `len` reads only the relation of its first argument, and `sum` lowers
-    # only its first argument. An `exists` generator holds terms and the name
-    # it binds.
+    # only its first argument.
     if function == "len":
         return
     if function == "sum":
         arguments = arguments[:1]
-    elif function == "exists":
-        arguments = arguments[1:]
     judgment = function in ("exactly_one", "exists")
     named = NAMED_ARGUMENTS.get(function)
     for position, argument in enumerate(arguments):

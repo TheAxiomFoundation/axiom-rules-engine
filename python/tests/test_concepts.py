@@ -385,6 +385,12 @@ POSITION_CASES = [
     ("(rate_table)[household_size]", {"household_size"}),
     ("count_where(household_members, is_adult)", {"is_adult"}),
     ("sum(household_members.wages)", {"wages"}),
+    # `input_for_year` and `only_related` read their names as inputs, whatever
+    # a bare name of that spelling reads.
+    ("input_for_year(period_start, 2024)", {"period_start"}),
+    ("only_related(member_of_household, period_end)", {"period_end"}),
+    # A shape the lowering refuses reads what it names.
+    ("(wages + other)[2]", {"wages", "other"}),
 ]
 # The lexer reads a path such as `a/b` as one name, and the lowering reads it
 # as the input of that name. With whitespace around `/`, or a digit after it,
@@ -435,17 +441,23 @@ DECLARED_NAME_CASES = [
     ("only(member_of_household.local_rate)", {"local_rate"}),
     ("sum_where(member_of_household, local_rate, is_eligible)", {"local_rate", "is_eligible"}),
     ("min_where(member_of_household, local_rate, is_eligible)", {"local_rate", "is_eligible"}),
+    ("only_related(member_of_household, local_rate)", {"local_rate"}),
     # A rule with no entity and only literal values is a parameter, a grouped
-    # literal included. `-1` computes, so that rule is a derived rule.
+    # literal included. `-1` computes, so that rule is a derived rule, and so is
+    # one with any version that computes.
     ("count_where(member_of_household, literal_rule)", {"literal_rule"}),
     ("count_where(member_of_household, grouped_literal_rule)", {"grouped_literal_rule"}),
     ("count_where(member_of_household, yaml_number_rule)", {"yaml_number_rule"}),
+    ("count_where(member_of_household, yaml_integer_rule)", {"yaml_integer_rule"}),
+    ("count_where(member_of_household, yaml_boolean_rule)", {"yaml_boolean_rule"}),
     ("count_where(member_of_household, negative_rule)", set()),
+    ("count_where(member_of_household, mixed_rule)", set()),
     ("literal_rule + grouped_literal_rule + yaml_number_rule + negative_rule", set()),
     # Outside a predicate a relation's name reads an input, and a source
     # relation's reads one everywhere.
     ("member_of_household + 1", {"member_of_household"}),
     ("member_of_household", {"member_of_household"}),
+    ("if member_of_household: 1 else: 0", {"member_of_household"}),
     ("cites_section_63 + 1", {"cites_section_63"}),
 ]
 # A number to `serde_yaml`, though PyYAML leaves these as text.
@@ -463,6 +475,8 @@ YAML_NUMBER_CASES = [
 TRIM_CASES = [
     ("len(member_of_household) ", set()),
     (" wages", {"wages"}),
+    ("match x: _ => 1 ", set()),
+    (" match x: _ => wages", {"wages"}),
 ]
 # A rule of each other kind in the module. None reads an input, so the compiled
 # program's inputs come from the formula under test alone.
@@ -479,6 +493,8 @@ DECLARED_RULES: list[dict[str, object]] = [
         ("local_rate", "parameter", "Integer", None, "35"),
         ("is_eligible", "parameter", "Judgment", None, "true"),
         ("yaml_number_rule", "parameter", "Money", None, 0.5),
+        ("yaml_integer_rule", "parameter", "Integer", None, 35),
+        ("yaml_boolean_rule", "parameter", "Judgment", None, True),
         ("literal_rule", "derived", "Money", None, "1"),
         ("grouped_literal_rule", "derived", "Money", None, "(1)"),
         ("negative_rule", "derived", "Money", None, "-1"),
@@ -492,6 +508,15 @@ DECLARED_RULES: list[dict[str, object]] = [
         "dtype": "Money",
         "indexed_by": LOCAL_TABLE_LABEL,
         "versions": [{"effective_from": "2026-01-01", "values": {1: 10, 2: 20}}],
+    },
+    {
+        "name": "mixed_rule",
+        "kind": "derived",
+        "dtype": "Money",
+        "versions": [
+            {"effective_from": "2026-01-01", "formula": "1"},
+            {"effective_from": "2027-01-01", "formula": "-1"},
+        ],
     },
     {
         "name": "cites_section_63",
@@ -508,6 +533,8 @@ CALL_DTYPES = {
     "date_add_months(birth_date, 1)": "Date",
     "date_add_years(birth_date, 18)": "Date",
     "only_related(member_of_household, is_adult)": "Boolean",
+    "only_related(member_of_household, period_end)": "Boolean",
+    "only_related(member_of_household, local_rate)": "Boolean",
     "exactly_one(is_adult, is_student)": "Judgment",
     '"max"': "Text",
     '"Aged (65+)"': "Text",
@@ -530,18 +557,24 @@ CALL_IMPORTS = {
     "(rate_table)[household_size]": [RATE_TABLE_MODULE],
 }
 CALL_INPUTS = {
-    "input_for_year(wages, 2024)": [
-        {
-            "name": "wages",
-            "entity": "Household",
-            "dtype": "Money",
-            "unit": "USD",
-            "period": "Year",
-        }
-    ],
-    "only_related(member_of_household, is_adult)": [
-        {"name": "is_adult", "entity": "Person", "dtype": "Boolean"}
-    ],
+    **{
+        f"input_for_year({name}, 2024)": [
+            {
+                "name": name,
+                "entity": "Household",
+                "dtype": "Money",
+                "unit": "USD",
+                "period": "Year",
+            }
+        ]
+        for name in ("wages", "period_start")
+    },
+    **{
+        f"only_related(member_of_household, {name})": [
+            {"name": name, "entity": "Person", "dtype": "Boolean"}
+        ]
+        for name in ("is_adult", "period_end", "local_rate")
+    },
 }
 
 
@@ -703,9 +736,13 @@ def test_inference_searches_each_comment_once(text: str) -> None:
 # reads. A fixture the compiler refuses is valid up to the refusal named here,
 # which is where its inputs stop being checkable.
 COMPILE_REFUSALS = {
-    "input_for_year(wages, 2024)": (
-        "dense compilation does not yet support selected-year input"
-    ),
+    **{
+        f"input_for_year({name}, 2024)": (
+            "dense compilation does not yet support selected-year input"
+        )
+        for name in ("wages", "period_start")
+    },
+    "(wages + other)[2]": "parameter lookup target must be a named parameter",
     'min """ (': "block is never closed",
     **{
         formula: re.escape(
@@ -718,10 +755,13 @@ COMPILE_REFUSALS = {
     "not period_end": "`period_end` is a date, so it cannot be tested as a judgment",
     "count_where(household_members, is_adult)": "typing is mandatory",
     "sum(household_members.wages)": "typing is mandatory",
-    # The dense compiler covers less than the artifact, which checks these two.
+    # The dense compiler covers less than the artifact, which checks these.
     "person_pay + 1": "dense compilation only supports dependencies within the same root",
     "count_where(member_of_household, negative_rule)": (
         "dense compilation does not yet support where-clause predicates"
+    ),
+    "count_where(member_of_household, mixed_rule)": (
+        "dense compilation does not yet support versioned inlined derived formulas"
     ),
 }
 COMPILED_CASES = [
@@ -805,6 +845,7 @@ def test_inferred_inputs_are_the_compiled_artifact_inputs(
     root = canonical_root(tmp_path)
     path = write_call_module(root, formula)
 
+    assert inferred_input_names(root) == inputs
     assert artifact_inputs(root, path, tmp_path / "artifact.json") == inputs
 
 
@@ -823,18 +864,21 @@ def write_predicate_module(root: Path, predicate: str) -> Path:
                 "data_relation": {"arity": 2, "arguments": ["Person", "Person"]},
             },
             *DECLARED_RULES,
-            {
-                "name": "kin",
-                "kind": "derived_relation",
-                "derived_relation": {
-                    "arity": 2,
-                    "source_relation": "relative_of",
-                    "slot_entities": ["Person", "Person"],
-                    "current_slot": 0,
-                    "related_slot": 1,
-                },
-                "versions": [{"effective_from": "2026-01-01", "formula": predicate}],
-            },
+            *(
+                {
+                    "name": name,
+                    "kind": "derived_relation",
+                    "derived_relation": {
+                        "arity": 2,
+                        "source_relation": "relative_of",
+                        "slot_entities": ["Person", "Person"],
+                        "current_slot": 0,
+                        "related_slot": 1,
+                    },
+                    "versions": [{"effective_from": "2026-01-01", "formula": formula}],
+                }
+                for name, formula in (("in_law", "true"), ("kin", predicate))
+            ),
         ],
     }
     return write_rulespec(
@@ -865,8 +909,13 @@ PREDICATE_CASES = [
     # A relation's name reads the relation only in the judgment position.
     ("member_of_household", set()),
     ("(if member_of_household: 1 else: 0) > 0", set()),
+    ("(if true: member_of_household else: 0) > 0", {"member_of_household"}),
+    ("(if true: 0 else: member_of_household) > 0", {"member_of_household"}),
     ("exactly_one(member_of_household, is_kin)", {"is_kin"}),
+    ("exists(relative_of(anchor, p), member_of_household)", set()),
     ("member_of_household == true", {"member_of_household"}),
+    ("in_law", set()),
+    ("in_law == true", {"in_law"}),
     ("cites_section_63", {"cites_section_63"}),
     ("cites_section_63 > 1", {"cites_section_63"}),
     # Other names read as they do in a rule.
@@ -904,6 +953,32 @@ def test_inferred_predicate_inputs_are_the_compiled_artifact_inputs(
 
     assert inferred_input_names(root) == inputs
     assert artifact_inputs(root, path, tmp_path / "artifact.json") == inputs
+
+
+# A shape the lowering refuses reads what it names, though a term is never an
+# input.
+@needs_binary
+@pytest.mark.parametrize(
+    ("predicate", "inputs", "refusal"),
+    [
+        ("candidate.anchor > 1", set(), "relation_term_used_as_value"),
+        ("count_where(member_of_household, anchor) > 0", set(), "relation_term_used_as_value"),
+        ("exists(relative_of(anchor, p), candidate.p > 1)", set(), "relation_term_used_as_value"),
+        ("exists(wages, true)", {"wages"}, "relation_exists_generator_not_atom"),
+        ("exists(relative_of(anchor, wages + 1), true)", {"wages"}, "relation_atom_argument_not_term"),
+        # The parser refuses this one, and the fallback leaves out the terms too.
+        ("candidate.age >", {"age"}, "formula parse error"),
+    ],
+)
+def test_a_predicate_the_lowering_refuses_reads_what_it_names(
+    tmp_path: Path, predicate: str, inputs: set[str], refusal: str
+) -> None:
+    root = canonical_root(tmp_path)
+    path = write_predicate_module(root, predicate)
+
+    assert inferred_input_names(root) == inputs
+    with pytest.raises(RuntimeError, match=refusal):
+        artifact_inputs(root, path, tmp_path / "artifact.json")
 
 
 RANDOM_NAMES = [
@@ -1117,6 +1192,7 @@ PARSER_EDGES = [
     "if", "else", "elif", "match", "and", "or", "not", "from", "to", "entity", "amend",
     "true", "True", "TRUE", "false", "False", "not not x", "not -x", "- not x", "--x",
     "x and", "and x", "x or or y", "x and not y", "x.if", "x.true", "x.not", "if.x",
+    "x.True", "x.False", "x.false", "x.elif", "not x < y < z", "- x < y < z", "not x + y",
     "true.x", "(true).x", "1 . x", "(1).x", '"s".x',
     # Operators
     "x = 1", "x == 1", "x != 1", "x ! 1", "!x", "x -> y", "x => y", "x <= y", "x < = y",
@@ -1251,6 +1327,15 @@ def test_a_refused_formula_counts_every_undeclared_name_it_does_not_call(
     if NativeCompiledDenseProgram is not None:
         with pytest.raises(ValueError, match=refusal):
             CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity="Household")
+
+
+def test_a_refused_formula_does_not_count_a_declared_name() -> None:
+    rules = [
+        {"name": "declared", "kind": "derived", "versions": [{"formula": "1 + other"}]},
+        {"name": "refused", "kind": "derived", "versions": [{"formula": "declared wages"}]},
+    ]
+
+    assert _infer_input_names(rules) == {"other", "wages"}
 
 
 @pytest.mark.parametrize(
