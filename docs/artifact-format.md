@@ -506,6 +506,13 @@ in Rust test builds: it has no spec or schema variant, and conversion to a
 serialized term refuses it (`variable_artifact_form_keeps_legacy_terms_and_round_trips`
 and `literal_ids_have_no_spec_or_artifact_representation`).
 
+`calendar_years_to_months(years)` adds the scalar form
+`{kind: calendar_years_to_months, years: ...}` to format 3 without a version
+bump, as the forms above do: older engines refuse the unknown expression kind.
+The archived format-2 schema does not list it. Programs that do not use it
+serialize as before. An engine that reads it lists `lifetime_calculation` in
+`capabilities`.
+
 ## In Rust
 
 `ProgramSpec` carries `input_declarations` last and omits it when empty.

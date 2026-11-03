@@ -1316,7 +1316,8 @@ impl<'a> Checker<'a> {
             ),
             ScalarExpr::ParameterLookup { index, .. }
             | ScalarExpr::Ceil(index)
-            | ScalarExpr::Floor(index) => self.scalar(index, context),
+            | ScalarExpr::Floor(index)
+            | ScalarExpr::CalendarYearsToMonths { years: index } => self.scalar(index, context),
             ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
                 for item in items {
                     self.scalar(item, context);
@@ -1954,7 +1955,8 @@ fn collect_scalar_role_reads_in<'p>(
         }
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => {
+        | ScalarExpr::Floor(index)
+        | ScalarExpr::CalendarYearsToMonths { years: index } => {
             collect_scalar_role_reads_in(index, aggregated, out, bindings)
         }
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
@@ -2081,7 +2083,8 @@ fn collect_scalar_derived(expr: &ScalarExpr, out: &mut BTreeSet<String>) {
         }
         ScalarExpr::ParameterLookup { index, .. }
         | ScalarExpr::Ceil(index)
-        | ScalarExpr::Floor(index) => collect_scalar_derived(index, out),
+        | ScalarExpr::Floor(index)
+        | ScalarExpr::CalendarYearsToMonths { years: index } => collect_scalar_derived(index, out),
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
             for item in items {
                 collect_scalar_derived(item, out);

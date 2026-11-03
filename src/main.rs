@@ -10,6 +10,10 @@ use axiom_rules_engine::compile::{
     ARTIFACT_FORMAT_VERSION, CompileError, CompiledProgramArtifact, CorpusProvisionIndex,
     EngineBuild, LEGACY_ARTIFACT_FORMATS, compile_summary_lines,
 };
+use axiom_rules_engine::lifetime_api::{
+    LifetimeApiError, MAX_ARTIFACT_BYTES, MAX_REQUEST_BYTES, execute_lifetime_wire_request,
+    parse_lifetime_artifact, parse_lifetime_wire_request,
+};
 use axiom_rules_engine::rulespec::CanonicalRuleSpecRoots;
 
 fn main() {
@@ -25,6 +29,7 @@ enum TopLevelCommand {
     CompileComposed,
     Run,
     RunCompiled,
+    RunLifetime,
     #[cfg(feature = "unit-derivation")]
     CompileUnitAggregation,
     #[cfg(feature = "unit-derivation")]
@@ -74,6 +79,12 @@ const TOP_LEVEL_COMMANDS: &[CommandMetadata] = &[
         name: "run-compiled",
         aliases: &[],
         description: &["Execute a compiled artifact against a JSON request on stdin."],
+    },
+    CommandMetadata {
+        command: TopLevelCommand::RunLifetime,
+        name: "run-lifetime",
+        aliases: &[],
+        description: &["Execute aligned period batches with exact Decimal lifetime reductions."],
     },
     #[cfg(feature = "unit-derivation")]
     CommandMetadata {
@@ -192,8 +203,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // `program.interface`.
                         // `relation_roles` supports predicate terms, qualified
                         // reads, parameters, atoms, term comparisons,
-                        // bounded exists and paths.
-                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
+                        // bounded exists and paths. `lifetime_calculation`
+                        // reads `calendar_years_to_months`, nests reductions
+                        // in a top-N count and runs `run-lifetime` (wire v1
+                        // and v2).
+                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles", "lifetime_calculation"],
                     }))?
                 );
                 return Ok(());
@@ -206,6 +220,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             TopLevelCommand::CompileComposed => return run_compile(args.collect(), true),
             TopLevelCommand::Run => return run_request(args.collect()),
             TopLevelCommand::RunCompiled => return run_compiled(args.collect()),
+            TopLevelCommand::RunLifetime => return run_lifetime(args.collect()),
             #[cfg(feature = "unit-derivation")]
             TopLevelCommand::CompileUnitAggregation => {
                 return run_compile_unit_aggregation(args.collect());
@@ -584,6 +599,72 @@ fn warn_lenient_relation_binding(policy: RelationBinding) {
             "warning[lenient_relation_binding]: relation_binding is lenient; mismatched relation tuples are accepted without reordering"
         );
     }
+}
+
+fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // Help follows the other commands' rules: a lone `--help` or `-h`
+    // prints usage and exits 0; a help flag is never `--artifact`'s value,
+    // and beside other arguments it is refused. These are plain-text
+    // refusals, before any JSON request handling.
+    let is_help = |arg: &str| arg == "--help" || arg == "-h";
+    if let [only] = args.as_slice()
+        && is_help(only)
+    {
+        println!(
+            "usage: axiom-rules-engine run-lifetime --artifact <compiled.json>\nRead one lifetime-request/v1 or lifetime-request/v2 JSON request from stdin; Decimal only."
+        );
+        return Ok(());
+    }
+    if let [option, value, ..] = args.as_slice()
+        && option == "--artifact"
+        && is_help(value)
+    {
+        return Err(format!("`--artifact` takes a value, not `{value}`").into());
+    }
+    if let Some(flag) = args.iter().find(|arg| is_help(arg)) {
+        return Err(format!("`run-lifetime {flag}` takes no other arguments").into());
+    }
+    let execute = || -> Result<(), LifetimeApiError> {
+        if args.len() != 2 || args[0] != "--artifact" || args[1].starts_with("--") {
+            return Err(LifetimeApiError::invalid(
+                "arguments",
+                "expected exactly --artifact <compiled.json>",
+            ));
+        }
+        let file = std::fs::File::open(&args[1])
+            .map_err(|error| LifetimeApiError::invalid("artifact", error.to_string()))?;
+        let artifact =
+            parse_lifetime_artifact(&read_lifetime_input(file, MAX_ARTIFACT_BYTES, "artifact")?)?;
+        let request = parse_lifetime_wire_request(&read_lifetime_input(
+            io::stdin().lock(),
+            MAX_REQUEST_BYTES,
+            "request",
+        )?)?;
+        let response = execute_lifetime_wire_request(artifact, request)?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        Ok(())
+    };
+    execute().map_err(|error| {
+        serde_json::to_string(&error.diagnostic())
+            .expect("diagnostic is JSON")
+            .into()
+    })
+}
+
+fn read_lifetime_input(
+    reader: impl Read,
+    limit: usize,
+    field: &str,
+) -> Result<String, LifetimeApiError> {
+    let mut source = String::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_string(&mut source)
+        .map_err(|error| LifetimeApiError::invalid(field, error.to_string()))?;
+    if source.len() > limit {
+        return Err(LifetimeApiError::invalid(field, "input exceeds byte limit"));
+    }
+    Ok(source)
 }
 
 fn is_help_flag(arg: &str) -> bool {
