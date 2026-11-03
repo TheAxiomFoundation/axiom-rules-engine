@@ -23,6 +23,11 @@
 //! Results are compared on two batches: the generator's own, and
 //! [`varied_batch`], whose every slot holds its own values on each row, so
 //! a program that read another slot or row of the same type would differ.
+//!
+//! 5. Every compiled program, each closure and the whole root, reads only
+//!    slots the artifact's interface block lists for the kind of ids it reads
+//!    them on (`docs/artifact-format.md`): its root inputs for `Household`,
+//!    and each relation's related inputs for that relation's related kind.
 
 #[allow(dead_code)]
 #[path = "support/artifact_interface_generator.rs"]
@@ -174,6 +179,59 @@ fn executed(program: &DenseCompiledProgram, g: &Generated, output: &str) -> [Str
         .map(|batch| format!("{:?}", program.execute(&period(), batch, &outputs)))
 }
 
+/// Property 5: every slot `program` reads is listed in `artifact`'s
+/// interface block for the kind of ids it reads it on.
+fn reads_only_listed_slots(
+    program: &DenseCompiledProgram,
+    artifact: &CompiledProgramArtifact,
+) -> Result<usize, TestCaseError> {
+    let interface = artifact
+        .interface
+        .as_ref()
+        .ok_or_else(|| failure("the artifact has no interface block"))?;
+    let listed = |slot: &str, kind: &str| {
+        interface
+            .inputs
+            .iter()
+            .any(|input| input.name == slot && input.entities.iter().any(|entity| entity == kind))
+    };
+    let mut reads = 0;
+    for slot in program.root_inputs() {
+        prop_assert!(
+            listed(slot, ROOT),
+            "root input `{}` is not listed for `{}`",
+            slot,
+            ROOT
+        );
+        reads += 1;
+    }
+    for relation in program.relations() {
+        let kind = artifact
+            .program
+            .relations
+            .iter()
+            .find(|spec| spec.name == relation.key.name)
+            .and_then(|spec| spec.slot_entities.get(relation.key.related_slot))
+            .ok_or_else(|| {
+                failure(format!(
+                    "relation `{}` has no related kind",
+                    relation.key.name
+                ))
+            })?;
+        for slot in &relation.related_inputs {
+            prop_assert!(
+                listed(slot, kind),
+                "related input `{}` of `{}` is not listed for `{}`",
+                slot,
+                relation.key.name,
+                kind
+            );
+            reads += 1;
+        }
+    }
+    Ok(reads)
+}
+
 #[derive(Default)]
 struct Health {
     programs: u32,
@@ -182,6 +240,7 @@ struct Health {
     proper_single_closures: u32,
     executed_values: u32,
     varied_values: u32,
+    listed_reads: usize,
 }
 
 #[test]
@@ -205,7 +264,8 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
             // 1. The whole root refuses the crossing; without it, it compiles.
             let mut without = g.program.clone();
             without.derived.retain(|rule| rule.name != CROSSING);
-            let whole = DenseCompiledProgram::from_artifact(&compile(&without)?, Some(ROOT))
+            let without_artifact = compile(&without)?;
+            let whole = DenseCompiledProgram::from_artifact(&without_artifact, Some(ROOT))
                 .map_err(|error| {
                     failure(format!(
                         "the whole root without {CROSSING} refused: {error}"
@@ -254,6 +314,7 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
             let whole_outputs = set(whole.output_names());
             let whole_inputs = set(whole.root_inputs().iter().cloned());
             let whole_relations = relation_keys(&whole);
+            h.listed_reads += reads_only_listed_slots(&whole, &without_artifact)?;
             let others = rules
                 .iter()
                 .filter(|rule| *rule != CROSSING)
@@ -279,6 +340,7 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
                 );
                 prop_assert!(set(closure.root_inputs().iter().cloned()).is_subset(&whole_inputs));
                 prop_assert!(relation_keys(&closure).is_subset(&whole_relations));
+                h.listed_reads += reads_only_listed_slots(&closure, &artifact)?;
                 if outputs.len() < whole_outputs.len() {
                     h.proper_single_closures += 1;
                 }
@@ -308,6 +370,7 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
             prop_assert_eq!(set(all.output_names()), whole_outputs);
             prop_assert_eq!(set(all.root_inputs().iter().cloned()), whole_inputs);
             prop_assert_eq!(relation_keys(&all), whole_relations);
+            h.listed_reads += reads_only_listed_slots(&all, &artifact)?;
             for output in all.output_names() {
                 prop_assert_eq!(executed(&all, &g, &output), executed(&whole, &g, &output));
             }
@@ -316,13 +379,18 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
         .unwrap();
     let h = health.borrow();
     eprintln!(
-        "requested closures: {} programs, {} with the crossing; {} single-rule closures, {} smaller than the whole root, {} executed to values on the generator's batch and {} on the varied one",
+        "requested closures: {} programs, {} with the crossing; {} single-rule closures, {} smaller than the whole root, {} executed to values on the generator's batch and {} on the varied one; {} slot reads checked against the interface",
         h.programs,
         h.with_crossing,
         h.single_closures,
         h.proper_single_closures,
         h.executed_values,
-        h.varied_values
+        h.varied_values,
+        h.listed_reads
+    );
+    assert!(
+        h.listed_reads >= 10 * h.programs as usize,
+        "the interface check must see many reads"
     );
     assert!(
         h.with_crossing >= 32 && h.programs - h.with_crossing >= 32,

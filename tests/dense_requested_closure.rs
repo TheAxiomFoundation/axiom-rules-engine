@@ -1159,3 +1159,232 @@ fn relation_typing_still_covers_the_whole_program() {
         );
     }
 }
+
+const CHAIN_A_TARGET: &str = "us:policies/chain/a";
+const CHAIN_B_TARGET: &str = "us:policies/chain/b";
+const CHAIN_C_TARGET: &str = "us:policies/chain/c";
+const CHAIN_D_TARGET: &str = "us:policies/chain/d";
+
+const CHAIN_A: &str = r#"
+format: rulespec/v1
+imports:
+  - us:policies/chain/b
+rules:
+  - name: chain_top
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: chain_middle + 1
+"#;
+
+const CHAIN_B: &str = r#"
+format: rulespec/v1
+imports:
+  - us:policies/chain/c
+rules:
+  - name: chain_middle
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: chain_bottom * 2
+  - name: versioned_unreached
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: wages
+      - effective_from: 2027-01-01
+        formula: wages * 2
+"#;
+
+const CHAIN_C: &str = r#"
+format: rulespec/v1
+imports:
+  - us:policies/chain/d
+rules:
+  - name: chain_bottom
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: chain_deep + 3
+  - name: crossing_unreached
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_amount_rule + 0
+"#;
+
+const CHAIN_D: &str = r#"
+format: rulespec/v1
+rules:
+  - name: chain_deep
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: wages
+  - name: person_amount_rule
+    kind: derived
+    entity: Person
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_amount
+"#;
+
+/// Three imports deep (a, b, c, d), with two rules the output does not reach
+/// in the middle modules: a rule with two formula versions, which dense
+/// declines, and a rule that reads a `Person` rule directly. The whole root
+/// refuses on whichever it meets first. The output compiles through the
+/// whole chain and gives explain's values, and each unreached rule refuses
+/// only a request that reaches it, with the whole root's error.
+#[test]
+fn a_three_import_chain_compiles_only_what_the_output_reaches() {
+    let artifact = artifact(
+        CHAIN_A_TARGET,
+        &[
+            (CHAIN_A_TARGET, CHAIN_A),
+            (CHAIN_B_TARGET, CHAIN_B),
+            (CHAIN_C_TARGET, CHAIN_C),
+            (CHAIN_D_TARGET, CHAIN_D),
+        ],
+    );
+    let versioned = "dense compilation does not yet support versioned derived formulas in \
+                     `versioned_unreached`; use generic API execution";
+    let crosses = |error: &DenseCompileError| {
+        matches!(
+            error,
+            DenseCompileError::CrossEntityDependency { derived, dependency, entity, .. }
+                if derived == "crossing_unreached"
+                    && dependency == "person_amount_rule"
+                    && entity == "Person"
+        )
+    };
+    let whole = DenseCompiledProgram::from_artifact(&artifact, Some("TaxUnit"))
+        .expect_err("the whole root holds both unreached rules");
+    assert!(whole.to_string() == versioned || crosses(&whole), "{whole}");
+
+    let closure = compile_requested(&artifact, "TaxUnit", &["chain_top"])
+        .expect("the output reaches neither unreached rule");
+    assert_eq!(
+        sorted(closure.output_names()),
+        ["chain_bottom", "chain_deep", "chain_middle", "chain_top"]
+    );
+    assert_eq!(closure.root_inputs(), ["wages"]);
+    let rows: Rows<'_> = &[("wages", &["10", "0", "2.5"])];
+    let values = dense_values(&closure, rows, "chain_top");
+    assert_eq!(
+        values,
+        explain_values(&artifact, "TaxUnit", rows, "chain_top")
+    );
+    assert_eq!(
+        values,
+        ["27", "7", "12"]
+            .map(|value| Decimal::from_str(value).unwrap())
+            .to_vec()
+    );
+
+    let error = compile_requested(&artifact, "TaxUnit", &["chain_top", "versioned_unreached"])
+        .expect_err("the request reaches the versioned rule");
+    assert_eq!(error.to_string(), versioned);
+    let error = compile_requested(&artifact, "TaxUnit", &["crossing_unreached"])
+        .expect_err("the request reaches the direct read");
+    assert!(crosses(&error), "{error}");
+}
+
+/// Three data relations between the two entities, declared out of name
+/// order, one with its slots the other way round.
+const UNSORTED_RELATIONS: &str = r#"
+format: rulespec/v1
+rules:
+  - name: z_member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, TaxUnit]
+  - name: a_dependent_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, TaxUnit]
+  - name: m_filer_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [TaxUnit, Person]
+  - name: person_share
+    kind: derived
+    entity: Person
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: share
+  - name: unit_reads_share
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_share + 0
+"#;
+
+/// The refusal names every data relation between the two entities, sorted
+/// by name, however the program's maps happen to order them.
+#[test]
+fn the_refusal_lists_the_declared_relations_in_name_order() {
+    let mut messages = BTreeSet::new();
+    // Each artifact load builds the program's maps afresh, in varying orders.
+    for _ in 0..16 {
+        let artifact = CompiledProgramArtifact::from_rulespec_str(UNSORTED_RELATIONS)
+            .expect("the module compiles");
+        let mut declared = artifact
+            .program
+            .relations
+            .iter()
+            .map(|relation| relation.name.clone())
+            .collect::<Vec<String>>();
+        declared.sort();
+        assert_eq!(declared.len(), 3);
+        let error = compile_requested(&artifact, "TaxUnit", &["unit_reads_share"])
+            .expect_err("the unit reads a Person rule directly");
+        match &error {
+            DenseCompileError::CrossEntityDependency { relations, .. } => {
+                assert_eq!(relations, &declared)
+            }
+            other => panic!("expected a cross-entity refusal, got {other}"),
+        }
+        assert!(
+            error.to_string().contains(&format!(
+                "such as `{}`, `{}` or `{}`, which this program declares",
+                declared[0], declared[1], declared[2]
+            )),
+            "{error}"
+        );
+        messages.insert(error.to_string());
+    }
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+}
