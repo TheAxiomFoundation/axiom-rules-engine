@@ -4,6 +4,51 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-03 — Formula and input errors name what the user wrote
+
+**Decision.** Three errors now report what the user wrote, not what the
+loader or binder made of it.
+
+- `RuleSpecError::Formula` becomes a struct variant,
+  `Formula { rule, effective_from, error }`. A parse error in a rule's formula,
+  or a lowering error in a derived relation's predicate, names the rule, and
+  the version's `effective_from` when the rule has several. Its position
+  counts from the formula as written, whitespace around it included. An error
+  from the module the loader generates from every rule still names no rule.
+- The new `RuleSpecError::EffectiveDateOutOfRange { path, name, field, date }`
+  refuses any `effective_from` or `effective_to` outside 0000-01-01 to
+  9999-12-31, for every rule kind and every place a date can sit.
+- `EvalError::AmbiguousInput` gains `other_name: Option<String>`. `name` and
+  `other_name` are the conflicting records' names as the request spelled
+  them. `other_name` is set only when the two spellings differ.
+
+**Why.** The loader writes version dates into generated formula source
+unquoted, and chrono spells a year outside four digits with a sign, so
+`+10000-01-01` failed as a parse error at a position in source the user never
+sees. Parse positions counted from the trimmed formula, and nothing said which
+of a module's formulas failed. The ambiguous-input error named the bound
+slot, which a qualified program's binder refuses, and named neither
+conflicting input.
+
+**Consequences.**
+
+- This breaks Rust callers in three ways. A pattern `Formula(_)` must become
+  `Formula { .. }`. `RuleSpecError` is not `#[non_exhaustive]`, so an
+  exhaustive match needs an arm for `EffectiveDateOutOfRange`. A pattern or
+  struct literal of `AmbiguousInput` without `..` must name `other_name`.
+  "Dense batches justify every row count they claim" (2026-10-14) already
+  makes the next release a breaking one, 0.3.0; these changes ship in it.
+- The display text of all three changes. Anyone who matches on it needs to
+  update. The generated-module case keeps `failed to parse RuleSpec formula:`.
+- The date check refuses some input that the loader accepted before, when no
+  writer emitted the date: a table's `effective_to` and later versions, the
+  dates of derived and data relations, and a rule-level `effective_from`
+  beside a `versions:` list. None of these can be written into the formula
+  source, and accepting them would leave one date rule for some kinds and none
+  for others. No tracked fixture uses such a date.
+- Direct `Engine` callers bind slots themselves, so their ambiguity error
+  names the slot and leaves `other_name` unset.
+
 ## 2026-11-02 — Lifetime execution can fix law at a calculation period
 
 **Decision.** Add a `run-lifetime` CLI command and its JSON wire, with
@@ -48,6 +93,9 @@ the top-N count could not express.
 - `calendar_years_to_months` takes Integer or exactly integral Decimal years
   and refuses Float, fractions and i64 overflow. Fast mode declines it, and
   the artifact node extends format 3 (see `docs/artifact-format.md`).
+- `capabilities` lists a new `lifetime_calculation` capability: the engine
+  reads `calendar_years_to_months`, nests reductions in a top-N count and
+  runs `run-lifetime` (wire v1 and v2).
 - `docs/lifetime-cli.md`, `docs/calendar-unit-conversion.md` and
   `docs/execution-semantics.md` give the contracts. The tests are
   `tests/lifetime_cli.rs`, `tests/lifetime_calculation.rs`,

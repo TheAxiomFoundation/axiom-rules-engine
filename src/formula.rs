@@ -33,7 +33,8 @@ pub enum FormulaError {
     /// The lexer or parser rejected the source. `line` and `col` point into
     /// the source text given to the [`Lexer`]. RuleSpec lowering parses each
     /// rule's formula on its own, trimmed, before it parses the module it
-    /// generates, so a syntax error in a formula points into that formula
+    /// generates, then moves the position back by the whitespace it trimmed,
+    /// so a syntax error in a formula points into that formula as written
     /// (`docs/rulespec-format.md`, "Formula parse errors").
     #[error("formula parse error at line {line}, col {col}: {message}")]
     Parse {
