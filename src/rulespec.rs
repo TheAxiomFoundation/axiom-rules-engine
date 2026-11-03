@@ -2921,11 +2921,6 @@ impl RulesDocument {
         &self,
         options: RuleSpecLoweringOptions,
     ) -> Result<RuleSpecLoweringOutcome, RuleSpecError> {
-        // Before any formula is parsed or written, so a date the source
-        // cannot spell is never reported as a formula error.
-        for rule in &self.rules {
-            rule.validate_effective_dates()?;
-        }
         let mut diagnostics = self.compatibility_diagnostics()?;
         if !self.relations.is_empty() {
             return Err(RuleSpecError::TopLevelRelationsUnsupported);
@@ -2974,6 +2969,13 @@ impl RulesDocument {
                 }
                 Err(error) => return Err(error),
             };
+            // Before the rule's formula source is written, so a date the
+            // source cannot spell is never reported as a formula error. The
+            // module is parsed only after this loop. A rule of a kind the
+            // loader cannot read reports its kind first.
+            if !matches!(kind, RuleKind::Unsupported(_)) {
+                rule.validate_effective_dates()?;
+            }
             rule.validate_version_ranges()?;
             rule.reject_unsupported_default()?;
             // Rounding is an output-rule concern; reject it on any non-derived
