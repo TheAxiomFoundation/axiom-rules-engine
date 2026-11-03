@@ -34,9 +34,17 @@ the top-N count could not express.
   name, with no fallback to an older version.
 - Commencement in a calculation plan is checked at the calculation start;
   v1 keeps main's per-rule check (#270).
-- In a nested count, values inside its reductions keep each period. A bare
-  input or parameter read outside them must agree across periods, or that
-  row fails with `OverPeriodsTopNPeriodVarying`.
+- In a nested count, values inside its reductions keep each period.
+  Outside them, a value must agree across periods, or that row fails:
+  - a bare input with `LifetimePeriodVaryingInput`, as any bare lifetime
+    input does;
+  - a parameter with `OverPeriodsTopNPeriodVarying`, except in a plan, which
+    fixes the parameter's version.
+
+  The same varying input used as a flat count fails with
+  `OverPeriodsTopNPeriodVarying` instead
+  (`tests/lifetime_law_properties.rs`,
+  `period_varying_values_in_a_count_fail_with_their_own_errors`).
 - `calendar_years_to_months` takes Integer or exactly integral Decimal years
   and refuses Float, fractions and i64 overflow. Fast mode declines it, and
   the artifact node extends format 3 (see `docs/artifact-format.md`).

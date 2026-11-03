@@ -19,8 +19,10 @@
 //! nested top-N counts. The refusals expected on both sides are the
 //! evaluation errors those produce (division by zero, missing parameter key,
 //! calendar overflow) and `OverPeriodsTopNOutOfRange` for a count outside
-//! `1..=periods`. The calculation plan reports some of those errors at the
-//! calculation date, so only refusal, not its message, is compared there.
+//! `1..=periods`. The calculation plan must refuse with the same variant and
+//! message as dense lifetime; a missing parameter key names the calculation
+//! date instead of the observation's, and that variant's other fields must
+//! match.
 //!
 //! `AXIOM_LIFETIME_DIFF_CASES=<n>` sets the case count (default 48). The seed
 //! is fixed, so CI is deterministic.
@@ -33,7 +35,7 @@ use axiom_rules_engine::api::{
 };
 use axiom_rules_engine::compile::CompiledProgramArtifact;
 use axiom_rules_engine::dense::{
-    CalculationLifetimePlan, DenseBatchSpec, DenseColumn, DenseCompiledProgram,
+    CalculationLifetimePlan, DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram,
     DenseExecutionResult, DenseOutputValue,
 };
 use axiom_rules_engine::engine::EvalError;
@@ -582,7 +584,9 @@ fn check(data: &[u8], cells_data: &[u8]) -> Result<(), TestCaseError> {
                 }
             }
         }
-        (Err(_), Err(_)) => {}
+        (Err(lifetime), Err(calculation)) => {
+            same_refusal(lifetime, calculation).map_err(context)?;
+        }
         (lifetime, calculation) => {
             return Err(context(format!(
                 "lifetime {lifetime:?} against calculation plan {calculation:?}"
@@ -590,6 +594,36 @@ fn check(data: &[u8], cells_data: &[u8]) -> Result<(), TestCaseError> {
         }
     }
     Ok(())
+}
+
+/// A one-version plan refuses with the same evaluation error as dense
+/// lifetime: the same variant and message. The one difference is the date a
+/// missing parameter key names: the plan looks it up at the calculation
+/// period, so its message names that date.
+fn same_refusal(lifetime: &EvalError, calculation: &DenseCompileError) -> Result<(), String> {
+    let DenseCompileError::Eval(calculation) = calculation else {
+        return Err(format!(
+            "plan refusal `{calculation}` is not an evaluation error; lifetime gave `{lifetime}`"
+        ));
+    };
+    let same = match (lifetime, calculation) {
+        (
+            EvalError::MissingParameterValue { parameter, key, .. },
+            EvalError::MissingParameterValue {
+                parameter: plan_parameter,
+                key: plan_key,
+                at,
+            },
+        ) => parameter == plan_parameter && key == plan_key && *at == year(2010).start,
+        _ => lifetime.to_string() == calculation.to_string(),
+    };
+    if same {
+        Ok(())
+    } else {
+        Err(format!(
+            "plan refusal `{calculation}` differs from lifetime's `{lifetime}`"
+        ))
+    }
 }
 
 #[test]

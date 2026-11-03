@@ -346,3 +346,109 @@ fn expected_clone(expected: &TopN) -> TopN {
         TopN::OutOfRange => TopN::OutOfRange,
     }
 }
+
+// ---------------------------------------------------------------------------
+// What a period-varying value outside the count's reductions fails with
+// ---------------------------------------------------------------------------
+
+const VARYING_SOURCE: &str = r#"
+format: rulespec/v1
+rules:
+  - name: p
+    kind: parameter
+    dtype: Integer
+    indexed_by: k
+    versions:
+      - effective_from: '2000-01-01'
+        values:
+          1: 1
+      - effective_from: '2002-01-01'
+        values:
+          1: 2
+  - name: nested_input
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '1990-01-01'
+        formula: sum_top_n_over_periods(x, min(count_over_periods(q), c))
+  - name: flat_input
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '1990-01-01'
+        formula: sum_top_n_over_periods(x, c)
+  - name: nested_parameter
+    kind: derived
+    entity: Worker
+    dtype: Money
+    versions:
+      - effective_from: '1990-01-01'
+        formula: sum_top_n_over_periods(x, min(count_over_periods(q), p[k]))
+"#;
+
+/// Three observations of one worker. `c` changes from 1 to 2 in 2002, as
+/// `p` does.
+fn varying_batches() -> Vec<DenseBatchSpec> {
+    [(5, 1), (3, 2), (1, 2)]
+        .into_iter()
+        .map(|(x, c)| DenseBatchSpec {
+            row_count: 1,
+            inputs: HashMap::from([
+                ("x".into(), DenseColumn::Decimal(vec![Decimal::from(x)])),
+                ("q".into(), DenseColumn::Integer(vec![1])),
+                ("c".into(), DenseColumn::Integer(vec![c])),
+                ("k".into(), DenseColumn::Integer(vec![1])),
+            ]),
+            relations: HashMap::new(),
+        })
+        .collect()
+}
+
+/// A varying input outside a nested count's reductions fails as any bare
+/// lifetime input does, `LifetimePeriodVaryingInput`; as a flat count it
+/// fails with `OverPeriodsTopNPeriodVarying`. A varying parameter there fails
+/// with `OverPeriodsTopNPeriodVarying`, except in a plan, which fixes the
+/// parameter's version at the calculation period.
+#[test]
+fn period_varying_values_in_a_count_fail_with_their_own_errors() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(VARYING_SOURCE).unwrap();
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Worker")).unwrap();
+    let plan = CalculationLifetimePlan::from_artifact(&artifact, "Worker", year(2010)).unwrap();
+    let periods = [year(2001), year(2002), year(2003)];
+    let lifetime = |name: &str| dense.execute_lifetime(&periods, varying_batches(), &[name.into()]);
+    let calculation = |name: &str| plan.execute(&periods, varying_batches(), &[name.into()]);
+
+    match lifetime("nested_input") {
+        Err(EvalError::LifetimePeriodVaryingInput { input, .. }) => assert_eq!(input, "c"),
+        other => panic!("nested input: {other:?}"),
+    }
+    match calculation("nested_input") {
+        Err(DenseCompileError::Eval(EvalError::LifetimePeriodVaryingInput { input, .. })) => {
+            assert_eq!(input, "c")
+        }
+        other => panic!("nested input in a plan: {other:?}"),
+    }
+    assert!(matches!(
+        lifetime("flat_input"),
+        Err(EvalError::OverPeriodsTopNPeriodVarying { .. })
+    ));
+    assert!(matches!(
+        calculation("flat_input"),
+        Err(DenseCompileError::Eval(
+            EvalError::OverPeriodsTopNPeriodVarying { .. }
+        ))
+    ));
+    assert!(matches!(
+        lifetime("nested_parameter"),
+        Err(EvalError::OverPeriodsTopNPeriodVarying { .. })
+    ));
+    // In force at 2010: p = 2, so the count is min(3, 2) and the top two
+    // amounts sum to 8.
+    let fixed = calculation("nested_parameter").unwrap();
+    assert_eq!(
+        decimal_output(&fixed, "nested_parameter", 0),
+        Decimal::from(8)
+    );
+}
