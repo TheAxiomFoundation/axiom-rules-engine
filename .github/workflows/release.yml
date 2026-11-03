@@ -9,7 +9,10 @@
 # - validate Cargo.lock with --locked/--offline and force dist builds offline
 # Finding 3 (tag ruleset) is a repository-settings change and is intentionally not handled here.
 # MANUAL CHANGE — re-apply after every `dist init` regeneration:
-# - the concurrency block above `jobs:`, which cancels a pull request's older run
+# - the concurrency block above `jobs:`, a copy of the one in ci.yml, which
+#   cancels a pull request's older run
+# dist regenerates this file only after someone removes "ci" from allow-dirty in
+# dist-workspace.toml.
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
