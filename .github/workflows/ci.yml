@@ -247,14 +247,16 @@ jobs:
   # Builds the dense extension as a CPython 3.14 wheel, installs it with the
   # wrapper from python/, runs the Python tests against the installed packages,
   # and uploads the wheel under a name that carries the commit sha. It runs on
-  # every push to main and every pull request, so each main commit carries a
-  # wheel built from it. maturin builds on the runner and tags the wheel with
-  # the oldest manylinux policy its glibc symbols allow (manylinux_2_34 on
-  # ubuntu-24.04), the same glibc floor as the CLI binary the `cli-linux` job
-  # builds.
+  # every push to main and every pull request, so each main commit whose job
+  # passes carries a wheel built from it, for the repository's artifact
+  # retention period. maturin builds on the runner and tags the wheel with the
+  # oldest manylinux policy its glibc symbols allow: manylinux_2_34, the same
+  # glibc floor as the CLI binary the `cli-linux` job builds. Both jobs name
+  # ubuntu-24.04 rather than ubuntu-latest, which GitHub is moving to a newer
+  # image, so that floor does not change from one commit to the next.
   python-ext-linux-wheel:
     name: PyO3 extension wheel (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -335,7 +337,7 @@ jobs:
   # take the wheel and the CLI from one build.
   cli-linux:
     name: CLI release binary (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

@@ -332,7 +332,8 @@ opt in to the legacy path.
 From a checkout with the current stable Rust toolchain and
 [uv](https://docs.astral.sh/uv/), these commands build the dense extension as
 a CPython 3.14 wheel and install it with the wrapper. CI's
-`PyO3 extension wheel (Linux)` job builds and installs the wheel the same way:
+`PyO3 extension wheel (Linux)` job builds and installs the wheel the same way.
+The commands create `.venv`, so run them in a checkout that has none yet:
 
 ```bash
 uv venv --python 3.14 .venv
