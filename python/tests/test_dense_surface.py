@@ -96,11 +96,14 @@ def program(tmp_path_factory) -> CompiledDenseProgram:
 
 
 # Derived rules on three entities, joined the way the other dense fixtures join
-# them: a rule on Person, two rules on Household and one on TaxUnit, each unit
+# them: two rules on Household, one on Person and one on TaxUnit, each unit
 # reading its Person members through its own relation. Household and TaxUnit
 # share no relation, so neither's program reaches the other's rules. A dense
 # program compiles one entity's rules; `derived_metadata` must still describe
-# all four.
+# all four, in module order. The Household total comes before the Person rule
+# it reads, and the TaxUnit rule sits between the two Household rules, so
+# module order differs from the same rules grouped by entity, sorted by name,
+# or listed dependencies first.
 MULTI_ENTITY_MODULE_SOURCE = """\
 format: rulespec/v1
 module:
@@ -122,6 +125,16 @@ rules:
     data_relation:
       arity: 2
       arguments: [Person, TaxUnit]
+  - name: dense_test_household_net_income
+    kind: derived
+    entity: Household
+    dtype: Money
+    period: Year
+    unit: EUR
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          sum(member_of_household.dense_test_net_income)
   - name: dense_test_net_income
     kind: derived
     entity: Person
@@ -133,23 +146,6 @@ rules:
       - effective_from: '2025-01-01'
         formula: |-
           dense_test_gross_income - dense_test_deductions
-  - name: dense_test_household_net_income
-    kind: derived
-    entity: Household
-    dtype: Money
-    period: Year
-    unit: EUR
-    versions:
-      - effective_from: '2025-01-01'
-        formula: |-
-          sum(member_of_household.dense_test_net_income)
-  - name: dense_test_household_size
-    kind: derived
-    entity: Household
-    dtype: Integer
-    versions:
-      - effective_from: '2025-01-01'
-        formula: len(member_of_household)
   - name: dense_test_tax_unit_net_income
     kind: derived
     entity: TaxUnit
@@ -160,14 +156,21 @@ rules:
       - effective_from: '2025-01-01'
         formula: |-
           sum(member_of_tax_unit.dense_test_net_income)
+  - name: dense_test_household_size
+    kind: derived
+    entity: Household
+    dtype: Integer
+    versions:
+      - effective_from: '2025-01-01'
+        formula: len(member_of_household)
 """
 
 # Each derived rule's entity, in module order.
 MULTI_ENTITY_RULES = {
-    "dense_test_net_income": "Person",
     "dense_test_household_net_income": "Household",
-    "dense_test_household_size": "Household",
+    "dense_test_net_income": "Person",
     "dense_test_tax_unit_net_income": "TaxUnit",
+    "dense_test_household_size": "Household",
 }
 MULTI_ENTITIES = ["Person", "Household", "TaxUnit"]
 
