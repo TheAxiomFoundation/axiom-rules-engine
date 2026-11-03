@@ -755,3 +755,54 @@ fn lifetime_schemas_match_wire_and_companion_case_branches() {
     // null expected values and object/list expectations exactly as before.
     assert!(validator.is_valid(&json!([{"name":"scalar","period":"2026","tables":{},"extra":true,"output":{"a":null,"b":{"x":1},"c":[1,2]}}])));
 }
+
+/// `run-lifetime` follows the help rules every command follows: a lone help
+/// flag prints usage and exits 0 with nothing on stderr; a help flag is never
+/// `--artifact`'s value; beside other arguments it is refused in plain text.
+#[test]
+fn help_flags_follow_the_command_line_rules() {
+    let engine = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_axiom-rules-engine"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for flag in ["--help", "-h"] {
+        let out = engine(&["run-lifetime", flag]);
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert!(out.stderr.is_empty(), "{flag}");
+        assert!(
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .starts_with("usage: axiom-rules-engine run-lifetime"),
+            "{flag}"
+        );
+
+        let out = engine(&["run-lifetime", "--artifact", flag]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("`--artifact` takes a value, not `{flag}`\n")
+        );
+
+        for extra in [
+            vec![flag, "extra"],
+            vec!["extra", flag],
+            vec![flag, flag],
+            vec!["--json", flag],
+        ] {
+            let mut args = vec!["run-lifetime"];
+            args.extend(&extra);
+            let out = engine(&args);
+            assert_eq!(out.status.code(), Some(1), "{args:?}");
+            assert!(out.stdout.is_empty(), "{args:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!("`run-lifetime {flag}` takes no other arguments\n"),
+                "{args:?}"
+            );
+        }
+    }
+}
