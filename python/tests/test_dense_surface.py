@@ -1,8 +1,8 @@
 """Dense vectorized surface: metadata, Decimal + f64 execution.
 
 These tests exercise the native ``axiom_rules_engine_dense`` extension and
-skip when it is not built (CI type-checks the extension crate but does not
-build the wheel). Build locally with::
+skip when it is not built. CI's Python package tests job builds it in place
+with ``maturin develop``. Build locally with::
 
     maturin develop --release --manifest-path python-ext/Cargo.toml
 """
@@ -95,16 +95,18 @@ def program(tmp_path_factory) -> CompiledDenseProgram:
     )
 
 
-# Derived rules on two entities, joined the way the other dense fixtures join
-# them: a rule on Person, and two rules on Household that read the household's
-# members through `member_of_household`. A dense program compiles one entity's
-# rules; `derived_metadata` must still describe all three.
-TWO_ENTITY_MODULE_SOURCE = """\
+# Derived rules on three entities, joined the way the other dense fixtures join
+# them: a rule on Person, two rules on Household and one on TaxUnit, each unit
+# reading its Person members through its own relation. Household and TaxUnit
+# share no relation, so neither's program reaches the other's rules. A dense
+# program compiles one entity's rules; `derived_metadata` must still describe
+# all four.
+MULTI_ENTITY_MODULE_SOURCE = """\
 format: rulespec/v1
 module:
   summary: |-
-    Dense-surface test fixture: derived rules on a person and on the
-    household the person belongs to.
+    Dense-surface test fixture: derived rules on a person, on the household
+    the person belongs to, and on the person's tax unit.
 units:
   - name: EUR
     kind: currency
@@ -115,13 +117,18 @@ rules:
     data_relation:
       arity: 2
       arguments: [Person, Household]
+  - name: member_of_tax_unit
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, TaxUnit]
   - name: dense_test_net_income
     kind: derived
     entity: Person
     dtype: Money
     period: Year
     unit: EUR
-    source: dense-surface two-entity fixture
+    source: dense-surface multi-entity fixture
     versions:
       - effective_from: '2025-01-01'
         formula: |-
@@ -143,22 +150,35 @@ rules:
     versions:
       - effective_from: '2025-01-01'
         formula: len(member_of_household)
+  - name: dense_test_tax_unit_net_income
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: EUR
+    versions:
+      - effective_from: '2025-01-01'
+        formula: |-
+          sum(member_of_tax_unit.dense_test_net_income)
 """
 
-TWO_ENTITY_RULES = {
+# Each derived rule's entity, in module order.
+MULTI_ENTITY_RULES = {
     "dense_test_net_income": "Person",
     "dense_test_household_net_income": "Household",
     "dense_test_household_size": "Household",
+    "dense_test_tax_unit_net_income": "TaxUnit",
 }
+MULTI_ENTITIES = ["Person", "Household", "TaxUnit"]
 
 
 @pytest.fixture(scope="module")
-def two_entity_module(tmp_path_factory) -> tuple[Path, Path]:
-    """The canonical root holding ``TWO_ENTITY_MODULE_SOURCE``, and its path."""
-    root = (tmp_path_factory.mktemp("two_entity") / "rulespec-us").resolve()
-    path = root / "us/policies/tests/dense_two_entity.yaml"
+def multi_entity_module(tmp_path_factory) -> tuple[Path, Path]:
+    """The canonical root holding ``MULTI_ENTITY_MODULE_SOURCE``, and its path."""
+    root = (tmp_path_factory.mktemp("multi_entity") / "rulespec-us").resolve()
+    path = root / "us/policies/tests/dense_multi_entity.yaml"
     path.parent.mkdir(parents=True)
-    path.write_text(TWO_ENTITY_MODULE_SOURCE, encoding="utf-8")
+    path.write_text(MULTI_ENTITY_MODULE_SOURCE, encoding="utf-8")
     return root, path
 
 
@@ -282,10 +302,6 @@ def _generated_module_source(rules: list[DerivedMetadata]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _by_name(items: list[DerivedMetadata]) -> list[DerivedMetadata]:
-    return sorted(items, key=lambda item: item.name)
-
-
 def _derived_concepts(root: Path) -> list[tuple[str, str | None, str | None]]:
     """Each derived rule's id, entity and unit, as concept discovery reads
     them from the RuleSpec YAML in Python, without the compiler."""
@@ -307,45 +323,47 @@ class TestDerivedMetadata:
         assert tax.source == "dense-surface test fixture"
         assert tax.id == "us:policies/tests/dense_flat_tax#dense_test_tax"
 
-    @pytest.mark.parametrize("entity", ["Person", "Household"])
+    @pytest.mark.parametrize("entity", MULTI_ENTITIES)
     def test_lists_rules_on_every_entity_not_just_the_compiled_one(
-        self, two_entity_module, entity
+        self, multi_entity_module, entity
     ) -> None:
-        root, path = two_entity_module
+        root, path = multi_entity_module
         compiled = CompiledDenseProgram.from_file(
             path, rulespec_roots=[root], entity=entity
         )
         # The premise: the dense program compiles only `entity`'s rules.
         assert compiled.root_entity == entity
         assert set(compiled.output_names) == {
-            name for name, owner in TWO_ENTITY_RULES.items() if owner == entity
+            name for name, owner in MULTI_ENTITY_RULES.items() if owner == entity
         }
-        # Its metadata still lists every derived rule, each on its own entity.
-        assert sorted(
+        # Its metadata still lists every derived rule, in module order, each on
+        # its own entity: also the rules on an entity it shares no relation with.
+        assert [
             (item.name, item.entity) for item in compiled.derived_metadata
-        ) == sorted(TWO_ENTITY_RULES.items())
+        ] == list(MULTI_ENTITY_RULES.items())
 
-    def test_is_the_same_whichever_entity_compiles(self, two_entity_module) -> None:
+    def test_is_the_same_whichever_entity_compiles(self, multi_entity_module) -> None:
         # A caller may cache the metadata of the first program it compiles for
         # a module, whichever entity that program compiles.
-        root, path = two_entity_module
-        person, household = (
+        root, path = multi_entity_module
+        first, *others = (
             CompiledDenseProgram.from_file(path, rulespec_roots=[root], entity=entity)
-            for entity in ("Person", "Household")
+            for entity in MULTI_ENTITIES
         )
-        assert person.derived_metadata == household.derived_metadata
+        for other in others:
+            assert other.derived_metadata == first.derived_metadata, other.root_entity
 
-    @pytest.mark.parametrize("entity", ["Person", "Household"])
-    def test_agrees_with_concept_discovery(self, two_entity_module, entity) -> None:
+    @pytest.mark.parametrize("entity", MULTI_ENTITIES)
+    def test_agrees_with_concept_discovery(self, multi_entity_module, entity) -> None:
         # Differential: the extension reads the compiled artifact, concept
         # discovery reads the YAML. Both must name the same derived rules, on
         # the same entities, in the same units.
-        root, path = two_entity_module
+        root, path = multi_entity_module
         compiled = CompiledDenseProgram.from_file(
             path, rulespec_roots=[root], entity=entity
         )
         discovered = _derived_concepts(root)
-        assert len(discovered) == len(TWO_ENTITY_RULES)
+        assert len(discovered) == len(MULTI_ENTITY_RULES)
         assert (
             sorted(
                 (item.id, item.entity, item.unit)
@@ -356,9 +374,9 @@ class TestDerivedMetadata:
 
     def test_covers_every_entity_property(self) -> None:
         """Over generated modules with derived rules on up to three entities,
-        each entity's program reports every rule's metadata, and concept
-        discovery names the same rules (skipped when Hypothesis is not
-        installed)."""
+        each entity's program reports every rule's metadata in module order,
+        and concept discovery names the same rules (skipped when Hypothesis is
+        not installed)."""
         hypothesis = pytest.importorskip("hypothesis")
         strategies = pytest.importorskip("hypothesis.strategies")
 
@@ -383,7 +401,7 @@ class TestDerivedMetadata:
                         path, rulespec_roots=[root], entity=entity
                     )
                     assert compiled.root_entity == entity
-                    assert _by_name(compiled.derived_metadata) == _by_name(rules)
+                    assert compiled.derived_metadata == rules
                 assert _derived_concepts(root) == sorted(
                     (rule.id, rule.entity, rule.unit) for rule in rules
                 )
