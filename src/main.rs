@@ -601,28 +601,27 @@ fn warn_lenient_relation_binding(policy: RelationBinding) {
     }
 }
 
+const RUN_LIFETIME_USAGE: &str = "\
+usage: axiom-rules-engine run-lifetime --artifact <compiled.json>
+
+Read one lifetime-request/v1 or lifetime-request/v2 JSON request from stdin; Decimal only.";
+
 fn run_lifetime(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // Help follows the other commands' rules: a lone `--help` or `-h`
-    // prints usage and exits 0; a help flag is never `--artifact`'s value,
-    // and beside other arguments it is refused. These are plain-text
-    // refusals, before any JSON request handling.
-    let is_help = |arg: &str| arg == "--help" || arg == "-h";
-    if let [only] = args.as_slice()
-        && is_help(only)
-    {
-        println!(
-            "usage: axiom-rules-engine run-lifetime --artifact <compiled.json>\nRead one lifetime-request/v1 or lifetime-request/v2 JSON request from stdin; Decimal only."
-        );
-        return Ok(());
-    }
-    if let [option, value, ..] = args.as_slice()
-        && option == "--artifact"
-        && is_help(value)
-    {
-        return Err(format!("`--artifact` takes a value, not `{value}`").into());
-    }
-    if let Some(flag) = args.iter().find(|arg| is_help(arg)) {
-        return Err(format!("`run-lifetime {flag}` takes no other arguments").into());
+    // Help follows the other commands' rules, through the same helpers: a
+    // lone `--help` or `-h` prints usage and exits 0; a help flag is never
+    // `--artifact`'s value, wherever `--artifact` stands; and beside other
+    // arguments it is refused. These are plain-text refusals, before any
+    // JSON request handling, which checks every other argument.
+    let arg_count = args.len();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--artifact" {
+            option_value("--artifact", iter.next().cloned())?;
+        } else if is_help_flag(arg) {
+            help_alone("run-lifetime", arg, arg_count)?;
+            println!("{RUN_LIFETIME_USAGE}");
+            return Ok(());
+        }
     }
     let execute = || -> Result<(), LifetimeApiError> {
         if args.len() != 2 || args[0] != "--artifact" || args[1].starts_with("--") {

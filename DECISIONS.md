@@ -93,6 +93,9 @@ the top-N count could not express.
 - `calendar_years_to_months` takes Integer or exactly integral Decimal years
   and refuses Float, fractions and i64 overflow. Fast mode declines it, and
   the artifact node extends format 3 (see `docs/artifact-format.md`).
+- `capabilities` lists a new `lifetime_calculation` capability: the engine
+  reads `calendar_years_to_months`, nests reductions in a top-N count and
+  runs `run-lifetime` (wire v1 and v2).
 - `docs/lifetime-cli.md`, `docs/calendar-unit-conversion.md` and
   `docs/execution-semantics.md` give the contracts. The tests are
   `tests/lifetime_cli.rs`, `tests/lifetime_calculation.rs`,
