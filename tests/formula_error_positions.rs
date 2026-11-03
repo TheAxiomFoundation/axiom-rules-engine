@@ -1,9 +1,9 @@
-//! A RuleSpec formula parse error's line and column point into the failing
-//! formula's own text, trimmed of surrounding whitespace, not into the YAML
-//! file that holds it, and a column counts Unicode scalar values (Rust
-//! `char`s) from 1. docs/rulespec-format.md ("Formula parse errors") states
-//! this rule and quotes the first test's error, so these tests hold the doc
-//! to the code.
+//! A RuleSpec formula parse error names the rule, and its line and column
+//! point into the failing formula's own text as written, whitespace around it
+//! included, not into the YAML file that holds it. A column counts Unicode
+//! scalar values (Rust `char`s) from 1. docs/rulespec-format.md ("Formula
+//! parse errors") states this rule and quotes the first test's error, so
+//! these tests hold the doc to the code.
 
 use axiom_rules_engine::rulespec::{RuleSpecError, lower_rulespec_str};
 use proptest::prelude::*;
@@ -42,7 +42,7 @@ fn block_module(indicator: &str, lines: &[&str]) -> String {
 /// The error lowering `yaml` reports. It must be a formula error.
 fn formula_error(yaml: &str) -> String {
     match lower_rulespec_str(yaml) {
-        Err(error @ RuleSpecError::Formula(_)) => error.to_string(),
+        Err(error @ RuleSpecError::Formula { .. }) => error.to_string(),
         other => panic!("expected a formula error, got {other:?}\n---\n{yaml}"),
     }
 }
@@ -67,7 +67,7 @@ fn the_documented_example_reports_the_documented_error() {
     let message = formula_error(&module(0, formula));
     assert_eq!(
         message,
-        "failed to parse RuleSpec formula: formula parse error at line 1, col 29: unexpected char '×'"
+        "failed to parse the formula of RuleSpec rule `subject`: formula parse error at line 1, col 29: unexpected char '×'"
     );
     assert!(
         REFERENCE.contains(&format!("```text\n{formula}\n```")),
@@ -123,10 +123,55 @@ fn a_formula_that_ends_too_early_points_one_past_its_last_character() {
 }
 
 #[test]
-fn whitespace_around_a_formula_does_not_count() {
-    // The engine trims the formula before it parses it.
-    for formula in ["'é' $", "\n\n'é' $", "   'é' $", " \n\t 'é' $ \n"] {
-        assert_eq!(position(&module(0, formula)), (1, 5), "{formula:?}");
+fn whitespace_before_a_formula_counts() {
+    // The engine trims the formula before it parses it, then maps the
+    // position back to the formula as written. Trailing whitespace never
+    // moves a position.
+    for (formula, expected) in [
+        ("'é' $", (1, 5)),
+        ("\n\n'é' $", (3, 5)),
+        ("   'é' $", (1, 8)),
+        (" \n\t 'é' $ \n", (2, 7)),
+        // A formula that ends too early: one past its last character as
+        // written, not one past the trailing whitespace.
+        ("\n  1 +\n\n", (2, 6)),
+    ] {
+        for before in [0, 2] {
+            assert_eq!(
+                position(&module(before, formula)),
+                expected,
+                "{formula:?} after {before} rules"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_parse_error_names_the_rule_and_a_version_of_several() {
+    // One version: the rule alone.
+    let message = formula_error(&module(2, "1 $"));
+    assert!(
+        message.starts_with("failed to parse the formula of RuleSpec rule `subject`: "),
+        "{message}"
+    );
+    // Several versions: the rule and the failing version's effective_from.
+    let yaml = "format: rulespec/v1\nrules:\n  - name: subject\n    kind: derived\n    entity: Person\n    dtype: Decimal\n    period: Year\n    versions:\n      - effective_from: '2025-01-01'\n        formula: '1'\n      - effective_from: '2026-01-01'\n        formula: '1 $'\n";
+    assert_eq!(
+        formula_error(yaml),
+        "failed to parse the formula of RuleSpec rule `subject` effective from 2026-01-01: formula parse error at line 1, col 3: unexpected char '$'"
+    );
+    // A derived relation's predicate names its rule too. A parse error in
+    // it surfaces from the pass that parses every rule's formula first.
+    match lower_rulespec_str(&relation_module("'ü' $")) {
+        Err(RuleSpecError::Formula {
+            rule,
+            effective_from,
+            ..
+        }) => {
+            assert_eq!(rule.as_deref(), Some("pair"));
+            assert_eq!(effective_from, None);
+        }
+        other => panic!("expected a formula error, got {other:?}"),
     }
 }
 
@@ -156,18 +201,44 @@ fn a_yaml_block_scalar_counts_in_the_text_yaml_reads() {
     assert_eq!(position(&block_module(">-", &["1 +", "2 $"])), (1, 7));
 }
 
+/// A derived relation `pair` whose predicate starts with a blank line, then
+/// `'é' == 'a' and`, then `predicate_lines`.
+fn relation_module(predicate_lines: &str) -> String {
+    format!(
+        "format: rulespec/v1\nrules:\n  - name: relative_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Person]\n  - name: pair\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: relative_of\n      slot_entities: [Person, Person]\n      current_slot: 0\n      related_slot: 1\n    versions:\n      - effective_from: '2026-01-01'\n        formula: |-\n\n          'é' == 'a' and\n          {predicate_lines}\n"
+    )
+}
+
 #[test]
 fn a_derived_relation_predicate_counts_the_same_way() {
-    let relation = |predicate_lines: &str| {
-        format!(
-            "format: rulespec/v1\nrules:\n  - name: relative_of\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Person]\n  - name: pair\n    kind: derived_relation\n    derived_relation:\n      arity: 2\n      source_relation: relative_of\n      slot_entities: [Person, Person]\n      current_slot: 0\n      related_slot: 1\n    versions:\n      - effective_from: '2026-01-01'\n        formula: |-\n\n          'é' == 'a' and\n          {predicate_lines}\n"
-        )
-    };
     // The relation is well formed: only the predicate's last line differs.
-    if let Err(error) = lower_rulespec_str(&relation("'ü' == 'b'")) {
+    if let Err(error) = lower_rulespec_str(&relation_module("'ü' == 'b'")) {
         panic!("the well-formed relation should lower: {error}");
     }
-    assert_eq!(position(&relation("'ü' $")), (2, 5));
+    // The blank first line counts.
+    assert_eq!(position(&relation_module("'ü' $")), (3, 5));
+}
+
+#[test]
+fn a_derived_relation_predicate_lowering_error_names_its_rule() {
+    // The predicate parses, so this error comes from lowering it as a
+    // judgment in `to_derived_relation_spec`, not from the parse pass.
+    let yaml = relation_module("ceil(1, 2)");
+    assert_eq!(
+        formula_error(&yaml),
+        "failed to parse the formula of RuleSpec rule `pair`: formula lower error: unknown function `ceil` in judgment position"
+    );
+    match lower_rulespec_str(&yaml) {
+        Err(RuleSpecError::Formula {
+            rule,
+            effective_from,
+            ..
+        }) => {
+            assert_eq!(rule.as_deref(), Some("pair"));
+            assert_eq!(effective_from, None);
+        }
+        other => panic!("expected a formula error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -175,7 +246,7 @@ fn a_lowering_error_carries_no_position() {
     let message = formula_error(&module(0, "ceil(1, 2)"));
     assert!(
         message.starts_with("failed to parse RuleSpec formula: formula lower error: "),
-        "{message}"
+        "a lowering error comes from the generated module, which names no rule: {message}"
     );
     assert!(!message.contains(" at line "), "{message}");
 }
@@ -197,20 +268,36 @@ fn offending_char() -> impl Strategy<Value = char> {
     prop::sample::select(vec!['$', '@', '?', '`', ';', '×', '€', '中', '😀'])
 }
 
-/// Whitespace the engine trims from either end of a formula.
+/// Whitespace the engine trims from either end of a formula before it
+/// parses it.
 fn padding() -> impl Strategy<Value = &'static str> {
-    prop::sample::select(vec!["", "\n", "\n\n", "  ", " \n\t", "\t\n  \n"])
+    // NBSP and U+3000 are multibyte, so a byte count of the trimmed
+    // prefix would move the column too far. A `\r` is trimmed but starts no
+    // line, so it takes a column.
+    prop::sample::select(vec![
+        "",
+        "\n",
+        "\n\n",
+        "  ",
+        " \n\t",
+        "\t\n  \n",
+        "\u{a0}",
+        "\n\u{3000} ",
+        "\r",
+        "\r\n\r",
+        " \r\n\u{a0}\t",
+    ])
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// Earlier formula lines, a clean prefix and then a character the lexer
-    /// rejects: the reported position names that character in the trimmed
-    /// formula, however many rules come first and whatever whitespace pads
+    /// rejects: the reported position names that character in the formula as
+    /// written, however many rules come first and whatever whitespace pads
     /// the formula.
     #[test]
-    fn the_position_names_the_offending_character_in_the_trimmed_formula(
+    fn the_position_names_the_offending_character_in_the_formula_as_written(
         earlier in prop::collection::vec(clean_line(), 0..3),
         prefix in clean_line().prop_filter("no comment", |line| !line.starts_with('#')),
         offending in offending_char(),
@@ -228,12 +315,11 @@ proptest! {
         body.push(offending);
         let formula = format!("{leading}{body}{trailing}");
 
-        let trimmed = formula.trim();
-        let at = trimmed.rfind(offending).expect("the offending character");
-        let line_start = trimmed[..at].rfind('\n').map_or(0, |index| index + 1);
+        let at = formula.rfind(offending).expect("the offending character");
+        let line_start = formula[..at].rfind('\n').map_or(0, |index| index + 1);
         let expected = (
-            trimmed[..at].matches('\n').count() + 1,
-            trimmed[line_start..at].chars().count() + 1,
+            formula[..at].matches('\n').count() + 1,
+            formula[line_start..at].chars().count() + 1,
         );
         prop_assert_eq!(position(&module(before, &formula)), expected, "{:?}", formula);
     }

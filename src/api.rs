@@ -335,7 +335,16 @@ pub fn execute_request(request: ExecutionRequest) -> Result<ExecutionResponse, A
     )?;
     crate::spec::emit_dataset_binding_diagnostics(&outcome.diagnostics);
     let dataset = outcome.dataset;
-    crate::engine::validate_input_spells(&dataset)?;
+    // Binding maps every input record to its slot in order, so record `i`
+    // of the request is record `i` of the dataset. The ambiguity error names
+    // the records as the request spelled them (#289).
+    let request_names = request
+        .dataset
+        .inputs
+        .iter()
+        .map(|input| input.name.as_str())
+        .collect::<Vec<_>>();
+    crate::engine::validate_input_spells(&dataset, &request_names)?;
 
     let result = match requested_mode {
         ExecutionMode::Explain => execute_explain(
