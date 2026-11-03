@@ -322,6 +322,74 @@ rules: []
     );
 }
 
+/// A module whose imports declare no relation of the name reads the one
+/// declaration elsewhere in the program, as relation atoms, `exists` and
+/// `count_where` over an imported rule already did. `e5` imports nothing; the
+/// root imports `e1` and `e5`, so `e1`'s is the program's only declaration.
+#[test]
+fn a_read_whose_imports_declare_nothing_binds_the_program_declaration() {
+    let e5 = r#"
+format: rulespec/v1
+rules:
+  - name: household_size_e5
+    kind: derived
+    entity: Household
+    dtype: Integer
+    period: Month
+    versions:
+      - effective_from: 2026-01-01
+        formula: len(member_of_household)
+"#;
+    let root = r#"
+format: rulespec/v1
+imports:
+  - us:policies/e1
+  - us:policies/e5
+rules: []
+"#;
+    let artifact = compile(
+        &[
+            (E1_TARGET, E1),
+            ("us:policies/e5", e5),
+            ("us:policies/root", root),
+        ],
+        "us:policies/root",
+    )
+    .expect("the program declares the name once");
+    assert_eq!(relation_names(&artifact), [E1_RELATION]);
+    assert_counts(
+        &artifact,
+        members(E1_RELATION, 4),
+        &[("us:policies/e5#household_size_e5", 4)],
+    );
+
+    // A second declaration elsewhere makes the read ambiguous.
+    let root = r#"
+format: rulespec/v1
+imports:
+  - us:policies/e1
+  - us:policies/e1b
+  - us:policies/e5
+rules: []
+"#;
+    let message = compile(
+        &[
+            (E1_TARGET, E1),
+            (E1B_TARGET, E1B),
+            ("us:policies/e5", e5),
+            ("us:policies/root", root),
+        ],
+        "us:policies/root",
+    )
+    .expect_err("two declarations are in the program")
+    .to_string();
+    assert!(
+        message.contains("[ambiguous_relation_reference] `us:policies/e5#household_size_e5`")
+            && message.contains("neither its module nor its imports declare"),
+        "{message}"
+    );
+}
+
 /// A module's own declaration of the name wins over an imported one, as
 /// before: the module reads its own tuples.
 #[test]
@@ -723,4 +791,488 @@ fn an_imported_module_never_reads_the_composition_root_declaration() {
             ("household_size_root", 0),
         ],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Property: over generated module graphs, a compile that succeeds gives every
+// aggregate the tuples supplied under the legal id of the declaration it
+// resolves to, and explain, fast and dense agree.
+// ---------------------------------------------------------------------------
+
+use axiom_rules_engine::dense::{
+    DenseBatchSpec, DenseColumn, DenseCompiledProgram, DenseOutputValue, DenseRelationBatchSpec,
+};
+use proptest::prelude::*;
+use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+use std::collections::BTreeSet;
+
+/// How a module's rule reads `member_of_household`.
+#[derive(Clone, Copy, Debug)]
+enum Form {
+    /// `len(member_of_household)`.
+    Len,
+    /// `sum(member_of_household.unit_weight_<module>)`, where the module's
+    /// own Person rule is `1`: a related-derived sum that counts members.
+    SumOfLocalRule,
+}
+
+/// One module of a generated graph.
+#[derive(Clone, Debug)]
+struct GeneratedModule {
+    /// Indices of earlier modules this one imports.
+    imports: Vec<usize>,
+    declares: bool,
+    reads: Option<Form>,
+}
+
+#[derive(Clone, Debug)]
+struct Graph {
+    modules: Vec<GeneratedModule>,
+    /// The root: atomic module `us:policies/root`, or an originless
+    /// composition.
+    root: GeneratedModule,
+    composition: bool,
+}
+
+fn form() -> impl Strategy<Value = Form> {
+    prop_oneof![Just(Form::Len), Just(Form::SumOfLocalRule)]
+}
+
+fn graph() -> impl Strategy<Value = Graph> {
+    (2usize..=5)
+        .prop_flat_map(|count| {
+            (
+                proptest::collection::vec(
+                    (any::<u8>(), any::<bool>(), proptest::option::of(form())),
+                    count,
+                ),
+                (any::<u8>(), any::<bool>(), proptest::option::of(form())),
+                any::<bool>(),
+            )
+        })
+        .prop_map(
+            |(modules, (root_imports, root_declares, root_reads), composition)| {
+                let count = modules.len();
+                let modules = modules
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (imports, declares, reads))| GeneratedModule {
+                        imports: (0..index).filter(|j| imports & (1 << j) != 0).collect(),
+                        declares,
+                        reads,
+                    })
+                    .collect();
+                let mut imports = (0..count)
+                    .filter(|j| root_imports & (1 << j) != 0)
+                    .collect::<Vec<_>>();
+                if imports.is_empty() {
+                    imports.push(count - 1);
+                }
+                Graph {
+                    modules,
+                    root: GeneratedModule {
+                        imports,
+                        declares: root_declares,
+                        reads: root_reads,
+                    },
+                    composition,
+                }
+            },
+        )
+}
+
+/// A module in a generated program: one of the graph's modules, or the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Node {
+    Module(usize),
+    Root,
+}
+
+impl Graph {
+    fn module(&self, node: Node) -> &GeneratedModule {
+        match node {
+            Node::Module(index) => &self.modules[index],
+            Node::Root => &self.root,
+        }
+    }
+
+    fn target(&self, node: Node) -> Option<String> {
+        match node {
+            Node::Module(index) => Some(format!("us:policies/g{index}")),
+            Node::Root if self.composition => None,
+            Node::Root => Some("us:policies/root".to_string()),
+        }
+    }
+
+    fn suffix(node: Node) -> String {
+        match node {
+            Node::Module(index) => format!("g{index}"),
+            Node::Root => "root".to_string(),
+        }
+    }
+
+    /// The name a dataset supplies the node's declaration under.
+    fn relation(&self, node: Node) -> String {
+        self.target(node).map_or_else(
+            || "member_of_household".to_string(),
+            |target| format!("{target}#relation.member_of_household"),
+        )
+    }
+
+    /// The id a query names the node's reading rule by.
+    fn output(&self, node: Node) -> String {
+        let name = format!("size_{}", Self::suffix(node));
+        self.target(node)
+            .map_or_else(|| name.clone(), |target| format!("{target}#{name}"))
+    }
+
+    /// The modules the node imports, directly or transitively.
+    fn closure(&self, node: Node) -> BTreeSet<usize> {
+        let mut closure = BTreeSet::new();
+        let mut pending = self.module(node).imports.clone();
+        while let Some(index) = pending.pop() {
+            if closure.insert(index) {
+                pending.extend(self.modules[index].imports.iter().copied());
+            }
+        }
+        closure
+    }
+
+    /// Every node the compiled program holds: the root and its closure.
+    fn program(&self) -> Vec<Node> {
+        self.closure(Node::Root)
+            .into_iter()
+            .map(Node::Module)
+            .chain([Node::Root])
+            .collect()
+    }
+
+    /// How many tuples the dataset supplies for the node's declaration: a
+    /// different count per declaration, so a read of the wrong one shows.
+    fn tuple_count(node: Node) -> usize {
+        match node {
+            Node::Module(index) => index + 1,
+            Node::Root => 10,
+        }
+    }
+
+    fn text(&self, node: Node) -> String {
+        let module = self.module(node);
+        let suffix = Self::suffix(node);
+        let mut text = String::from("format: rulespec/v1\n");
+        if node == Node::Root && self.composition {
+            text.push_str("module:\n  kind: composition\n  summary: Generated composition.\n");
+        }
+        if !module.imports.is_empty() {
+            text.push_str("imports:\n");
+            for import in &module.imports {
+                text.push_str(&format!("  - us:policies/g{import}\n"));
+            }
+        }
+        let mut rules = Vec::new();
+        if module.declares {
+            rules.push(
+                "  - name: member_of_household\n    kind: data_relation\n    data_relation:\n      arity: 2\n      arguments: [Person, Household]\n"
+                    .to_string(),
+            );
+        }
+        if let Some(form) = module.reads {
+            let formula = match form {
+                Form::Len => "len(member_of_household)".to_string(),
+                Form::SumOfLocalRule => {
+                    rules.push(format!(
+                        "  - name: unit_weight_{suffix}\n    kind: derived\n    entity: Person\n    dtype: Integer\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: \"1\"\n"
+                    ));
+                    format!("sum(member_of_household.unit_weight_{suffix})")
+                }
+            };
+            rules.push(format!(
+                "  - name: size_{suffix}\n    kind: derived\n    entity: Household\n    dtype: Integer\n    period: Month\n    versions:\n      - effective_from: 2026-01-01\n        formula: {formula}\n"
+            ));
+        }
+        if rules.is_empty() {
+            text.push_str("rules: []\n");
+        } else {
+            text.push_str("rules:\n");
+            for rule in rules {
+                text.push_str(&rule);
+            }
+        }
+        text
+    }
+}
+
+/// What the read in `node` resolves to, independently of the engine: the
+/// node's own declaration, else the one declaration in its imports, else
+/// (when its imports declare none) the one declaration in the program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Expected {
+    Reads(Node),
+    Ambiguous,
+    Undeclared,
+}
+
+fn expected(graph: &Graph, node: Node) -> Expected {
+    if graph.module(node).declares {
+        return Expected::Reads(node);
+    }
+    let declaring = |nodes: &mut dyn Iterator<Item = Node>| {
+        nodes
+            .filter(|candidate| graph.module(*candidate).declares)
+            .collect::<Vec<_>>()
+    };
+    let imported = declaring(&mut graph.closure(node).into_iter().map(Node::Module));
+    let candidates = if imported.is_empty() {
+        declaring(
+            &mut graph
+                .program()
+                .into_iter()
+                .filter(|candidate| *candidate != node),
+        )
+    } else {
+        imported
+    };
+    match candidates.as_slice() {
+        [only] => Expected::Reads(*only),
+        [] => Expected::Undeclared,
+        _ => Expected::Ambiguous,
+    }
+}
+
+/// Compile the graph's root through the surface its kind takes.
+fn compile_graph(graph: &Graph) -> Result<CompiledProgramArtifact, CompileError> {
+    let modules = (0..graph.modules.len())
+        .map(|index| {
+            let node = Node::Module(index);
+            (
+                graph.target(node).expect("graph modules have origins"),
+                graph.text(node),
+            )
+        })
+        .collect::<Vec<_>>();
+    if graph.composition {
+        let borrowed = modules
+            .iter()
+            .map(|(target, text)| (target.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let checkout = Checkout::new(&borrowed);
+        let path = checkout.composition(&graph.text(Node::Root));
+        checkout.compile_composed(&path)
+    } else {
+        let mut modules = modules;
+        modules.push(("us:policies/root".to_string(), graph.text(Node::Root)));
+        let borrowed = modules
+            .iter()
+            .map(|(target, text)| (target.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        compile(&borrowed, "us:policies/root")
+    }
+}
+
+fn dense_integer(output: &DenseOutputValue) -> i64 {
+    match output {
+        DenseOutputValue::Scalar(DenseColumn::Integer(values)) => values[0],
+        DenseOutputValue::Scalar(DenseColumn::Decimal(values)) => values[0]
+            .to_string()
+            .parse()
+            .expect("an integral dense value"),
+        other => panic!("expected an integer dense output, got {other:?}"),
+    }
+}
+
+fn check_graph(graph: &Graph) -> Result<(), TestCaseError> {
+    let program = graph.program();
+    let readers = program
+        .iter()
+        .copied()
+        .filter(|node| graph.module(*node).reads.is_some())
+        .collect::<Vec<_>>();
+    let expectations = readers
+        .iter()
+        .map(|node| (*node, expected(graph, *node)))
+        .collect::<Vec<_>>();
+    let compiled = compile_graph(graph);
+
+    let ambiguous = expectations
+        .iter()
+        .filter(|(_, expected)| *expected == Expected::Ambiguous)
+        .collect::<Vec<_>>();
+    if !ambiguous.is_empty() {
+        let message = compiled
+            .err()
+            .ok_or_else(|| TestCaseError::fail("an ambiguous read compiled"))?
+            .to_string();
+        prop_assert!(
+            message.contains("[ambiguous_relation_reference]"),
+            "{}",
+            message
+        );
+        for (node, _) in ambiguous {
+            prop_assert!(
+                message.contains(&format!("`{}`", graph.output(*node))),
+                "{}",
+                message
+            );
+        }
+        return Ok(());
+    }
+    if expectations
+        .iter()
+        .any(|(_, expected)| *expected == Expected::Undeclared)
+    {
+        let message = compiled
+            .err()
+            .ok_or_else(|| TestCaseError::fail("a read of an undeclared relation compiled"))?
+            .to_string();
+        prop_assert!(message.contains("[untyped_relation]"), "{}", message);
+        return Ok(());
+    }
+    let artifact = compiled.map_err(|error| TestCaseError::fail(error.to_string()))?;
+
+    // Every relation left in the program is a declaration a dataset can
+    // supply by name: no formula-synthesized relation survives.
+    let declared = program
+        .iter()
+        .filter(|node| graph.module(**node).declares)
+        .map(|node| graph.relation(*node))
+        .collect::<BTreeSet<_>>();
+    let relations = relation_names(&artifact)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    prop_assert_eq!(&relations, &declared);
+
+    let tuples = program
+        .iter()
+        .filter(|node| graph.module(**node).declares)
+        .flat_map(|node| members(&graph.relation(*node), Graph::tuple_count(*node)))
+        .collect::<Vec<_>>();
+    let expected_counts = expectations
+        .iter()
+        .map(|(node, expected)| {
+            let Expected::Reads(declaration) = expected else {
+                unreachable!("only resolved reads remain");
+            };
+            (graph.output(*node), Graph::tuple_count(*declaration) as i64)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if expected_counts.is_empty() {
+        return Ok(());
+    }
+    let outputs = expected_counts
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    for mode in [ExecutionMode::Explain, ExecutionMode::Fast] {
+        prop_assert_eq!(
+            &run(&artifact, mode.clone(), tuples.clone(), &outputs),
+            &expected_counts,
+            "{:?}",
+            mode
+        );
+    }
+
+    // Dense reads each relation by the key it compiled, so its batch is
+    // keyed by the declarations' legal ids too.
+    let dense = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
+        .map_err(|error| TestCaseError::fail(format!("dense compile: {error}")))?;
+    let mut batch_relations = HashMap::new();
+    for schema in dense.relations() {
+        let count = program
+            .iter()
+            .find(|node| graph.module(**node).declares && graph.relation(**node) == schema.key.name)
+            .map(|node| Graph::tuple_count(*node))
+            .ok_or_else(|| {
+                TestCaseError::fail(format!(
+                    "dense reads `{}`, which no module declares",
+                    schema.key.name
+                ))
+            })?;
+        batch_relations
+            .entry(schema.key.clone())
+            .or_insert_with(|| DenseRelationBatchSpec {
+                offsets: vec![0, count],
+                related_row_count: Some(count),
+                ..Default::default()
+            });
+    }
+    let names = expected_counts
+        .keys()
+        .map(|output| {
+            output
+                .rsplit_once('#')
+                .map_or(output.as_str(), |(_, name)| name)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let result = dense
+        .execute(
+            &period().to_model().expect("the period converts"),
+            DenseBatchSpec {
+                row_count: 1,
+                inputs: HashMap::new(),
+                relations: batch_relations,
+            },
+            &names,
+        )
+        .map_err(|error| TestCaseError::fail(format!("dense execute: {error}")))?;
+    for (output, name) in expected_counts.keys().zip(&names) {
+        prop_assert_eq!(
+            dense_integer(&result.outputs[name]),
+            expected_counts[output],
+            "dense {}",
+            output
+        );
+    }
+    Ok(())
+}
+
+fn runner(cases: u32, seed: u8) -> TestRunner {
+    TestRunner::new_with_rng(
+        Config {
+            cases,
+            failure_persistence: None,
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]),
+    )
+}
+
+/// Generated graphs, atomic roots and composition roots alike: wherever the
+/// compile succeeds, each aggregate counts exactly the tuples supplied under
+/// its declaration's legal id in explain, fast and dense; wherever two
+/// declarations could answer a read, or none could, the compile refuses.
+#[test]
+fn generated_module_graphs_read_the_declaration_in_scope() {
+    let outcomes = std::cell::RefCell::new(BTreeMap::<&str, usize>::new());
+    let mut runner = runner(256, 226);
+    runner
+        .run(&graph(), |graph| {
+            let readers = graph
+                .program()
+                .into_iter()
+                .filter(|node| graph.module(*node).reads.is_some())
+                .map(|node| expected(&graph, node))
+                .collect::<Vec<_>>();
+            let outcome = if readers.contains(&Expected::Ambiguous) {
+                "ambiguous"
+            } else if readers.contains(&Expected::Undeclared) {
+                "undeclared"
+            } else if readers.is_empty() {
+                "nothing read"
+            } else {
+                "reads"
+            };
+            *outcomes.borrow_mut().entry(outcome).or_default() += 1;
+            check_graph(&graph)
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    // Every outcome the property distinguishes is reached.
+    let outcomes = outcomes.into_inner();
+    for outcome in ["ambiguous", "undeclared", "reads"] {
+        assert!(
+            outcomes.get(outcome).copied().unwrap_or(0) >= 8,
+            "too few `{outcome}` cases: {outcomes:?}"
+        );
+    }
 }

@@ -459,13 +459,15 @@ An aggregate over a `derived_relation` uses the derivation's `current_slot` and
 `related_slot`. A derived relation takes its source's slot kinds; if it
 declares `slot_entities`, they must match the source's.
 
-A relation name a module aggregates without declaring it (a composition
-root, or a module relying on an import) is that module's own relation,
-separate from any same-named declaration in its imports, and it has no
-declared kinds: executing it is an `untyped_relation` error whose message
-names those declarations. Declare the relation, typed, in the module that
-aggregates it, or aggregate the imported relation through the module that
-declares it (see axiom-rules-engine#226 on aliasing).
+A relation name a module reads without declaring it (a composition root, or
+a module relying on an import) reads the declaration of that name its imports
+supply, or, when they supply none, the program's one declaration of it. So
+`len(member_of_household)` in a module that imports
+`us:statutes/7/2012/j` counts the tuples a dataset supplies under
+`us:statutes/7/2012/j#relation.member_of_household`. When more than one
+declaration could answer the read, compiling fails with
+`ambiguous_relation_reference`, naming each. See
+[relation names a module does not declare](rulespec.md#relation-names-a-module-does-not-declare).
 
 The explicit format-2 compatibility loader still enforces relation typing.
 An old compiled artifact that executes an untyped relation fails with a

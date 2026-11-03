@@ -109,6 +109,47 @@ rules:
       arguments: [Person, Household]
 ```
 
+### Relation names a module does not declare
+
+A module declares a relation under its legal id: `member_of_household`
+declared in `us:statutes/7/2012/j` is the relation
+`us:statutes/7/2012/j#relation.member_of_household`, and a dataset supplies
+its tuples under that id. A formula reads a relation by its short name only.
+When a module's formula reads a short name, lowering binds the read to:
+
+1. the module's own declaration of that name;
+2. otherwise, the one declaration of that name among the modules it imports,
+   directly or through their imports;
+3. otherwise, when its imports declare no relation of that name, the one
+   declaration of that name elsewhere in the program.
+
+Every read binds this way: `len`, `count_where`, `sum`, `sum_where`, `min`,
+`max`, `only` and `only_related`, membership tests, relation atoms, `exists`
+generators, and a derived relation's `source_relation` and path steps. An
+originless composition root resolves in its imports like any module, and its
+own declarations keep their bare names. A rule whose entity is a derived
+relation's filtered `entity` reads that relation's `member_relation` alias
+as the derived relation, unless the rule's module declares the name itself.
+
+When two or more declarations could answer a read at the step that decides,
+compiling fails with `[ambiguous_relation_reference]`, naming the reading rule
+and every candidate's legal id: each candidate takes its own dataset tuples,
+so the name does not say which to read. Declare the relation in the module
+that reads it, or import only the module whose declaration it means. A short
+name that no module in the program declares has no declared slot kinds, so
+executing it is an `untyped_relation` error.
+
+Before this rule, only relation atoms, `exists`, and aggregations whose
+`where` clause or value read an imported rule bound a short name to an
+imported declaration. Any other read kept a separate relation of the short
+name, which no tuple supplied under a declaration's legal id reached. Since
+relation typing became mandatory, compiling refused that relation as
+`untyped_relation`, except where a composition root declared a bare relation
+of the same name, which then answered an imported module's read. A program
+compiled by such an engine still holds the separate relation; relation
+typing refuses it with a message that names the same-named declarations, and
+recompiling binds the read.
+
 ### Relation entity typing
 
 Entity ids are opaque strings, and an aggregate reads a relation by looking
@@ -1038,6 +1079,11 @@ The error names both declarations' modules. Two declarations that read the
 same way are left to the existing checks: compatible duplicate parameters
 merge with a diagnostic (an error in strict mode), and a rule declared twice
 is an error.
+
+Relations are scoped by module, so two modules may each declare a relation of
+one name. A read of that name binds to one of them, or is refused, as
+[Relation names a module does not declare](#relation-names-a-module-does-not-declare)
+describes.
 
 **A reserved name** (`reserved_declaration_name`). A bare `period_start` or
 `period_end` means the start or end date of the period being computed: a
