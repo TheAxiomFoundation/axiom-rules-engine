@@ -327,6 +327,60 @@ and `SourceClosure` models; `LegacyCompiledProgramV2` models format 2.
 Pass `accept_artifact_format=2` to the client or dense artifact loader to
 opt in to the legacy path.
 
+### Build on Linux and use the CI binaries
+
+From a checkout with a Rust toolchain and [uv](https://docs.astral.sh/uv/),
+these commands build the dense extension as a CPython 3.14 wheel and install
+it with the wrapper. CI's `PyO3 extension wheel (Linux)` job runs the same
+commands:
+
+```bash
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python maturin==1.14.1
+.venv/bin/maturin build --release --locked --manifest-path python-ext/Cargo.toml \
+  --interpreter .venv/bin/python --out dist
+uv pip install --python .venv/bin/python ./python dist/axiom_rules_engine_dense-*.whl
+```
+
+Built on Ubuntu 24.04, the wheel is tagged `manylinux_2_34_x86_64`: it needs
+glibc 2.34 or later.
+
+Every push to `main` and every pull request uploads that wheel and the
+release `axiom-rules-engine` binary as workflow artifacts, named
+`axiom-rules-engine-dense-wheel-cp314-linux-x86_64-<sha>` and
+`axiom-rules-engine-cli-linux-x86_64-<sha>` after the commit the run built.
+On a pull request that commit is GitHub's merge commit, not the branch head.
+Download an artifact from its workflow run's page. GitHub serves it as a zip
+and drops the binary's executable bit:
+
+```bash
+unzip axiom-rules-engine-cli-linux-x86_64-<sha>.zip -d engine-bin
+chmod +x engine-bin/axiom-rules-engine
+engine-bin/axiom-rules-engine capabilities
+```
+
+`capabilities` reports the commit the binary was built from as
+`engine_build.commit`. The wrapper's default binary paths assume a checkout
+(`target/debug/axiom-rules-engine`), so pass the downloaded binary as
+`binary_path`:
+
+```python
+from axiom_rules_engine import AxiomRulesEngine, CompiledDenseProgram
+
+engine = AxiomRulesEngine(binary_path="engine-bin/axiom-rules-engine")
+engine.compile(
+    program_path="/path/to/rulespec-us/us/policies/example.yaml",
+    rulespec_roots=("/path/to/rulespec-us",),
+    output_path="example.compiled.json",
+)
+program = CompiledDenseProgram.from_artifact_file(
+    "example.compiled.json", entity="Person"
+)
+```
+
+`load_program` and `load_composed_program` take the same `binary_path`
+argument.
+
 ## Tests
 
 ```bash

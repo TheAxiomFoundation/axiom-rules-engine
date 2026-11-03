@@ -236,3 +236,128 @@ jobs:
 
       - name: Run Python tests
         run: .venv/bin/python -m pytest -q python/tests
+
+  # Builds the dense extension as a CPython 3.14 wheel, installs it with the
+  # wrapper from python/, runs the Python tests that use the extension against
+  # the installed packages, and uploads the wheel under a name that carries the
+  # commit sha. It runs on every push to main and every pull request, so each
+  # main commit carries a wheel built from it. maturin builds on the runner and
+  # tags the wheel with the oldest manylinux policy its glibc symbols allow
+  # (manylinux_2_34 on ubuntu-24.04), the same glibc floor as the CLI binary
+  # the `cli-linux` job builds.
+  python-ext-linux-wheel:
+    name: PyO3 extension wheel (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: python-ext
+
+      - name: Build the wheel
+        run: |
+          uv venv --python 3.14 .venv
+          uv pip install --python .venv/bin/python maturin==1.14.1
+          .venv/bin/maturin build --release --locked \
+            --manifest-path python-ext/Cargo.toml \
+            --interpreter .venv/bin/python --out dist
+
+      - name: Install the wheel with the Python wrapper
+        run: >-
+          uv pip install --python .venv/bin/python
+          ./python dist/axiom_rules_engine_dense-*.whl pytest
+
+      # The tests below must exercise the installed packages, not the checkout.
+      - name: Check both packages import from site-packages
+        run: |
+          .venv/bin/python - <<'PY'
+          import sysconfig
+          from pathlib import Path
+
+          import axiom_rules_engine
+          import axiom_rules_engine_dense
+
+          site_packages = Path(sysconfig.get_path("platlib")).resolve()
+          for module in (axiom_rules_engine, axiom_rules_engine_dense):
+              path = Path(module.__file__).resolve()
+              print(module.__name__, path)
+              assert path.is_relative_to(site_packages), path
+          PY
+
+      # Every Python test file that uses the extension. The end-to-end tests in
+      # test_artifact_format.py also need target/debug/axiom-rules-engine, which
+      # this job does not build, so they skip here; the python job runs them.
+      - name: Run the dense-extension tests against the installed wheel
+        run: |
+          mapfile -t tests < <(git grep -l -e CompiledDenseProgram -e axiom_rules_engine_dense -- 'python/tests/test_*.py')
+          test "${#tests[@]}" -gt 0
+          printf '%s\n' "${tests[@]}"
+          .venv/bin/python -m pytest -q "${tests[@]}"
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axiom-rules-engine-dense-wheel-cp314-linux-x86_64-${{ github.sha }}
+          path: dist/axiom_rules_engine_dense-*.whl
+          if-no-files-found: error
+
+  # Builds the axiom-rules-engine CLI, which the Python wrapper runs through
+  # subprocess to compile and run programs, smoke-tests it and uploads it under
+  # a name that carries the same commit sha as the wheel's, so a consumer can
+  # take the wheel and the CLI from one build.
+  cli-linux:
+    name: CLI release binary (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked --verbose
+
+      - name: Smoke test (compile --help)
+        run: target/release/axiom-rules-engine compile --help
+
+      # build.rs stamps the commit into every artifact the binary compiles
+      # (`engine_build`), so it must be the commit the artifact name carries.
+      - name: Check the binary's build identity
+        run: |
+          target/release/axiom-rules-engine capabilities | tee capabilities.json
+          jq -e --arg sha "$GITHUB_SHA" '.engine_build == {commit: $sha, dirty: false}' capabilities.json
+
+      - name: Upload the CLI binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: axiom-rules-engine-cli-linux-x86_64-${{ github.sha }}
+          path: target/release/axiom-rules-engine
+          if-no-files-found: error
