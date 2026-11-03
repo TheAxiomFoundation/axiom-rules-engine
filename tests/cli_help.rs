@@ -131,6 +131,7 @@ fn the_walk_covers_every_known_command_path() {
         &["compile-composed"],
         &["run"],
         &["run-compiled"],
+        &["run-lifetime"],
         &["emit-schemas"],
         &["migrate"],
         &["migrate", "scan"],
@@ -275,6 +276,7 @@ fn value_options() -> Vec<(Vec<&'static str>, &'static str)> {
     ] {
         options.push((vec!["run-compiled"], option));
     }
+    options.push((vec!["run-lifetime"], "--artifact"));
     if cfg!(feature = "schema") {
         options.push((vec!["emit-schemas"], "--out"));
     }
@@ -304,6 +306,43 @@ fn a_help_flag_is_never_an_option_value() {
             let scratch = Scratch::new("value");
             let mut args = path.clone();
             args.extend([option, flag]);
+            let shown = args.join(" ");
+            let out = engine_in(&scratch.0, &args);
+            assert_eq!(out.status.code(), Some(1), "`{shown}` exits 1");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!("`{option}` takes a value, not `{flag}`\n"),
+                "`{shown}`"
+            );
+            assert!(out.stdout.is_empty(), "`{shown}` prints nothing");
+            assert_eq!(
+                scratch.entries(),
+                Vec::<String>::new(),
+                "`{shown}` writes nothing"
+            );
+        }
+    }
+}
+
+/// A value the option accepts at parse time, so a repeat of it is parsed.
+fn accepted_value(option: &str) -> &'static str {
+    match option {
+        "--relation-binding" => "strict",
+        "--accept-artifact-format" => "2",
+        "--relation-entities" => "pair=Person,Person",
+        _ => "value",
+    }
+}
+
+#[test]
+fn a_help_flag_is_never_an_option_value_wherever_the_option_stands() {
+    // The option given once with a value, then again with a help flag: the
+    // refusal names the option, as it does when the option comes first.
+    for (path, option) in value_options() {
+        for flag in HELP_FLAGS {
+            let scratch = Scratch::new("value-later");
+            let mut args = path.clone();
+            args.extend([option, accepted_value(option), option, flag]);
             let shown = args.join(" ");
             let out = engine_in(&scratch.0, &args);
             assert_eq!(out.status.code(), Some(1), "`{shown}` exits 1");
