@@ -36,8 +36,8 @@ conflicting input.
   `Formula { .. }`. `RuleSpecError` is not `#[non_exhaustive]`, so an
   exhaustive match needs an arm for `EffectiveDateOutOfRange`. A pattern or
   struct literal of `AmbiguousInput` without `..` must name `other_name`.
-  Like the dense text change above, this belongs to the next breaking
-  release.
+  "Dense batches justify every row count they claim" (2026-10-14) already
+  makes the next release a breaking one, 0.3.0; these changes ship in it.
 - The display text of all three changes. Anyone who matches on it needs to
   update. The generated-module case keeps `failed to parse RuleSpec formula:`.
 - The date check refuses some input that the loader accepted before, when no

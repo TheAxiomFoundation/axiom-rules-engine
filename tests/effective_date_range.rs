@@ -27,7 +27,8 @@ enum Kind {
     Table,
     /// A derived relation: one version, whose dates no writer emits.
     DerivedRelation,
-    /// A data relation: rule-level dates only, which no writer emits.
+    /// A data relation: dates in versions or at rule level, none of which a
+    /// writer emits. Its versions hold no formula.
     DataRelation,
 }
 
@@ -79,11 +80,13 @@ const ALL_POSITIONS: [Position; 7] = [
 ];
 
 /// The places a date can sit in a rule of `kind` that otherwise lowers. A
-/// table needs `values:` inside a version, a derived relation takes exactly
-/// one version, and a data relation has no versions.
+/// table needs `values:` inside a version, so it has no rule-level pair in
+/// place of `versions:`, and a derived relation takes exactly one version. A
+/// data relation takes every position: its versions and its rule-level pair
+/// hold only dates.
 fn positions(kind: Kind) -> &'static [Position] {
     match kind {
-        Kind::Derived | Kind::Parameter => &ALL_POSITIONS,
+        Kind::Derived | Kind::Parameter | Kind::DataRelation => &ALL_POSITIONS,
         Kind::Table => &[
             Position::FirstFrom,
             Position::FirstTo,
@@ -98,7 +101,6 @@ fn positions(kind: Kind) -> &'static [Position] {
             Position::RuleTo,
             Position::RuleBesideVersions,
         ],
-        Kind::DataRelation => &[Position::RuleFrom, Position::RuleTo],
     }
 }
 
