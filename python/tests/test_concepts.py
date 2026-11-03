@@ -278,6 +278,7 @@ FUNCTION_CALLS = [
     ("min(member_of_household.age)", {"age"}),
     ("ceil(wages)", {"wages"}),
     ("floor(wages)", {"wages"}),
+    ("calendar_years_to_months(years)", {"years"}),
     ("days_between(birth_date, assessment_date)", {"birth_date", "assessment_date"}),
     ("date_add_days(birth_date, 1)", {"birth_date"}),
     ("date_add_months(birth_date, 1)", {"birth_date"}),
@@ -529,6 +530,7 @@ DECLARED_NAME_FORMULAS = {formula for formula, _ in DECLARED_NAME_CASES}
 # What some formulas need to compile: a result dtype other than Money, an
 # input declaration, or an imported module.
 CALL_DTYPES = {
+    "calendar_years_to_months(years)": "Integer",
     "date_add_days(birth_date, 1)": "Date",
     "date_add_months(birth_date, 1)": "Date",
     "date_add_years(birth_date, 18)": "Date",
@@ -622,6 +624,19 @@ def test_no_function_name_is_inferred_as_an_input(
     write_call_module(root, formula)
 
     assert inferred_input_names(root) == inputs
+
+
+def test_every_built_in_function_has_a_call_case() -> None:
+    # `BUILTIN_FUNCTIONS` in src/formula.rs, which the engine's `builtin_tests`
+    # keep equal to the call lowering. A new built-in needs a row that states
+    # what its arguments read.
+    source = (Path(__file__).resolve().parents[2] / "src" / "formula.rs").read_text()
+    listed = source.split("const BUILTIN_FUNCTIONS", 1)[1].split("];", 1)[0]
+    called = {
+        formula.split("(", 1)[0] for formula, _ in FUNCTION_CALLS + PREDICATE_CASES
+    }
+
+    assert set(re.findall(r'"(\w+)"', listed)) - called == set()
 
 
 @pytest.mark.parametrize("separator", SEPARATORS)
