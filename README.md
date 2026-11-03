@@ -329,10 +329,10 @@ opt in to the legacy path.
 
 ### Build on Linux and use the CI binaries
 
-From a checkout with a Rust toolchain and [uv](https://docs.astral.sh/uv/),
-these commands build the dense extension as a CPython 3.14 wheel and install
-it with the wrapper. CI's `PyO3 extension wheel (Linux)` job runs the same
-commands:
+From a checkout with the current stable Rust toolchain and
+[uv](https://docs.astral.sh/uv/), these commands build the dense extension as
+a CPython 3.14 wheel and install it with the wrapper. CI's
+`PyO3 extension wheel (Linux)` job builds and installs the wheel the same way:
 
 ```bash
 uv venv --python 3.14 .venv
@@ -342,27 +342,37 @@ uv pip install --python .venv/bin/python maturin==1.14.1
 uv pip install --python .venv/bin/python ./python dist/axiom_rules_engine_dense-*.whl
 ```
 
-Built on Ubuntu 24.04, the wheel is tagged `manylinux_2_34_x86_64`: it needs
-glibc 2.34 or later.
-
-Every push to `main` and every pull request uploads that wheel and the
-release `axiom-rules-engine` binary as workflow artifacts, named
+Every push to `main` and every pull request into it uploads that wheel and
+the release `axiom-rules-engine` binary as workflow artifacts, named
 `axiom-rules-engine-dense-wheel-cp314-linux-x86_64-<sha>` and
 `axiom-rules-engine-cli-linux-x86_64-<sha>` after the commit the run built.
 On a pull request that commit is GitHub's merge commit, not the branch head.
-Download an artifact from its workflow run's page. GitHub serves it as a zip
-and drops the binary's executable bit:
+A commit has an artifact only if the job that builds it passed, and GitHub
+deletes artifacts after the repository's retention period of 90 days. CI
+builds both on Ubuntu 24.04: the wheel is tagged `manylinux_2_34_x86_64`, and
+the binary also needs x86_64 and glibc 2.34 or later.
+
+Take the CLI from the commit you built the extension from. Loading a format-3
+artifact re-derives its metadata and interface and refuses one that differs,
+so a CLI from another commit can write artifacts this extension won't load.
+In a checkout of a `main` commit, download that commit's CLI artifact from its
+workflow run's page, then:
 
 ```bash
-unzip axiom-rules-engine-cli-linux-x86_64-<sha>.zip -d engine-bin
+sha=$(git rev-parse HEAD)
+unzip "axiom-rules-engine-cli-linux-x86_64-$sha.zip" -d engine-bin
 chmod +x engine-bin/axiom-rules-engine
 engine-bin/axiom-rules-engine capabilities
 ```
 
-`capabilities` reports the commit the binary was built from as
-`engine_build.commit`. The wrapper's default binary paths assume a checkout
-(`target/debug/axiom-rules-engine`), so pass the downloaded binary as
-`binary_path`:
+`unzip` keeps the binary's executable bit, and `chmod` restores it if another
+extractor drops it. `capabilities` reports the commit the binary was built
+from as `engine_build.commit`. Once a commit's artifacts have expired, build
+its CLI with `cargo build --release --locked` and use
+`target/release/axiom-rules-engine` instead.
+
+The wrapper's default binary paths assume a checkout
+(`target/debug/axiom-rules-engine`), so pass the binary as `binary_path`:
 
 ```python
 from axiom_rules_engine import AxiomRulesEngine, CompiledDenseProgram

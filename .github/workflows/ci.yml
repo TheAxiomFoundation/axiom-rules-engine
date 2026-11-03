@@ -245,13 +245,13 @@ jobs:
         run: .venv/bin/python -m pytest -q python/tests
 
   # Builds the dense extension as a CPython 3.14 wheel, installs it with the
-  # wrapper from python/, runs the Python tests that use the extension against
-  # the installed packages, and uploads the wheel under a name that carries the
-  # commit sha. It runs on every push to main and every pull request, so each
-  # main commit carries a wheel built from it. maturin builds on the runner and
-  # tags the wheel with the oldest manylinux policy its glibc symbols allow
-  # (manylinux_2_34 on ubuntu-24.04), the same glibc floor as the CLI binary
-  # the `cli-linux` job builds.
+  # wrapper from python/, runs the Python tests against the installed packages,
+  # and uploads the wheel under a name that carries the commit sha. It runs on
+  # every push to main and every pull request, so each main commit carries a
+  # wheel built from it. maturin builds on the runner and tags the wheel with
+  # the oldest manylinux policy its glibc symbols allow (manylinux_2_34 on
+  # ubuntu-24.04), the same glibc floor as the CLI binary the `cli-linux` job
+  # builds.
   python-ext-linux-wheel:
     name: PyO3 extension wheel (Linux)
     runs-on: ubuntu-latest
@@ -278,7 +278,9 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: python-ext
+          workspaces: |
+            python-ext
+            .
 
       - name: Build the wheel
         run: |
@@ -288,10 +290,11 @@ jobs:
             --manifest-path python-ext/Cargo.toml \
             --interpreter .venv/bin/python --out dist
 
+      # Hypothesis runs the property tests, which skip without it.
       - name: Install the wheel with the Python wrapper
         run: >-
           uv pip install --python .venv/bin/python
-          ./python dist/axiom_rules_engine_dense-*.whl pytest
+          ./python dist/axiom_rules_engine_dense-*.whl pytest hypothesis==6.170.14
 
       # The tests below must exercise the installed packages, not the checkout.
       - name: Check both packages import from site-packages
@@ -310,15 +313,14 @@ jobs:
               assert path.is_relative_to(site_packages), path
           PY
 
-      # Every Python test file that uses the extension. The end-to-end tests in
-      # test_artifact_format.py also need target/debug/axiom-rules-engine, which
-      # this job does not build, so they skip here; the python job runs them.
-      - name: Run the dense-extension tests against the installed wheel
-        run: |
-          mapfile -t tests < <(git grep -l -e CompiledDenseProgram -e axiom_rules_engine_dense -- 'python/tests/test_*.py')
-          test "${#tests[@]}" -gt 0
-          printf '%s\n' "${tests[@]}"
-          .venv/bin/python -m pytest -q "${tests[@]}"
+      # The end-to-end tests compile and run programs with
+      # target/debug/axiom-rules-engine, as in the python job. Among them,
+      # CompiledDenseProgram.from_artifact_file loads the artifacts it writes.
+      - name: Build the engine binary for the end-to-end tests
+        run: cargo build --locked --bin axiom-rules-engine
+
+      - name: Run the Python tests against the installed wheel
+        run: .venv/bin/python -m pytest -q python/tests
 
       - name: Upload the wheel
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
