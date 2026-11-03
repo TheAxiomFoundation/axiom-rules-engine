@@ -160,7 +160,8 @@ fn a_parse_error_names_the_rule_and_a_version_of_several() {
         formula_error(yaml),
         "failed to parse the formula of RuleSpec rule `subject` effective from 2026-01-01: formula parse error at line 1, col 3: unexpected char '$'"
     );
-    // A derived relation's predicate names its rule too.
+    // A derived relation's predicate names its rule too. A parse error in
+    // it surfaces from the pass that parses every rule's formula first.
     match lower_rulespec_str(&relation_module("'ü' $")) {
         Err(RuleSpecError::Formula {
             rule,
@@ -219,6 +220,28 @@ fn a_derived_relation_predicate_counts_the_same_way() {
 }
 
 #[test]
+fn a_derived_relation_predicate_lowering_error_names_its_rule() {
+    // The predicate parses, so this error comes from lowering it as a
+    // judgment in `to_derived_relation_spec`, not from the parse pass.
+    let yaml = relation_module("ceil(1, 2)");
+    assert_eq!(
+        formula_error(&yaml),
+        "failed to parse the formula of RuleSpec rule `pair`: formula lower error: unknown function `ceil` in judgment position"
+    );
+    match lower_rulespec_str(&yaml) {
+        Err(RuleSpecError::Formula {
+            rule,
+            effective_from,
+            ..
+        }) => {
+            assert_eq!(rule.as_deref(), Some("pair"));
+            assert_eq!(effective_from, None);
+        }
+        other => panic!("expected a formula error, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_lowering_error_carries_no_position() {
     let message = formula_error(&module(0, "ceil(1, 2)"));
     assert!(
@@ -248,7 +271,22 @@ fn offending_char() -> impl Strategy<Value = char> {
 /// Whitespace the engine trims from either end of a formula before it
 /// parses it.
 fn padding() -> impl Strategy<Value = &'static str> {
-    prop::sample::select(vec!["", "\n", "\n\n", "  ", " \n\t", "\t\n  \n"])
+    // NBSP and U+3000 are multibyte, so a byte count of the trimmed
+    // prefix would move the column too far. A `\r` is trimmed but starts no
+    // line, so it takes a column.
+    prop::sample::select(vec![
+        "",
+        "\n",
+        "\n\n",
+        "  ",
+        " \n\t",
+        "\t\n  \n",
+        "\u{a0}",
+        "\n\u{3000} ",
+        "\r",
+        "\r\n\r",
+        " \r\n\u{a0}\t",
+    ])
 }
 
 proptest! {

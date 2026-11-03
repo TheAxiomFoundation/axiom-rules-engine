@@ -555,16 +555,24 @@ statements.
 
 ### Effective dates
 
-A version's `effective_from` and `effective_to` must lie between 0000-01-01
-and 9999-12-31: the loader writes each date into the formula source it
-generates, which spells a year in four digits. A date outside that range,
-such as `'+10000-01-01'`, fails before any formula is parsed:
+Every `effective_from` and `effective_to` a rule declares must lie between
+0000-01-01 and 9999-12-31. That covers each version's two fields and the
+rule-level pair, with or without a `versions:` list. The loader writes the
+version dates of a derived rule or a parameter into the formula source it
+generates, which spells a year in four digits. A table writes only its first
+version's `effective_from`, and a relation writes none. The engine checks
+every date anyway, so one rule holds for every kind. A date outside the
+range, such as `'+10000-01-01'`, fails with a date error, never a formula
+parse error:
 
 ```text
 RuleSpec file `<memory>` rule `subject` has effective_from +10000-01-01, outside the dates a RuleSpec version can take (0000-01-01 to 9999-12-31)
 ```
 
-`tests/effective_date_range.rs` checks this for every kind of rule.
+`tests/effective_date_range.rs` checks this for derived rules, scalar
+parameters, parameter tables, derived relations and data relations, at every
+place each can hold a date. A rule whose `kind` the loader does not support
+reports its kind, not its date.
 
 ## The lowered expression vocabulary
 

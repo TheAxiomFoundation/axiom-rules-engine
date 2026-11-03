@@ -145,6 +145,15 @@ fn the_walk_covers_every_known_command_path() {
             "the walk misses {expected:?}: {paths:?}"
         );
     }
+    // The experimental commands exist only in a build with their feature,
+    // which then lists them.
+    for command in ["compile-unit-aggregation", "run-unit-aggregation"] {
+        assert_eq!(
+            paths.iter().any(|path| path == &[command]),
+            cfg!(feature = "unit-derivation"),
+            "the walk covers `{command}` exactly when the build has it: {paths:?}"
+        );
+    }
 }
 
 #[test]
