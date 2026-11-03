@@ -496,11 +496,15 @@ pub enum DenseCompileError {
         outer: &'static str,
         inner: &'static str,
     },
-    /// A rule dense compiles reads a rule of another entity directly, with no
-    /// relation. Dense evaluates the rows of one entity, and a relation batch
-    /// is the only way it reaches another entity's rows, so it refuses the
-    /// read by design. Explain evaluates such a read on the reading rule's own
-    /// entity id (see `docs/rulespec-format.md`).
+    /// A rule dense evaluates on root rows (a rule of the root entity, a
+    /// `Scalar` rule one reaches, or a rule a derived relation's predicate
+    /// reads on the current record) reads a rule of another entity directly,
+    /// with no relation. Dense evaluates the rows of one entity, and a
+    /// relation batch is the only way it reaches another entity's rows, so it
+    /// refuses the read by design. Explain evaluates such a read on the
+    /// reading rule's own entity id (see `docs/rulespec-format.md`). Inside a
+    /// related expression, dense evaluates a direct read on the related rows,
+    /// as explain does, and does not refuse it.
     #[error(
         "dense compilation only supports dependencies within the same root entity; `{dependency}` from `{derived}` crosses into `{entity}`. {}",
         cross_entity_advice(.derived, .dependency, .entity, .reader_entity, .relations)
@@ -1120,11 +1124,11 @@ impl DenseCompiledProgram {
 
     /// Compile `outputs` and the rules they reach, and no other rule (#266).
     ///
-    /// A rule no requested output reaches is never compiled, so it cannot
-    /// refuse the program: a module that arrives only through imports, and
-    /// whose rules the outputs do not read, is not judged. A rule the outputs
-    /// do reach is compiled as [`Self::from_program`] compiles it, so it
-    /// refuses the program with the same error. For every output both
+    /// A rule no requested output reaches is never compiled, so no dense
+    /// refusal concerns it: the rules of a module that arrives only through
+    /// imports, and that the outputs do not read, are not compiled. A rule the
+    /// outputs do reach is compiled as [`Self::from_program`] compiles it, so
+    /// it refuses the program with the same error. For every output both
     /// compile, the two programs return the same values and errors for a
     /// batch that the whole-root program binds.
     ///
@@ -1145,8 +1149,8 @@ impl DenseCompiledProgram {
     /// another rule reads.
     ///
     /// Relation entity typing still covers the whole program, as artifact
-    /// compilation does; see [`Self::from_program`] for what this does not
-    /// check.
+    /// compilation does, so an ill-typed rule no output reaches still refuses
+    /// it; see [`Self::from_program`] for what this does not check.
     pub fn from_program_for_outputs(
         program: &Program,
         entity: Option<&str>,

@@ -360,8 +360,9 @@ fn explain_dataset(
 }
 
 /// The credit compiles for `TaxUnit`: the unrelated deduction that reads a
-/// `Person` rule is not part of it, so it cannot refuse it. The compiled
-/// program holds the credit and what it reads, and nothing else.
+/// `Person` rule is not part of it, so the dense compiler never judges it.
+/// The compiled program holds the credit and what it reads, and nothing
+/// else.
 #[test]
 fn the_credit_compiles_without_the_unrelated_rule_that_crosses_into_person() {
     let artifact = credit_artifact();

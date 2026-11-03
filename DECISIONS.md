@@ -12,9 +12,9 @@ reach, and no other rule. The Python loaders `CompiledDenseProgram.from_file`,
 `from_composed_file` and `from_artifact_file` take the same request as
 `outputs=`. Without a request, `from_program`, `from_artifact` and the Python
 loaders still compile every rule of the root entity. Dense keeps refusing a
-rule that reads a rule of another entity directly, with no relation; the
-refusal now says that this is deliberate and names the data relations the
-program declares between the two entities.
+direct read of another entity's rule, with no relation, by a rule it
+evaluates on root rows; the refusal now says that this is deliberate and
+names the data relations the program declares between the two entities.
 
 **Why.** A module names every rule its import closure reaches, so a whole-root
 compile judges rules that no wanted output reaches. 26 USC 32 for `TaxUnit`
@@ -60,8 +60,13 @@ need a contract of its own.
   same values and errors on any batch the whole-root program binds. A closure
   batch needs only the columns and relations the closure reads, so a batch
   that omits a relation only another rule reads binds for the closure alone.
-- Relation entity typing still covers the whole program, as artifact
-  compilation does.
+- Only the dense compile is limited to the closure. Relation entity typing
+  still covers the whole program, as artifact compilation does, and the
+  Python loaders still compile the whole RuleSpec import closure into an
+  artifact first, so a rule no output reaches can still fail those checks.
+- The Python extension infers a batch's row count from the program's own
+  root inputs and relations, so a closure batch can need an explicit
+  `row_count` where the whole root's did not.
 - Tests: synthetic fixtures with the 26 USC 32 and 42 USC 1382 shapes; the
   parity suite compares the closure with the whole root and explain over its
   three dense profiles, and again with an unreached crossing added; a property

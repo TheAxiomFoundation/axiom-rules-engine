@@ -125,16 +125,21 @@ class CompiledDenseProgram:
         reaches.
 
         With ``outputs``, it compiles only those rules and the rules they
-        reach. A rule none of them reaches is not compiled and cannot refuse
-        the program; a rule they do reach refuses it as before. Name outputs
+        reach. A rule none of them reaches is not dense-compiled, so dense
+        does not refuse the program for it; a rule they do reach refuses it as
+        before. The RuleSpec compile that runs first, relation typing
+        included, still checks every rule of the import closure. Name outputs
         by rule name, as :meth:`execute` takes them. Each must be a rule of
         the root entity or an entity-free ``Scalar`` rule. With no
         ``entity``, the outputs' entity is the root entity, and for
         ``Scalar`` outputs alone, the module's one entity, as without
         ``outputs``. :attr:`output_names`,
         :attr:`root_inputs` and :attr:`relations` then list only what those
-        rules read, so a batch needs nothing else. For every output both
-        compile, the values and errors are the same either way.
+        rules read, so a batch needs nothing else. :meth:`execute` infers the
+        row count from those columns and relations alone, so pass
+        ``row_count`` when the batch supplies none of them. For every output
+        both compile, given the same row count, the values and errors are the
+        same either way.
         """
         if NativeCompiledDenseProgram is None:
             raise RuntimeError(

@@ -497,9 +497,12 @@ differently.
   rule for the tax unit's id, so it finds only facts filed under that id.
   With well-kinded data, where a person's facts are keyed by person ids, an
   input the person rule reads is missing.
-- Dense refuses the read, by design. A dense batch holds the rows of one
-  entity, and dense reaches another entity's rows only through a relation
-  batch, so a direct read has no rows to evaluate. Compilation fails with
+- Dense refuses the read when a rule it evaluates on root rows makes it: a
+  rule of the root entity, a `Scalar` rule one reaches, or a rule a derived
+  relation's predicate reads on the current record. That refusal is by
+  design. A dense batch holds the rows of one entity, and dense reaches
+  another entity's rows only through a relation batch, so the read has no
+  rows to evaluate on. Compilation fails with
   `DenseCompileError::CrossEntityDependency`. Its message says the
   restriction is deliberate, names the rule that reads and the rule it
   reads, and names by legal id the data relations the program declares
@@ -507,6 +510,9 @@ differently.
   (such as `SnapUnit`) counts as the kind of its ids (`Household`), and a
   derived relation is not named, since dense may refuse its predicate or
   path; its data relation carries the same pairs.
+- Inside a related aggregate's value or `where` clause, dense evaluates the
+  rules it reads on the related rows, a direct read included, as explain
+  does (see [dense execution semantics](execution-semantics.md#dense-contract)).
 
 A `Scalar` rule belongs to no entity: any rule reads it directly, in every
 mode.
@@ -514,13 +520,15 @@ mode.
 Dense refuses only a read that the rules it compiles reach. Compiled for its
 whole root entity (`DenseCompiledProgram::from_program` or `from_artifact`,
 or the Python loaders without `outputs`), a program is refused when any of
-its rules of that entity makes such a read, including a rule that arrives
-only through imports and that no wanted output reaches. Compiled for
-requested outputs (`from_program_for_outputs`, `from_artifact_for_outputs`,
-or the Python loaders' `outputs=[...]`), it is refused only when one of those
-outputs reaches such a read. To compute the rule in dense, read it through a
-relation between the two entities. See
-[dense execution semantics](execution-semantics.md#dense-contract).
+its root-entity rules makes such a read, or reaches a rule that does,
+including a rule that arrives only through imports and that no wanted output
+reaches. Compiled for requested outputs (`from_program_for_outputs`,
+`from_artifact_for_outputs`, or the Python loaders' `outputs=[...]`), it is
+refused only when one of those outputs reaches such a read. Only the dense
+compile is limited to those outputs: relation entity typing, and the
+RuleSpec compile the Python loaders run first, still judge every rule. To
+compute the rule in dense, read it through a relation between the two
+entities.
 
 ## Judgment position
 

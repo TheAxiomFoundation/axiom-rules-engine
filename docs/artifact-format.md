@@ -227,10 +227,11 @@ The block describes the program under the reference (explain) evaluator, for
 queries and datasets that are well-kinded: each rule queried on an id of its
 own entity's kind, and tuples bound to the relation's slot kinds (the strict
 binding default). Fast mode evaluates the same ids. The dense compiler
-refuses to compile a rule that depends directly on a rule of another named
-entity (`DenseCompileError::CrossEntityDependency`), whether it compiles
-every rule of the root entity or only the rules requested outputs reach, so
-it never reads a slot somewhere this block does not list.
+refuses to compile a rule it evaluates on root rows that depends directly on
+a rule of another named entity (`DenseCompileError::CrossEntityDependency`),
+whether it compiles every rule of the root entity or only the rules
+requested outputs reach, so it never reads a slot somewhere this block does
+not list.
 
 ### Entities
 

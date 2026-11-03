@@ -58,6 +58,15 @@ rules:
     versions:
       - effective_from: 2026-01-01
         formula: earned_income_for_credit * 0.1
+  - name: minimum_credit
+    kind: derived
+    entity: TaxUnit
+    dtype: Money
+    period: Year
+    unit: USD
+    versions:
+      - effective_from: 2026-01-01
+        formula: "0"
 """
 
 DEDUCTION = """\
@@ -178,6 +187,7 @@ def test_requested_outputs_compile_the_credit(corpus) -> None:
     # The metadata still covers every rule the module brings in.
     assert {item.name for item in program.derived_metadata} == {
         "earned_income_credit",
+        "minimum_credit",
         "earned_income_for_credit",
         "senior_deduction_modified_adjusted_gross_income",
         "section_911_amount_excluded_from_gross_income",
@@ -193,6 +203,28 @@ def test_requested_outputs_compile_the_credit(corpus) -> None:
     assert inferred.root_entity == "TaxUnit"
     assert inferred.output_names == program.output_names
     assert _credit_values(inferred) == _credit_values(program)
+
+
+def test_a_closure_that_reads_no_column_needs_a_stated_row_count(corpus) -> None:
+    # execute infers the row count from the program's own root inputs and
+    # relations. A closure that reads neither cannot infer it from a column
+    # only other rules read, so the caller states it.
+    root, credit = corpus
+    program = CompiledDenseProgram.from_file(
+        credit,
+        rulespec_roots=[root],
+        entity="TaxUnit",
+        outputs=["minimum_credit"],
+    )
+    assert program.root_inputs == []
+    assert program.relations == []
+    inputs = {"wages": np.array([1.0, 2.0])}
+    with pytest.raises(ValueError, match="row_count"):
+        program.execute(**YEAR, inputs=inputs, outputs=["minimum_credit"])
+    result = program.execute(
+        **YEAR, inputs=inputs, outputs=["minimum_credit"], row_count=2
+    )
+    assert list(result["outputs"]["minimum_credit"]) == [0.0, 0.0]
 
 
 def test_a_requested_output_that_reaches_the_crossing_rule_still_refuses(corpus) -> None:

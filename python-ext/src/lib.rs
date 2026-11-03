@@ -321,8 +321,8 @@ impl CompiledDenseProgramHandle {
 }
 
 /// Compile `artifact` for dense execution: every rule of the root entity, or,
-/// given `outputs`, only those rules and the rules they reach, so a rule none
-/// of them reaches cannot refuse the program
+/// given `outputs`, only those rules and the rules they reach, so the dense
+/// compiler never judges a rule none of them reaches
 /// (`DenseCompiledProgram::from_artifact_for_outputs`).
 fn compiled_dense_from_artifact(
     artifact: CompiledProgramArtifact,
