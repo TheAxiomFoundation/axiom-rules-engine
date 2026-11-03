@@ -188,12 +188,35 @@ pub enum RuleSpecError {
     #[error(transparent)]
     Source(#[from] crate::source::SourceError),
     /// The formula source failed to lex, parse or lower. A syntax error in a
-    /// formula reports a line and column in that formula's text, trimmed of
-    /// surrounding whitespace, not in the YAML file; a column counts Unicode
-    /// scalar values from 1. `docs/rulespec-format.md` ("Formula parse
+    /// rule's formula names the rule in `rule`, and the version's
+    /// `effective_from` in `effective_from` when the rule has several
+    /// versions. Its line and column point into that formula's text as
+    /// written, whitespace around it included, not into the YAML file; a
+    /// column counts Unicode scalar values from 1. An error found in the
+    /// module the loader generates from every formula, such as a lowering
+    /// error, names no rule. `docs/rulespec-format.md` ("Formula parse
     /// errors") gives the full rule.
-    #[error("failed to parse RuleSpec formula: {0}")]
-    Formula(#[from] crate::formula::FormulaError),
+    #[error(
+        "failed to parse {}: {error}",
+        formula_subject(rule.as_deref(), effective_from.as_ref())
+    )]
+    Formula {
+        rule: Option<String>,
+        effective_from: Option<NaiveDate>,
+        #[source]
+        error: crate::formula::FormulaError,
+    },
+    /// A version date outside the four-digit years the formula source can
+    /// spell. `field` is `effective_from` or `effective_to`.
+    #[error(
+        "RuleSpec file `{path}` rule `{name}` has {field} {date}, outside the dates a RuleSpec version can take (0000-01-01 to 9999-12-31)"
+    )]
+    EffectiveDateOutOfRange {
+        path: String,
+        name: String,
+        field: &'static str,
+        date: NaiveDate,
+    },
     /// `name` and `entity` are copied into the generated formula source
     /// unquoted, so each must lex as exactly one token.
     #[error("RuleSpec rule {name:?} has {field} {value:?}; it must be exactly one {expected}")]
@@ -465,6 +488,74 @@ pub enum RuleSpecError {
     PluralCorpusCitationPaths { path: String },
     #[error("strict RuleSpec validation failed:\n{0}")]
     StrictDiagnostics(RuleSpecDiagnosticReport),
+}
+
+/// An error in the generated module names no rule.
+impl From<crate::formula::FormulaError> for RuleSpecError {
+    fn from(error: crate::formula::FormulaError) -> Self {
+        RuleSpecError::Formula {
+            rule: None,
+            effective_from: None,
+            error,
+        }
+    }
+}
+
+/// What [`RuleSpecError::Formula`] failed to parse: one rule's formula, or
+/// the generated module when no rule is known.
+fn formula_subject(rule: Option<&str>, effective_from: Option<&NaiveDate>) -> String {
+    match (rule, effective_from) {
+        (Some(rule), Some(date)) => {
+            format!("the formula of RuleSpec rule `{rule}` effective from {date}")
+        }
+        (Some(rule), None) => format!("the formula of RuleSpec rule `{rule}`"),
+        (None, _) => "RuleSpec formula".to_string(),
+    }
+}
+
+/// The first and last dates whose year the formula lexer reads: four digits.
+const FIRST_FORMULA_DATE: NaiveDate = NaiveDate::from_ymd_opt(0, 1, 1).expect("a valid date");
+const LAST_FORMULA_DATE: NaiveDate = NaiveDate::from_ymd_opt(9999, 12, 31).expect("a valid date");
+
+/// Parse `written`, a formula as the YAML holds it, trimmed as the loader
+/// trims it, and attribute any error to `rule`. `parse` sees the trimmed
+/// text; a parse error's position is moved back by the whitespace the trim
+/// removed, so it counts from the formula as written. Every path that parses
+/// a trimmed formula goes through here, so their positions agree.
+fn parse_trimmed_formula<T>(
+    written: &str,
+    rule: &str,
+    effective_from: Option<NaiveDate>,
+    parse: impl FnOnce(&str) -> Result<T, crate::formula::FormulaError>,
+) -> Result<T, RuleSpecError> {
+    use crate::formula::FormulaError;
+
+    let trimmed = written.trim();
+    parse(trimmed).map_err(|error| {
+        let error = match error {
+            FormulaError::Parse { line, col, message } => {
+                let leading = &written[..written.len() - written.trim_start().len()];
+                let lines_before = leading.matches('\n').count();
+                let line_start = leading.rfind('\n').map_or(0, |index| index + 1);
+                let col = if line == 1 {
+                    col + leading[line_start..].chars().count()
+                } else {
+                    col
+                };
+                FormulaError::Parse {
+                    line: line + lines_before,
+                    col,
+                    message,
+                }
+            }
+            other => other,
+        };
+        RuleSpecError::Formula {
+            rule: Some(rule.to_string()),
+            effective_from,
+            error,
+        }
+    })
 }
 
 /// Options for RuleSpec semantic lowering.
@@ -2878,6 +2969,13 @@ impl RulesDocument {
                 }
                 Err(error) => return Err(error),
             };
+            // Before the rule's formula source is written, so a date the
+            // source cannot spell is never reported as a formula error. The
+            // module is parsed only after this loop. A rule of a kind the
+            // loader cannot read reports its kind first.
+            if !matches!(kind, RuleKind::Unsupported(_)) {
+                rule.validate_effective_dates()?;
+            }
             rule.validate_version_ranges()?;
             rule.reject_unsupported_default()?;
             // Rounding is an output-rule concern; reject it on any non-derived
@@ -3038,14 +3136,19 @@ impl RulesDocument {
         let mut diagnostics = Vec::new();
         for rule in &self.rules {
             let mut occurrences = 0;
-            for version in rule.effective_versions() {
+            let versions = rule.effective_versions();
+            for version in &versions {
                 if let Some(formula) = version
                     .formula
                     .as_deref()
-                    .map(str::trim)
-                    .filter(|formula| !formula.is_empty())
+                    .filter(|formula| !formula.trim().is_empty())
                 {
-                    occurrences += crate::formula::non_exhaustive_match_count(formula)?;
+                    occurrences += parse_trimmed_formula(
+                        formula,
+                        &rule.name,
+                        version.effective_from.filter(|_| versions.len() > 1),
+                        crate::formula::non_exhaustive_match_count,
+                    )?;
                 }
             }
             if occurrences > 0 {
@@ -3322,7 +3425,12 @@ impl RuleDefinition {
     /// of the formula's own parse but would hide every later rule in the
     /// generated source. `written` is the formula as written; it is trimmed
     /// here as the writer trims it, and error positions refer to `written`.
-    fn validate_formula_source(&self, written: &str) -> Result<(), RuleSpecError> {
+    /// `effective_from` is the version's, when the rule has several.
+    fn validate_formula_source(
+        &self,
+        written: &str,
+        effective_from: Option<NaiveDate>,
+    ) -> Result<(), RuleSpecError> {
         use crate::formula::{Lexer, TokType};
 
         let formula = written.trim();
@@ -3335,7 +3443,9 @@ impl RuleDefinition {
         const END: &str = "__rulespec_formula_end__";
         let mut line_offsets = vec![0];
         line_offsets.extend(formula.match_indices('\n').map(|(offset, _)| offset + 1));
-        let tokens = Lexer::new(&format!("{formula}\n{END}")).tokenise()?;
+        let tokens = parse_trimmed_formula(written, &self.name, effective_from, |formula| {
+            Lexer::new(&format!("{formula}\n{END}")).tokenise()
+        })?;
         if !tokens.iter().any(|token| {
             token.ty == TokType::Ident
                 && token.value == END
@@ -3430,6 +3540,40 @@ impl RuleDefinition {
             }];
         }
         Vec::new()
+    }
+
+    /// Refuse a version date the formula source cannot spell. The writers
+    /// put each date into the generated source unquoted, and the lexer reads
+    /// a date as a four-digit year, so `NaiveDate`'s spelling of any other
+    /// year (`+10000-01-01`, `-0001-01-01`) would lex as a sign and fail as a
+    /// formula parse error at a position in source the user never sees. Every
+    /// date the rule declares is checked, whether or not its writer emits
+    /// it, so one rule holds for every kind.
+    fn validate_effective_dates(&self) -> Result<(), RuleSpecError> {
+        let dates = [
+            ("effective_from", self.effective_from),
+            ("effective_to", self.effective_to),
+        ]
+        .into_iter()
+        .chain(self.versions.iter().flat_map(|version| {
+            [
+                ("effective_from", version.effective_from),
+                ("effective_to", version.effective_to),
+            ]
+        }));
+        for (field, date) in dates {
+            if let Some(date) = date
+                && !(FIRST_FORMULA_DATE..=LAST_FORMULA_DATE).contains(&date)
+            {
+                return Err(RuleSpecError::EffectiveDateOutOfRange {
+                    path: self.source_path(),
+                    name: self.name.clone(),
+                    field,
+                    date,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn validate_version_ranges(&self) -> Result<(), RuleSpecError> {
@@ -3647,17 +3791,19 @@ impl RuleDefinition {
         let formula = versions[0]
             .formula
             .as_deref()
-            .map(str::trim)
-            .filter(|formula| !formula.is_empty())
+            .filter(|formula| !formula.trim().is_empty())
             .ok_or_else(|| RuleSpecError::MissingFormula {
                 name: self.name.clone(),
             })?;
-        let predicate = crate::formula::lower_judgment_formula(
-            formula,
-            derived_names.clone(),
-            relation_predicate_names.clone(),
-            parameter_names.clone(),
-        )?;
+        // One version, so the error names the rule alone.
+        let predicate = parse_trimmed_formula(formula, &self.name, None, |formula| {
+            crate::formula::lower_judgment_formula(
+                formula,
+                derived_names.clone(),
+                relation_predicate_names.clone(),
+                parameter_names.clone(),
+            )
+        })?;
         let (inferred_current_slot, inferred_related_slot) = source_relation
             .as_deref()
             .map(crate::formula::infer_relation_slots_for_rulespec)
@@ -3826,6 +3972,7 @@ impl RuleDefinition {
 
     fn write_formula_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
         self.validate_source_name()?;
+        self.validate_effective_dates()?;
         if let Some(entity) = self.entity.as_deref().filter(|value| !value.is_empty()) {
             self.validate_source_entity(entity)?;
         }
@@ -3850,6 +3997,7 @@ impl RuleDefinition {
         write_metadata(out, "source", source.as_deref());
         write_metadata(out, "source_url", source_url.as_deref());
 
+        let several = versions.len() > 1;
         for version in versions {
             let start =
                 version
@@ -3865,7 +4013,10 @@ impl RuleDefinition {
                 .ok_or_else(|| RuleSpecError::MissingFormula {
                     name: self.name.clone(),
                 })?;
-            self.validate_formula_source(version.formula.as_deref().unwrap_or(formula))?;
+            self.validate_formula_source(
+                version.formula.as_deref().unwrap_or(formula),
+                Some(start).filter(|_| several),
+            )?;
             out.push_str("    from ");
             out.push_str(&start.to_string());
             if let Some(end) = version.effective_to {
@@ -3885,6 +4036,7 @@ impl RuleDefinition {
 
     fn write_formula_stub_definition(&self, out: &mut String) -> Result<(), RuleSpecError> {
         self.validate_source_name()?;
+        self.validate_effective_dates()?;
         let effective_from = self
             .versions
             .iter()
@@ -4322,7 +4474,8 @@ fn rewrite_relation_alias_in_scalar(expr: &mut ScalarExprSpec, alias: &str, rela
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             rewrite_relation_alias_in_scalar(index, alias, relation_name);
         }
         ScalarExprSpec::Add { items }
@@ -4668,7 +4821,8 @@ fn collect_scalar_relation_names(expr: &ScalarExprSpec, names: &mut HashSet<Stri
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             collect_scalar_relation_names(index, names);
         }
         ScalarExprSpec::Add { items }
@@ -4806,7 +4960,8 @@ fn rewrite_scalar_relation_references(
         ScalarExprSpec::InputOrElse { default: _, .. } => {}
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             rewrite_scalar_relation_references(
                 index,
                 origin_target,
@@ -5206,7 +5361,8 @@ fn scalar_uses_imported_derived(
         }
         ScalarExprSpec::ParameterLookup { index, .. }
         | ScalarExprSpec::Ceil { value: index }
-        | ScalarExprSpec::Floor { value: index } => {
+        | ScalarExprSpec::Floor { value: index }
+        | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
             scalar_uses_imported_derived(index, origin_target, derived_origin_targets)
         }
         ScalarExprSpec::Add { items }

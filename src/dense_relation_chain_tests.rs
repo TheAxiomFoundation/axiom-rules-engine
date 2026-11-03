@@ -260,9 +260,9 @@ fn empty_dense_source_chains_share_masks_and_skip_later_filters() {
     for relation in &mut dense.relations[1..] {
         relation.filter = Some(CompiledRelatedJudgmentExpr::RootJudgment(Box::new(
             CompiledJudgmentExpr::Comparison {
-                left: CompiledScalarExpr::Literal(ScalarValue::Integer(1)),
+                left: CompiledScalarExpr::Literal(DenseLiteral::Integer(1)),
                 op: ComparisonOp::Eq,
-                right: CompiledScalarExpr::Literal(ScalarValue::Integer(1)),
+                right: CompiledScalarExpr::Literal(DenseLiteral::Integer(1)),
             },
         )));
     }

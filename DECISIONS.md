@@ -4,6 +4,231 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-03 — Formula and input errors name what the user wrote
+
+**Decision.** Three errors now report what the user wrote, not what the
+loader or binder made of it.
+
+- `RuleSpecError::Formula` becomes a struct variant,
+  `Formula { rule, effective_from, error }`. A parse error in a rule's formula,
+  or a lowering error in a derived relation's predicate, names the rule, and
+  the version's `effective_from` when the rule has several. Its position
+  counts from the formula as written, whitespace around it included. An error
+  from the module the loader generates from every rule still names no rule.
+- The new `RuleSpecError::EffectiveDateOutOfRange { path, name, field, date }`
+  refuses any `effective_from` or `effective_to` outside 0000-01-01 to
+  9999-12-31, for every rule kind and every place a date can sit.
+- `EvalError::AmbiguousInput` gains `other_name: Option<String>`. `name` and
+  `other_name` are the conflicting records' names as the request spelled
+  them. `other_name` is set only when the two spellings differ.
+
+**Why.** The loader writes version dates into generated formula source
+unquoted, and chrono spells a year outside four digits with a sign, so
+`+10000-01-01` failed as a parse error at a position in source the user never
+sees. Parse positions counted from the trimmed formula, and nothing said which
+of a module's formulas failed. The ambiguous-input error named the bound
+slot, which a qualified program's binder refuses, and named neither
+conflicting input.
+
+**Consequences.**
+
+- This breaks Rust callers in three ways. A pattern `Formula(_)` must become
+  `Formula { .. }`. `RuleSpecError` is not `#[non_exhaustive]`, so an
+  exhaustive match needs an arm for `EffectiveDateOutOfRange`. A pattern or
+  struct literal of `AmbiguousInput` without `..` must name `other_name`.
+  "Dense batches justify every row count they claim" (2026-10-14) already
+  makes the next release a breaking one, 0.3.0; these changes ship in it.
+- The display text of all three changes. Anyone who matches on it needs to
+  update. The generated-module case keeps `failed to parse RuleSpec formula:`.
+- The date check refuses some input that the loader accepted before, when no
+  writer emitted the date: a table's `effective_to` and later versions, the
+  dates of derived and data relations, and a rule-level `effective_from`
+  beside a `versions:` list. None of these can be written into the formula
+  source, and accepting them would leave one date rule for some kinds and none
+  for others. No tracked fixture uses such a date.
+- Direct `Engine` callers bind slots themselves, so their ambiguity error
+  names the slot and leaves `other_name` unset.
+
+## 2026-11-02 — Dense can compile only the outputs a caller requests; a direct cross-entity read stays refused
+
+**Decision.** `DenseCompiledProgram::from_program_for_outputs` and
+`from_artifact_for_outputs` compile the requested outputs and the rules they
+reach, and no other rule. The Python loaders `CompiledDenseProgram.from_file`,
+`from_composed_file` and `from_artifact_file` take the same request as
+`outputs=`. Without a request, `from_program`, `from_artifact` and the Python
+loaders still compile every rule of the root entity. Dense keeps refusing a
+direct read of another entity's rule, with no relation, by a rule it
+evaluates on root rows; the refusal now says that this is deliberate and
+names the data relations the program declares between the two entities.
+
+**Why.** A module names every rule its import closure reaches, so a whole-root
+compile judges rules that no wanted output reaches. 26 USC 32 for `TaxUnit`
+and 42 USC 1382 for `Person` both failed that way in `rulespec-us`, on an
+unrelated rule that reads a rule of another entity (#266). A compile of the
+requested closure judges only the program the caller asked for, and its
+contents follow from the request alone.
+
+The direct read stays refused. Explain evaluates it on the reading rule's own
+entity id, so with well-kinded data, where a person's facts are keyed by
+person ids, a `TaxUnit` rule's direct read of a `Person` rule finds none. A
+dense batch holds the rows of one entity and reaches another entity's rows
+only through a relation batch, and the artifact interface relies on dense
+never reading a slot it does not list. A one-to-one or broadcast read would
+need a contract of its own.
+
+**Consequences.**
+
+- New public Rust API: the two constructors above, and `DenseCompileError`
+  variants `NoRequestedOutputs`, `UnknownOutput { output, rule }`,
+  `OutputOfOtherEntity { output, entity, root_entity }` and
+  `OutputsSpanEntities(Vec<String>)`. `CrossEntityDependency` gains
+  `reader_entity` and `relations`, and its message keeps its first clause and
+  adds the advice. A `match` on `DenseCompileError` without a wildcard, or a
+  `CrossEntityDependency` pattern that lists its fields without `..`, needs
+  updating.
+- New Python API: `outputs=` on the three loaders and on the native
+  extension's. A single string raises `TypeError`. A closure program's
+  `output_names`, `root_inputs` and `relations` list only what its rules
+  read; `derived_metadata` still lists every rule of the module.
+- Requested outputs are rule names, as `execute` takes them. Each must be a
+  rule of the root entity or a `Scalar` rule. With no entity named, the
+  outputs name it; `Scalar` outputs alone take the program's one non-scalar
+  entity, as the whole root does, since a `Scalar` rule (any rule written
+  without `entity:`) can read that entity's rules. An empty request, an
+  unknown name (with a hint when it is a rule's legal id), another entity's
+  rule, and outputs of several entities each fail with their own error.
+- The refusal of a direct read depends on the read alone, not on the path a
+  compile reaches it by: the reading rows are root rows. A filtered root
+  (such as `SnapUnit`) is matched to relations by the kind of its ids, and
+  only data relations are named.
+- For every output both compile, the closure and whole-root programs give the
+  same values and errors on any batch the whole-root program binds. A closure
+  batch needs only the columns and relations the closure reads, so a batch
+  that omits a relation only another rule reads binds for the closure alone.
+- Only the dense compile is limited to the closure. Relation entity typing
+  still covers the whole program, as artifact compilation does, and the
+  Python loaders still compile the whole RuleSpec import closure into an
+  artifact first, so a rule no output reaches can still fail those checks.
+- The Python extension infers a batch's row count from the program's own
+  root inputs and relations, so a closure batch can need an explicit
+  `row_count` where the whole root's did not.
+- Tests: synthetic fixtures with the 26 USC 32 and 42 USC 1382 shapes; the
+  parity suite compares the closure with the whole root and explain over its
+  three dense profiles, and again with an unreached crossing added; a property
+  over the artifact-interface generator compares each rule's closure with the
+  whole root.
+
+## 2026-11-02 — Lifetime execution can fix law at a calculation period
+
+**Decision.** Add a `run-lifetime` CLI command and its JSON wire, with
+schemas `lifetime-request`/`lifetime-response` v1 and v2. v1 runs the
+existing Decimal lifetime executor on aligned period batches. v2 adds
+`calculation_period`: every rule and parameter table the program reaches uses
+the version in force at that period's start, while each observation keeps
+its own dates for inputs and `period_start`/`period_end`. The Rust surface
+is `dense::CalculationLifetimePlan` and `dense::SelectedVersion`; the response
+reports each selected version's original index and bounds. Add the formula
+builtin `calendar_years_to_months(years)`. A `sum_top_n_over_periods` count
+may itself reduce over periods (`count_over_periods(...)`), evaluated once
+per row in lifetime context.
+
+**Why.** A benefit computed in one year often applies that year's formula
+and tables to a completed earnings history. Selecting law at each
+observation's date answers a different question, and v1's reference date,
+the last observation's start, is not the calculation year when the history
+ends earlier.
+The count of years to keep is itself often a count over the history, which
+the top-N count could not express.
+
+**Consequences.**
+
+- v2 refuses relations, Float input columns, inputs no rule for the entity
+  reads, and observations that do not end before the calculation starts. A
+  missing formula or table version at the calculation start is refused by
+  name, with no fallback to an older version.
+- Commencement in a calculation plan is checked at the calculation start;
+  v1 keeps main's per-rule check (#270).
+- In a nested count, values inside its reductions keep each period.
+  Outside them, a value must agree across periods, or that row fails:
+  - a bare input with `LifetimePeriodVaryingInput`, as any bare lifetime
+    input does;
+  - a parameter with `OverPeriodsTopNPeriodVarying`, except in a plan, which
+    fixes the parameter's version.
+
+  The same varying input used as a flat count fails with
+  `OverPeriodsTopNPeriodVarying` instead
+  (`tests/lifetime_law_properties.rs`,
+  `period_varying_values_in_a_count_fail_with_their_own_errors`).
+- `calendar_years_to_months` takes Integer or exactly integral Decimal years
+  and refuses Float, fractions and i64 overflow. Fast mode declines it, and
+  the artifact node extends format 3 (see `docs/artifact-format.md`).
+- `capabilities` lists a new `lifetime_calculation` capability: the engine
+  reads `calendar_years_to_months`, nests reductions in a top-N count and
+  runs `run-lifetime` (wire v1 and v2).
+- `docs/lifetime-cli.md`, `docs/calendar-unit-conversion.md` and
+  `docs/execution-semantics.md` give the contracts. The tests are
+  `tests/lifetime_cli.rs`, `tests/lifetime_calculation.rs`,
+  `tests/lifetime_law_properties.rs` and the cross-path differential
+  `tests/lifetime_differential.rs`.
+
+## 2026-11-02 — Dense text columns share their values
+
+**Decision.** `DenseColumn::Text` holds `Vec<Arc<str>>` instead of
+`Vec<String>`. Rows that hold the same text share one allocation. Dense fills
+a text column by cloning the `Arc`, never the text: a broadcast literal, a
+projection to each related row, a parameter lookup, each read of an input or
+cached rule, and each row an `if` or a cached stretch merges. Text literals and
+parameter tables become `Arc<str>` once, at dense compile time, and
+`assign_rows` moves each value instead of cloning it.
+
+An error that quotes a column's value is not formatted when a row fails.
+Three errors do this:
+
+- `NoMatchingArm`: a `match` with no arm for its subject
+- `LifetimePeriodVaryingInput`: a lifetime input that varies across periods
+- `OverPeriodsTopNPeriodVarying`: a `sum_top_n` whose `n` varies across
+  periods. A text `n` compiles, so its values can be texts.
+
+The row records a quoted error that shares the text, and the compile-time
+labels of the `match`. Consecutive rows failing on the same value
+share one. Its message is built only for the error a call reports, with
+strings reserved fallibly. If the allocator refuses one, the call fails with
+the refusal of a buffer of the rows the error was raised on. Every other
+`RowErrors` entry is unchanged.
+
+**Why.** After "Dense execution reserves every row-count buffer fallibly"
+(2026-10-14), every row buffer was reserved fallibly, but a text column
+copied its value's heap data once per row with ordinary allocation. A stated
+related count of N over a root text of L bytes asked for
+about N × L bytes in small allocations. On wasm32 or under an address-space
+limit the first refused one aborted the process; on a host that overcommits
+memory the rest could exhaust it. An error naming the text copied it once per
+failing row in the same way.
+
+**Consequences.**
+
+- `DenseColumn::Text` is a public type, so this breaks callers that build or
+  match text columns outside the crate. `DenseColumn::Text(vec!["a".into()])`
+  builds one, and `&*value` or `value.to_string()` reads one. The Python
+  extension converts at its boundary, so Python callers see no change.
+- A quoted error is built lazily, not eagerly. Building it when recorded
+  would allocate the text's rendering for errors no call reports, such as a
+  later row's failure when an earlier row fails first. The plan for this
+  change named `Rc<EvalError>` entries; those would still build each message
+  when recorded.
+- Ready errors (everything but the three above) are stored and cloned as
+  before. None of them quotes a text from a column.
+  `OverPeriodsTopNOutOfRange` quotes `n`, but only after `n` converted to a
+  number, so its label is a number; a text `n` fails that conversion first.
+- Text comparison compares contents, as before. Sharing changes no result:
+  `tests/dense_text_explain.rs` checks dense against explain on generated
+  text programs, in both numeric modes.
+- `tests/dense_text_alloc.rs` runs under the shared guard allocator
+  (`tests/support/guarded_alloc.rs`), with texts four times a 16 KiB cap. A
+  run whose result names no long text makes no allocation as large as the
+  cap. Refusing any one large allocation of a run that does changes its
+  result only to the refusal naming one of the batch's counts.
+
 ## 2026-10-31 — Relation roles express guarded household membership
 
 **Decision.** Add terms and qualified reads, parameters in predicates,
@@ -137,6 +362,7 @@ therefore still abort the process, the Python interpreter included:
   - allocations sized by something other than a row count (one per rule,
     period, output or relation key)
   - the heap data of each text value, cloned per row with ordinary allocation
+    (dense text columns now share their values; see the 2026-11-02 entry)
   - the entries `RowErrors` records, one per failing row; dense records them
     only after a buffer for the same rows was granted
 - A reservation fails only when the allocator refuses it. On a host that

@@ -176,7 +176,7 @@ For a build whose commit is unknown, the response has this shape:
 ```json
 {
   "artifact_format_version": 3,
-  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
+  "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles", "lifetime_calculation"],
   "engine_version": "0.2.2",
   "engine_build": { "commit": null, "dirty": null },
   "legacy_artifact_formats": [2]
@@ -202,6 +202,12 @@ refuses a reachable qualified read, atom, term comparison, `exists` or path
 source by name and names #218. Parameter reads in predicates also compile in
 dense. See the [relation-role design](docs/relation-roles.md) and
 [execution semantics](docs/execution-semantics.md).
+An engine listing `lifetime_calculation` reads the
+`calendar_years_to_months` expression node, accepts a `sum_top_n_over_periods`
+count that itself reduces over periods, and runs `run-lifetime` with
+`lifetime-request/v1` and `/v2` (law fixed at a calculation period). An engine
+without it refuses an artifact carrying the node on load. See the
+[lifetime CLI](docs/lifetime-cli.md).
 
 `request.json` must key atomic inputs by one of the exact owners published in
 `metadata.input_catalog`. Synthesized composition inputs use the catalog's bare
@@ -320,6 +326,71 @@ bindings, and concept discovery helpers. It shells out to the compiled
 and `SourceClosure` models; `LegacyCompiledProgramV2` models format 2.
 Pass `accept_artifact_format=2` to the client or dense artifact loader to
 opt in to the legacy path.
+
+### Build on Linux and use the CI binaries
+
+From a checkout with the current stable Rust toolchain and
+[uv](https://docs.astral.sh/uv/), these commands build the dense extension as
+a CPython 3.14 wheel and install it with the wrapper. CI's
+`PyO3 extension wheel (Linux)` job builds and installs the wheel the same way.
+The commands create `.venv`, so run them in a checkout that has none yet:
+
+```bash
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python maturin==1.14.1
+.venv/bin/maturin build --release --locked --manifest-path python-ext/Cargo.toml \
+  --interpreter .venv/bin/python --out dist
+uv pip install --python .venv/bin/python ./python dist/axiom_rules_engine_dense-*.whl
+```
+
+Every push to `main` and every pull request into it uploads that wheel and
+the release `axiom-rules-engine` binary as workflow artifacts, named
+`axiom-rules-engine-dense-wheel-cp314-linux-x86_64-<sha>` and
+`axiom-rules-engine-cli-linux-x86_64-<sha>` after the commit the run built.
+On a pull request that commit is GitHub's merge commit, not the branch head.
+A commit has an artifact only if the job that builds it passed, and GitHub
+deletes artifacts after the repository's retention period of 90 days. CI
+builds both on Ubuntu 24.04: the wheel is tagged `manylinux_2_34_x86_64`, and
+the binary also needs x86_64 and glibc 2.34 or later.
+
+Take the CLI from the commit you built the extension from. Loading a format-3
+artifact re-derives its metadata and interface and refuses one that differs,
+so a CLI from another commit can write artifacts this extension won't load.
+In a checkout of a `main` commit, download that commit's CLI artifact from its
+workflow run's page, then:
+
+```bash
+sha=$(git rev-parse HEAD)
+unzip "axiom-rules-engine-cli-linux-x86_64-$sha.zip" -d engine-bin
+chmod +x engine-bin/axiom-rules-engine
+engine-bin/axiom-rules-engine capabilities
+```
+
+`unzip` keeps the binary's executable bit, and `chmod` restores it if another
+extractor drops it. `capabilities` reports the commit the binary was built
+from as `engine_build.commit`. Once a commit's artifacts have expired, build
+its CLI with `cargo build --release --locked` and use
+`target/release/axiom-rules-engine` instead.
+
+The wrapper's default binary paths assume a checkout
+(`target/debug/axiom-rules-engine`), so pass the binary as `binary_path`:
+
+```python
+from axiom_rules_engine import AxiomRulesEngine, CompiledDenseProgram
+
+engine = AxiomRulesEngine(binary_path="engine-bin/axiom-rules-engine")
+engine.compile(
+    program_path="/path/to/rulespec-us/us/policies/example.yaml",
+    rulespec_roots=("/path/to/rulespec-us",),
+    output_path="example.compiled.json",
+)
+program = CompiledDenseProgram.from_artifact_file(
+    "example.compiled.json", entity="Person"
+)
+```
+
+`load_program` and `load_composed_program` take the same `binary_path`
+argument.
 
 ## Tests
 

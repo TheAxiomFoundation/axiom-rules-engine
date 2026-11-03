@@ -16,6 +16,7 @@ pub mod engine;
 mod formula;
 pub mod interface;
 mod lazy;
+pub mod lifetime_api;
 pub mod migrate;
 pub mod model;
 mod relation_direction;

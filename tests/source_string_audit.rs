@@ -371,7 +371,7 @@ fn formulas_reject_extra_declarations_and_unclosed_docstrings() {
             matches!(
                 &error,
                 CompileError::RuleSpec {
-                    error: RuleSpecError::Formula(_),
+                    error: RuleSpecError::Formula { .. },
                     ..
                 }
             )

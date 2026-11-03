@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use thiserror::Error;
 
 use crate::model::{
@@ -47,6 +47,27 @@ pub(crate) fn shift_calendar_years(
                 "date_add_years result is outside the supported date range".to_string(),
             )
         })
+}
+
+/// Convert signed whole Gregorian calendar-year units, independently of dates
+/// or policy eligibility. Integer/integral Decimal admission is exact; no
+/// fractional truncation, saturation, or floating-point conversion is allowed.
+pub(crate) fn calendar_years_to_months(value: &ScalarValue) -> Result<i64, EvalError> {
+    let years = match value {
+        ScalarValue::Integer(years) => Some(*years),
+        ScalarValue::Decimal(years) if years.fract().is_zero() => years.to_i64(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        EvalError::TypeMismatch(
+            "calendar_years_to_months requires Integer or exactly integral Decimal years within the signed 64-bit range".to_string(),
+        )
+    })?;
+    years.checked_mul(12).ok_or_else(|| {
+        EvalError::TypeMismatch(
+            "calendar_years_to_months result is outside the signed 64-bit range".to_string(),
+        )
+    })
 }
 
 pub(crate) fn shift_calendar_days(
@@ -148,13 +169,20 @@ pub enum EvalError {
         period_start: chrono::NaiveDate,
         period_end: chrono::NaiveDate,
     },
+    /// Two records for one input, entity and start date hold different
+    /// values. `name` is the first record's name as the dataset spelled it.
+    /// `other_name` is the second record's, when the dataset spelled the same
+    /// input another way (a shared slot read by two imported modules binds
+    /// under each module's qualified name).
     #[error(
-        "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values; merge or split the spells so one value applies at each start date"
+        "ambiguous input `{name}` for entity `{entity_id}`: records effective from {effective_from} have conflicting values{}; merge or split the spells so one value applies at each start date",
+        other_name.as_ref().map(|other| format!(" (`{name}` and `{other}` name the same input)")).unwrap_or_default()
     )]
     AmbiguousInput {
         name: String,
         entity_id: String,
         effective_from: chrono::NaiveDate,
+        other_name: Option<String>,
     },
     #[error(
         "no `match` arm in `{rule}` covers `{subject}` = {value} (arms: {patterns}); add an arm for it or a final `_ =>` arm"
@@ -394,25 +422,42 @@ pub(crate) fn describe_scalar_value(value: &ScalarValue) -> String {
 /// choosing either would reintroduce dataset-order semantics. Equal duplicates
 /// are harmless; conflicting values are rejected before either execution mode
 /// runs.
-pub(crate) fn validate_input_spells(data: &DataSet) -> Result<(), EvalError> {
-    let mut values_by_start: HashMap<(&str, &str, chrono::NaiveDate), &ScalarValue> =
-        HashMap::new();
-    for record in &data.inputs {
+///
+/// `request_names[i]` is the name the caller gave `data.inputs[i]` before
+/// binding replaced it with the slot. The error names the conflicting
+/// records that way, since a program with public ids may refuse the bare
+/// slot. A record without a request name is named by its slot.
+pub(crate) fn validate_input_spells(
+    data: &DataSet,
+    request_names: &[&str],
+) -> Result<(), EvalError> {
+    debug_assert_eq!(request_names.len(), data.inputs.len());
+    let request_name = |index: usize| {
+        request_names
+            .get(index)
+            .copied()
+            .unwrap_or(data.inputs[index].name.as_str())
+    };
+    let mut first_by_start: HashMap<(&str, &str, chrono::NaiveDate), usize> = HashMap::new();
+    for (index, record) in data.inputs.iter().enumerate() {
         let key = (
             record.name.as_str(),
             record.entity_id.as_str(),
             record.interval.start,
         );
-        if let Some(existing) = values_by_start.get(&key) {
-            if *existing != &record.value {
+        if let Some(&first) = first_by_start.get(&key) {
+            if data.inputs[first].value != record.value {
+                let name = request_name(first).to_string();
+                let other = request_name(index);
                 return Err(EvalError::AmbiguousInput {
-                    name: record.name.clone(),
+                    other_name: (other != name).then(|| other.to_string()),
+                    name,
                     entity_id: record.entity_id.clone(),
                     effective_from: record.interval.start,
                 });
             }
         } else {
-            values_by_start.insert(key, &record.value);
+            first_by_start.insert(key, index);
         }
     }
     Ok(())
@@ -2258,6 +2303,11 @@ impl<'a> Engine<'a> {
                 self.eval_decimal(value, entity_id, period, relation_context)?
                     .floor(),
             )),
+            ScalarExpr::CalendarYearsToMonths { years } => {
+                let years =
+                    self.eval_scalar_expr_inner(years, entity_id, period, relation_context)?;
+                Ok(ScalarValue::Integer(calendar_years_to_months(&years)?))
+            }
             ScalarExpr::PeriodStart => Ok(ScalarValue::Date(period.start)),
             ScalarExpr::PeriodEnd => Ok(ScalarValue::Date(period.end)),
             ScalarExpr::DateAddDays { date, days } => {
@@ -2886,10 +2936,13 @@ impl<'a> Engine<'a> {
         // order as a hidden tie-breaker for direct Engine callers.
         for tied in covering.take_while(|record| record.interval.start == selected.interval.start) {
             if tied.value != selected.value {
+                // A direct Engine caller binds slots itself, so the slot is
+                // the name it gave.
                 return Err(EvalError::AmbiguousInput {
                     name: name.to_string(),
                     entity_id: entity_id.to_string(),
                     effective_from: selected.interval.start,
+                    other_name: None,
                 });
             }
         }
@@ -2934,10 +2987,8 @@ impl<'a> Engine<'a> {
                 .get(name)
                 .ok_or_else(|| EvalError::UnknownParameter(name.to_string()))?;
             let version = parameter
-                .versions
-                .iter()
-                .filter(|version| version.applies_at(period.start))
-                .max_by_key(|version| version.effective_from)
+                .version_at(period.start)
+                .map(|(_, version)| version)
                 .ok_or_else(|| EvalError::MissingParameterValue {
                     parameter: name.to_string(),
                     key,
@@ -3874,7 +3925,9 @@ fn collect_scalar_trace_references(
             collect_scalar_trace_references(left, derived, parameters);
             collect_scalar_trace_references(right, derived, parameters);
         }
-        ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+        ScalarExpr::Ceil(value)
+        | ScalarExpr::Floor(value)
+        | ScalarExpr::CalendarYearsToMonths { years: value } => {
             collect_scalar_trace_references(value, derived, parameters);
         }
         ScalarExpr::DateAddDays { date, days } => {

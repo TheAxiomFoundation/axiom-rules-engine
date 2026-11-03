@@ -273,7 +273,9 @@ fn equal_start_conflicting_inputs_are_ambiguous_in_every_mode_and_order() {
                         ref name,
                         ref entity_id,
                         effective_from,
+                        ref other_name,
                     }) if name == "amount"
+                        && other_name.is_none()
                         && entity_id == "household-1"
                         && effective_from
                             == chrono::NaiveDate::from_ymd_opt(2025, 7, 1)

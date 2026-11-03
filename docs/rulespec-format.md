@@ -355,6 +355,7 @@ rules:
 | `max(relation.field)` | 1 | greatest `field` over related entities; fails when there is none |
 | `ceil(x)` | 1 | round up to an integer |
 | `floor(x)` | 1 | round down to an integer |
+| `calendar_years_to_months(years)` | 1 | convert signed whole Gregorian calendar-year units to exact Integer month units; reject fractions, Float and overflow |
 | `days_between(from, to)` | 2 | day count between two dates |
 | `date_add_days(date, days)` | 2 | shift a date by a day count |
 | `date_add_months(date, months)` | 2 | shift by an integer number of calendar months; clamp a missing target day to month end |
@@ -373,7 +374,7 @@ rules:
 
 The `_where` predicate names a Boolean input or a derived judgment computed
 on the related entity. The lowerer enforces the fixed arities (`ceil`,
-`floor`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`,
+`floor`, `calendar_years_to_months`, `days_between`, `date_add_days`, `date_add_months`, `date_add_years`,
 `count_where`, `sum_where`, `min_where`, `max_where`, `only`, and the
 reductions); `max` and `min` take one or more arguments. They aggregate over
 related entities only when their single argument is a relation field access
@@ -386,6 +387,15 @@ under the lifetime execution surface; per-period execution paths reject
 them, and an unrecognized `*_over_periods` name fails lowering with an error
 that lists the supported reductions. Any other unknown function name fails
 lowering.
+
+`calendar_years_to_months` accepts Integer and exactly integral Decimal values,
+including zero and negative values, and returns an Integer using checked
+signed 64-bit arithmetic. It converts quantities of whole calendar years; it
+does not measure date intervals, partial years, covered months, or eligibility.
+The caller must establish the whole-year interpretation. Float arguments are
+rejected even when they appear integral; use Decimal execution for counts
+produced by arithmetic. See [calendar unit conversion](calendar-unit-conversion.md)
+for lifetime use and execution-mode limits.
 
 ```yaml
 format: rulespec/v1
@@ -483,6 +493,53 @@ but leniency does not reorder the tuple and may still produce a zero count.
 See [dataset binding in RuleSpec](rulespec.md#semantics) for the CLI override,
 response metadata, and limits for unknown ids and older compiled artifacts.
 
+## Reading a rule of another entity
+
+A formula reads another entity's rules and inputs through a relation, with
+one of the related aggregates above: `sum(member_of_tax_unit.income)`,
+`only(member_of_household.rent)`, `count_where(...)`. A formula can also name
+a rule of another entity directly, with no relation, as a `TaxUnit` rule
+that adds a `Person` rule does. The engine's modes treat that read
+differently.
+
+- Explain evaluates the named rule on the reading rule's own entity id, and
+  fast returns what explain returns. A `TaxUnit` query reads the `Person`
+  rule for the tax unit's id, so it finds only facts filed under that id.
+  With well-kinded data, where a person's facts are keyed by person ids, an
+  input the person rule reads is missing.
+- Dense refuses the read when a rule it evaluates on root rows makes it: a
+  rule of the root entity, a `Scalar` rule one reaches, or a rule a derived
+  relation's predicate reads on the current record. That refusal is by
+  design. A dense batch holds the rows of one entity, and dense reaches
+  another entity's rows only through a relation batch, so the read has no
+  rows to evaluate on. Compilation fails with
+  `DenseCompileError::CrossEntityDependency`. Its message says the
+  restriction is deliberate, names the rule that reads and the rule it
+  reads, and names by legal id the data relations the program declares
+  between the two entities, or says it declares none. A filtered entity
+  (such as `SnapUnit`) counts as the kind of its ids (`Household`), and a
+  derived relation is not named, since dense may refuse its predicate or
+  path; its data relation carries the same pairs.
+- Inside a related aggregate's value or `where` clause, dense evaluates the
+  rules it reads on the related rows, a direct read included, as explain
+  does (see [dense execution semantics](execution-semantics.md#dense-contract)).
+
+A `Scalar` rule belongs to no entity: any rule reads it directly, in every
+mode.
+
+Dense refuses only a read that the rules it compiles reach. Compiled for its
+whole root entity (`DenseCompiledProgram::from_program` or `from_artifact`,
+or the Python loaders without `outputs`), a program is refused when any of
+its root-entity rules makes such a read, or reaches a rule that does,
+including a rule that arrives only through imports and that no wanted output
+reaches. Compiled for requested outputs (`from_program_for_outputs`,
+`from_artifact_for_outputs`, or the Python loaders' `outputs=[...]`), it is
+refused only when one of those outputs reaches such a read. Only the dense
+compile is limited to those outputs: relation entity typing, and the
+RuleSpec compile the Python loaders run first, still judge every rule. To
+compute the rule in dense, read it through a relation between the two
+entities.
+
 ## Judgment position
 
 A `dtype: Judgment` formula composes:
@@ -507,8 +564,9 @@ position — the two grammars meet only at comparisons.
 
 ## Formula parse errors
 
-When the lexer or parser rejects a formula, lowering fails with a line and a
-column. This formula has `×` where it needs `*`:
+When the lexer or parser rejects a formula, lowering fails with the rule's
+name, a line and a column. This formula, in the rule `subject`, has `×` where
+it needs `*`:
 
 ```text
 if canton == 'Zürich': base × 1.2
@@ -518,18 +576,24 @@ else: base
 Lowering it fails with:
 
 ```text
-failed to parse RuleSpec formula: formula parse error at line 1, col 29: unexpected char '×'
+failed to parse the formula of RuleSpec rule `subject`: formula parse error at line 1, col 29: unexpected char '×'
 ```
+
+When the rule has several versions, the message also names the failing
+version's `effective_from`:
+`` failed to parse the formula of RuleSpec rule `subject` effective from 2026-01-01: ... ``.
 
 The line and column point into the formula's own text as YAML reads it, not
 into the YAML file that holds it. A block scalar's indentation is not part of
 that text, and YAML reads the file's CRLF and CR line breaks as line feeds. A
 folded (`>`) scalar, for example, joins most of its lines with spaces, so its
 positions follow the joined text. Within the formula text only a line feed
-starts a new line; a `\r` escape in a double-quoted scalar takes a column. The
-engine trims whitespace from both ends of a formula before it parses it, so
-blank lines and spaces before the formula do not count: line 1 holds its
-first non-blank character.
+starts a new line; a `\r` escape in a double-quoted scalar takes a column.
+Whitespace before the formula counts: a formula that starts with a blank line
+reports its first non-blank line as line 2, and spaces before its first
+character move line 1's columns right. The engine trims the formula before it
+parses it and then moves the position back by what it trimmed, so every
+error that carries a position counts from the formula as written.
 
 A column counts Unicode scalar values (Rust `char`s) from 1, not UTF-8 bytes
 or user-perceived characters. `ü`, `×`, a tab and `😀` take one column each.
@@ -539,10 +603,33 @@ A character that spans several code points takes one column per code point:
 The column names the offending character or the first character of the
 offending token, such as the opening quote of an unterminated string. When a
 formula ends too early, the position falls one column past its last
-character. The error for a line break inside a string literal counts columns
-the same way, but in the formula text before trimming. Errors that lowering
-finds after parsing (`formula lower error:`) carry no position.
-`tests/formula_error_positions.rs` checks each of these statements.
+non-whitespace character. The error for a line break inside a string literal
+counts the same way. Errors that lowering finds after parsing (`formula lower
+error:`) carry no position. One found in the module the loader generates from
+every rule names no rule: `failed to parse RuleSpec formula: formula lower
+error: ...`. `tests/formula_error_positions.rs` checks each of these
+statements.
+
+### Effective dates
+
+Every `effective_from` and `effective_to` a rule declares must lie between
+0000-01-01 and 9999-12-31. That covers each version's two fields and the
+rule-level pair, with or without a `versions:` list. The loader writes the
+version dates of a derived rule or a parameter into the formula source it
+generates, which spells a year in four digits. A table writes only its first
+version's `effective_from`, and a relation writes none. The engine checks
+every date anyway, so one rule holds for every kind. A date outside the
+range, such as `'+10000-01-01'`, fails with a date error, never a formula
+parse error:
+
+```text
+RuleSpec file `<memory>` rule `subject` has effective_from +10000-01-01, outside the dates a RuleSpec version can take (0000-01-01 to 9999-12-31)
+```
+
+`tests/effective_date_range.rs` checks this for derived rules, scalar
+parameters, parameter tables, derived relations and data relations, at every
+place each can hold a date. A rule whose `kind` the loader does not support
+reports its kind, not its date.
 
 ## The lowered expression vocabulary
 
@@ -553,8 +640,8 @@ JSON Schemas give exact field shapes.
 
 Scalar kinds: `literal`, `input`, `input_for_year`, `derived`,
 `parameter_lookup`, `add`, `sub`, `mul`, `div`, `max`, `min`, `ceil`,
-`floor`, `period_start`, `period_end`, `date_add_days`, `date_add_months`,
-`date_add_years`, `days_between`, `only_related`, `single_related`,
+`floor`, `calendar_years_to_months`, `period_start`, `period_end`,
+`date_add_days`, `date_add_months`, `date_add_years`, `days_between`, `only_related`, `single_related`,
 `count_related`, `sum_related`, `extreme_related`, `if`, `no_match`,
 `over_periods`.
 

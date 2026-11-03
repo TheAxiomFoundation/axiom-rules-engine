@@ -269,6 +269,24 @@ that row, and a dense call fails exactly when explain would fail for some row.
 When several rows fail, the error is the first failing row's, then the first
 failing output's in the requested order.
 
+Each compile-time refusal below applies to the rules a compile reaches.
+`DenseCompiledProgram::from_program` and `from_artifact` compile every rule
+of the root entity, so one the compiler declines refuses the program, even
+a rule that arrives only through imports and that no requested output
+reaches. `from_program_for_outputs` and `from_artifact_for_outputs` (the
+Python loaders' `outputs=`) compile only the requested outputs and the rules
+they reach (#266). The dense compiler never sees a rule outside that
+closure, so none of its refusals concerns one; relation entity typing, and
+the RuleSpec compile the Python loaders run first, still judge every rule. A
+rule inside the closure compiles as the whole root compiles it, so it
+refuses with the same error. Wherever the whole root compiles, the two
+programs give the same values and errors for every output both hold, given
+a batch the whole-root program binds. The closure's program reads only the
+root columns and relations its own rules read, so its batch needs no others.
+The Python extension infers a batch's row count from the program's own root
+columns and relations, so a closure batch can need an explicit `row_count`
+where the whole root's did not.
+
 Four representation limits apply. They are properties of typed columns and
 positional relation batches, not of evaluation order. A column's dtype never
 depends on which rows are live: dense still types a branch no row selects, and
@@ -338,7 +356,13 @@ nothing confirms, and execution reserves every such buffer fallibly. When the
 allocator refuses one, the call fails with a `TypeMismatch` naming the count,
 whichever rows reach it. On a host that overcommits memory, a large but
 possible count can pass its reservation and still exhaust memory as the buffer
-is filled. Only a refused request becomes an error.
+is filled. Only a refused request becomes an error. A text column shares
+each value among its rows rather than copying it per row, and an error that
+quotes a column's value builds its message only when the call reports it,
+fallibly. Three errors do: a `match` with no arm for its subject
+(`NoMatchingArm`), a lifetime input that varies across periods
+(`LifetimePeriodVaryingInput`), and a `sum_top_n` whose `n` varies across
+periods (`OverPeriodsTopNPeriodVarying`).
 
 A rule before its commencement date fails the rows that reach it, as the
 explain path reports `MissingDerivedFormulaVersion` for that rule; a rule no
@@ -360,7 +384,13 @@ the same laziness: a reduction, a period-invariant input check and a top-N
 count see only the rows that reach them, and a row stops at its first failing
 period. Inside a reduction, each reached rule's commencement is checked against
 that reduction period's start. The `n` argument of `sum_top_n_over_periods` is
-also evaluated and checked in every period before its invariance check. In the
+also evaluated and checked in every period before its invariance check, unless
+`n` itself reduces over periods (a per-person count of qualifying periods, for
+example). Such an `n` has no per-period value, so it is evaluated once in the
+lifetime context with caches of its own: values inside its reductions keep each
+period, a bare input outside them must be period-invariant as for any lifetime
+value, and a parameter lookup outside them is made in every period and must
+agree, failing the row with `OverPeriodsTopNPeriodVarying` otherwise. In the
 lifetime context, requested outputs and derived rules referenced outside a
 reduction are checked against the reference period's start: the chronologically
 last supplied period. A row that reaches a
@@ -369,6 +399,15 @@ the rule and the applicable period start, just as per-period dense and explain
 do for that period. Untaken branches do not fail. Lifetime uses the same dense
 compiler as per-period execution: derived rules with an `effective_to` bound or
 multiple formula versions are refused with `DenseCompileError::Unsupported`.
+
+A calculation lifetime plan (`dense::CalculationLifetimePlan`, behind the
+`lifetime-request/v2` CLI request) fixes law at one calculation period
+instead. Every rule and parameter it reaches uses the version in force at the
+calculation period's start, whatever its version count, and commencement is
+checked against that date. Inputs, `period_start` and `period_end` keep each
+observation's period. The plan refuses relations, Float input columns and
+observations that do not end before the calculation starts; see
+[the lifetime CLI](lifetime-cli.md).
 
 In an output that reduces over periods, a relation aggregation outside
 the reduction has no period to read and fails with `LifetimeAmbiguousLeaf`,
@@ -528,6 +567,15 @@ carry the reference control flow as data:
   rows that have asked for it so far and extended when a later reference asks
   for more rows. A rule reached only through dead branches is never computed
   for those rows, and its errors never surface.
+- **Shared inlined bodies.** Dense inlines a rule wherever an aggregation's
+  value, a `where` clause or a derived relation's predicate reads it, along
+  with the rules it reads. Each inlined rule's body is compiled once for each
+  place it is evaluated: root rows, or one relation's related rows. A body
+  read more than once is cached per row like a derived rule's column, so a
+  rule graph with shared dependencies compiles and evaluates in time linear
+  in its size. The body is the formula the inlined copy had; the rule's
+  commencement check and rounding still apply at each read. A shared read is
+  held to `MAX_INLINE_DEPTH` as if the body were compiled again there.
 - **Relation aggregations** in fast run row by row on the explain
   interpreter itself, so related-id resolution, derived-relation filtering and
   `where` laziness match by construction. Dense masks related rows by stage:
