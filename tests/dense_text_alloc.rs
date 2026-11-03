@@ -198,7 +198,7 @@ fn program(rules: Vec<Value>, chosen: Option<Value>) -> Value {
         "units": [],
         "relations": relations,
         "parameters": [
-            { "name": "t", "unit": null, "versions": [{ "effective_from": "2000-01-01", "values": {
+            { "name": "t", "unit": null, "indexed_by": "key", "versions": [{ "effective_from": "2000-01-01", "values": {
                 "0": { "kind": "text", "value": short_a },
                 "1": { "kind": "text", "value": short_b },
                 "2": { "kind": "text", "value": long_x },

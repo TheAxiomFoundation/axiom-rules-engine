@@ -561,6 +561,9 @@ fn execute_explain(
     for query in queries {
         let period = query.period.to_model()?;
         let mut outputs = BTreeMap::new();
+        // The trace roots at this query's derived outputs, not at everything
+        // the request's engine has cached for the entity and period.
+        let mut trace_roots = Vec::new();
 
         for output_reference in &query.outputs {
             let Some(output_name) = program.resolve_derived_name(output_reference) else {
@@ -609,6 +612,11 @@ fn execute_explain(
                     at: period.start,
                 }
             })?;
+            trace_roots.push(crate::engine::CacheKey {
+                derived: output_name.clone(),
+                entity_id: query.entity_id.clone(),
+                period: period.clone(),
+            });
             match semantics {
                 DerivedSemantics::Scalar(_) => {
                     let value = engine.evaluate_scalar(&output_name, &query.entity_id, &period)?;
@@ -643,7 +651,7 @@ fn execute_explain(
             }
         }
 
-        let trace = collect_trace(program, &engine, &query.entity_id, &period);
+        let trace = collect_trace(program, &engine, &query.entity_id, &period, &trace_roots);
 
         results.push(QueryResult {
             entity_id: query.entity_id,
@@ -662,9 +670,10 @@ fn collect_trace(
     engine: &Engine,
     entity_id: &str,
     period: &crate::model::Period,
+    roots: &[crate::engine::CacheKey],
 ) -> BTreeMap<String, DerivedTraceNode> {
     let mut trace = BTreeMap::new();
-    let mut instances = engine.evaluated_trace_instances(period, entity_id);
+    let mut instances = engine.evaluated_trace_instances_from(period, roots);
     instances.sort_by(|left, right| {
         (&left.key.derived, &left.key.entity_id).cmp(&(&right.key.derived, &right.key.entity_id))
     });

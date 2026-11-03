@@ -80,6 +80,11 @@ enforces. Semantic checks remain in the loader:
   declaring module actually reads the input.
 - Dependency, effective-date, provenance, rounding and relation-typing
   validation also apply to the program.
+- Every parameter has at least one version and a value in each version, and
+  a parameter without `indexed_by` holds exactly key 0 in every version
+  (`parameter_key_shape`). No parameter shares a name or public id with a
+  derived rule (`parameter_derived_collision`). Program conversion enforces
+  both, so they hold for raw requests and both loaders as well as compile.
 
 Schema validity alone does not establish these properties. See
 [the artifact format reference](artifact-format.md) for the derivation and

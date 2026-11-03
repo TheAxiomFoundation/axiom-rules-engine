@@ -20,6 +20,21 @@ A request is a list of queries; each query names an entity, a period and a list
 of outputs. For each query in order, and each requested output in order, the
 output's formula is evaluated for that entity and period as follows.
 
+- **A parameter output reads key 0.** An output may name a parameter without
+  `indexed_by`; its value is the one the parameter holds, under key 0, in the
+  version covering the period's start. Loading refuses a parameter without
+  `indexed_by` that holds any other key, a parameter with no version or a
+  version with no value (`parameter_key_shape`), and a parameter and a derived
+  rule that share a name or public id (`parameter_derived_collision`), so an
+  output names one declaration and reads the cell it names.
+- **A query's trace is its own.** Explain answers a request's queries with one
+  evaluator and its cache. A query's trace holds the rule instances its
+  derived outputs reach through recorded dependencies, whether this query or
+  an earlier one evaluated them, and nothing an earlier query evaluated that
+  its outputs do not reach. A parameter output evaluates no rule, so a query
+  of parameters only has an empty trace. A query has the same trace in a
+  request as when it runs alone.
+
 - **Conditionals are lazy.** `if c then a else b` evaluates `c` first. When `c`
   holds, only `a` is evaluated; when `c` does not hold or is undetermined, only
   `b` is evaluated. `match` lowers to nested `if` and inherits this. A

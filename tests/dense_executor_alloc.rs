@@ -318,24 +318,24 @@ fn program(rules: Vec<Value>, chosen: Option<Value>) -> Value {
         "units": [{ "name": "USD", "kind": "currency", "minor_units": 2 }],
         "relations": relations,
         "parameters": [
-            { "name": "p", "unit": null, "versions": table(json!({
+            { "name": "p", "unit": null, "indexed_by": "key", "versions": table(json!({
                 "0": { "kind": "integer", "value": 10 },
                 "1": { "kind": "integer", "value": 20 },
                 "2": { "kind": "integer", "value": 30 },
             })) },
-            { "name": "q", "unit": null, "versions": table(json!({
+            { "name": "q", "unit": null, "indexed_by": "key", "versions": table(json!({
                 "0": { "kind": "decimal", "value": "0.5" },
                 "1": { "kind": "decimal", "value": "1.25" },
             })) },
-            { "name": "t", "unit": null, "versions": table(json!({
+            { "name": "t", "unit": null, "indexed_by": "key", "versions": table(json!({
                 "0": { "kind": "text", "value": "zero" },
                 "1": { "kind": "text", "value": "one" },
             })) },
-            { "name": "u", "unit": null, "versions": table(json!({
+            { "name": "u", "unit": null, "indexed_by": "key", "versions": table(json!({
                 "0": { "kind": "bool", "value": false },
                 "1": { "kind": "bool", "value": true },
             })) },
-            { "name": "w", "unit": null, "versions": table(json!({
+            { "name": "w", "unit": null, "indexed_by": "key", "versions": table(json!({
                 "0": { "kind": "date", "value": "2026-01-01" },
                 "1": { "kind": "date", "value": "2026-06-30" },
             })) },

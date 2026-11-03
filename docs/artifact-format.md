@@ -542,6 +542,10 @@ in the emitted schema.
   `program.extends` is refused outright; and `interface` must equal what this
   engine derives from the embedded program. Metadata must equal this
   engine's current analysis; relation typing is checked as at compile.
+  Program conversion refuses a malformed parameter (`parameter_key_shape`)
+  and a parameter and derived rule that share a name or public id
+  (`parameter_derived_collision`), as it does for a raw request and the
+  format-2 loader.
 
 The format-2 dialect tolerances are confined to
 `from_legacy_format_2_json_str` / `_file`. That loader accepts format 2 only

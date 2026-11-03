@@ -473,3 +473,71 @@ fn generated_parameter_shapes_load_exactly_when_well_shaped() {
         "accepted {accepted}, refused {refused}"
     );
 }
+
+/// A `Program` built or changed in Rust skips the loader, so a direct query
+/// checks the key shape too instead of returning the key-0 cell.
+#[test]
+fn a_direct_query_refuses_a_non_indexed_parameter_built_without_the_loader() {
+    use axiom_rules_engine::engine::Engine;
+    use axiom_rules_engine::model::{DataSet, Period, ScalarValue};
+
+    let spec = program(json!({
+        "parameters": [parameter("amount", None, json!([version("2026-01-01", &[(0, 10)])]))],
+        "derived": [scalar_rule("read", literal(1))],
+    }));
+    let mut model = spec.to_program().expect("the parameter is well shaped");
+    let dataset = DataSet::default();
+    let period = Period::month(2026, 1);
+    assert_eq!(
+        Engine::new(&model, &dataset)
+            .evaluate_parameter("amount", &period)
+            .expect("key 0 reads"),
+        ScalarValue::Integer(10)
+    );
+
+    model
+        .parameters
+        .get_mut("amount")
+        .expect("the parameter converts")
+        .versions[0]
+        .values
+        .insert(1, ScalarValue::Integer(20));
+    let error = Engine::new(&model, &dataset)
+        .evaluate_parameter("amount", &period)
+        .expect_err("a second key is refused")
+        .to_string();
+    assert!(
+        error.contains("declares no `indexed_by` but holds keys other than 0"),
+        "{error}"
+    );
+}
+
+/// The format-2 compatibility loader converts the program the same way, so
+/// a stored format-2 artifact with a malformed parameter is refused too.
+#[test]
+fn the_format_2_loader_refuses_a_non_indexed_parameter_with_another_key() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/artifacts/format2/compiled/tests__fixtures__rulespec__other__family_allowance__rules.compiled.json"
+    );
+    let source = std::fs::read_to_string(path).expect("read the format-2 fixture");
+    CompiledProgramArtifact::from_legacy_format_2_json_str(&source)
+        .expect("the stored artifact loads");
+
+    let mut document: Value = serde_json::from_str(&source).expect("the fixture is JSON");
+    let parameter = document["program"]["parameters"]
+        .as_array_mut()
+        .expect("the fixture has parameters")
+        .iter_mut()
+        .find(|parameter| parameter["name"] == "family_allowance_per_child")
+        .expect("the fixture's per-child amount");
+    assert!(parameter["indexed_by"].is_null());
+    parameter["versions"][0]["values"]["1"] = integer(1);
+    let error = CompiledProgramArtifact::from_legacy_format_2_json_str(&document.to_string())
+        .expect_err("a second key is refused")
+        .to_string();
+    assert!(
+        error.contains("[parameter_key_shape] parameter `family_allowance_per_child`"),
+        "{error}"
+    );
+}
