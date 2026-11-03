@@ -203,8 +203,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // `program.interface`.
                         // `relation_roles` supports predicate terms, qualified
                         // reads, parameters, atoms, term comparisons,
-                        // bounded exists and paths.
-                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles"],
+                        // bounded exists and paths. `lifetime_calculation`
+                        // reads `calendar_years_to_months`, nests reductions
+                        // in a top-N count and runs `run-lifetime` (wire v1
+                        // and v2).
+                        "capabilities": ["relation_entity_typing", "related_min_max_only", "artifact_interface", "relation_roles", "lifetime_calculation"],
                     }))?
                 );
                 return Ok(());

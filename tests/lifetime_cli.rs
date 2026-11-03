@@ -545,12 +545,20 @@ fn decimal_and_f64_lifetime_enforce_scalar_commencement() {
     };
     // Commencement is checked per rule reached (#84, #270): the lifetime
     // output fails at its reference period, as a per-period call reaching
-    // the rule would.
-    let scalar = axiom_rules_engine::engine::EvalError::MissingDerivedFormulaVersion {
-        derived: "history_total".into(),
-        at: period.start,
-    }
-    .to_string();
+    // the rule does. The rule is uncommenced, so the per-period call fails
+    // on commencement before it would reach the reduction.
+    let scalar = dense
+        .execute(&period, batch.clone(), &["history_total".into()])
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        scalar,
+        axiom_rules_engine::engine::EvalError::MissingDerivedFormulaVersion {
+            derived: "history_total".into(),
+            at: period.start,
+        }
+        .to_string()
+    );
     assert_eq!(
         dense
             .execute_lifetime(

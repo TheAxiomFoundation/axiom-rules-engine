@@ -510,7 +510,8 @@ and `literal_ids_have_no_spec_or_artifact_representation`).
 `{kind: calendar_years_to_months, years: ...}` to format 3 without a version
 bump, as the forms above do: older engines refuse the unknown expression kind.
 The archived format-2 schema does not list it. Programs that do not use it
-serialize as before.
+serialize as before. An engine that reads it lists `lifetime_calculation` in
+`capabilities`.
 
 ## In Rust
 

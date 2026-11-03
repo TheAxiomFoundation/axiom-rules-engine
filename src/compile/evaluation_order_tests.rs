@@ -303,6 +303,15 @@ fn scalar(scope: &Scope, depth: u32) -> BoxedStrategy<ScalarExprSpec> {
                 .boxed(),
         ),
         (
+            10,
+            inner
+                .clone()
+                .prop_map(|years| ScalarExprSpec::CalendarYearsToMonths {
+                    years: Box::new(years),
+                })
+                .boxed(),
+        ),
+        (
             30,
             inner
                 .clone()
