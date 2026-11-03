@@ -69,7 +69,7 @@ fn unterminated_multibyte_escape_is_a_parse_error() {
     let error = lower_rulespec_str(&text_parameter_module(r#""\é"#))
         .expect_err("a string with no closing quote must not lower");
     assert!(
-        matches!(error, RuleSpecError::Formula(_)),
+        matches!(error, RuleSpecError::Formula { .. }),
         "expected a formula error, got {error:?}"
     );
     assert!(error.to_string().contains("unterminated string"), "{error}");

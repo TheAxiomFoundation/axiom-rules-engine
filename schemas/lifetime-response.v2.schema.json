@@ -1,0 +1,505 @@
+{
+  "$defs": {
+    "CalculationResponseSchema": {
+      "enum": [
+        "axiom-rules-engine/lifetime-response/v2"
+      ],
+      "type": "string"
+    },
+    "DTypeSpec": {
+      "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal.",
+      "enum": [
+        "judgment",
+        "Judgment",
+        "bool",
+        "Bool",
+        "Boolean",
+        "boolean",
+        "integer",
+        "Integer",
+        "decimal",
+        "Decimal",
+        "Money",
+        "money",
+        "Rate",
+        "rate",
+        "text",
+        "Text",
+        "date",
+        "Date"
+      ],
+      "type": "string"
+    },
+    "JudgmentColumnKind": {
+      "enum": [
+        "judgment"
+      ],
+      "type": "string"
+    },
+    "JudgmentOutcomeSpec": {
+      "enum": [
+        "holds",
+        "not_holds",
+        "undetermined"
+      ],
+      "type": "string"
+    },
+    "LifetimeArithmetic": {
+      "enum": [
+        "decimal"
+      ],
+      "type": "string"
+    },
+    "LifetimeColumn": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "boolean"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "decimal",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "date",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimeOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/LifetimeOutputColumn"
+        },
+        "dtype": {
+          "$ref": "#/$defs/DTypeSpec"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "dtype",
+        "column"
+      ],
+      "type": "object"
+    },
+    "LifetimeOutputColumn": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LifetimeColumn"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/JudgmentColumnKind"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/JudgmentOutcomeSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimePeriod": {
+      "description": "Same period wire vocabulary as PeriodSpec, with unknown fields refused.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "month",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "benefit_week",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "tax_year",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "custom",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "name",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SelectedVersion": {
+      "description": "Exact original version selected while preparing a fixed-law lifetime plan.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "unversioned_derived",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "effective_from": {
+              "format": "date",
+              "type": "string"
+            },
+            "effective_to": {
+              "format": "date",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "derived",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "version_index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "version_index",
+            "effective_from"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "effective_from": {
+              "format": "date",
+              "type": "string"
+            },
+            "effective_to": {
+              "format": "date",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "parameter",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "version_index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "version_index",
+            "effective_from"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/lifetime-response.v2.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Exact Decimal results retaining historical observation periods and the separate legal calculation/reference/output period, with original selected version indices and inclusive source ranges. No knowledge-time selection is implied.",
+  "properties": {
+    "arithmetic": {
+      "$ref": "#/$defs/LifetimeArithmetic"
+    },
+    "artifact_format_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "calculation_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "entity": {
+      "type": "string"
+    },
+    "entity_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "output_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "outputs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LifetimeOutput"
+      },
+      "type": "object"
+    },
+    "periods": {
+      "items": {
+        "$ref": "#/$defs/LifetimePeriod"
+      },
+      "type": "array"
+    },
+    "reference_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "row_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schema": {
+      "$ref": "#/$defs/CalculationResponseSchema"
+    },
+    "selected_versions": {
+      "items": {
+        "$ref": "#/$defs/SelectedVersion"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "engine_version",
+    "artifact_format_version",
+    "arithmetic",
+    "entity",
+    "row_count",
+    "entity_ids",
+    "periods",
+    "calculation_period",
+    "reference_period",
+    "output_period",
+    "selected_versions",
+    "outputs"
+  ],
+  "title": "Axiom calculation lifetime response",
+  "type": "object"
+}

@@ -4,6 +4,51 @@ Short decision log for architecture choices. Publicly and internally, this is
 the Axiom Rules Engine; the Rust crate and executable are `axiom-rules-engine`. One
 entry per decision, most recent first.
 
+## 2026-11-03 — Formula and input errors name what the user wrote
+
+**Decision.** Three errors now report what the user wrote, not what the
+loader or binder made of it.
+
+- `RuleSpecError::Formula` becomes a struct variant,
+  `Formula { rule, effective_from, error }`. A parse error in a rule's formula,
+  or a lowering error in a derived relation's predicate, names the rule, and
+  the version's `effective_from` when the rule has several. Its position
+  counts from the formula as written, whitespace around it included. An error
+  from the module the loader generates from every rule still names no rule.
+- The new `RuleSpecError::EffectiveDateOutOfRange { path, name, field, date }`
+  refuses any `effective_from` or `effective_to` outside 0000-01-01 to
+  9999-12-31, for every rule kind and every place a date can sit.
+- `EvalError::AmbiguousInput` gains `other_name: Option<String>`. `name` and
+  `other_name` are the conflicting records' names as the request spelled
+  them. `other_name` is set only when the two spellings differ.
+
+**Why.** The loader writes version dates into generated formula source
+unquoted, and chrono spells a year outside four digits with a sign, so
+`+10000-01-01` failed as a parse error at a position in source the user never
+sees. Parse positions counted from the trimmed formula, and nothing said which
+of a module's formulas failed. The ambiguous-input error named the bound
+slot, which a qualified program's binder refuses, and named neither
+conflicting input.
+
+**Consequences.**
+
+- This breaks Rust callers in three ways. A pattern `Formula(_)` must become
+  `Formula { .. }`. `RuleSpecError` is not `#[non_exhaustive]`, so an
+  exhaustive match needs an arm for `EffectiveDateOutOfRange`. A pattern or
+  struct literal of `AmbiguousInput` without `..` must name `other_name`.
+  "Dense batches justify every row count they claim" (2026-10-14) already
+  makes the next release a breaking one, 0.3.0; these changes ship in it.
+- The display text of all three changes. Anyone who matches on it needs to
+  update. The generated-module case keeps `failed to parse RuleSpec formula:`.
+- The date check refuses some input that the loader accepted before, when no
+  writer emitted the date: a table's `effective_to` and later versions, the
+  dates of derived and data relations, and a rule-level `effective_from`
+  beside a `versions:` list. None of these can be written into the formula
+  source, and accepting them would leave one date rule for some kinds and none
+  for others. No tracked fixture uses such a date.
+- Direct `Engine` callers bind slots themselves, so their ambiguity error
+  names the slot and leaves `other_name` unset.
+
 ## 2026-11-02 — Dense can compile only the outputs a caller requests; a direct cross-entity read stays refused
 
 **Decision.** `DenseCompiledProgram::from_program_for_outputs` and
@@ -72,6 +117,59 @@ need a contract of its own.
   three dense profiles, and again with an unreached crossing added; a property
   over the artifact-interface generator compares each rule's closure with the
   whole root.
+
+## 2026-11-02 — Lifetime execution can fix law at a calculation period
+
+**Decision.** Add a `run-lifetime` CLI command and its JSON wire, with
+schemas `lifetime-request`/`lifetime-response` v1 and v2. v1 runs the
+existing Decimal lifetime executor on aligned period batches. v2 adds
+`calculation_period`: every rule and parameter table the program reaches uses
+the version in force at that period's start, while each observation keeps
+its own dates for inputs and `period_start`/`period_end`. The Rust surface
+is `dense::CalculationLifetimePlan` and `dense::SelectedVersion`; the response
+reports each selected version's original index and bounds. Add the formula
+builtin `calendar_years_to_months(years)`. A `sum_top_n_over_periods` count
+may itself reduce over periods (`count_over_periods(...)`), evaluated once
+per row in lifetime context.
+
+**Why.** A benefit computed in one year often applies that year's formula
+and tables to a completed earnings history. Selecting law at each
+observation's date answers a different question, and v1's reference date,
+the last observation's start, is not the calculation year when the history
+ends earlier.
+The count of years to keep is itself often a count over the history, which
+the top-N count could not express.
+
+**Consequences.**
+
+- v2 refuses relations, Float input columns, inputs no rule for the entity
+  reads, and observations that do not end before the calculation starts. A
+  missing formula or table version at the calculation start is refused by
+  name, with no fallback to an older version.
+- Commencement in a calculation plan is checked at the calculation start;
+  v1 keeps main's per-rule check (#270).
+- In a nested count, values inside its reductions keep each period.
+  Outside them, a value must agree across periods, or that row fails:
+  - a bare input with `LifetimePeriodVaryingInput`, as any bare lifetime
+    input does;
+  - a parameter with `OverPeriodsTopNPeriodVarying`, except in a plan, which
+    fixes the parameter's version.
+
+  The same varying input used as a flat count fails with
+  `OverPeriodsTopNPeriodVarying` instead
+  (`tests/lifetime_law_properties.rs`,
+  `period_varying_values_in_a_count_fail_with_their_own_errors`).
+- `calendar_years_to_months` takes Integer or exactly integral Decimal years
+  and refuses Float, fractions and i64 overflow. Fast mode declines it, and
+  the artifact node extends format 3 (see `docs/artifact-format.md`).
+- `capabilities` lists a new `lifetime_calculation` capability: the engine
+  reads `calendar_years_to_months`, nests reductions in a top-N count and
+  runs `run-lifetime` (wire v1 and v2).
+- `docs/lifetime-cli.md`, `docs/calendar-unit-conversion.md` and
+  `docs/execution-semantics.md` give the contracts. The tests are
+  `tests/lifetime_cli.rs`, `tests/lifetime_calculation.rs`,
+  `tests/lifetime_law_properties.rs` and the cross-path differential
+  `tests/lifetime_differential.rs`.
 
 ## 2026-11-02 — Dense text columns share their values
 

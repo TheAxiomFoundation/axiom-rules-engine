@@ -6,8 +6,18 @@
 # - pin actions and the checksum-verified cargo-dist 0.31.0 binary immutably
 # - cargo fetch --locked before each offline dist build (populate the cache so
 #   the offline build cannot resolve newer deps, and does not fail on a clean runner)
-# - validate Cargo.lock with --locked/--offline and force dist builds offline
+# - validate Cargo.lock with --locked/--offline, make it read-only before each
+#   dist build, and force dist builds offline
+# - install dist in build-local-artifacts from each platform's archive, checked
+#   against a pinned digest, and fail on any other runner (#114)
+# - run Cleanup under bash with set -euo pipefail, and strip the blank lines from
+#   the published .sha256 files (#122)
 # Finding 3 (tag ruleset) is a repository-settings change and is intentionally not handled here.
+# MANUAL CHANGE — re-apply after every `dist init` regeneration:
+# - the concurrency block above `jobs:`, a copy of the one in ci.yml, which
+#   cancels a pull request's older run
+# dist regenerates this file only after someone removes "ci" from allow-dirty in
+# dist-workspace.toml.
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
@@ -52,6 +62,13 @@ on:
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
+
+# A new push to a pull request cancels that pull request's older run of this
+# workflow, so runs for superseded heads stop holding runners. Each tag push
+# keys its own group, so nothing cancels a release run or makes it wait.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do

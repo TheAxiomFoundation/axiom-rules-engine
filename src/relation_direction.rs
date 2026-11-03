@@ -492,7 +492,10 @@ impl Resolver<'_> {
             }
             ScalarExprSpec::ParameterLookup { index, .. }
             | ScalarExprSpec::Ceil { value: index }
-            | ScalarExprSpec::Floor { value: index } => self.scalar(index, entity, membership)?,
+            | ScalarExprSpec::Floor { value: index }
+            | ScalarExprSpec::CalendarYearsToMonths { years: index } => {
+                self.scalar(index, entity, membership)?
+            }
             ScalarExprSpec::OverPeriods { value, n, .. } => {
                 self.scalar(value, entity, None)?;
                 if let Some(n) = n {

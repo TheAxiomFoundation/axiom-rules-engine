@@ -33,7 +33,8 @@ pub enum FormulaError {
     /// The lexer or parser rejected the source. `line` and `col` point into
     /// the source text given to the [`Lexer`]. RuleSpec lowering parses each
     /// rule's formula on its own, trimmed, before it parses the module it
-    /// generates, so a syntax error in a formula points into that formula
+    /// generates, then moves the position back by the whitespace it trimmed,
+    /// so a syntax error in a formula points into that formula as written
     /// (`docs/rulespec-format.md`, "Formula parse errors").
     #[error("formula parse error at line {line}, col {col}: {message}")]
     Parse {
@@ -1458,11 +1459,12 @@ fn term_named(name: &str) -> Option<TermSpec> {
 
 /// Function names cannot also be used for relation atoms. `builtin_tests`
 /// keeps this list equal to the scalar and judgment call lowering below.
-const BUILTIN_FUNCTIONS: [&str; 23] = [
+const BUILTIN_FUNCTIONS: [&str; 24] = [
     "max",
     "min",
     "ceil",
     "floor",
+    "calendar_years_to_months",
     "days_between",
     "date_add_days",
     "date_add_months",
@@ -1972,6 +1974,16 @@ fn lower_to_scalar(e: &Expr, ctx: &LowerCtx) -> Result<ScalarExprSpec, FormulaEr
                     value: Box::new(lower_to_scalar(&args[0], ctx)?),
                 }
             }
+            "calendar_years_to_months" => {
+                if args.len() != 1 {
+                    return Err(FormulaError::lower(
+                        "calendar_years_to_months takes 1 arg".to_string(),
+                    ));
+                }
+                ScalarExprSpec::CalendarYearsToMonths {
+                    years: Box::new(lower_to_scalar(&args[0], ctx)?),
+                }
+            }
             "days_between" => {
                 if args.len() != 2 {
                     return Err(FormulaError::lower("days_between takes 2 args".to_string()));
@@ -2452,6 +2464,7 @@ fn promote_ints_to_decimal(expr: &mut ScalarExprSpec) {
         // Don't descend into:
         //   * Comparisons (operands compare by their own type)
         //   * ParameterLookup index (always Integer)
+        //   * CalendarYearsToMonths years (exact whole-year units)
         //   * CountRelated / SumRelated / ExtremeRelated / SingleRelated
         //     (aggregators)
         //   * Input / Derived / PeriodStart/End / DateAddDays / DaysBetween

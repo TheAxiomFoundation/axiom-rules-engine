@@ -1,0 +1,384 @@
+{
+  "$defs": {
+    "DTypeSpec": {
+      "description": "Output data type. Canonical: judgment, bool, integer, decimal, text, date. Aliases (accepted, but not emitted): PascalCase forms and Money/money/Rate/rate for decimal.",
+      "enum": [
+        "judgment",
+        "Judgment",
+        "bool",
+        "Bool",
+        "Boolean",
+        "boolean",
+        "integer",
+        "Integer",
+        "decimal",
+        "Decimal",
+        "Money",
+        "money",
+        "Rate",
+        "rate",
+        "text",
+        "Text",
+        "date",
+        "Date"
+      ],
+      "type": "string"
+    },
+    "JudgmentColumnKind": {
+      "enum": [
+        "judgment"
+      ],
+      "type": "string"
+    },
+    "JudgmentOutcomeSpec": {
+      "enum": [
+        "holds",
+        "not_holds",
+        "undetermined"
+      ],
+      "type": "string"
+    },
+    "LifetimeArithmetic": {
+      "enum": [
+        "decimal"
+      ],
+      "type": "string"
+    },
+    "LifetimeColumn": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "bool",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "boolean"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "integer",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "decimal",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "format": "date",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimeOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "$ref": "#/$defs/LifetimeOutputColumn"
+        },
+        "dtype": {
+          "$ref": "#/$defs/DTypeSpec"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "dtype",
+        "column"
+      ],
+      "type": "object"
+    },
+    "LifetimeOutputColumn": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LifetimeColumn"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/JudgmentColumnKind"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/JudgmentOutcomeSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimePeriod": {
+      "description": "Same period wire vocabulary as PeriodSpec, with unknown fields refused.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "month",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "benefit_week",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "tax_year",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "end": {
+              "format": "date",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "period_kind": {
+              "const": "custom",
+              "type": "string"
+            },
+            "start": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          "required": [
+            "period_kind",
+            "name",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LifetimeResponseSchema": {
+      "enum": [
+        "axiom-rules-engine/lifetime-response/v1"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.axiom-foundation.org/rules-engine/lifetime-response.v1.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Canonical Decimal lifetime results with exact decimal strings, public output IDs and caller-declared aligned entity IDs. The reference period is the last supplied period.",
+  "properties": {
+    "arithmetic": {
+      "$ref": "#/$defs/LifetimeArithmetic"
+    },
+    "artifact_format_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "entity": {
+      "type": "string"
+    },
+    "entity_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "output_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "outputs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LifetimeOutput"
+      },
+      "type": "object"
+    },
+    "periods": {
+      "items": {
+        "$ref": "#/$defs/LifetimePeriod"
+      },
+      "type": "array"
+    },
+    "reference_period": {
+      "$ref": "#/$defs/LifetimePeriod"
+    },
+    "row_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schema": {
+      "$ref": "#/$defs/LifetimeResponseSchema"
+    }
+  },
+  "required": [
+    "schema",
+    "engine_version",
+    "artifact_format_version",
+    "arithmetic",
+    "entity",
+    "row_count",
+    "entity_ids",
+    "periods",
+    "reference_period",
+    "output_period",
+    "outputs"
+  ],
+  "title": "Axiom lifetime execution response",
+  "type": "object"
+}

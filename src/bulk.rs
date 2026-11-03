@@ -929,6 +929,9 @@ impl<'a> BulkEvaluator<'a> {
             }
             ScalarExpr::Ceil(value) => self.eval_unary(value, mask, |value| value.ceil()),
             ScalarExpr::Floor(value) => self.eval_unary(value, mask, |value| value.floor()),
+            ScalarExpr::CalendarYearsToMonths { .. } => {
+                Err(unsupported("calendar_years_to_months").into())
+            }
             ScalarExpr::PeriodStart | ScalarExpr::PeriodEnd => {
                 Err(unsupported("period_start / period_end").into())
             }

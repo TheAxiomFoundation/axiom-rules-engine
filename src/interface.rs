@@ -847,7 +847,9 @@ impl Collector<'_> {
                 self.scalar(left, flow, routing, Demand::Number, None);
                 self.scalar(right, flow, routing, Demand::Number, None);
             }
-            ScalarExpr::Ceil(value) | ScalarExpr::Floor(value) => {
+            ScalarExpr::Ceil(value)
+            | ScalarExpr::Floor(value)
+            | ScalarExpr::CalendarYearsToMonths { years: value } => {
                 self.scalar(value, flow, routing, Demand::Number, None);
             }
             ScalarExpr::DateAddDays { date, days: offset }
@@ -1094,6 +1096,7 @@ fn comparison_demand(op: ComparisonOp, other: &ScalarExpr) -> Demand {
         | ScalarExpr::Min(_)
         | ScalarExpr::Ceil(_)
         | ScalarExpr::Floor(_)
+        | ScalarExpr::CalendarYearsToMonths { .. }
         | ScalarExpr::CountRelated { .. }
         | ScalarExpr::SumRelated { .. }
         | ScalarExpr::DaysBetween { .. } => Demand::Number,
@@ -1202,7 +1205,10 @@ fn collect_scalar_relations(expr: &ScalarExpr, relations: &mut BTreeSet<String>)
         | ScalarExpr::PeriodEnd => {}
         ScalarExpr::ParameterLookup { index: value, .. }
         | ScalarExpr::Ceil(value)
-        | ScalarExpr::Floor(value) => collect_scalar_relations(value, relations),
+        | ScalarExpr::Floor(value)
+        | ScalarExpr::CalendarYearsToMonths { years: value } => {
+            collect_scalar_relations(value, relations)
+        }
         ScalarExpr::Add(items) | ScalarExpr::Max(items) | ScalarExpr::Min(items) => {
             for item in items {
                 collect_scalar_relations(item, relations);

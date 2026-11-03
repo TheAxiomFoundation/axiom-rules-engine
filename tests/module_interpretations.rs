@@ -996,7 +996,7 @@ fn generated_rule_names_keep_formula_keywords_as_safe_identifiers() {
     keyword_formula["rules"][0]["versions"][0]["formula"] = json!("to");
     let error = lower_rulespec_str(&yaml(&keyword_formula))
         .expect_err("a reserved keyword is not a formula identifier");
-    assert!(matches!(&error, RuleSpecError::Formula(_)), "{error:?}");
+    assert!(matches!(&error, RuleSpecError::Formula { .. }), "{error:?}");
     assert!(error.to_string().contains("To (to)"), "{error}");
 
     for keyword in [
