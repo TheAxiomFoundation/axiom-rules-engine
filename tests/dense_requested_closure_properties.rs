@@ -11,27 +11,36 @@
 //! 1. The whole root of `P` refuses `cross_kind` when `P` holds it, and `W`
 //!    compiles.
 //! 2. The requested closure of `cross_kind` refuses it with the whole root's
-//!    error, naming every relation `P` declares between `Household` and
-//!    `Person`.
+//!    error, naming `members`, the one data relation `P` declares between
+//!    `Household` and `Person`; derived relations over it are not named.
 //! 3. For every other rule `r`, the requested closure of `[r]` compiles from
 //!    `P`; its outputs, root inputs and relations are among `W`'s, it holds
 //!    `r`, and it executes `r` to `W`'s exact result.
 //! 4. The requested closure of every `Household` rule but `cross_kind` has
 //!    `W`'s outputs, root inputs and relations, and executes each output to
 //!    `W`'s exact result.
+//!
+//! Results are compared on two batches: the generator's own, and
+//! [`varied_batch`], whose every slot holds its own values on each row, so
+//! a program that read another slot or row of the same type would differ.
 
 #[allow(dead_code)]
 #[path = "support/artifact_interface_generator.rs"]
 mod generator;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use axiom_rules_engine::compile::CompiledProgramArtifact;
-use axiom_rules_engine::dense::{DenseCompileError, DenseCompiledProgram};
-use axiom_rules_engine::spec::PeriodSpec;
+use axiom_rules_engine::dense::{
+    DenseBatchSpec, DenseColumn, DenseCompileError, DenseCompiledProgram, DenseRelationBatchSpec,
+    DenseRelationKey,
+};
+use axiom_rules_engine::spec::{PeriodSpec, ScalarValueSpec};
 use generator::{Generated, generate};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
+use rust_decimal::Decimal;
 use serde_json::json;
 
 const ROOT: &str = "Household";
@@ -85,13 +94,84 @@ fn relation_keys(program: &DenseCompiledProgram) -> BTreeSet<String> {
         .collect()
 }
 
-/// `program`'s execution of `output` alone on the generator's batch, as text:
-/// the values, or the error.
-fn executed(program: &DenseCompiledProgram, g: &Generated, output: &str) -> String {
-    format!(
-        "{:?}",
-        program.execute(&period(), g.dense_batch(), &[output.to_string()])
-    )
+/// A column of `count` values of `template`'s type, chosen by `seed` and the
+/// cell: integers 1 to 3 (the parameter tables' keys and more), Booleans,
+/// texts and dates that differ between neighbouring cells and slots.
+fn varied_column(template: &ScalarValueSpec, seed: usize, count: usize) -> DenseColumn {
+    let pick = |cell: usize| (seed + cell) % 3;
+    match template {
+        ScalarValueSpec::Bool { .. } => {
+            DenseColumn::Bool((0..count).map(|c| pick(c) != 1).collect())
+        }
+        ScalarValueSpec::Integer { .. } => {
+            DenseColumn::Integer((0..count).map(|c| 1 + pick(c) as i64).collect())
+        }
+        ScalarValueSpec::Decimal { .. } => DenseColumn::Decimal(
+            (0..count)
+                .map(|c| Decimal::new(5 + 10 * pick(c) as i64, 1))
+                .collect(),
+        ),
+        ScalarValueSpec::Text { .. } => DenseColumn::Text(
+            (0..count)
+                .map(|c| Arc::from(["a", "b", "c"][pick(c)]))
+                .collect(),
+        ),
+        ScalarValueSpec::Date { value } => DenseColumn::Date(
+            (0..count)
+                .map(|c| *value + chrono::Days::new(pick(c) as u64 * 20))
+                .collect(),
+        ),
+    }
+}
+
+/// Two root rows whose every slot holds its own values: row 0 has two
+/// members and row 1 one, and each links one household.
+fn varied_batch(g: &Generated) -> DenseBatchSpec {
+    let columns = |count: usize, offset: usize| {
+        g.values
+            .iter()
+            .enumerate()
+            .map(|(seed, (name, value))| (name.clone(), varied_column(value, seed + offset, count)))
+            .collect::<HashMap<_, _>>()
+    };
+    DenseBatchSpec {
+        row_count: 2,
+        inputs: columns(2, 0),
+        relations: HashMap::from([
+            (
+                DenseRelationKey {
+                    name: "members".into(),
+                    current_slot: 1,
+                    related_slot: 0,
+                },
+                DenseRelationBatchSpec {
+                    offsets: vec![0, 2, 3],
+                    inputs: columns(3, 1),
+                    ..Default::default()
+                },
+            ),
+            (
+                DenseRelationKey {
+                    name: "links".into(),
+                    current_slot: 0,
+                    related_slot: 1,
+                },
+                DenseRelationBatchSpec {
+                    offsets: vec![0, 1, 2],
+                    inputs: columns(2, 2),
+                    ..Default::default()
+                },
+            ),
+        ]),
+    }
+}
+
+/// `program`'s execution of `output` alone on the generator's batch and on
+/// [`varied_batch`], as text: the values, or the error.
+fn executed(program: &DenseCompiledProgram, g: &Generated, output: &str) -> [String; 2] {
+    let outputs = [output.to_string()];
+    [g.dense_batch(), varied_batch(g)]
+        .map(|batch| format!("{:?}", program.execute(&period(), batch, &outputs)))
 }
 
 #[derive(Default)]
@@ -101,6 +181,7 @@ struct Health {
     single_closures: u32,
     proper_single_closures: u32,
     executed_values: u32,
+    varied_values: u32,
 }
 
 #[test]
@@ -157,10 +238,7 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
                         prop_assert_eq!(dependency, "person_value");
                         prop_assert_eq!(entity, "Person");
                         prop_assert_eq!(reader_entity, ROOT);
-                        prop_assert_eq!(
-                            relations,
-                            &["member_households", "members", "selected_members"]
-                        );
+                        prop_assert_eq!(relations, &["members"]);
                     }
                     other => {
                         return Err(failure(format!(
@@ -204,11 +282,19 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
                 if outputs.len() < whole_outputs.len() {
                     h.proper_single_closures += 1;
                 }
-                let result = executed(&closure, &g, rule);
+                let [result, varied] = executed(&closure, &g, rule);
                 if result.starts_with("Ok") {
                     h.executed_values += 1;
                 }
-                prop_assert_eq!(result, executed(&whole, &g, rule), "rule `{}`", rule);
+                if varied.starts_with("Ok") {
+                    h.varied_values += 1;
+                }
+                prop_assert_eq!(
+                    [result, varied],
+                    executed(&whole, &g, rule),
+                    "rule `{}`",
+                    rule
+                );
             }
 
             // 4. The closure of every rule but the crossing is the whole root.
@@ -230,8 +316,13 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
         .unwrap();
     let h = health.borrow();
     eprintln!(
-        "requested closures: {} programs, {} with the crossing; {} single-rule closures, {} smaller than the whole root, {} executed to values",
-        h.programs, h.with_crossing, h.single_closures, h.proper_single_closures, h.executed_values
+        "requested closures: {} programs, {} with the crossing; {} single-rule closures, {} smaller than the whole root, {} executed to values on the generator's batch and {} on the varied one",
+        h.programs,
+        h.with_crossing,
+        h.single_closures,
+        h.proper_single_closures,
+        h.executed_values,
+        h.varied_values
     );
     assert!(
         h.with_crossing >= 32 && h.programs - h.with_crossing >= 32,
@@ -242,7 +333,7 @@ fn requested_closures_agree_with_the_whole_root_on_generated_programs() {
         "most single-rule closures must leave rules out"
     );
     assert!(
-        h.executed_values >= h.single_closures / 4,
-        "a useful share of single-rule closures must execute to values"
+        h.executed_values >= h.single_closures / 4 && h.varied_values >= h.single_closures / 4,
+        "a useful share of single-rule closures must execute to values on both batches"
     );
 }

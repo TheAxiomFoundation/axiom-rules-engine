@@ -128,8 +128,10 @@ class CompiledDenseProgram:
         reach. A rule none of them reaches is not compiled and cannot refuse
         the program; a rule they do reach refuses it as before. Name outputs
         by rule name, as :meth:`execute` takes them. Each must be a rule of
-        the root entity or an entity-free ``Scalar`` rule; with no ``entity``,
-        the outputs' entity is the root entity. :attr:`output_names`,
+        the root entity or an entity-free ``Scalar`` rule. With no
+        ``entity``, the outputs' entity is the root entity, and for
+        ``Scalar`` outputs alone, the module's one entity, as without
+        ``outputs``. :attr:`output_names`,
         :attr:`root_inputs` and :attr:`relations` then list only what those
         rules read, so a batch needs nothing else. For every output both
         compile, the values and errors are the same either way.

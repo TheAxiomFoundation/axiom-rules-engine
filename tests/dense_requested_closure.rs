@@ -19,7 +19,7 @@
 //!   `amount_after_subsection_a_increase`, a rule of another entity (`Couple`
 //!   here). Nothing the payment reaches reads it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use axiom_rules_engine::api::{
@@ -885,4 +885,276 @@ fn the_requested_closure_matches_the_whole_root_where_the_whole_root_compiles() 
         dense_values(&requested, rows, output),
         explain_values(&artifact, "Couple", rows, output)
     );
+}
+
+/// A rule written without `entity:` is `Scalar`. With no entity named,
+/// `Scalar` outputs alone are rooted where the whole root is, at the
+/// program's one non-scalar entity, because a `Scalar` rule can read that
+/// entity's rules.
+#[test]
+fn scalar_outputs_alone_take_the_programs_one_entity_as_their_root() {
+    let artifact = CompiledProgramArtifact::from_rulespec_str(
+        r#"
+format: rulespec/v1
+rules:
+  - name: countable_income
+    kind: derived
+    entity: Person
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: earned_income + unearned_income
+  - name: half_countable
+    kind: derived
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: countable_income * 0.5
+  - name: payment
+    kind: derived
+    entity: Person
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: half_countable + 1
+"#,
+    )
+    .expect("the module compiles");
+    let whole = DenseCompiledProgram::from_artifact(&artifact, None)
+        .expect("the whole root is the program's one entity");
+    assert_eq!(whole.root_entity(), "Person");
+    let closure = DenseCompiledProgram::from_artifact_for_outputs(
+        &artifact,
+        None,
+        &names(&["half_countable"]),
+    )
+    .expect("the Scalar output's closure compiles where the whole root does");
+    assert_eq!(closure.root_entity(), "Person");
+    assert_eq!(
+        sorted(closure.output_names()),
+        ["countable_income", "half_countable"]
+    );
+    let rows: Rows<'_> = &[
+        ("earned_income", &["100", "10"]),
+        ("unearned_income", &["50", "0"]),
+    ];
+    assert_eq!(
+        dense_values(&closure, rows, "half_countable"),
+        dense_values(&whole, rows, "half_countable")
+    );
+}
+
+/// A direct read reached through a derived relation's predicate, on the
+/// current record, refuses with the same error as when a root rule reaches
+/// it: the reading rows are root rows either way. Before, the predicate path
+/// named the inlined `Scalar` rule's entity as the reader, so the whole
+/// root's message depended on which rule it compiled first.
+#[test]
+fn a_direct_read_refuses_alike_however_it_is_reached() {
+    let spec: axiom_rules_engine::spec::ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [
+            {"name": "members", "arity": 2, "slot_entities": ["Person", "Household"]},
+            {"name": "tax_unit_of_household", "arity": 2, "slot_entities": ["TaxUnit", "Household"]},
+            {"name": "adults", "arity": 2, "derivation": {
+                "source_relation": "members", "current_slot": 1, "related_slot": 0,
+                "slot_entities": ["Person", "Household"],
+                "predicate": {"kind": "derived", "name": "household_ok"}
+            }}
+        ],
+        "derived": [
+            {"name": "tax_unit_flag", "entity": "TaxUnit", "dtype": "judgment", "unit": null,
+             "semantics": "judgment", "expr": {"kind": "comparison",
+                "left": {"kind": "input", "name": "filed_jointly"}, "op": "eq",
+                "right": {"kind": "literal", "value": {"kind": "bool", "value": true}}}},
+            {"name": "scalar_gate", "entity": "Scalar", "dtype": "judgment", "unit": null,
+             "semantics": "judgment", "expr": {"kind": "derived", "name": "tax_unit_flag"}},
+            {"name": "household_ok", "entity": "Household", "dtype": "judgment", "unit": null,
+             "semantics": "judgment", "expr": {"kind": "derived", "name": "scalar_gate"}},
+            {"name": "adult_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": {"kind": "count_related", "relation": "adults",
+                "current_slot": 1, "related_slot": 0}}
+        ]
+    }))
+    .expect("the program parses");
+    let artifact = CompiledProgramArtifact::compile(spec).expect("the program compiles");
+    let mut messages = BTreeSet::new();
+    for output in ["adult_count", "household_ok"] {
+        let error = compile_requested(&artifact, "Household", &[output])
+            .expect_err("the gate reads a TaxUnit rule directly");
+        match &error {
+            DenseCompileError::CrossEntityDependency {
+                derived,
+                dependency,
+                reader_entity,
+                relations,
+                ..
+            } => {
+                assert_eq!(derived, "scalar_gate", "{output}");
+                assert_eq!(dependency, "tax_unit_flag", "{output}");
+                assert_eq!(reader_entity, "Household", "{output}");
+                assert_eq!(relations, &["tax_unit_of_household"], "{output}");
+            }
+            other => panic!("{output}: expected a cross-entity refusal, got {other}"),
+        }
+        messages.insert(error.to_string());
+    }
+    // Each artifact load builds the program's maps afresh, so the whole root
+    // meets its rules in varying orders.
+    for _ in 0..8 {
+        let error = DenseCompiledProgram::from_artifact(&artifact, Some("Household"))
+            .expect_err("the whole root holds the direct read");
+        messages.insert(error.to_string());
+    }
+    assert_eq!(messages.len(), 1, "{messages:#?}");
+}
+
+const FILTERED_ROOT: &str = r#"
+format: rulespec/v1
+rules:
+  - name: member_of_household
+    kind: data_relation
+    data_relation:
+      arity: 2
+      arguments: [Person, Household]
+  - name: snap_member_eligible
+    kind: derived
+    entity: Person
+    dtype: Judgment
+    versions:
+      - effective_from: 2026-01-01
+        formula: has_ssn
+  - name: snap_unit
+    kind: derived_relation
+    derived_relation:
+      arity: 2
+      source_relation: member_of_household
+      entity: SnapUnit
+      member_relation: members
+      slot_entities: [Person, Household]
+    versions:
+      - effective_from: 2026-01-01
+        formula: member_of_household and snap_member_eligible
+  - name: person_income
+    kind: derived
+    entity: Person
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: income
+  - name: household_rent
+    kind: derived
+    entity: Household
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: rent
+  - name: unit_reads_person
+    kind: derived
+    entity: SnapUnit
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: person_income + 0
+  - name: unit_reads_household
+    kind: derived
+    entity: SnapUnit
+    dtype: Money
+    versions:
+      - effective_from: 2026-01-01
+        formula: household_rent + 0
+"#;
+
+/// A filtered entity's rows hold its source's ids, so the refusal names the
+/// data relations between those ids' kind and the other entity. It names no
+/// derived relation, as dense may refuse one's predicate or path. When the
+/// rows' ids already have the other entity's kind, no relation carries the
+/// read, and the refusal says so instead.
+#[test]
+fn a_filtered_root_reads_relations_by_the_kind_of_its_ids() {
+    let artifact =
+        CompiledProgramArtifact::from_rulespec_str(FILTERED_ROOT).expect("the module compiles");
+    let relation = artifact
+        .program
+        .relations
+        .iter()
+        .map(|relation| relation.name.clone())
+        .find(|name| name.ends_with("member_of_household"))
+        .expect("the data relation is declared");
+
+    let error = compile_requested(&artifact, "SnapUnit", &["unit_reads_person"])
+        .expect_err("the unit reads a Person rule directly");
+    match &error {
+        DenseCompileError::CrossEntityDependency {
+            reader_entity,
+            relations,
+            ..
+        } => {
+            assert_eq!(reader_entity, "Household");
+            assert_eq!(relations, &[relation.clone()]);
+        }
+        other => panic!("expected a cross-entity refusal, got {other}"),
+    }
+    assert!(
+        error.to_string().contains(&format!(
+            "over a relation between `Household` and `Person`, such as `{relation}`, which this \
+             program declares"
+        )),
+        "{error}"
+    );
+
+    let error = compile_requested(&artifact, "SnapUnit", &["unit_reads_household"])
+        .expect_err("the unit reads a Household rule directly");
+    assert!(
+        matches!(
+            &error,
+            DenseCompileError::CrossEntityDependency { reader_entity, relations, .. }
+                if reader_entity == "Household" && relations.is_empty()
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().ends_with(
+            "crosses into `Household`. These rows' ids are `Household` ids, but dense reads a \
+             rule of another entity only through a relation, and none carries this read: \
+             compile only outputs that do not reach `unit_reads_household`"
+        ),
+        "{error}"
+    );
+}
+
+/// Relation entity typing covers the whole program in the requested-closure
+/// compile too, as in artifact compilation and the whole-root compile: a raw
+/// program that executes an untyped relation is refused, even for an output
+/// that does not read it.
+#[test]
+fn relation_typing_still_covers_the_whole_program() {
+    let spec: axiom_rules_engine::spec::ProgramSpec = serde_json::from_value(serde_json::json!({
+        "relations": [{"name": "member", "arity": 2}],
+        "derived": [
+            {"name": "member_count", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar", "expr": {"kind": "count_related", "relation": "member",
+                "current_slot": 1, "related_slot": 0}},
+            {"name": "flat", "entity": "Household", "dtype": "integer", "unit": null,
+             "semantics": "scalar",
+             "expr": {"kind": "literal", "value": {"kind": "integer", "value": 1}}}
+        ]
+    }))
+    .expect("the program parses");
+    let program = spec.to_program().expect("the program converts");
+    assert!(matches!(
+        DenseCompiledProgram::from_program(&program, Some("Household")),
+        Err(DenseCompileError::RelationTyping(_))
+    ));
+    for output in ["member_count", "flat"] {
+        let error = DenseCompiledProgram::from_program_for_outputs(
+            &program,
+            Some("Household"),
+            &names(&[output]),
+        )
+        .expect_err("the program executes an untyped relation");
+        assert!(
+            matches!(error, DenseCompileError::RelationTyping(_)),
+            "{output}: {error}"
+        );
+    }
 }

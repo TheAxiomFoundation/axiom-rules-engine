@@ -3525,18 +3525,17 @@ fn check_requested_closure(
         requested,
         DenseOutcome::Unsupported(_) | DenseOutcome::Refused { .. }
     );
-    if matches!(whole_root, DenseOutcome::Unsupported(_)) {
-        if ran {
-            stats.closure_compiled_where_whole_root_declined += 1;
-        }
-    } else {
+    let whole_ran = !matches!(
+        whole_root,
+        DenseOutcome::Unsupported(_) | DenseOutcome::Refused { .. }
+    );
+    if !matches!(whole_root, DenseOutcome::Unsupported(_)) {
         let (whole, closure) = (render_dense(whole_root), render_dense(&requested));
         if whole != closure {
             return Err(format!(
                 "the requested closure's outcome differs from the whole root's:\n  whole root: {whole}\n  requested closure: {closure}"
             ));
         }
-        stats.closure_matched_whole_root += 1;
     }
     compare_dense(explain, &requested, outputs)
         .map_err(|problem| format!("requested closure against explain: {problem}"))?;
@@ -3566,8 +3565,21 @@ fn check_requested_closure(
             "{UNREACHED_CROSSING}, which no requested output reaches, changed the requested closure's outcome:\n  without it: {closure}\n  with it: {with_crossing}"
         ));
     }
-    if ran {
-        stats.closure_unchanged_by_unreached_crossing += 1;
+    if whole_ran {
+        stats.closure_checked_where_whole_root_ran += 1;
+        let compiled = |requested| {
+            compile_dense_for(program, requested)
+                .map(|(dense, _)| dense.output_names().into_iter().collect::<BTreeSet<_>>())
+                .ok()
+        };
+        if let (Some(whole), Some(closure)) = (compiled(None), compiled(Some(outputs)))
+            && closure.len() < whole.len()
+            && closure.is_subset(&whole)
+        {
+            stats.closure_smaller_than_whole_root += 1;
+        }
+    } else if ran {
+        stats.closure_compiled_where_whole_root_declined += 1;
     }
     Ok(())
 }
@@ -4041,17 +4053,17 @@ struct Stats {
     decisive_links: u32,
     /// Dense ran on a case with decisive links.
     dense_decisive_links: u32,
-    /// The whole root compiled (or the artifact compiler refused it), and the
-    /// program compiled for the requested outputs alone gave the same outcome
+    /// The whole root ran, and the program compiled for the requested outputs
+    /// alone gave its exact outcome, also with [`UNREACHED_CROSSING`] added
     /// (see [`check_requested_closure`]).
-    closure_matched_whole_root: u32,
+    closure_checked_where_whole_root_ran: u32,
+    /// Of those, the cases whose requested program compiled fewer rules than
+    /// the whole root.
+    closure_smaller_than_whole_root: u32,
     /// The dense compiler declined the whole root, but the program compiled
-    /// for the requested outputs alone compiled and ran.
+    /// for the requested outputs alone ran and matched explain, also with
+    /// [`UNREACHED_CROSSING`] added.
     closure_compiled_where_whole_root_declined: u32,
-    /// The program compiled for the requested outputs ran, and adding a rule
-    /// they do not reach that reads another entity's rule directly, which
-    /// refuses the whole root, left its outcome unchanged.
-    closure_unchanged_by_unreached_crossing: u32,
     /// Explain succeeded, and fixing every membership test in the derived
     /// relation's predicate to hold, or not to, changes its answer: a
     /// `relation_member` was evaluated where explain allows it, and decided an
@@ -4069,7 +4081,7 @@ struct Stats {
 impl Stats {
     fn summary(&self, name: &str) -> String {
         format!(
-            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {} / decisive links {}; relation_member errors {} / decisive memberships {} / decisive links {}; kind crossings {}; reference panics {}; divergences {}; requested closures matching the whole root {} / compiled where it declined {} / unchanged by an unreached crossing {}",
+            "{name}: {} cases; explain ok {} / err {}; laziness hazards {}; uncovered matches {} / hidden {}; fast path {} / fallback {}; dense ran {} / declined {}; dense relation_member errors {} / decisive memberships {} / membership declines {} / refusals {} / decisive links {}; relation_member errors {} / decisive memberships {} / decisive links {}; kind crossings {}; reference panics {}; divergences {}; requested closures checked where the whole root ran {} / smaller than it {} / compiled where it declined {}",
             self.cases,
             self.explain_ok,
             self.explain_err,
@@ -4091,9 +4103,9 @@ impl Stats {
             self.kind_crossings,
             self.reference_panics,
             self.divergences,
-            self.closure_matched_whole_root,
-            self.closure_compiled_where_whole_root_declined,
-            self.closure_unchanged_by_unreached_crossing
+            self.closure_checked_where_whole_root_ran,
+            self.closure_smaller_than_whole_root,
+            self.closure_compiled_where_whole_root_declined
         )
     }
 }
@@ -4875,13 +4887,19 @@ fn random_programs_dense_matches_explain() {
     }
 }
 
-/// Every case dense ran was also run compiled for its requested outputs
-/// alone, and again with [`UNREACHED_CROSSING`] added.
+/// Every case the whole root ran was also run compiled for its requested
+/// outputs alone, and again with [`UNREACHED_CROSSING`] added, and in a
+/// useful share of them the requested program left rules out.
 fn assert_closure_exercised(name: &str, stats: &Stats) {
-    assert!(
-        stats.closure_matched_whole_root >= stats.dense_ran
-            && stats.closure_unchanged_by_unreached_crossing >= stats.dense_ran,
+    assert_eq!(
+        stats.closure_checked_where_whole_root_ran,
+        stats.dense_ran,
         "{name}: the requested closure was not checked on every case dense ran: {}",
+        stats.summary(name)
+    );
+    assert!(
+        f64::from(stats.closure_smaller_than_whole_root) >= 0.25 * f64::from(stats.dense_ran),
+        "{name}: too few requested programs left rules out: {}",
         stats.summary(name)
     );
 }

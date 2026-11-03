@@ -502,8 +502,11 @@ differently.
   batch, so a direct read has no rows to evaluate. Compilation fails with
   `DenseCompileError::CrossEntityDependency`. Its message says the
   restriction is deliberate, names the rule that reads and the rule it
-  reads, and names by legal id the relations the program declares between
-  the two entities, or says it declares none.
+  reads, and names by legal id the data relations the program declares
+  between the two entities, or says it declares none. A filtered entity
+  (such as `SnapUnit`) counts as the kind of its ids (`Household`), and a
+  derived relation is not named, since dense may refuse its predicate or
+  path; its data relation carries the same pairs.
 
 A `Scalar` rule belongs to no entity: any rule reads it directly, in every
 mode.

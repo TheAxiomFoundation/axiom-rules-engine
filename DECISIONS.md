@@ -13,8 +13,8 @@ reach, and no other rule. The Python loaders `CompiledDenseProgram.from_file`,
 `outputs=`. Without a request, `from_program`, `from_artifact` and the Python
 loaders still compile every rule of the root entity. Dense keeps refusing a
 rule that reads a rule of another entity directly, with no relation; the
-refusal now says that this is deliberate and names the relations the program
-declares between the two entities.
+refusal now says that this is deliberate and names the data relations the
+program declares between the two entities.
 
 **Why.** A module names every rule its import closure reaches, so a whole-root
 compile judges rules that no wanted output reaches. 26 USC 32 for `TaxUnit`
@@ -47,9 +47,15 @@ need a contract of its own.
   read; `derived_metadata` still lists every rule of the module.
 - Requested outputs are rule names, as `execute` takes them. Each must be a
   rule of the root entity or a `Scalar` rule. With no entity named, the
-  outputs name it. An empty request, an unknown name (with a hint when it is
-  a rule's legal id), another entity's rule, and outputs of several entities
-  each fail with their own error.
+  outputs name it; `Scalar` outputs alone take the program's one non-scalar
+  entity, as the whole root does, since a `Scalar` rule (any rule written
+  without `entity:`) can read that entity's rules. An empty request, an
+  unknown name (with a hint when it is a rule's legal id), another entity's
+  rule, and outputs of several entities each fail with their own error.
+- The refusal of a direct read depends on the read alone, not on the path a
+  compile reaches it by: the reading rows are root rows. A filtered root
+  (such as `SnapUnit`) is matched to relations by the kind of its ids, and
+  only data relations are named.
 - For every output both compile, the closure and whole-root programs give the
   same values and errors on any batch the whole-root program binds. A closure
   batch needs only the columns and relations the closure reads, so a batch

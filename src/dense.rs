@@ -512,12 +512,15 @@ pub enum DenseCompileError {
         dependency: String,
         /// `dependency`'s entity.
         entity: String,
-        /// The entity whose rows read `dependency`: the root entity, or for a
-        /// rule a derived relation's predicate reads on the current record,
-        /// the relation's current entity.
+        /// The kind of the ids on the rows that read `dependency`. Those are
+        /// always root rows, so this is the root entity, or, for a filtered
+        /// entity (a derived relation's `entity`, such as `SnapUnit`), the
+        /// kind its ids have (`Household`).
         reader_entity: String,
-        /// The relations the program declares whose slots hold both
-        /// `reader_entity` and `entity`, sorted by name.
+        /// The data relations the program declares whose slots hold
+        /// `reader_entity` and the kind of `entity`'s ids, sorted by name. It
+        /// is empty when those kinds are the same, as no relation carries
+        /// such a read.
         relations: Vec<String>,
     },
 }
@@ -538,8 +541,9 @@ fn quoted_list(names: &[String], conjunction: &str) -> String {
 }
 
 /// What [`DenseCompileError::CrossEntityDependency`] tells the caller to do:
-/// read the rule through a relation, naming any the program declares between
-/// the two entities, or compile outputs that do not reach the reading rule.
+/// read the rule through a relation, naming the data relations the program
+/// declares between the two entities, or compile only outputs that do not
+/// reach the reading rule.
 fn cross_entity_advice(
     derived: &str,
     dependency: &str,
@@ -550,6 +554,12 @@ fn cross_entity_advice(
     if reader_entity == SCALAR_ENTITY {
         return format!(
             "This dense program's root is the entity-free `{SCALAR_ENTITY}`, whose rows hold no `{entity}`: compile it for `{entity}` instead, or compile only outputs that do not reach `{derived}`"
+        );
+    }
+    if reader_entity == entity {
+        // A filtered entity's rows, whose ids are `entity` ids already.
+        return format!(
+            "These rows' ids are `{entity}` ids, but dense reads a rule of another entity only through a relation, and none carries this read: compile only outputs that do not reach `{derived}`"
         );
     }
     let declared = if relations.is_empty() {
@@ -1123,7 +1133,10 @@ impl DenseCompiledProgram {
     /// rules are compiled in the order given. Each must be a rule of the root
     /// entity or an entity-free `Scalar` rule. The root entity is `entity`,
     /// or, when that is `None`, the one non-scalar entity of the requested
-    /// outputs (`Scalar` when they are all scalar).
+    /// outputs. When they are all `Scalar`, it is the program's one
+    /// non-scalar entity, as [`Self::from_program`] infers it, since a
+    /// `Scalar` rule can read that entity's rules; with none or several, it
+    /// is `Scalar`.
     ///
     /// The compiled program's [`Self::output_names`] are the requested outputs
     /// and the rules of the root entity and `Scalar` they reach; its
@@ -1164,11 +1177,25 @@ impl DenseCompiledProgram {
         let root_entity = match entity {
             Some(entity) => entity.to_string(),
             None => {
-                let entities = requested
-                    .iter()
-                    .map(|rule| rule.entity.as_str())
-                    .filter(|entity| *entity != SCALAR_ENTITY)
-                    .collect::<std::collections::BTreeSet<&str>>();
+                fn non_scalar<'p>(
+                    rules: impl Iterator<Item = &'p Derived>,
+                ) -> std::collections::BTreeSet<&'p str> {
+                    rules
+                        .map(|rule| rule.entity.as_str())
+                        .filter(|entity| *entity != SCALAR_ENTITY)
+                        .collect()
+                }
+                let mut entities = non_scalar(requested.iter().copied());
+                if entities.is_empty() {
+                    // `Scalar` outputs alone. A `Scalar` rule can read rules
+                    // of the program's entity, so root them where
+                    // `from_program` would: at the program's one non-scalar
+                    // entity, and at `Scalar` when it has none or several.
+                    let program_entities = non_scalar(program.derived.values());
+                    if program_entities.len() == 1 {
+                        entities = program_entities;
+                    }
+                }
                 match entities.len() {
                     0 => SCALAR_ENTITY.to_string(),
                     1 => entities.into_iter().next().expect("one entity").to_string(),
@@ -2132,34 +2159,48 @@ impl<'a> DenseCompiler<'a> {
     }
 
     /// The refusal of `derived`'s direct read of `dependency`, a rule of
-    /// `entity`, on `reader_entity` rows, naming the relations the program
-    /// declares whose slots hold both entities.
+    /// `entity`. The rows that read it are root rows, however the read is
+    /// reached, so the refusal depends on the read alone. It names the data
+    /// relations whose slots hold the kinds of both sides' ids: a filtered
+    /// entity's ids have its source's current-slot kind, and a relation's
+    /// slots name such kinds. A derived relation is left out, as dense may
+    /// refuse its predicate or path source; its data relation carries the
+    /// same pairs.
     fn cross_entity_dependency(
         &self,
         derived: &str,
         dependency: &str,
         entity: &str,
-        reader_entity: &str,
     ) -> DenseCompileError {
-        let mut relations =
-            self.program
-                .relations
-                .keys()
-                .filter(|relation| {
-                    crate::relation_typing::effective_slot_entities(self.program, relation)
-                        .is_some_and(|kinds| {
-                            kinds.iter().any(|kind| kind == reader_entity)
-                                && kinds.iter().any(|kind| kind == entity)
-                        })
-                })
+        let id_kinds = crate::relation_typing::filtered_entity_kinds(self.program);
+        let id_kind = |kind: &str| {
+            id_kinds
+                .get(kind)
                 .cloned()
+                .unwrap_or_else(|| kind.to_string())
+        };
+        let reader_entity = id_kind(&self.root_entity);
+        let entity_ids = id_kind(entity);
+        let mut relations = Vec::new();
+        if reader_entity != entity_ids {
+            relations = self
+                .program
+                .relations
+                .iter()
+                .filter(|(_, relation)| {
+                    relation.derivation.is_none()
+                        && relation.slot_entities.contains(&reader_entity)
+                        && relation.slot_entities.contains(&entity_ids)
+                })
+                .map(|(name, _)| name.clone())
                 .collect::<Vec<String>>();
-        relations.sort();
+            relations.sort();
+        }
         DenseCompileError::CrossEntityDependency {
             derived: derived.to_string(),
             dependency: dependency.to_string(),
             entity: entity.to_string(),
-            reader_entity: reader_entity.to_string(),
+            reader_entity,
             relations,
         }
     }
@@ -2269,7 +2310,7 @@ impl<'a> DenseCompiler<'a> {
         };
         if derived.entity != self.root_entity && derived.entity != SCALAR_ENTITY {
             return Err(self
-                .cross_entity_dependency(name, name, &derived.entity, &self.root_entity)
+                .cross_entity_dependency(name, name, &derived.entity)
                 .into());
         }
 
@@ -2359,12 +2400,7 @@ impl<'a> DenseCompiler<'a> {
                 })?;
                 if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(self
-                        .cross_entity_dependency(
-                            derived_name,
-                            name,
-                            &dependency.entity,
-                            &self.root_entity,
-                        )
+                        .cross_entity_dependency(derived_name, name, &dependency.entity)
                         .into());
                 }
                 Ok(CompiledScalarExpr::Derived(self.compile_rule(name)?))
@@ -2623,12 +2659,7 @@ impl<'a> DenseCompiler<'a> {
                 })?;
                 if dependency.entity != self.root_entity && dependency.entity != SCALAR_ENTITY {
                     return Err(self
-                        .cross_entity_dependency(
-                            derived_name,
-                            name,
-                            &dependency.entity,
-                            &self.root_entity,
-                        )
+                        .cross_entity_dependency(derived_name, name, &dependency.entity)
                         .into());
                 }
                 Ok(CompiledJudgmentExpr::Derived(self.compile_rule(name)?))
@@ -3054,7 +3085,6 @@ impl<'a> DenseCompiler<'a> {
                         derived_name,
                         name,
                         &dependency.entity,
-                        entity,
                     ));
                 }
                 let (semantics, commencement) = inlined_rule_semantics(dependency)?;
@@ -3251,7 +3281,6 @@ impl<'a> DenseCompiler<'a> {
                         derived_name,
                         name,
                         &dependency.entity,
-                        entity,
                     ));
                 }
                 let (semantics, commencement) = inlined_rule_semantics(dependency)?;
